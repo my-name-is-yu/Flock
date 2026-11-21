@@ -174,27 +174,30 @@ int main(int argc, char** argv) {
         read.runId = "root";
         read.itemId = "unicode";
         std::string expectedText = "界";
-        for (int i = 0; i < 500; ++i) expectedText += "猫🙂犬魚🐦";
+        for (int i = 0; i < 3000; ++i) expectedText += "🙂";
+        expectedText += "犬";
+        for (int i = 0; i < 3000; ++i) expectedText += "🐦";
         expectedText += "\n夕焼け";
         std::string receivedText;
-        bool firstExcerpt = true;
         Excerpt chunk;
         do {
             chunk = adapter->read(read);
             check(!chunk.text.empty() && chunk.text.size() <= 8192, "each Unicode excerpt fits the byte limit");
             check(chunk.threadId == "thread" && chunk.runId == "root" && chunk.itemId == "unicode",
                   "continuation retains the excerpt's thread, Run and item");
-            if (firstExcerpt) {
-                check(chunk.more && chunk.nextOffset == 2729 && chunk.text.ends_with("魚"),
-                      "the fixture did not return the boundary before a split surrogate pair");
-                firstExcerpt = false;
-            }
             receivedText += chunk.text;
             check(receivedText.size() <= expectedText.size(), "continuation does not repeat text");
             check(!chunk.more || chunk.nextOffset > read.offset, "a continued excerpt advances its cursor");
             read.offset = chunk.nextOffset;
         } while (chunk.more);
         check(receivedText == expectedText, "continued excerpts preserve the complete Unicode text");
+        const auto boundaries = effects("unicode_split_avoided");
+        check(!boundaries.empty(), "the fixture did not encounter a split surrogate pair");
+        for (const auto& boundary : boundaries) {
+            check(boundary.at("nextOffset").get<std::size_t>() + 1 ==
+                  boundary.at("offset").get<std::size_t>() + boundary.at("limit").get<std::size_t>(),
+                  "the fixture did not back up from the requested limit by one UTF-16 code unit");
+        }
         read.offset = 0;
         read.runId = "wrong";
         bool rejected = false;

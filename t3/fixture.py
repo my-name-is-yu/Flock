@@ -214,8 +214,8 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
         if "itemId" in args:
             if args["itemId"] == "unicode":
-                rows = [self.item(thread_id, 8, "root", "assistant_message", "界" + "猫🙂犬魚🐦" * 500 + "\n夕焼け")
-                        | {"itemId": "unicode"}]
+                text = "界" + "🙂" * 3000 + "犬" + "🐦" * 3000 + "\n夕焼け"
+                rows = [self.item(thread_id, 8, "root", "assistant_message", text) | {"itemId": "unicode"}]
             else:
                 rows = [row for row in rows if row["itemId"] == args["itemId"]]
         elif args["view"] == "messages":
@@ -228,10 +228,15 @@ class Fixture(BaseHTTPRequestHandler):
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:
             text = row["text"].encode("utf-16-le")
-            start = 2 * args.get("textOffset", 0)
-            end = min(start + 2 * args["maxCharsPerItem"], len(text))
+            offset = args.get("textOffset", 0)
+            limit_chars = args["maxCharsPerItem"]
+            start = 2 * offset
+            end = min(start + 2 * limit_chars, len(text))
             if end < len(text) and 0xD800 <= int.from_bytes(text[end - 2:end], "little") <= 0xDBFF:
                 end -= 2
+                if row["itemId"] == "unicode":
+                    state.setdefault("effects", {}).setdefault("unicode_split_avoided", []).append({
+                        "offset": offset, "limit": limit_chars, "nextOffset": end // 2})
             row["textTruncated"] = end < len(text)
             row["nextTextOffset"] = end // 2 if row["textTruncated"] else None
             row["text"] = text[start:end].decode("utf-16-le")

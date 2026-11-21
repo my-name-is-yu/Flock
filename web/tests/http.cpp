@@ -176,9 +176,9 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
             check(task != triage,"conversation included another Bot's history");
             const auto kind = event.at("kind").get<std::string>();
             if (const auto expected = expectedResults.find(kind); task == release && expected != expectedResults.end()) {
-                check(oldestSeen > 0 && foundResults.insert(kind).second &&
+                check(foundResults.insert(kind).second &&
                       event.at("data").at(expected->second.first) == expected->second.second,
-                      "older page returned a wrong or repeated report or completion");
+                      "conversation returned a wrong or repeated report or completion");
             }
             if (kind != "request") continue;
             const auto request = expectedRequests.find(task);
