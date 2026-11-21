@@ -1197,13 +1197,13 @@ int main() {
         cancellationReleasesOnlyAfterStopConfirmation();
         durableInboxAndTargetedRevision();
         linkedResultStartsANewSession();
+        cancelledReportCanBeReferencedWithoutRestarting();
         omittedDestinationAndWrongNamedTaskAreBlocked();
         destinationClarificationPreservesAndValidatesRevisionDraft();
         deferredCompletionPreservesDestinationRevisionDraft();
         modelDestinationClarificationKeepsRevision();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
-        cancelledReportCanBeReferencedWithoutRestarting();
         restartRestoresCancelledTaskDirections();
         explanationDoesNotHoldCompletion();
         independentRequestQueuesSeparately();
