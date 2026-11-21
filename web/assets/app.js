@@ -1,13 +1,14 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'theme-switch',
+  'bot-editor', 'theme-switch',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -391,7 +392,7 @@ function renderHeader() {
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -878,6 +879,10 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
     if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
+    else if (loaded && !bots.length) {
+      empty.append(node('p', null, 'Create a Bot to get started.'));
+      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+    }
     fragment.append(empty);
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
@@ -1173,6 +1178,45 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+let reopenSettingsOnClose = false;
+const botEditor = createBotEditor(elements['bot-editor'], {
+  api,
+  async onSaved(savedBot, savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    await refreshBots();
+    if (savedMode === 'create') {
+      selectBot(savedBot.id);
+      return;
+    }
+    if (view?.id === savedBot.id) await refreshView(view);
+    if (returnToSettings && view?.id === savedBot.id && view.data) {
+      openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
+    }
+  },
+  onCancel(savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    if (savedMode === 'edit' && returnToSettings && view?.data) {
+      openDetail({ kind: 'settings', section: 'general' });
+    }
+  },
+});
+
+function openNewBot(origin = elements['new-bot-button']) {
+  reopenSettingsOnClose = false;
+  closeMenu(false);
+  openNavigation(false, false);
+  closeDetail();
+  botEditor.openCreate({ bots, origin });
+}
+
+function openEditAppearance(bot) {
+  reopenSettingsOnClose = true;
+  closeDetail();
+  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+}
+
 function generalContent(bot) {
   const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
@@ -1182,7 +1226,16 @@ function generalContent(bot) {
     hero.style.setProperty('--hero-tint', accentColor(bot));
     return handle;
   } };
-  hero.append(face, node('p', 'settings-name', bot.name));
+  hero.append(
+    face,
+    node('p', 'settings-name', bot.name),
+    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
+  );
+  if (detail?.status) {
+    const note = node('p', 'settings-status', detail.status);
+    note.setAttribute('role', 'status');
+    hero.append(note);
+  }
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
   role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
@@ -1527,6 +1580,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);
 });
+elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
@@ -1587,7 +1641,7 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
-  if (digit && !event.isComposing && !elements.detail.open &&
+  if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
     const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
     if (bot) {
@@ -1598,7 +1652,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'Escape') return;
   if (menu) closeMenu();
-  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
 function refresh() {
