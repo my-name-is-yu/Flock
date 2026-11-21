@@ -403,6 +403,8 @@ event.pendingClarification only when event.text clearly answers its question. Se
 and clarificationMessageId to its exact messageId, and route its originalText with the correction.
 Leave unrelated requests independent. If multiplePendingClarifications is true and the intended
 clarification lacks an anchor, ask the user to reply directly to the intended question.
+If event.reply.selectedTaskId is set, the user chose that candidate from the clarification. Resolve the
+clarification with it and target only that task; the reply text is just its label.
 Use only the clarification's supplied candidates. It can resolve a wait only if the user selects a
 recorded task and the same wait was open at first intake. Set resolution=superseded only if the user
 expressly withdraws the anchored clarification.
@@ -413,6 +415,9 @@ A clarification carries a short specific question in text and only its plausible
 Set operation only for a cancellation, a revision, or a destination selection. Follow-up facts
 answering an explicit result clarification, including yes or no, continue the same source by ID.
 When recent context is incomplete and target identity cannot be grounded, clarify.
+IDs are internal references for routing only. In respond and clarify text, refer to a request by its
+description, when it started, or a short excerpt of the original message. Never write task, message,
+revision, or run IDs, or "#N" references, in text the user reads.
 )PROMPT";
     constexpr auto answerInstructions = R"PROMPT(
 Answer event.text in the user's language. Apply the current SOUL (soul) and MEMORY (memory) to the
@@ -422,7 +427,8 @@ Use any clarification in event.text as user-supplied context. Explain what the s
 and why its steps or tradeoffs matter when asked to elaborate. Condense the central point when asked
 to summarize. A preamble followed by the same excerpt is not an answer. Never claim new work was
 performed. Return one answer_conversation_result call with the answer, or one
-clarify_conversation_result call if the excerpt cannot support an answer.
+clarify_conversation_result call if the excerpt cannot support an answer. Refer to requests by
+description, never by task, message, revision, or run IDs.
 )PROMPT";
     std::string instructions =
         "You are the Flock Bot that owns this task. Select exactly one Flock action and provide its arguments "
@@ -435,7 +441,8 @@ clarify_conversation_result call if the excerpt cannot support an answer.
         "If a settled Session can remedy missing evidence or work, use follow_up; use delegate for a genuinely "
         "new Session. Complete only when available evidence proves all saved criteria. Ask the user when a "
         "decision or fact cannot be resolved from the available context or through Session work. Answer a "
-        "Session question with the exact current requestId and field IDs when the needed facts are available.";
+        "Session question with the exact current requestId and field IDs when the needed facts are available. "
+        "A question for the user refers to work by its description and never cites task, run, or revision IDs.";
     const bool routingRequest = input.tools == std::vector<std::string>{"route_conversation"};
     const bool resultAnswerRequest = std::find(input.tools.begin(),input.tools.end(),"answer_conversation_result") != input.tools.end();
     const bool conversationRequest = routingRequest || resultAnswerRequest ||

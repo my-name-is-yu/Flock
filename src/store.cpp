@@ -562,7 +562,10 @@ SELECT page.id,page.task_id,page.time,page.kind,
               AND json_array_length(json_extract(decision.data,'$.segments'))=1
             ) THEN 'true' ELSE 'false' END))) END
 FROM (
-  SELECT j.* FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
+  SELECT j.id,j.task_id,j.time,j.kind,
+    CASE WHEN j.kind='cancelled' THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data,
+    j.conversation_bot_id
+  FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
     AND j.conversation_bot_id IS NULL
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')

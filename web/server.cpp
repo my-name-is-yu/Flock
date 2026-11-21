@@ -416,8 +416,10 @@ private:
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
+                const auto candidate = message && body.contains("candidateTaskId") ? bodyId(body,"candidateTaskId") : Id{};
+                if (candidate && !replyTo) throw InputError("invalid_candidate");
                 if (message) {
-                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
+                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo,candidate);
                     if (previous) return json(res,201,*previous);
                 }
                 Intake intake;
@@ -430,7 +432,7 @@ private:
                 intake.request = request;
                 intake.scheduleId.clear();
                 intake.scheduledAt = 0;
-                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
+                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo,candidate));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);

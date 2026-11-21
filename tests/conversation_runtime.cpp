@@ -663,7 +663,7 @@ void unknownSendThenScopeChange() {
     const auto revised = f.task(id);
     const auto response = f.response(f.receive("explain-superseded-result",explain));
     check(response["route"] == "clarify" && !response.contains("source") &&
-          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          response["text"] == "Please tell me which request, result, or question you mean and what you'd like me to do." &&
           f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
           "the model's stale result ID escaped the current revision's candidates or changed work");
     f.t3.finish("run-2","New p95 evidence");

@@ -273,6 +273,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (context.reply.kind == Reply::Kind::invalid && !readOnly) return false;
         const auto source = sourceOf(action);
         if (source && !knownSource(context,*source)) return false;
+        if (context.selection && !readOnly && (!resolving || clarification->id != context.reply.id ||
+                                  std::holds_alternative<CreateTask>(action))) return false;
         if (const auto creation = std::get_if<CreateTask>(&action)) {
             if (!hasText(creation->request) || creation->request.size() > messageSize) return false;
             if (field(routing,"environmentId").empty() || field(routing,"projectId").empty()) {
@@ -293,6 +295,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (field(task,"botId") != bot || integer(task,"generation") != target->generation ||
             integer(task,"currentRevision") != target->revision || integer(wait,"id") != target->waitId)
             return false;
+        if (context.selection && target->taskId != context.selection) return false;
         if (std::holds_alternative<Status>(action)) return true;
         if ((std::holds_alternative<AppendInstruction>(action) || std::holds_alternative<ReviseTask>(action)) &&
             !namedTargetMatches(route.segment,context,target->taskId)) return false;
@@ -433,9 +436,9 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
                     }
                     segments[index]["effectTaskId"] = linkedTask;
                     status = "working";
-                    addLine(item.source ? (ja ? "元の作業を参照して、新しい作業として受け付けました。"
-                                               : "I queued a new task linked to the earlier work.")
-                                        : (ja ? "作業を受け付けました。" : "I queued the task."));
+                    addLine(item.source ? (ja ? "元の結果をもとに、新しい依頼として受け付けました。"
+                                               : "I queued this as a new request based on the earlier result.")
+                                        : (ja ? "依頼を受け付けました。" : "I queued your request."));
                 },
                 [&](const AppendInstruction& item) { saveInstruction(item.target,item.instruction,item.source,nullptr); },
                 [&](const ReviseTask& item) { saveInstruction(item.target,item.instruction,item.source,&item); },
@@ -448,8 +451,13 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
                 [&](const CancelTask& item) {
                     operate(item.target.taskId,0,"cancel",Json::object(),true);
                     linkedTask = item.target.taskId;
-                    status = load(linkedTask)["state"] == "cancelled" ? "done" : "stopping";
-                    addLine(ja ? "停止を受け付けました。" : "I accepted the stop request.");
+                    const auto stopped = load(linkedTask);
+                    const auto request = field(stopped,"request");
+                    const auto name = bounded(request.substr(0,request.find('\n')),160);
+                    status = stopped["state"] == "cancelled" ? "done" : "stopping";
+                    if (status == "done") addLine(ja ? "「" + name + "」を中止しました。" : "I stopped “" + name + "”.");
+                    else addLine(ja ? "「" + name + "」の停止を依頼しました。停止を確認したらお知らせします。"
+                                    : "I’ve asked to stop “" + name + "”. I’ll let you know once it has stopped.");
                 },
                 [](const Clarify&) {}
             },routes[index].action);
@@ -467,8 +475,8 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             if (candidateIds.contains(task.id) && task.state != "completed" && task.state != "cancelled")
                 candidates.push_back({{"taskId",task.id},{"request",task.name}});
         }
-        if (response.empty()) addLine(ja ? "対象の作業と指示を確認してください。"
-                                         : "Please confirm the task and instruction.");
+        if (response.empty()) addLine(ja ? "対象の依頼と、希望する対応を確認させてください。"
+                                         : "Please confirm which request you mean and what you'd like me to do.");
     }
     const auto* question = routes.size() == 1 ? std::get_if<Clarify>(&routes.front().action) : nullptr;
     const bool resultQuestion = question && question->source && knownSource(context,*question->source);
