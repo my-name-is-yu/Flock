@@ -187,6 +187,13 @@ void exercise(const std::filesystem::path& path) {
     const auto list = browser.get("/api/bots");
     check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
     const Id waitId = waits[0]["wait"]["id"];
+    for (int i = 0; i < 45; ++i)
+        cli.submit({"release","Earlier request " + std::to_string(i),"local-env","release"});
+    const auto beforeAnswer = browser.get("/api/view?bot=release");
+    check(std::none_of(beforeAnswer["events"].begin(),beforeAnswer["events"].end(),[&](const Json& row) {
+        return row["kind"] == "waiting" && row["data"]["id"] == waitId;
+    }),"question fixture did not cross a history page boundary");
+
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
@@ -197,6 +204,11 @@ void exercise(const std::filesystem::path& path) {
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
     cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
+    const auto answered = browser.get("/api/view?bot=release");
+    check(std::any_of(answered["events"].begin(),answered["events"].end(),[&](const Json& row) {
+        return row["kind"] == "user_answer" && row["taskId"] == release &&
+               row["data"]["question"] == "利用者向けの変更だけを載せますか？";
+    }),"the answer did not carry the question from the older page");
     browser.post("/api/operations",reply,409);
     tick(*runtime,2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&
@@ -246,10 +258,17 @@ void exercise(const std::filesystem::path& path) {
     const auto newest = reopened.get("/api/view?bot=release");
     const auto cursor = newest.at("olderBefore").get<Id>();
     check(cursor > 0 && newest["events"].front()["id"] == cursor,"missing exclusive older cursor");
-    const auto older = reopened.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
-    check(older["events"].back()["id"].get<Id>() < cursor &&
-          hasEvent(older["events"],"request","下書きの掲載範囲を確認する") &&
-          !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
+    bool foundOriginal = false;
+    for (auto before = cursor; before != 0;) {
+        const auto older = reopened.get("/api/conversation?bot=release&before=" + std::to_string(before));
+        check(!older["events"].empty() && older["events"].back()["id"].get<Id>() < before &&
+              !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or did not advance");
+        foundOriginal |= hasEvent(older["events"],"request","下書きの掲載範囲を確認する");
+        const auto nextBefore = older.at("olderBefore").get<Id>();
+        check(nextBefore < before,"older cursor did not advance");
+        before = nextBefore;
+    }
+    check(foundOriginal,"older pages lost the original request");
     check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
 
     for (int i = 0; i < 8; ++i) {

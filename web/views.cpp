@@ -109,7 +109,7 @@ Json eventView(const Json& event) {
     if (kind == "waiting") details = waitView(data);
     else if (kind == "request") copyFields(details,data,{"text","source","scheduleId","scheduledAt"});
     else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
-    else if (kind == "user_answer") copyFields(details,data,{"text","waitId"});
+    else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "completed") copyFields(details,data,{"text","reason","doneWhen"});
     else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId"});

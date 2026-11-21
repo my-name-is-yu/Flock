@@ -436,11 +436,11 @@ function eventCard(event, context, place) {
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     if (event.kind === 'user_answer') {
-      const question = context.questions.get(data.waitId);
+      const question = data.question;
       if (question && !place.afterQuestion) {
         const quote = node('p', 'msg-quote');
-        quote.append(icon('reply'), node('span', null, waitText(question.data)));
-        quote.title = waitText(question.data);
+        quote.append(icon('reply'), node('span', null, question));
+        quote.title = question;
         row.insertBefore(quote, meta.nextSibling);
       }
     }
@@ -511,7 +511,6 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
-    questions: new Map(events.filter((event) => event.kind === 'waiting').map((event) => [event.data.id, event])),
   };
   const shown = events.filter((event) => event.kind !== 'wait_closed');
   const fragment = document.createDocumentFragment();

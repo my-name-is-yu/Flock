@@ -340,8 +340,14 @@ Json Store::history(Id taskId, Id after, unsigned limit) const {
 Json Store::conversation(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT journal.id,task_id,time,kind,journal.data FROM journal
-JOIN tasks ON tasks.id=task_id WHERE bot_id=? AND (?=0 OR journal.id<?)
+SELECT journal.id,journal.task_id,time,kind,
+       CASE WHEN kind='user_answer' AND w.id IS NOT NULL
+            THEN json_set(journal.data,'$.question',json_extract(w.data,'$.text'))
+            ELSE journal.data END
+FROM journal JOIN tasks ON tasks.id=journal.task_id
+LEFT JOIN waits w ON journal.kind='user_answer'
+  AND w.id=json_extract(journal.data,'$.waitId') AND w.task_id=journal.task_id
+WHERE tasks.bot_id=? AND (?=0 OR journal.id<?)
 AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
 ORDER BY journal.id DESC LIMIT ?)SQL", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
