@@ -138,7 +138,6 @@ void boundary(Browser& browser) {
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
 }
 
-// The list and the selected-Bot view must agree on what each Bot is doing.
 void samePresence(Browser& browser) {
     for (const auto& row : browser.get("/api/bots")) {
         const auto view = browser.get("/api/view?bot=" + row["id"].get<std::string>());

@@ -1,5 +1,6 @@
 #include "views.hpp"
 
+#include <algorithm>
 #include <array>
 #include <set>
 
@@ -169,23 +170,34 @@ Json taskSessions(const Json& task) {
     return sessions;
 }
 
-// One Bot-level state across its tasks: working outranks thinking, which outranks waiting.
-std::string nextPresence(std::string_view presence, std::string_view state) {
-    if (state == "running" || state == "cancelling") return "working";
-    if ((state == "deciding" || state == "sending") && presence != "working") return "thinking";
-    if (state == "waiting" && presence != "working" && presence != "thinking") return "waiting";
-    return std::string(presence);
+enum class Presence { idle, waiting, thinking, working };
+
+Presence taskPresence(std::string_view state) {
+    if (state == "running" || state == "cancelling") return Presence::working;
+    if (state == "deciding" || state == "sending") return Presence::thinking;
+    if (state == "waiting") return Presence::waiting;
+    return Presence::idle;
 }
 
-std::string presence(Store& store, std::string_view bot) {
-    std::string result = "idle";
+std::string_view presenceName(Presence presence) {
+    switch (presence) {
+        case Presence::working: return "working";
+        case Presence::thinking: return "thinking";
+        case Presence::waiting: return "waiting";
+        case Presence::idle: return "idle";
+    }
+    return "idle";
+}
+
+std::string_view presence(Store& store, std::string_view bot) {
+    auto result = Presence::idle;
     for (Id cursor = 0;;) {
         const auto tasks = store.tasks(bot,cursor,taskBatch);
         for (const auto& task : tasks) {
-            result = nextPresence(result,field(task,"state"));
-            if (result == "working") return result;
+            result = std::max(result,taskPresence(field(task,"state")));
+            if (result == Presence::working) return presenceName(result);
         }
-        if (tasks.size() < taskBatch) return result;
+        if (tasks.size() < taskBatch) return presenceName(result);
         cursor = tasks.back().at("id").get<Id>();
     }
 }
@@ -194,11 +206,11 @@ std::string presence(Store& store, std::string_view bot) {
 // Scan bounded batches to keep older, still-open waits visible behind newer requests.
 Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
     Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
+    auto botPresence = Presence::idle;
     if (overview) {
         result["waits"] = Json::array();
         result["queued"] = Json::array();
         result["activeSessions"] = Json::array();
-        result["presence"] = "idle";
     }
     auto& sessionTasks = result["sessionTasks"];
     bool moreSessions = false;
@@ -208,7 +220,7 @@ Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
             const auto id = task.at("id").get<Id>();
             const auto state = field(task,"state");
             if (overview) {
-                result["presence"] = nextPresence(result["presence"].get<std::string>(),state);
+                botPresence = std::max(botPresence,taskPresence(state));
                 if (state == "waiting") result["waits"].push_back(currentWait(task));
                 if (state == "queued" && !task.at("blockedBy").is_null()) {
                     auto queued = taskSummary(task);
@@ -237,6 +249,7 @@ Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
         cursor = tasks.back().at("id").get<Id>();
     }
     if (!moreSessions) result["sessionsBefore"] = 0;
+    if (overview) result["presence"] = presenceName(botPresence);
     return result;
 }
 } // namespace

@@ -1,5 +1,3 @@
-/* Sidebar: Bot pins and list, waits, sessions and the footer. Surfaces and spacing carry the structure;
-   row actions stay hidden until the row is hovered, focused or its menu is open. */
 .sidebar {
   --press: color-mix(in srgb, var(--text) 9%, transparent);
   background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; min-width: 0;
@@ -13,9 +11,8 @@
 .section-heading { display: flex; align-items: baseline; }
 .count { font-size: var(--text-xs); font-weight: 600; color: var(--warning); font-variant-numeric: tabular-nums; margin-left: -.15rem; }
 
-/* Pinned Bots: larger tiles above the list. */
-.pins { display: flex; flex-wrap: wrap; gap: .25rem; padding: .2rem 0 .6rem; }
-.pin-tile { position: relative; width: 5.5rem; }
+.pins { display: grid; grid-template-columns: repeat(3, minmax(0, 5.5rem)); gap: .25rem; padding: .2rem 0 .6rem; }
+.pin-tile { position: relative; min-width: 0; }
 .pin { width: 100%; display: grid; justify-items: center; gap: .4rem; padding: .75rem .4rem .6rem; border: 0; border-radius: var(--radius-lg); background: transparent; }
 .pin:hover { background: var(--hover); }
 .pin:focus-visible { outline-offset: -2px; }
@@ -29,7 +26,6 @@
 .pin-presence.working, .pin-presence.thinking { animation: presence-pulse 1.6s ease-in-out infinite; }
 .pin-tile .row-menu { position: absolute; top: .15rem; right: .15rem; width: 1.3rem; height: 1.3rem; margin: 0; }
 
-/* Tooltips open below the tile and stay inside the sidebar: first column left-aligned, last column right-aligned. */
 .pin-tooltip {
   position: absolute; z-index: 3; top: calc(100% + .2rem); left: 50%; translate: -50% 0;
   display: flex; align-items: center; gap: .45rem; width: max-content; max-width: 10rem;
@@ -45,7 +41,6 @@
 .pin:focus-visible ~ .pin-tooltip { opacity: 1; }
 .pin-tile.menu-open .pin-tooltip { display: none; }
 
-/* Bot rows */
 .bot-list, .activity-list { display: grid; gap: 2px; }
 .bot-row { position: relative; display: flex; min-width: 0; align-items: center; border-radius: var(--radius-md); }
 .bot-row:hover { background: var(--hover); }
@@ -81,7 +76,6 @@
 .menu-popover button svg { width: 1rem; height: 1rem; flex: none; color: var(--text-2); }
 .menu-popover button:hover, .menu-popover button:focus-visible { background: var(--press); outline: none; }
 
-/* Waits and sessions: title + one status line, grouped under quiet headers. */
 .activity { position: relative; display: grid; gap: .15rem; min-width: 0; padding: .45rem .55rem; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; text-decoration: none; }
 button.activity:hover, a.activity:hover { background: var(--hover); }
 .activity-title { font-size: var(--text-sm); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -100,7 +94,6 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 .activity-empty { color: var(--text-3); font-size: var(--text-xs); line-height: 1.5; padding: .2rem .65rem; }
 .load-sessions { margin: .3rem .2rem 0; }
 
-/* Placeholders while a Bot's view or the Bot list is loading. */
 .skeleton-row, .skeleton-bot { display: flex; align-items: center; gap: .75rem; padding: .55rem; }
 .skeleton-lines { flex: 1; display: grid; gap: .45rem; }
 .skeleton-line, .skeleton-avatar { display: block; background: var(--selected); border-radius: var(--radius-full); animation: skeleton-pulse 1.4s ease-in-out infinite; }

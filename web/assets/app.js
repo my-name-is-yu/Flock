@@ -134,11 +134,10 @@ function setTheme(mode) {
 }
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
-  const changedState = workspace.classList.contains('nav-open') !== expanded;
+  const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
-  // Only move focus when the panel actually opens or closes, so a pin shortcut typed in the composer keeps the caret.
-  if (focus && narrow.matches && changedState) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
+  if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
 function selectBot(botId) {
   menu = null;
@@ -163,8 +162,7 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 
-// Pin order is the order the user pinned in, so ⌥⇧N keeps pointing at the same Bot while the list re-sorts.
-function pinnedBots() {
+function pinnedBotsInShortcutOrder() {
   return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
 }
 function focusKey(key) {
@@ -314,20 +312,18 @@ function skeletonRows(count, className = 'skeleton-row') {
 
 function renderBots() {
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
-  // Re-rendering replaces the buttons, so carry keyboard focus over to the matching new element.
-  const focused = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const pinned = pinnedBots();
-  // Bots that are working or waiting rise to the top; sort a copy so the default selection keeps the configured order.
-  const rank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const rest = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => rank(a) - rank(b));
+  const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+  const pinned = pinnedBotsInShortcutOrder();
+  const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
+  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
   elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
-  list.replaceChildren(...rest.map(botRow));
+  list.replaceChildren(...unpinnedByPresence.map(botRow));
   if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
   else if (!bots.length) list.append(node('p', 'activity-empty', '設定済みの Bot はありません'));
-  if (focused) focusKey(focused);
+  if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
 function renderHeader() {
@@ -876,7 +872,7 @@ document.addEventListener('keydown', (event) => {
   // ⌥⇧1…⌥⇧9 switch to the pinned Bot in that position; event.code keeps it layout- and Option-key-independent.
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
   if (digit && !event.isComposing && !elements.detail.open) {
-    const bot = pinnedBots()[Number(digit[1]) - 1];
+    const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
     if (bot) {
       event.preventDefault();
       selectBot(bot.id);
