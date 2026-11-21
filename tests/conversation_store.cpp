@@ -644,6 +644,8 @@ void followUpsKeepThePriorResult() {
             return route("create_task",{{"resultMessageId",sourceId},{"resultOption",0}});
         if (text == "Implement everything in the other report")
             return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",0}});
+        if (text == "Implement everything in \"Original report\"")
+            return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",0}});
         if (text == "Implement the whole report in another environment")
             return route("clarify",{{"text","Which configured execution destination should I use?"},
                 {"operation","destination"},{"resultMessageId",sourceId},{"resultOption",0}});
@@ -677,6 +679,9 @@ void followUpsKeepThePriorResult() {
     check(other.at("route") == "create_task" && other.at("source").at("messageId") == unrelatedId &&
           other.at("source").at("option") == 0 && other.at("source").at("text") == unrelatedReport,
           "a whole-report reference was redirected to a recent excerpt");
+    const auto named = send("named-whole","Implement everything in \"Original report\"");
+    check(named.at("route") == "clarify",
+          "a named report was replaced by the model's unrelated source");
     const auto destination = send("whole-destination","Implement the whole report in another environment",answer.at("messageId"));
     check(destination.at("route") == "clarify" && destination.at("source") == whole.at("source"),
           "a destination question lost the whole-report scope");

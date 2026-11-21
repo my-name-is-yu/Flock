@@ -594,12 +594,12 @@ std::optional<Result> selectWorkResult(Id id, std::optional<int> numbered, const
         const auto match = std::ranges::find(context.rankedResults,id,&Result::messageId);
         require(match != context.rankedResults.end());
         source = &*match;
-        if (needsDisambiguation) {
-            std::set<Id> named, available;
-            for (const auto& entry : context.rankedResults) {
-                available.insert(entry.taskId);
-                if (refersTo(normal,normalize(entry.taskName))) named.insert(entry.taskId);
-            }
+        std::set<Id> named, available;
+        for (const auto& entry : context.rankedResults) {
+            available.insert(entry.taskId);
+            if (refersTo(normal,normalize(entry.taskName))) named.insert(entry.taskId);
+        }
+        if (needsDisambiguation || !named.empty()) {
             const auto& plausible = named.empty() ? available : named;
             require(plausible.size() == 1 && plausible.contains(source->taskId));
         }
