@@ -38,7 +38,15 @@ bool validHexColor(std::string_view color) {
 AvatarImage::AvatarImage(std::string bytes)
     : format_(detectAvatarFormat(bytes)), bytes_(std::move(bytes)) {}
 
+std::string AvatarImage::storageFilename(unsigned index) const {
+    const auto base = std::string(format_.filename);
+    return index == 0 ? base : std::to_string(index) + "-" + base;
+}
+
 bool AvatarImage::isStoredFilename(std::string_view name) {
+    const auto digits = name.find_first_not_of("0123456789");
+    if (digits > 0 && digits != name.npos && name.front() != '0' && name[digits] == '-')
+        name.remove_prefix(digits + 1);
     return name == png.filename || name == jpeg.filename || name == gif.filename || name == webp.filename;
 }
 
