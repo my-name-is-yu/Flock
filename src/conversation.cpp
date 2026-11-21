@@ -134,6 +134,13 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     return revision;
 }
 
+bool Store::Impl::conversationPending(std::string_view bot) const {
+    return query(R"SQL(
+SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'
+AND json_extract(data,'$.status') IS NULL LIMIT 1
+)SQL",{bot}).next();
+}
+
 bool Store::Impl::completionHeld(const Json& task) const {
     auto row = query(R"SQL(
 SELECT 1 FROM route_candidates c JOIN route_decisions r ON r.message_id=c.message_id

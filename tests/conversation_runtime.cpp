@@ -114,6 +114,7 @@ struct Fixture {
     std::unique_ptr<Runtime> runtime;
     Script model;
     SimulatedT3 t3;
+    std::function<void()> beforeNotes;
     Seconds now = unixTime();
 
     Fixture() {
@@ -131,8 +132,10 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir/"state.db");
-        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; },
-                                             RuntimeOptions{[&] { return now; }});
+        runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
+            if (beforeNotes) beforeNotes();
+            return BotNotes{};
+        },RuntimeOptions{[this] { return now; }});
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
@@ -696,6 +699,100 @@ void completeRacingWithNewCriteria() {
           result["doneWhen"] == "メモリを計測","the final result relied on stale work or criteria");
 }
 
+void receivedRevisionPrecedesCompletion() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.finish("run-1","Old timing evidence");
+    f.reach(id,"deciding");
+
+    constexpr auto request = "Change the completion criteria to report CPU timing";
+    f.script(request,revision(id,"doneWhen","report CPU timing"));
+    Json receipt;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.event["resultRunId"] == "run-1" && receipt.is_null())
+            receipt = f.enqueue("received-revision",request);
+    };
+    f.tick();
+    check(receipt["status"] == "received" && f.response(receipt).is_null() && f.event(id,"completed").is_null(),
+          "the old task completed after the revision was received but before it was routed");
+
+    f.reach(id,"running");
+    check(f.response(receipt)["route"] == "revise_task" && f.task(id)["doneWhen"] == "report CPU timing" &&
+          f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("report CPU timing") != std::string::npos,
+          "the earlier receipt did not drive the next Run on the original task");
+    f.t3.finish("run-2","New CPU timing evidence");
+    f.reach(id,"completed");
+    check(f.event(id,"completed")["text"] == "New CPU timing evidence","completion reused evidence from the old criteria");
+}
+
+void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["modelCallLimit"] = 2;
+    const auto id = f.store->submit(routing);
+    const auto other = f.store->submit(f.routing("Separate task","beta","cloud"));
+    f.reach(id,"running");
+    f.reach(other,"running");
+    for (const auto task : {id,other})
+        f.t3.finish(f.task(task)["activeRun"]["runId"].get<std::string>(),"Settled evidence");
+    f.tick();
+
+    constexpr auto request = "How do you define elapsed time?";
+    f.script(request,{{"kind","respond"},{"text","Time from start to finish."}});
+    bool received = false;
+    int completionCalls = 0;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (!std::exchange(received,true)) f.enqueue("read-only",request);
+        if (input.task["id"] == id) ++completionCalls;
+    };
+    f.tick();
+    check(f.task(other)["state"] == "completed" && f.task(id)["state"] == "deciding" && completionCalls == 1,
+          "a received message failed to hold same-Bot completion or held another Bot's completion");
+
+    f.restart();
+    f.reach(id,"completed");
+    check(f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
+          "the buffered completion was lost or requested another model call after the read-only message routed");
+}
+
+void unrelatedUpdatesKeepTheFirstRouteDecision() {
+    for (const bool receiveLaterMessage : {true,false}) {
+        Fixture f;
+        const auto targetId = f.store->submit(f.routing("Benchmark"));
+        const auto other = f.store->submit(f.routing("Unrelated task","alpha","cloud"));
+        constexpr auto request = "Add a table to the Benchmark";
+        f.script(request,target("append_instruction",targetId));
+        int decisions = 0;
+        int laterMessages = 0;
+        if (receiveLaterMessage) f.beforeNotes = [&] {
+            f.enqueue("arrived-later-" + std::to_string(++laterMessages),"status");
+        };
+        f.model.beforeRoute = [&](const ModelInput& input) {
+            if (input.event["text"] != request || ++decisions != 1 || receiveLaterMessage) return;
+            sqlite3* raw = nullptr;
+            const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
+            std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+            check(opened == SQLITE_OK,"could not open the generation fixture");
+            const auto sql = "UPDATE tasks SET generation=generation+1, "
+                "data=json_set(data,'$.generation',generation+1) WHERE id=" + std::to_string(other);
+            check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+                  "could not change the unrelated task generation");
+        };
+        const auto receipt = f.receive("append",request);
+        check(decisions == 1 && f.response(receipt)["route"] == "append_instruction" &&
+              f.event(targetId,"instruction_accepted")["messageId"] == receipt["messageId"] &&
+              f.event(other,"instruction_accepted").is_null(),
+              receiveLaterMessage ? "later receipts prevented the first routing decision from being applied"
+                                  : "an unrelated generation change repeated routing inference");
+        if (receiveLaterMessage) {
+            const auto later = f.enqueue("arrived-later-1","status");
+            check(laterMessages == 1 && f.response(later)["route"] == "status",
+                  "the pending message did not reach its turn after the earlier instruction");
+        }
+    }
+}
+
 void staleRoutingDecisionIsRecomputed() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -718,13 +815,15 @@ void staleRoutingDecisionIsRecomputed() {
 void pendingRouterDoesNotBlockIndependentProject() {
     using namespace std::chrono_literals;
     Fixture f;
-    const auto project = f.store->submit(f.routing("Separate project", "beta", "desktop", "other-project"));
+    const auto project = f.store->submit(f.routing("Separate project", "alpha", "desktop", "other-project"));
     f.reach(project,"deciding");
     std::promise<void> routeEntered, allowRoute, projectDeciding;
     const auto routing = routeEntered.get_future().share();
     const auto resume = allowRoute.get_future();
     const auto projectProgress = projectDeciding.get_future();
+    bool signalled = false;
     f.model.beforeRoute = [&](const ModelInput&) {
+        if (std::exchange(signalled,true)) return;
         routeEntered.set_value();
         resume.wait();
     };
@@ -739,7 +838,7 @@ void pendingRouterDoesNotBlockIndependentProject() {
     allowRoute.set_value();
     dispatch.get();
     f.runtime.reset();
-    check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 1,
+    check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 2,
           "a pending conversation decision blocked an independent project's model decision");
 }
 
@@ -1135,6 +1234,9 @@ int main() {
         appendWaitsForSafeBoundary();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();
+        receivedRevisionPrecedesCompletion();
+        pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall();
+        unrelatedUpdatesKeepTheFirstRouteDecision();
         staleRoutingDecisionIsRecomputed();
         pendingRouterDoesNotBlockIndependentProject();
         concurrentTasksShareModelBudget();
