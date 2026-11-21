@@ -302,7 +302,7 @@ Id Store::submit(const Intake& item) {
     return id;
 }
 
-Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceMessageId, const Json& source) {
+Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source, RequestJournal requestJournal) {
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
@@ -329,19 +329,11 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         return row.number(0);
     }
     const auto id = last();
-    if (peerKind.empty())
+    if (requestJournal == RequestJournal::record)
         journal(id, "request", {{"text",item.request},
             {"source",sourceMessageId ? "conversation" : (item.scheduleId.empty() ? "manual" : "cron")},
             {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt},{"messageId",sourceMessageId}});
     return id;
-}
-
-Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source) {
-    return submit(item,std::string_view{},sourceMessageId,source);
-}
-
-Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source, bool peerTask) {
-    return submit(item,peerTask ? std::string_view{"peer"} : std::string_view{},sourceMessageId,source);
 }
 
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {

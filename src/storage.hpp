@@ -24,6 +24,8 @@ std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 
+enum class RequestJournal { record, skip };
+
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
@@ -62,10 +64,8 @@ struct Store::Impl {
     bool conversationPending(std::string_view bot) const;
     bool completionHeld(const Json&) const;
     void save(Json&);
-    Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
-              const Json& source = nullptr);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
+              RequestJournal requestJournal = RequestJournal::record);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
     void peerMessage(const PeerExchange&, const Json&);
