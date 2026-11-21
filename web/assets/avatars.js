@@ -60,6 +60,7 @@ function avatarOptions(bot) {
 export function showAvatar(host, bot, { still = true, state = 'idle' } = {}) {
   const { definition, color, eyeColor, ...options } = avatarOptions(bot);
   host.setAttribute('aria-hidden', 'true');
+  host.classList.toggle('mug-outline', definition.id === 'mug' && color === galleryColors.mug);
   if (still) {
     host.innerHTML = renderAvatarSvg(definition, { color, eyeColor, state, reducedMotion: true });
     return;
