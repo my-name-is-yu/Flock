@@ -59,7 +59,7 @@ const drafts = new Map();
 const replies = new Map();
 const sendingMessages = new Set();
 const pendingMessages = new Map();
-const pendingWaits = new Set();
+const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
 let bots = [];
@@ -565,18 +565,39 @@ function renderTimeline(scroll = 'auto') {
   else scroller.scrollTop = previousTop;
 }
 
+const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (view?.id === context.id) renderComposer();
 }
 const replyLabels = { wait: 'Reply to a question', clarification: 'Reply to a clarification', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+function scheduleNoticeFade(context, notice) {
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.id) || [...pendingWaits.values()].includes(context.id)) return;
+  notice.timer = setTimeout(() => {
+    notice.timer = null;
+    if (notices.get(context.id) !== notice || view?.id !== context.id) return;
+    notice.fading = true;
+    renderComposer();
+    setTimeout(() => {
+      if (notices.get(context.id) !== notice) return;
+      notices.delete(context.id);
+      if (view?.id === context.id) renderComposer();
+    }, 400);
+  }, 3600);
+}
+function fitMessage() {
+  const field = elements.message;
+  if (!field.offsetParent) return;
+  field.style.height = 'auto';
+  field.style.height = `${field.scrollHeight}px`;
+}
 function renderComposer() {
   const context = view;
   elements['composer-container'].hidden = !context?.data;
   if (!context?.data) return;
   const reply = replies.get(context.id);
-  const { text, isError } = notices.get(context.id) ?? {};
+  const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
   elements['reply-context'].hidden = !reply;
@@ -585,12 +606,20 @@ function renderComposer() {
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
-  if (elements.message.value !== body) elements.message.value = body;
+  if (elements.message.value !== body) {
+    elements.message.value = body;
+    fitMessage();
+  }
   elements.message.readOnly = busy;
+  elements.composer.setAttribute('aria-busy', String(busy));
   elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
-  elements.notice.textContent = text ?? '';
-  elements.notice.classList.toggle('error', !!isError);
+  elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
+  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.classList.toggle('error', !!notice?.isError);
+  elements.notice.classList.toggle('fading', !!notice?.fading);
+  scheduleNoticeFade(context, notice);
 }
 
 function closeDetail() {
@@ -917,7 +946,7 @@ async function loadSessions() {
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
   if (!context || pendingWaits.has(waitId)) return;
-  pendingWaits.add(waitId);
+  pendingWaits.set(waitId, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   try {
@@ -992,11 +1021,36 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
+  fitMessage();
   notices.delete(view.id);
   const limit = composerLimit(reply);
   if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
 });
+// Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
+elements.composer.addEventListener('keydown', (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
+    event.preventDefault();
+    elements.send.click();
+  } else if (event.key === 'Escape' && !elements['reply-context'].hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+    elements['cancel-reply'].click();
+  }
+});
+byId('send-hint').textContent = `${sendKey} ↵`;
+let composerHeight = 0;
+function resizeComposerAndKeepTimelineAtBottom() {
+  const height = elements['composer-container'].offsetHeight;
+  const composerGrowth = height - composerHeight;
+  composerHeight = height;
+  const scroller = elements.conversation;
+  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
+  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
+  fitMessage();
+}
+new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
 });
