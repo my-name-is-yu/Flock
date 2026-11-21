@@ -442,7 +442,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 return true;
             }
             if ((target != old || current.value("environmentReleased",false) || current["state"] == "queued") &&
-                !db.queueBlocker(current["id"]).is_null()) return false;
+                !db.queueBlocker(current["id"].get<Id>()).is_null()) return false;
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;

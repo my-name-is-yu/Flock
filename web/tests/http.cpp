@@ -267,7 +267,7 @@ void peerHistory(const std::filesystem::path& path) {
           "waiting on a peer was presented as a user action");
     tick(runtime,8);
     const auto finished = browser.get("/api/view?bot=release");
-    check(hasEvent(finished.at("events"),"completed","判定基準を確認しました") && t3.launches == 0,
+    check(hasEvent(finished.at("events"),"completed","text","判定基準を確認しました") && t3.launches.empty(),
           "consultation did not show the result without starting a T3 Session");
 
     for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});

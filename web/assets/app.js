@@ -233,9 +233,9 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' : presence;
+  const avatarState = presence === 'peer_waiting' ? 'waiting' :
+    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
-  const avatarState = presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   if (key !== profileKey) {
     profileAvatar?.destroy();
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });

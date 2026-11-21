@@ -183,6 +183,13 @@ Json currentWait(const Json& task) {
     return result;
 }
 
+Json sourceView(const Json& source, bool includeText = false) {
+    Json view = Json::object();
+    copyFields(view,source,{"taskId","messageId","revisionId","option"});
+    if (includeText) copyFields(view,source,{"text"});
+    return view;
+}
+
 Json taskSessions(const Json& task) {
     auto sessions = Json::array();
     const auto env = field(task,"environmentId");
@@ -264,6 +271,40 @@ Json sessions(Store& store, std::string_view bot, Id before) {
         auto group = taskSummary(task);
         group["sessions"] = taskSessions(task);
         page.push_back(std::move(group));
+    }
+    return result;
+}
+
+Json taskDetail(const Json& task, const Json& latestResult) {
+    auto result = taskSummary(task);
+    copyFields(result,task,{"doneWhen","intent"});
+    result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
+    auto& revisions = result["revisions"] = Json::array();
+    if (task.contains("revisions") && task["revisions"].is_array()) {
+        for (const auto& revision : task["revisions"]) {
+            Json view = Json::object();
+            copyFields(view,revision,{"id","number","intent","doneWhen","sourceMessageId"});
+            revisions.push_back(std::move(view));
+        }
+    }
+    auto& instructions = result["pendingInstructions"] = Json::array();
+    if (task.contains("pendingInstructions") && task["pendingInstructions"].is_array()) {
+        for (const auto& instruction : task["pendingInstructions"]) {
+            Json view = Json::object();
+            copyFields(view,instruction,{"messageId","text","revisionId","conflicting"});
+            instructions.push_back(std::move(view));
+        }
+    }
+    auto& sources = result["sourceResultRefs"] = Json::array();
+    if (task.contains("sourceResultRefs") && task["sourceResultRefs"].is_array()) {
+        for (const auto& source : task["sourceResultRefs"]) sources.push_back(sourceView(source,true));
+    }
+    auto& runs = result["runs"] = Json::array();
+    for (const auto& run : task.at("runs")) {
+        auto view = runView(run,field(task,"environmentId"));
+        if (view.is_null()) continue;
+        copyFields(view,run,{"revisionId"});
+        runs.push_back(std::move(view));
     }
     return result;
 }
