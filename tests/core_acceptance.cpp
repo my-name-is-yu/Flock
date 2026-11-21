@@ -79,6 +79,7 @@ struct SimulatedT3 : T3 {
     std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
+    std::function<void()> beforeWorkAcknowledgement;
     std::string authGeneration(const std::string&,const Json&) override { return generation; }
     std::optional<Delivery> preflight(const Command&) override {
         if (onPreflight) onPreflight();
@@ -106,6 +107,7 @@ struct SimulatedT3 : T3 {
         }
         runs.emplace(run.runId,Observation{});
         check(assignments.emplace(cmd.actionId,run).second,"duplicated action");
+        if (auto callback = std::exchange(beforeWorkAcknowledgement,{})) callback();
         if (std::exchange(loseAcknowledgement,false)) return {};
         return {Delivery::Kind::Accepted,run,{}};
     }
@@ -477,6 +479,78 @@ void recoveredDelivery() {
     f.reach(id,"running");
     check(f.t3.replies==1 && f.t3.launches==1 && f.t3.reconciles==1 && f.task(id)["additionalUsed"]==0,
           "recovered answer created duplicate work");
+}
+
+void cancelDuringDelivery() {
+    Fixture f;
+    Store cli(f.directory/"state.db");
+    const auto independent = f.submit("Other project work","beta","other");
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(independent,"running");
+    const auto id = f.submit("Work being cancelled");
+    const auto queued = f.submit("Next project task");
+    f.model.script = [=](const ModelInput& i) {
+        return i.task["id"] == queued ? ask() : work();
+    };
+    f.t3.beforeWorkAcknowledgement = [&] { cli.operate(id,0,"cancel"); };
+    for (int i = 0; i < 12 && f.t3.launches < 2; ++i) f.runtime->tick();
+    f.t3.beforeWorkAcknowledgement = {};
+    f.restart();
+
+    const auto cancelling = f.task(id);
+    check(cancelling["state"] == "cancelling" && cancelling["activeRun"]["runId"] == "run-2",
+          "cancellation lost the Run acknowledged by T3");
+    for (int i = 0; i < 12 && f.t3.interruptedRuns.empty(); ++i) f.runtime->tick();
+    check(f.t3.interruptedRuns.size() == 1 &&
+          f.t3.interruptedRuns[0].threadId == "thread-2" &&
+          f.t3.interruptedRuns[0].runId == "run-2",
+          "cancelling delivery did not interrupt the Run that T3 accepted");
+    check(f.task(queued)["state"] == "queued" && f.task(independent)["state"] == "running",
+          "cancelling delivery changed the project queue or unrelated work");
+
+    f.t3.finish("run-2","interrupted");
+    f.reach(id,"cancelled");
+    f.wait(queued,"user_question");
+    check(f.t3.launches == 2 && f.logs(id,"report") == 1,
+          "settling cancelled delivery duplicated a Run or its result");
+}
+
+void settleWhileAnswerDeliveryIsUnknown() {
+    for (const bool cancel : {false,true}) {
+        Fixture f;
+        const auto id = f.submit();
+        f.model.script = [](const ModelInput& i) {
+            if (i.event["kind"] == "intake") return work();
+            if (i.event["kind"] == "question") return reply();
+            return ask();
+        };
+        f.reach(id,"running");
+        f.t3.question("run-1");
+        f.t3.loseAcknowledgement = true;
+        const auto wait = f.wait(id,"unknown_delivery");
+        f.t3.question("run-1");
+        f.restart();
+
+        if (cancel) {
+            f.store->operate(id,0,"cancel");
+            for (int i = 0; i < 12 && f.t3.interruptedRuns.empty(); ++i) f.runtime->tick();
+            check(f.task(id)["state"] == "cancelling" &&
+                  f.t3.interruptedRuns.size() == 1 &&
+                  f.t3.interruptedRuns[0].threadId == "thread-1" &&
+                  f.t3.interruptedRuns[0].runId == "run-1",
+                  "unknown answer delivery blocked interruption of the known Run");
+        }
+        f.t3.finish("run-1",cancel ? "interrupted" : "completed");
+        if (!cancel) {
+            for (int i = 0; i < 12 && f.task(id)["wait"]["id"] == wait; ++i) f.runtime->tick();
+            const auto review = f.wait(id,"user_question");
+            f.rejects(id,wait,"reconcile");
+            f.store->operate(id,review,"cancel");
+        }
+        f.reach(id,"cancelled");
+        check(f.logs(id,"report") == 1 && f.t3.replies == 1 && f.t3.launches == 1,
+              "settled Run duplicated its answer or report");
+    }
 }
 
 void evidenceResume() {
@@ -1097,7 +1171,9 @@ int main() {
             {"invalid decisions",invalidDecisions},{"clarification and failure",ambiguityAndFailure},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
-            {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
+            {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
+            {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
+            {"history reading restart",evidenceResume},
             {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
             {"Bot consultation and permission",peerConsultationAndPermission},

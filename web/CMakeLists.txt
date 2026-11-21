@@ -1,6 +1,5 @@
 find_package(Threads REQUIRED)
 
-# Header-only HTTP transport, with no TLS or compression dependencies.
 FetchContent_Declare(flock_httplib
   URL https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.67.0
   URL_HASH SHA256=be711ddaf7a3655d8f23aa5655709250b24d247aedd4b2629989d18b6164e5be

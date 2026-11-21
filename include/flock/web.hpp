@@ -13,4 +13,4 @@ public:
     virtual unsigned port() const = 0;
 };
 std::unique_ptr<WebServer> startWeb(Store&, unsigned port, WebCallbacks);
-} // namespace flockv0
+}

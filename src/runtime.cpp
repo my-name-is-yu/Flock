@@ -132,14 +132,20 @@ struct Runtime::Impl {
         close(lockFd);
     }
 
-    template<class F> bool change(const Json& snapshot, F fn) {
+    template<class F> bool changeTask(Id id, F fn) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
-        auto task = db.load(snapshot["id"]);
-        if (task["generation"] != snapshot["generation"] || !fn(task)) return false;
+        auto task = db.load(id);
+        if (!fn(task)) return false;
         db.save(task);
         transaction.commit();
         return true;
+    }
+
+    template<class F> bool change(const Json& snapshot, F fn) {
+        return changeTask(snapshot["id"],[&](Json& task) {
+            return task["generation"] == snapshot["generation"] && fn(task);
+        });
     }
 
     std::vector<Id> eligible() {
@@ -546,14 +552,11 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         return !prior.next();
     }
 
-    void applyDelivery(const Json& snapshotTask, const Json& action, Delivery outcome) {
-        // A concurrent cancel invalidates a decision, but an accepted side effect still belongs to its task.
-        const auto current = snapshot(snapshotTask["id"]);
-        if (current["actionId"] != action["id"] || terminal(current)) return;
-        change(current,[&](Json& task) {
+    void applyDelivery(Id id, const Json& action, Delivery outcome) {
+        changeTask(id,[&](Json& task) {
+            if (task["actionId"] != action["id"] || terminal(task)) return false;
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
-            const auto id = task["id"].get<Id>();
             if (outcome.kind == Delivery::Kind::Accepted && !reply && hasRun(outcome.run) &&
                 !assignedRunMatches(task,action,outcome.run)) {
                 outcome.kind = Delivery::Kind::Unknown;
@@ -622,13 +625,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
 
     void deliver(const Json& task, const Json& action) {
         auto cmd = command(task,action);
+        const auto id = task["id"].get<Id>();
         Delivery outcome;
         try {
             if (action["phase"] == "started") {
                 outcome = t3.reconcile(cmd);
             } else {
                 if (const auto stop = t3.preflight(cmd)) {
-                    applyDelivery(task,action,*stop);
+                    applyDelivery(id,action,*stop);
                     return;
                 }
                 cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
@@ -644,7 +648,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
-        applyDelivery(task,action,std::move(outcome));
+        applyDelivery(id,action,std::move(outcome));
     }
 
     std::vector<std::string> available(const Json& task, const Json& event,

@@ -254,7 +254,7 @@ void taskCommand(Store& store, const std::string& command, Arguments& args) {
         else throw Conflict("Unknown pagination option: " + flag);
     }
     if (command == "history") {
-        store.task(task);  // Unknown IDs are errors rather than empty pages.
+        if (!store.hasTask(task)) throw Conflict("Task does not exist");
         print(store.history(task,cursor,limit));
     } else print(store.tasks(bot,cursor,limit));
 }
@@ -297,8 +297,8 @@ int runCli(Arguments& args) {
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;
 }
-} // namespace
-} // namespace flockv0::app
+}
+}
 
 int main(int argc,char** argv) {
     try {

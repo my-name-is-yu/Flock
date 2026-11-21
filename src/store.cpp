@@ -365,6 +365,11 @@ Json Store::task(Id id) const {
     return p_->taskDetails(id,true);
 }
 
+bool Store::hasTask(Id id) const {
+    std::lock_guard lock(p_->mutex);
+    return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
+}
+
 static void restoreWaitAnchor(Store::Impl& store, Json& task) {
     auto& wait = task["wait"];
     if (wait.is_null() || wait.contains("messageId")) return;

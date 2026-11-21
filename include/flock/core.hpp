@@ -129,6 +129,7 @@ public:
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
     Json task(Id taskId) const;
+    bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json activeTasks(std::string_view botId) const;

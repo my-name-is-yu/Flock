@@ -229,8 +229,8 @@ class Fixture(BaseHTTPRequestHandler):
         lower = args.get("afterPosition", -1)
         upper = args.get("beforePosition", float("inf"))
         matches = [row for row in rows if lower < row["position"] < upper]
-        # Force an explicit second cursor page on history scans.
-        limit = min(args.get("limit", 30), 2)
+        pagination_test_page_size = 2
+        limit = min(args.get("limit", 30), pagination_test_page_size)
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:
             offset = args.get("textOffset", 0)

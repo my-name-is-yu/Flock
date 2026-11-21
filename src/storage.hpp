@@ -62,4 +62,4 @@ private:
     sqlite3* db_;
     bool done_ = false;
 };
-} // namespace flockv0
+}
