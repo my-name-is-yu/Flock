@@ -292,33 +292,9 @@ void Store::Impl::unlockQuestion(Json& task, std::string_view reason) {
     task["question"] = nullptr;
 }
 
-std::string replacementKey(const Json& item) {
-    if (!item.value("conflicting",false)) return {};
-    const auto key = field(item,"replaceKey");
-    if (!key.empty()) return key;
-    return field(item,"environmentId").empty() ? "target" : "environment";
-}
-
-std::string Store::Impl::taskIntent(const Json& task) const {
-    std::lock_guard lock(mutex);
-    const Json* current = &task;
-    Json prior;
-    for (;;) {
-        const auto request = field(*current,"request");
-        const auto intent = current->value("intent",request);
-        const auto restart = current->find("restartContext");
-        // Older tasks used the resume request as their initial revision's intent.
-        if (restart == current->end() || !restart->contains("intent") || intent != request) return intent;
-        if (current->contains("intent") && query(R"SQL(
-SELECT 1 FROM task_revisions WHERE task_id=? AND intent<>?
-UNION ALL SELECT 1 FROM journal WHERE task_id=? AND kind='instruction_accepted'
-    AND json_extract(data,'$.replaceKey')='intent' LIMIT 1
-)SQL",{current->at("id"),request,current->at("id")}).next()) return intent;
-        const auto parent = restart->at("taskId").get<Id>();
-        if (parent >= current->at("id").get<Id>()) throw Conflict("Invalid cancelled task reference");
-        prior = load(parent);
-        current = &prior;
-    }
+std::string taskIntent(const Json& task) {
+    const auto intent = field(task,"intent");
+    return intent.empty() ? field(task,"request") : intent;
 }
 
 Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending) const {
@@ -326,12 +302,12 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     std::map<std::pair<Id,int>,Json> byMessage;
     std::size_t sourceBytes = 8192;
     std::set<std::string> replaced{"environment"};
-    for (const auto& item : pending) replaced.insert(replacementKey(item));
+    for (const auto& item : pending) replaced.insert(field(item,"replaceKey"));
     const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
 
     // Newest first, so a later change supersedes earlier directions with the same replacement key.
     const auto remember = [&](Id owner, Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
-        const auto key = replacementKey(item);
+        const auto key = field(item,"replaceKey");
         if (!key.empty() && !replaced.insert(key).second) return;
         if (key == "intent" || key == "criteria") {
             auto contract = query(R"SQL(

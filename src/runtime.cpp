@@ -34,7 +34,7 @@ InstructionBatch pendingBatch(const Json& task) {
     const auto& pending = task["pendingInstructions"];
     std::map<std::string,std::size_t> latestOverrideIndices;
     for (std::size_t i = 0; i < pending.size(); ++i) {
-        if (auto key = replacementKey(pending[i]); !key.empty()) latestOverrideIndices[std::move(key)] = i;
+        if (auto key = field(pending[i],"replaceKey"); !key.empty()) latestOverrideIndices[std::move(key)] = i;
     }
     std::size_t reservedOverrideBytes = 0;
     for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += field(pending[i],"text").size() + 4;
@@ -42,7 +42,7 @@ InstructionBatch pendingBatch(const Json& task) {
     bool acceptsIndependentInstructions = true;
     for (std::size_t i = 0; i < pending.size(); ++i) {
         const auto& item = pending[i];
-        if (const auto key = replacementKey(item); !key.empty()) {
+        if (const auto key = field(item,"replaceKey"); !key.empty()) {
             if (latestOverrideIndices.at(key) == i) batch.instructions.push_back(item);
             else batch.superseded.push_back(item);
         } else if (acceptsIndependentInstructions) {
@@ -65,7 +65,7 @@ void includeWorkContext(std::string& instruction, const Json& earlier, const Jso
         for (const auto* batch : {&earlier,&pending}) {
             for (const auto& item : *batch) {
                 const auto text = field(item,"text");
-                const auto key = replacementKey(item);
+                const auto key = field(item,"replaceKey");
                 if (key == "intent" || key == "criteria") {
                     hasIntent = hasIntent || text.find(intent) != text.npos;
                     hasCriteria = hasCriteria || text.find(criteria) != text.npos;
@@ -825,7 +825,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             const bool needsContext = tool == "delegate" &&
                 (task.contains("restartContext") || task.value("newSessionRequired",false));
-            const auto goal = needsContext ? db.taskIntent(task) : std::string{};
+            const auto goal = needsContext ? taskIntent(task) : std::string{};
             const auto earlier = needsContext ? db.sessionInstructions(task,goal,pending) : Json::array();
             includeWorkContext(instruction,earlier,pending,goal,needsContext ? field(task,"doneWhen") : std::string{});
             std::size_t excerptBudget = 8192;
@@ -884,7 +884,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             std::string instruction = "Continue this Flock task.";
             if (!fresh && (!current.contains("restartContext") ||
                            current.at("lastRun").value("revisionId",Json(nullptr)) != revision(current)))
-                instruction += "\n\nTask intent:\n" + db.taskIntent(current) +
+                instruction += "\n\nTask intent:\n" + taskIntent(current) +
                     "\n\nCompletion criteria:\n" + field(current,"doneWhen");
             db.consumeEvent(current);
             db.journal(current["id"],"decision",{{"actionId",action},{"tool",tool},{"reason",reason},
@@ -982,7 +982,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 throw Conflict("Let the assigned Run settle before requesting another Bot's work");
             if (initial) {
                 const auto source = sender.value("criteriaSourceMessageId",sender.value("sourceMessageId",Id{0}));
-                db.addRevision(sender,db.taskIntent(sender),sender.value("requestedDoneWhen",field(decision.args,"doneWhen")),source);
+                db.addRevision(sender,taskIntent(sender),sender.value("requestedDoneWhen",field(decision.args,"doneWhen")),source);
                 sender.erase("requestedDoneWhen");
                 sender.erase("criteriaSourceMessageId");
             }
@@ -1248,7 +1248,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
             if (initial && work) {
                 const auto source = current.value("criteriaSourceMessageId",current.value("sourceMessageId",Id{0}));
-                db.addRevision(current,db.taskIntent(current),doneWhen,source);
+                db.addRevision(current,taskIntent(current),doneWhen,source);
                 current.erase("requestedDoneWhen");
                 current.erase("criteriaSourceMessageId");
             }
@@ -1339,7 +1339,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
             const auto bot = notes(field(task,"botId"));
-            const auto goal = db.taskIntent(task);
+            const auto goal = taskIntent(task);
             Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",goal},
                 {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};

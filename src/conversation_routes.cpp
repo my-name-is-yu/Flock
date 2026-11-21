@@ -416,7 +416,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         bool conflicting = change != nullptr;
         std::string environment;
         if (change) {
-            const auto oldIntent = field(task,"intent").empty() ? field(task,"request") : field(task,"intent");
+            const auto oldIntent = taskIntent(task);
             const auto oldDone = field(task,"doneWhen");
             const auto intent = change->intent.empty() ? oldIntent : change->intent;
             const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
