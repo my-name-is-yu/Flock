@@ -354,9 +354,10 @@ with a clearly intended active task is append_instruction. It never relaxes comp
 Never create a second Task for the same active work to reset or circumvent its Run budget.
 A user explicitly changing the existing task's scope, acceptance criteria, or execution environment is
 revise_task. Supply only the changed fields, with intent or doneWhen quoted exactly from that segment.
-Use a configured alias or canonical ID for environment, including on create_task.
-Set operation=destination on a clarification asking which destination to use. It may include one already
-identified task, or no task for new work. Use the exact name written by the user. Never interpret Session results as the user revising criteria.
+For new work with no destination requested by the user, omit environment to use the Bot's configured default.
+When the user requests a destination, use a matching configured alias or canonical ID for environment.
+If the requested destination cannot be identified, clarify with operation=destination. It may include one
+already identified task, or no task for new work. Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact resultMessageId. Think
