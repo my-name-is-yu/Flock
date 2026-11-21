@@ -382,6 +382,127 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
+
+struct StopModel : FixedModel {
+    Id other = 0;
+    bool honorSelection = false;
+    Decision decide(const ModelInput& input) override {
+        if (input.event["kind"] != "route_conversation") return FixedModel::decide(input);
+        const auto& event = input.event;
+        const auto& reply = event.at("reply");
+        if (reply.at("kind") == "clarification" && honorSelection) {
+            check(reply.contains("selectedTaskId"),"the model did not receive the user's hidden choice");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},
+                    {"taskId",reply.at("selectedTaskId")}}})},{"resolution","resolved"}},{}};
+        }
+        if (reply.at("kind") == "clarification") {
+            return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},{"taskId",other}}})},
+                    {"resolution","resolved"}},{}};
+        }
+        check(event.at("text") == "ログインの件を調整して","Unexpected route in stop fixture");
+        Json candidates = Json::array();
+        for (const auto& task : event.at("tasks"))
+            if (task.at("state") == "running") candidates.push_back(task.at("taskId"));
+        return {"route_conversation",{{"routes",Json::array({{{"kind","clarify"},{"text","どちらの依頼ですか？"},
+                {"candidates",candidates}}})}},{}};
+    }
+};
+
+bool exposesTaskNumber(const std::string& text, Id task) {
+    return text.find("#" + std::to_string(task)) != std::string::npos;
+}
+
+void sameNameStop(const std::filesystem::path& path) {
+    Store store(path);
+    StopModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const auto first = store.submit({"triage","ログイン画面の修正","linked env","login-a"});
+    const auto second = store.submit({"triage","ログイン画面の修正","linked env","login-b"});
+    tick(runtime,4);
+    check(store.task(first)["state"] == "running" && store.task(second)["state"] == "running",
+          "same-name fixtures did not both start");
+
+    const auto stop = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","stop-login"},
+        {"text","「ログイン画面の修正」を中止して"}},201);
+    runtime.routeConversation();
+    auto page = browser.get("/api/view?bot=triage");
+    const auto question = conversationReply(page,stop.at("messageId"));
+    const auto questionText = question.at("text").get<std::string>();
+    check(question.at("route") == "clarify" && questionText.find("ログイン画面の修正") != std::string::npos &&
+          !exposesTaskNumber(questionText,first) && !exposesTaskNumber(questionText,second),
+          "same-name stop request was not confirmed by request name");
+    check(store.task(first)["state"] == "running" && store.task(second)["state"] == "running",
+          "an ambiguous stop request stopped a request before confirmation");
+    check(page.at("clarifications").size() == 1,"stop confirmation was not listed as waiting for the user");
+    const auto& clarification = page.at("clarifications").at(0);
+    const Id anchor = clarification.at("messageId");
+    check(clarification.at("candidates").size() == 2,"stop confirmation did not offer both requests");
+    for (const auto& candidate : clarification.at("candidates"))
+        check(candidate.at("request") == "ログイン画面の修正" && candidate.at("createdAt").get<Seconds>() > 0 &&
+              candidate.at("state") == "running","same-name candidates lacked the facts that tell them apart");
+
+    const auto label = "ログイン画面の修正（後から依頼した方）";
+    browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","no-anchor"},{"text",label},
+        {"candidateTaskId",second}},400);
+    const auto forged = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","forged"},{"text",label},
+        {"replyToMessageId",anchor},{"candidateTaskId",second + 100}},201);
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=triage"),forged.at("messageId")).at("route") == "respond" &&
+          store.task(first)["state"] == "running" && store.task(second)["state"] == "running" &&
+          store.clarifications("triage").size() == 1,"a choice outside the confirmation reached a request");
+
+    const Json choice = {{"botId","triage"},{"clientMessageId","choose-second"},{"text",label},
+                         {"replyToMessageId",anchor},{"candidateTaskId",second}};
+    const auto chosen = browser.post("/api/messages",choice,201);
+    check(browser.post("/api/messages",choice,201) == chosen,"retrying a choice did not return its receipt");
+    auto switched = choice;
+    switched["candidateTaskId"] = first;
+    browser.post("/api/messages",switched,409);
+    runtime.routeConversation();
+    page = browser.get("/api/view?bot=triage");
+    const auto stopped = conversationReply(page,chosen.at("messageId"));
+    const auto stoppedText = stopped.at("text").get<std::string>();
+    check(stopped.at("route") == "cancel_task" && stoppedText.find("ログイン画面の修正") != std::string::npos &&
+          !exposesTaskNumber(stoppedText,second),"the chosen stop was not confirmed by request name");
+    const auto secondState = store.task(second)["state"];
+    check(store.task(first)["state"] == "running" && (secondState == "cancelling" || secondState == "cancelled") &&
+          store.clarifications("triage").empty(),"the choice did not stop only the selected request");
+
+    const auto stale = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","stale-choice"},{"text",label},
+        {"replyToMessageId",anchor},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto staleReply = conversationReply(browser.get("/api/view?bot=triage"),stale.at("messageId"));
+    check(staleReply.at("route") == "respond" && store.task(first)["state"] == "running",
+          "a reply to a closed confirmation reached another request");
+
+    const auto third = store.submit({"triage","ログイン画面の文言","linked env","login-c"});
+    tick(runtime,4);
+    check(store.task(third)["state"] == "running","the third request did not start");
+    model.other = third;
+    const auto adjust = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","adjust"},
+        {"text","ログインの件を調整して"}},201);
+    runtime.routeConversation();
+    const auto adjustQuestion = conversationReply(browser.get("/api/view?bot=triage"),adjust.at("messageId"));
+    check(adjustQuestion.at("route") == "clarify","the model clarification fixture did not ask");
+    const auto misrouted = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","misrouted"},
+        {"text","ログイン画面の修正"},{"replyToMessageId",adjustQuestion.at("messageId")},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto misroutedReply = conversationReply(browser.get("/api/view?bot=triage"),misrouted.at("messageId"));
+    const auto untouched = [&](Id task) { return store.task(task).value("pendingInstructions",Json::array()).empty(); };
+    check(misroutedReply.at("route") == "clarify" && untouched(first) && untouched(third),
+          "routing applied a chosen reply to a request the user did not choose");
+
+    model.honorSelection = true;
+    const auto honored = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","honored"},
+        {"text","ログイン画面の修正"},{"replyToMessageId",adjustQuestion.at("messageId")},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto honoredReply = conversationReply(browser.get("/api/view?bot=triage"),honored.at("messageId"));
+    check(honoredReply.at("route") == "append_instruction" && !untouched(first) && untouched(third),
+          "a chosen candidate did not resolve a non-stop clarification for that request only");
+}
 #ifdef FLOCK_TEST_CHATGPT
 void chatGPTConversation(const std::filesystem::path& home) {
     Store store(home / "conversation.sqlite");
@@ -474,8 +595,10 @@ void chatGPTConversation(const std::filesystem::path& home) {
     tick(runtime,5);
     const auto firstTask = task(linkedTask(first));
     const auto secondTask = task(linkedTask(second));
-    check(firstTask.at("runs").back().at("environmentId") == "local-env" &&
-          secondTask.at("runs").back().at("environmentId") == "backup-env",
+    const auto& firstRuns = firstTask.at("runs");
+    const auto& secondRuns = secondTask.at("runs");
+    check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
+    check(firstRuns.back().at("environmentId") == "local-env" && secondRuns.back().at("environmentId") == "backup-env",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
     check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&
@@ -571,6 +694,7 @@ int main(int argc,char** argv) {
 #endif
         TestDirectory directory;
         conversationEntry(directory.path / "conversation.sqlite");
+        sameNameStop(directory.path / "stop.sqlite");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {

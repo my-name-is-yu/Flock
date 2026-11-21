@@ -307,6 +307,18 @@ WHERE r.status='awaiting_resolution' AND m.bot_id=? AND m.id<? ORDER BY r.messag
             context.pendingClarification = readClarification(latest);
     }
 
+    if (const auto candidate = integer(routing,"candidateTaskId")) {
+        const bool offered = context.reply.kind == Reply::Kind::clarification &&
+            std::ranges::find(context.reply.candidates,candidate) != context.reply.candidates.end();
+        if (offered) context.selection = candidate;
+        else {
+            const auto anchor = context.reply.id ? context.reply.id : replyTo;
+            context.reply = Reply{};
+            context.reply.kind = Reply::Kind::invalid;
+            context.reply.id = anchor;
+        }
+    }
+
     auto turns = query(R"SQL(
 SELECT m.id,m.text,j.id,j.task_id,j.data FROM messages m
 JOIN route_decisions r ON r.message_id=m.id JOIN journal j ON j.id=r.reply_id

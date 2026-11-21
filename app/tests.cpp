@@ -245,6 +245,9 @@ void notesAcrossConversationAndWork() {
                 Json route = {{"kind","create_task"}};
                 if (reply.at("kind") == "result")
                     route = {{"kind","answer_result"},{"resultMessageId",reply.at("resultMessageId")}};
+                if (reply.at("kind") == "clarification")
+                    return {"route_conversation",{{"routes",Json::array({route})},{"resolution","resolved"},
+                            {"clarificationMessageId",reply.at("messageId")}},"Retry the original request"};
                 return {"route_conversation",{{"routes",Json::array({route})}},"Route the user request"};
             }
             if (event.at("kind") == "intake")
@@ -273,7 +276,9 @@ void notesAcrossConversationAndWork() {
     Store store(temp.path / "tasks.db");
     NotesT3 t3;
     t3.finished = true;
+    std::optional<std::string> noteReadError;
     Runtime runtime(store,model,t3,[&](std::string_view botId) {
+        if (noteReadError) throw Conflict(*noteReadError);
         auto notes = bots.notes(botId);
         if (!notes.soul.empty()) notes.soul += std::string(64,'X');
         if (!notes.memory.empty()) notes.memory += std::string(64,'X');
@@ -351,6 +356,25 @@ void notesAcrossConversationAndWork() {
     std::filesystem::remove(folder / "first" / "SOUL.md");
     std::filesystem::remove(folder / "first" / "MEMORY.md");
     checkResultAnswer(firstIntake,firstTask,deleted,{},explanation);
+
+    const auto beforeFailure = model.requests.size();
+    const auto originalRequest = "Collect the missing release evidence";
+    noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
+    store.receive(firstIntake,"unreadable-notes",originalRequest);
+    runtime.routeConversation();
+    const auto clarifications = store.clarifications(firstIntake.botId);
+    check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
+          clarifications.size() == 1 &&
+          clarifications.front().at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
+          "an unreadable note must prompt repair without calling the model or creating work");
+
+    noteReadError.reset();
+    store.receive(firstIntake,"repaired-notes","Please retry",clarifications.front().at("messageId"));
+    runtime.routeConversation();
+    const auto tasks = store.tasks(firstIntake.botId);
+    check(model.requests.size() == beforeFailure + 1 && store.clarifications(firstIntake.botId).empty() &&
+          tasks.size() == 2 && tasks.front().at("request").get_ref<const std::string&>().starts_with(originalRequest),
+          "replying after note repair must retry the original request");
 }
 
 void directionalPeerConfiguration() {
@@ -404,10 +428,14 @@ void responseContract() {
           "the task provider prompt must apply the notes to the Bot's own report");
 
     input.task["doneWhen"] = "";
+    input.task["requestedDoneWhen"] = "Use independently verified measurements";
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
         Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+    check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
+          initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
+          "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"route_conversation"};
     input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
