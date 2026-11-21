@@ -17,6 +17,7 @@ using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
 constexpr auto comparisonRequest = "3案を比較して";
+constexpr auto compoundExplanation = "2案目を詳しく。2案目を要約して";
 constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
 constexpr auto budgetDetail = "明細は100件です";
 constexpr auto proposedOptions = "1. 手動で照合する\n"
@@ -41,7 +42,7 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
-    unsigned explained = 0, summarized = 0;
+    unsigned routed = 0, explained = 0, summarized = 0;
     Id comparisonResult = 0;
     Id estimateClarification = 0;
     std::size_t summarySourceSize = 0;
@@ -64,6 +65,7 @@ struct FixedModel : Model {
     }
 
     Decision routeMessage(const ModelInput& input) {
+        ++routed;
         const auto& event = input.event;
         check(event.dump().find(privateValue) == std::string::npos &&
               input.history.dump().find(privateValue) == std::string::npos,"Connection settings entered model-visible context");
@@ -77,6 +79,7 @@ struct FixedModel : Model {
                     {"resolution","resolved"},{"clarificationMessageId",estimateClarification}},{}};
         }
         if (event.at("text") == "2案目を詳しく" || event.at("text") == "2案目を要約して" ||
+            event.at("text") == compoundExplanation ||
             event.at("text") == missingBudgetQuestion) {
             const auto& results = event.at("results");
             const auto selected = std::ranges::find_if(results,[&](const Json& result) {
@@ -85,6 +88,14 @@ struct FixedModel : Model {
             });
             check(selected != results.end(),"The comparison was not available to the model fixture");
             route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")},{"resultOption",2}};
+            if (event.at("text") == compoundExplanation) {
+                auto summary = route;
+                route["segment"] = "2案目を詳しく";
+                summary["segment"] = "2案目を要約して";
+                return {"route_conversation",{{"routes",Json::array({route,summary})}},"Explain and summarize"};
+            }
+        } else if (event.at("text") == "Who are you?") {
+            route = {{"kind","respond"},{"text","I'm the release Bot."}};
         } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
             route = {{"kind","status"}};
         } else {
@@ -487,6 +498,65 @@ void chatGPTConversation(const std::filesystem::path& home) {
           "ambiguous stop changed a Run or created work");
 }
 #endif
+void approveModelCallBeforeTask(const std::filesystem::path& path) {
+    Store webStore(path);
+    auto store = std::make_unique<Store>(path);
+    FixedModel model;
+    FixedT3 t3;
+    const auto start = [&] {
+        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+    };
+    auto runtime = start();
+    auto webCallbacks = callbacks();
+    webCallbacks.intake = [original = webCallbacks.intake](std::string_view bot, std::string_view request) {
+        auto intake = original(bot,request);
+        intake.config["modelCallLimit"] = 2;
+        return intake;
+    };
+    auto server = startWeb(webStore,0,std::move(webCallbacks));
+    Browser browser(*server);
+    const auto task = browser.request("release",comparisonRequest);
+    tick(*runtime,3);
+    t3.observations["thread-release"] = {
+        .kind = Observation::Kind::Finished,.status = "completed",.report = proposedOptions,
+        .itemId = "comparison-report",.settled = true
+    };
+    tick(*runtime,2);
+    model.comparisonResult = store->latestTaskResult(task).at("id");
+    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","compound"},
+        {"text",compoundExplanation}},201);
+    runtime->routeConversation();
+    const auto waiting = browser.get("/api/view?bot=release");
+    const auto wait = waiting.at("clarifications").at(0);
+    const auto reply = conversationReply(waiting,receipt.at("messageId"));
+    check(wait.at("route") == "model_budget" && wait.at("messageId") == reply.at("messageId") &&
+          model.routed == 1 && model.explained == 1 && model.summarized == 0,"third call reached the fixture");
+    runtime.reset();
+    store = std::make_unique<Store>(path);
+    runtime = start();
+    tick(*runtime,3);
+    check(model.routed == 1 && model.explained == 1 && model.summarized == 0,"waiting message resumed without approval");
+
+    const auto independent = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","independent"},
+        {"text","Who are you?"}},201);
+    runtime->routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=release"),independent.at("messageId")).at("route") == "respond" &&
+          model.routed == 2,"a paused message blocked an independent message to the same Bot");
+
+    Json approval = {{"botId","triage"},{"waitMessageId",wait.at("messageId")},{"operation","approve"}};
+    browser.post("/api/operations",approval,409);
+    approval["botId"] = "release";
+    browser.post("/api/operations",approval);
+    browser.post("/api/operations",approval,409);
+    runtime->routeConversation();
+    const auto resumed = browser.get("/api/view?bot=release");
+    const auto& answer = resumed.at("events").back().at("data");
+    check(resumed.at("clarifications").empty() && answer.at("route") == "compound" &&
+          answer.at("replyToMessageId") == receipt.at("messageId") &&
+          model.routed == 2 && model.explained == 1 && model.summarized == 1 &&
+          store->tasks().size() == 1 && t3.launches == 1,
+          "approval did not resume the unfinished explanation from its saved routing decisions");
+}
 
 }
 
@@ -501,6 +571,7 @@ int main(int argc,char** argv) {
 #endif
         TestDirectory directory;
         conversationEntry(directory.path / "conversation.sqlite");
+        approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

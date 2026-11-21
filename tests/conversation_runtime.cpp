@@ -1,5 +1,7 @@
 #include "flock/core.hpp"
+#include <sqlite3.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -24,7 +26,12 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id,Json> questions;
     std::function<Decision(const ModelInput&)> onResult;
+    std::function<Decision(const ModelInput&)> onAnswer;
     Decision decide(const ModelInput& input) override {
+        if (std::find(input.tools.begin(),input.tools.end(),"answer_conversation_result") != input.tools.end()) {
+            if (onAnswer) return onAnswer(input);
+            return {"answer_conversation_result",{{"text","The fixture answer."}},{}};
+        }
         if (std::find(input.tools.begin(),input.tools.end(),"route_conversation") != input.tools.end()) {
             const auto text = input.event.at("text").get<std::string>();
             const auto plan = routes.find(text);
@@ -395,6 +402,59 @@ void destinationClarificationPreservesAndValidatesRevisionDraft() {
           "a destination reply rebound a stale revision draft to the changed task");
 }
 
+void deferredCompletionPreservesDestinationRevisionDraft() {
+    Fixture f;
+    auto routing = f.routing("Release notes");
+    routing.config["conversationEnvironments"]["mock"] = "mock-executor";
+    const auto id = f.store->submit(routing);
+    int completionCalls = 0;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] == id) {
+            ++completionCalls;
+            check(!input.event.contains("_flockDeferredCompletion"),
+                  "private completion deferral metadata reached the model");
+        }
+    };
+    f.reach(id,"running");
+    f.t3.finish("run-1","Evidence");
+    f.tick();
+    check(f.task(id)["state"] == "deciding" && f.task(id)["activeRun"].is_null(),
+          "the settled Run did not leave a result to defer");
+
+    constexpr auto intent = "Measure acceptance on the release branch";
+    constexpr auto doneWhen = "all tests pass";
+    constexpr auto request = "Revise Release notes intent to Measure acceptance on the release branch, "
+                             "completion criteria to all tests pass, and move to mock";
+    auto route = revision(id,"doneWhen",doneWhen);
+    route["intent"] = intent;
+    f.script(request,std::move(route));
+    const auto message = f.store->receive(routing,"pending-revision",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify",
+          "the settled-task revision did not ask for its missing destination");
+    check(f.store->clarifications("alpha").size() == 1 && f.t3.sent.size() == 1,
+          "the destination clarification draft was not held against the settled task");
+
+    f.tick();
+    check(completionCalls == 1 && f.task(id)["state"] == "deciding",
+          "the held completion was not deferred exactly once");
+    f.restart();
+    f.tick(4);
+    check(completionCalls == 1 && f.store->clarifications("alpha").size() == 1,
+          "restart repeated the held completion or lost its destination clarification");
+
+    const auto destination = f.store->receive(routing,"mock-destination","mock",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto response = f.response(destination);
+    const auto revised = f.task(id);
+    check(response["route"] == "revise_task" && revised["intent"] == intent && revised["doneWhen"] == doneWhen &&
+          revised["pendingEnvironmentId"] == "mock-executor" && revised["environmentId"] == "desktop" &&
+          revised["revisions"].back()["intent"] == intent && revised["revisions"].back()["doneWhen"] == doneWhen &&
+          f.store->clarifications("alpha").empty() && f.t3.sent.size() == 1 && completionCalls == 1,
+          "the deferred completion invalidated the pending revision draft or dispatched work before confirmation");
+}
+
 void modelDestinationClarificationKeepsRevision() {
     Fixture f;
     auto routing = f.routing("Release notes");
@@ -595,6 +655,17 @@ void unknownSendThenScopeChange() {
           runs[1]["revisionId"] == f.task(id)["currentRevision"] &&
           f.event(id,"report")["revisionId"] == before["currentRevision"],
           "the prior report or Run was silently attributed to the new revision");
+    const auto history = f.store->history(id,0,200);
+    const auto oldReport = std::ranges::find_if(history,[](const Json& row) { return row["kind"] == "report"; });
+    check(oldReport != history.end(),"the stale result fixture is missing its earlier report");
+    constexpr auto explain = "Explain the result from the earlier run";
+    f.script(explain,{{"kind","answer_result"},{"resultMessageId",oldReport->at("id")}});
+    const auto revised = f.task(id);
+    const auto response = f.response(f.receive("explain-superseded-result",explain));
+    check(response["route"] == "clarify" && !response.contains("source") &&
+          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
+          "the model's stale result ID escaped the current revision's candidates or changed work");
     f.t3.finish("run-2","New p95 evidence");
     f.reach(id,"completed");
     const auto result = f.event(id,"completed");
@@ -670,6 +741,61 @@ void pendingRouterDoesNotBlockIndependentProject() {
     f.runtime.reset();
     check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 1,
           "a pending conversation decision blocked an independent project's model decision");
+}
+
+void concurrentTasksShareModelBudget() {
+    using namespace std::chrono_literals;
+    Fixture f;
+    constexpr auto local = "ローカルMacで利用件数を集計して";
+    constexpr auto cloud = "クラウドMacでメモリを計測して";
+    const auto text = std::string(local) + "。\n" + cloud;
+    f.model.routes[text] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",local},{"environment","desktop"}},
+        {{"kind","create_task"},{"segment",cloud},{"environment","cloud"}}
+    })}};
+    auto routing = f.routing();
+    routing.config["modelCallLimit"] = 2;
+    f.store->receive(routing,"compound-budget",text);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(tasks.size() == 2,"compound request did not create separate tasks");
+    f.tick();
+
+    std::atomic_int modelCalls = 0;
+    std::promise<void> releaseModel;
+    const auto release = releaseModel.get_future().share();
+    f.model.beforeIntake = [&](const ModelInput&) {
+        if (++modelCalls == 1) release.wait();
+    };
+    f.runtime->tickConcurrent();
+    Json paused;
+    const auto deadline = std::chrono::steady_clock::now() + 4s;
+    while (paused.is_null() && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& task : tasks) {
+            const auto current = f.task(task.at("id"));
+            if (current["state"] == "waiting" && current["wait"]["reason"] == "model_budget") paused = current;
+        }
+        if (paused.is_null()) std::this_thread::sleep_for(5ms);
+    }
+    releaseModel.set_value();
+    f.restart();
+    check(modelCalls == 1 && !paused.is_null(),
+          "concurrent tasks used the same last slot or held SQLite locked during inference");
+    const Id pausedId = paused.at("id"), waitId = paused.at("wait").at("id");
+    f.tick(3);
+    check(modelCalls == 1 && f.task(pausedId)["wait"]["id"] == waitId,"restart reset the shared allowance");
+
+    const auto approve = [&] {
+        Store writer(f.dir/"state.db");
+        try { writer.operate(pausedId,waitId,"approve"); return true; }
+        catch (const Conflict&) { return false; }
+    };
+    auto first = std::async(std::launch::async,approve);
+    auto second = std::async(std::launch::async,approve);
+    const bool firstApplied = first.get(), secondApplied = second.get();
+    check(firstApplied != secondApplied,"two SQLite connections applied the same approval");
+    f.reach(pausedId,"running");
+    check(modelCalls == 2 && f.t3.sent.size() == 2,"approval did not resume the blocked task exactly once");
 }
 
 void inFlightAnswerCannotMoveToAnUnrelatedWait() {
@@ -903,6 +1029,75 @@ void continuationUsesTheCurrentBudget() {
           "the approved Run lost the instruction that was held for approval");
 }
 
+void unanchoredClarificationInheritsOriginatingBudget() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.finish("run-1","Baseline evidence");
+    f.reach(id,"completed");
+    const auto resultId = f.store->latestTaskResult(id).at("id").get<Id>();
+
+    auto limited = f.routing("Tell me about the evidence");
+    limited.config["modelCallLimit"] = 1;
+    f.script("Tell me about the evidence",{{"kind","clarify"},{"text","Which detail do you need?"}});
+    const auto first = f.store->receive(limited,"first-question",limited.request);
+    f.runtime->routeConversation();
+    const auto question = f.response(first);
+    check(question.at("route") == "clarify" && f.store->clarifications("alpha").size() == 1,
+          "the estimate clarification was not saved");
+
+    f.model.routes.insert_or_assign("More detail",Json{
+        {"routes",Json::array({{{"kind","answer_result"},{"resultMessageId",resultId}}})},
+        {"resolution","resolved"},{"clarificationMessageId",question.at("messageId")}});
+    auto detail = f.routing("More detail");
+    detail.config["modelCallLimit"] = 1;
+    int explained = 0;
+    f.model.onAnswer = [&](const ModelInput&) {
+        ++explained;
+        return Decision{"answer_conversation_result",{{"text","The baseline covers it."}},{}};
+    };
+    const auto second = f.store->receive(detail,"detail",detail.request);
+    f.runtime->routeConversation();
+    const auto paused = f.response(second);
+    check(paused.at("route") == "model_budget" && explained == 0,
+          "the unanchored resolution did not inherit the exhausted allowance");
+
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
+          "could not read the attempt ledger");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    std::vector<std::pair<std::string,long long>> ledger;
+    auto result = sqlite3_exec(db.get(),
+        "SELECT budget_id,count(*) FROM model_attempts WHERE message_id IS NOT NULL GROUP BY budget_id",
+        [](void* context,int,char** values,char**) {
+            static_cast<std::vector<std::pair<std::string,long long>>*>(context)->emplace_back(
+                values[0],std::atoll(values[1]));
+            return 0;
+        },&ledger,nullptr);
+    check(result == SQLITE_OK && ledger.size() == 1 && ledger.front().second == 2,
+          "the unanchored resolution did not reconcile its routing call with the originating budget");
+    std::vector<std::string> owners;
+    result = sqlite3_exec(db.get(),
+        ("SELECT json_extract(routing,'$.modelBudgetId') FROM messages WHERE id IN (" +
+         std::to_string(first.at("messageId").get<Id>()) + "," +
+         std::to_string(second.at("messageId").get<Id>()) + ")").c_str(),
+        [](void* context,int,char** values,char**) {
+            static_cast<std::vector<std::string>*>(context)->emplace_back(values[0]);
+            return 0;
+        },&owners,nullptr);
+    check(result == SQLITE_OK && owners.size() == 2 && owners.front() == owners.back(),
+          "the resolved message kept a separate model budget");
+
+    f.store->approveMessageModelCall("alpha",paused.at("messageId"));
+    f.runtime->routeConversation();
+    Json answered;
+    for (const auto& row : f.store->conversation("alpha"))
+        if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == second["messageId"])
+            answered = row["data"];
+    check(answered.at("route") == "respond" && explained == 1 && f.store->clarifications("alpha").empty(),
+          "the approved allowance did not resume and answer the resolved message");
+}
+
 void revisionOfProvablyUnsentAction() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -942,6 +1137,7 @@ int main() {
         completeRacingWithNewCriteria();
         staleRoutingDecisionIsRecomputed();
         pendingRouterDoesNotBlockIndependentProject();
+        concurrentTasksShareModelBudget();
         inFlightAnswerCannotMoveToAnUnrelatedWait();
         unresolvedStopHoldsOnlyItsCandidates();
         cancellationReleasesOnlyAfterStopConfirmation();
@@ -949,6 +1145,7 @@ int main() {
         linkedResultStartsANewSession();
         omittedDestinationAndWrongNamedTaskAreBlocked();
         destinationClarificationPreservesAndValidatesRevisionDraft();
+        deferredCompletionPreservesDestinationRevisionDraft();
         modelDestinationClarificationKeepsRevision();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
@@ -961,6 +1158,7 @@ int main() {
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();
+        unanchoredClarificationInheritsOriginatingBudget();
         revisionOfProvablyUnsentAction();
         queuedCriteriaAreUsedForFirstDelegation();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";

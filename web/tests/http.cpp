@@ -146,7 +146,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/app.js","/avatars.js","/style.css","/flock.svg",
+    for (const auto* path : {"/app.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
@@ -509,6 +509,159 @@ void exercise(const std::filesystem::path& path) {
     conversationPages(reopened,cli,release,next,triage,earlierRequests);
     sessionPages(reopened,cli,*runtime,triage);
 }
+void botProfileEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    std::map<std::string,Json,std::less<>> profiles;
+    std::map<std::string,AvatarImage,std::less<>> images;
+    unsigned counter = 0;
+
+    WebCallbacks cb;
+    cb.bots = [&] {
+        Json list = Json::array();
+        for (const auto& [id,card] : profiles) list.push_back(card);
+        return list;
+    };
+    cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
+        return {std::string(bot),std::string(request),"local-env","proj",Json::object(),{},0};
+    };
+    cb.createBot = [&](const Json& profile, const std::optional<AvatarImage>& image) {
+        const auto id = "bot-" + std::to_string(++counter);
+        Json avatar = profile.at("avatar");
+        if (image) {
+            images[id] = *image;
+            avatar["version"] = "v" + std::to_string(counter);
+            avatar["file"] = "avatar.png";
+        }
+        Json card = {{"id",id},{"name",profile.at("name")},{"role",profile.value("role","custom")},
+                     {"soul",""},{"cron",Json::array()},{"avatar",avatar},{"secret",privateValue}};
+        profiles[id] = card;
+        return card;
+    };
+    cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
+        auto& card = profiles.at(std::string(botId));
+        if (!profile.contains("avatar")) {
+            card["name"] = profile.at("name");
+            return card;
+        }
+        Json avatar = profile.at("avatar");
+        if (avatar.at("kind") == "upload") {
+            if (image) {
+                images[std::string(botId)] = *image;
+                avatar["version"] = "v" + std::to_string(++counter);
+                avatar["file"] = "avatar.gif";
+            } else {
+                const auto& existing = card.at("avatar");
+                if (existing.value("kind","") != "upload") throw Conflict("Uploaded image is required");
+                avatar["version"] = existing.at("version");
+                avatar["file"] = existing.at("file");
+            }
+        } else {
+            images.erase(std::string(botId));
+        }
+        card["name"] = profile.at("name");
+        card["avatar"] = avatar;
+        return card;
+    };
+    cb.botAvatar = [&](std::string_view botId) -> std::optional<AvatarImage> {
+        const auto found = images.find(botId);
+        if (found == images.end()) return std::nullopt;
+        return found->second;
+    };
+
+    const auto server = startWeb(store,0,std::move(cb));
+    Browser browser(*server);
+
+    // 1x1 transparent PNG (67 bytes) base64
+    const std::string validPngBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    // 1x1 GIF base64
+    const std::string validGifBase64 = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    // SVG payload base64 (must be rejected)
+    const std::string svgBase64 = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjwvc3ZnPg==";
+
+    const auto created = browser.post("/api/bots",{
+        {"name","Scout"},
+        {"role","reviewer"},
+        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
+    },201);
+    check(created.at("id") == "bot-1" && created.at("name") == "Scout" && created.at("role") == "reviewer" &&
+          created.at("avatar").at("kind") == "shape" && created.at("avatar").at("example") == "sprout",
+          "POST /api/bots did not return sanitized created Bot");
+
+    const auto uploaded = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout Photo"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",validPngBase64}}},
+    },200);
+    check(uploaded.at("name") == "Scout Photo" && uploaded.at("avatar").at("kind") == "upload" &&
+          uploaded.at("avatar").at("filename") == "photo.png" && !uploaded.at("avatar").contains("file"),
+          "POST /api/bots/profile leaked internal filename or missed upload metadata");
+    const auto imageUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
+    check(imageUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
+
+    const auto fetchedImage = browser.client.Get(imageUrl);
+    check(fetchedImage && fetchedImage->status == 200 &&
+          fetchedImage->get_header_value("Content-Type") == "image/png" &&
+          fetchedImage->get_header_value("X-Content-Type-Options") == "nosniff" &&
+          fetchedImage->body.starts_with("\x89PNG"),
+          "GET /api/bot-avatar did not serve verified PNG");
+
+    // Rename without re-uploading keeps imageUrl intact.
+    const auto renamed = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout Kept"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"}}},
+    },200);
+    check(renamed.at("avatar").at("imageUrl") == imageUrl,"rename did not preserve uploaded avatar URL");
+
+    // A name-only update may omit the avatar entirely.
+    const auto nameOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Name"}},200);
+    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == imageUrl,
+          "name-only update changed the avatar");
+
+    // Replace with GIF updates version and content-type.
+    const auto replaced = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout GIF"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","badge.gif"},{"imageData",validGifBase64}}},
+    },200);
+    const auto gifUrl = replaced.at("avatar").at("imageUrl").get<std::string>();
+    check(gifUrl != imageUrl,"replacing uploaded image did not rotate version URL");
+    const auto fetchedGif = browser.client.Get(gifUrl);
+    check(fetchedGif && fetchedGif->status == 200 &&
+          fetchedGif->get_header_value("Content-Type") == "image/gif",
+          "GET /api/bot-avatar did not serve replaced GIF");
+
+    // Switch to icon removes image.
+    const auto iconed = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout Icon"},
+        {"avatar",{{"kind","icon"},{"icon","sparkles"},{"color","#b5a3ef"}}},
+    },200);
+    check(iconed.at("avatar").at("kind") == "icon" && iconed.at("avatar").at("icon") == "sparkles",
+          "switching to icon avatar failed");
+    Browser::checked(browser.client.Get("/api/bot-avatar?bot=bot-1"),404);
+
+    // Reject invalid inputs cleanly.
+    browser.post("/api/bots",{
+        {"name","Bad SVG"},
+        {"role","custom"},
+        {"avatar",{{"kind","upload"},{"imageData",svgBase64}}},
+    },400);
+    browser.post("/api/bots",{
+        {"name",""},
+        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
+    },400);
+    browser.post("/api/bots",{
+        {"name","TooLongNameThatExceedsThirtyTwoCharactersLimit"},
+        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
+    },400);
+    browser.post("/api/bots/profile",{
+        {"botId","missing"},
+        {"name","Ghost"},
+        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
+    },404);
+}
 } // namespace
 
 int main() {
@@ -516,6 +669,7 @@ int main() {
         TestDirectory directory;
         exercise(directory.path / "state.db");
         peerHistory(directory.path / "peers.db");
+        botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -118,7 +118,14 @@ struct Runtime::Impl {
     std::map<std::string,std::future<void>> conversationWorkers;
 
     Impl(Store::Impl& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
-        : db(store), model(m), t3(adapter), notes(std::move(loader)), options(std::move(opts)) {
+        : db(store), model(m), t3(adapter),
+          notes([load = std::move(loader)](std::string_view botId) {
+              constexpr auto limit = 8192;
+              auto bot = load(botId);
+              bot.soul = bounded(bot.soul,limit);
+              bot.memory = bounded(bot.memory,limit);
+              return bot;
+          }), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
@@ -146,6 +153,35 @@ struct Runtime::Impl {
         return changeTask(snapshot["id"],[&](Json& task) {
             return task["generation"] == snapshot["generation"] && fn(task);
         });
+    }
+
+    bool deferHeldCompletion(const Json& snapshot, const Json& event) {
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        const auto id = snapshot["id"].get<Id>();
+        const auto eventId = event["id"].get<Id>();
+        auto current = db.load(id);
+        if (current["generation"] != snapshot["generation"] || current.value("eventId",Id{0}) != eventId)
+            return false;
+        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,id});
+        if (!row.next() || hasPending(current) || current.value("replanning",false) ||
+            (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr))) ||
+            !db.completionHeld(current)) return false;
+        auto data = row.json(0);
+        data["_flockDeferredCompletion"] = true;
+        db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,id});
+        if (!sqlite3_changes(db.db)) return false;
+        transaction.commit();
+        return true;
+    }
+
+    void clearDeferredCompletionMarker(Id taskId, Id eventId) {
+        if (!eventId) return;
+        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,taskId});
+        if (!row.next()) return;
+        auto data = row.json(0);
+        if (data.erase("_flockDeferredCompletion"))
+            db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,taskId});
     }
 
     std::vector<Id> eligible() {
@@ -188,6 +224,7 @@ ORDER BY id)SQL");
     }
 
     void cancelDone(Json& task) {
+        clearDeferredCompletionMarker(task["id"].get<Id>(),task.value("eventId",Id{0}));
         db.clearWait(task,"cancelled");
         db.unlockQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
@@ -436,7 +473,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto old = field(current,"environmentId");
             auto target = field(current,"pendingEnvironmentId");
             if (target.empty()) target = old;
-            if (db.peerExchange(current["id"])) return false;
+            const auto id = current["id"].get<Id>();
+            const auto peer = db.peerExchange(id);
+            if (peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working"))
+                return false;
+            const auto event = db.currentEvent(current);
+            const bool preservePeerAnswer = peer && peer->recipient == id && peer->kind == "work" &&
+                peer->phase == "working" && !event.is_null() && event["consumed"] != true &&
+                event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
                 return true;
@@ -450,9 +494,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             db.clearWait(current,"user_instruction");
             db.unlockQuestion(current,"user_instruction");
-            db.consumeEvent(current);
-            if (current["lastRun"].is_null())
-                db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            if (!preservePeerAnswer) {
+                clearDeferredCompletionMarker(id,current.value("eventId",Id{0}));
+                db.consumeEvent(current);
+                if (current["lastRun"].is_null())
+                    db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            }
             current["state"] = "deciding";
             for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","environmentReleased","replanReconcileAt","feedback"})
                 current.erase(key);
@@ -1111,7 +1158,14 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         if (tool == "send_bot_message" || tool == "reply_to_bot") {
             if (!present(field(args,"text"))) throw Conflict("A Bot message requires text");
             if (tool == "reply_to_bot") {
-                change(snapshot,[&](Json& current) { replyPeer(current,event,decision,actionId()); return true; });
+                change(snapshot,[&](Json& current) {
+                    if (field(args,"kind") == "result" &&
+                        (hasPending(current) || current.value("replanning",false) ||
+                         (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))))
+                        throw Conflict("Apply the pending revision and complete revised work before returning a result");
+                    replyPeer(current,event,decision,actionId());
+                    return true;
+                });
                 return;
             }
             const auto kind = field(args,"kind");
@@ -1147,17 +1201,14 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 throw Conflict("The Session question no longer matches");
             validateAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
         }
-        change(snapshot,[&](Json& current) {
+        const bool changed = change(snapshot,[&](Json& current) {
             const auto id = current["id"].get<Id>();
             if (tool == "complete") {
                 if (hasPending(current) || current.value("replanning",false) ||
                     (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))) {
                     return false;
                 }
-                if (db.completionHeld(current)) {
-                    current["deferredCompletionEventId"] = event["id"];
-                    return true;
-                }
+                if (db.completionHeld(current)) return false;
             }
             const bool charge = work && (!current["lastRun"].is_null() || db.query(
                 "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
@@ -1168,6 +1219,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 current.erase("requestedDoneWhen");
                 current.erase("criteriaSourceMessageId");
             }
+            clearDeferredCompletionMarker(id,event["id"].get<Id>());
             db.consumeEvent(current);
             current.erase("deferredCompletionEventId");
             const auto action = actionId();
@@ -1194,6 +1246,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             }
             return true;
         });
+        if (!changed && tool == "complete") deferHeldCompletion(snapshot,event);
     }
 
     void decide(const Json& task) {
@@ -1207,7 +1260,9 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
-            if (task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>() && db.completionHeld(task)) return;
+            if ((event.value("_flockDeferredCompletion",false) ||
+                 task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>()) && db.completionHeld(task)) return;
+            event.erase("_flockDeferredCompletion");
             peer = db.peerExchange(task["id"]);
             if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
                 auto report = settledSessionReport(task);
@@ -1243,9 +1298,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             auto tools = available(task,event,peer,!choices.empty(),canRead);
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
-            auto bot = notes(field(task,"botId"));
-            bot.soul = bounded(bot.soul,8192);
-            bot.memory = bounded(bot.memory,8192);
+            const auto bot = notes(field(task,"botId"));
             Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",intent(task)},
                 {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
@@ -1262,7 +1315,24 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             const auto evidence = event["evidence"];
             event.erase("evidence");
             event.erase("consumed");
-            const Decision decision = model.decide({summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]});
+            Id attempt = 0;
+            {
+                std::lock_guard lock(db.mutex);
+                Transaction transaction(db.db);
+                auto current = db.load(task["id"]);
+                if (current["generation"] != task["generation"]) return;
+                const auto budget = db.taskModelBudget(current);
+                attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+                if (!attempt) {
+                    db.wait(current,"model_budget",{{"text",
+                        "The model call limit is exhausted. Approve one more model call to continue."}});
+                    db.save(current);
+                }
+                transaction.commit();
+            }
+            if (!attempt) return;
+            const Decision decision = db.callModel(model,
+                {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]},attempt);
             event["evidence"] = evidence;
             if (!task["activeRun"].is_null()) {
                 const auto observed = observe(task);
@@ -1279,16 +1349,17 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
     }
 
-    bool hasOpenPeerExchange(Id id) {
+    bool peerExchangeDefersReplan(Id id) {
         std::lock_guard lock(db.mutex);
-        return db.peerExchange(id).has_value();
+        const auto peer = db.peerExchange(id);
+        return peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working");
     }
 
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
-        else if (task.value("replanning",false) && !hasOpenPeerExchange(id)) replan(task);
+        else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
         else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;
@@ -1320,7 +1391,7 @@ void Runtime::routeConversation() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model)) break;
+        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model,p_->notes)) break;
     }
 }
 void Runtime::tick() {
@@ -1345,7 +1416,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.routeMessage(id,p_->model);
+                    p_->db.routeMessage(id,p_->model,p_->notes);
                 }));
             }
         }

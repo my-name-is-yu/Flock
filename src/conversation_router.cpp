@@ -135,6 +135,7 @@ int ordinal(std::string_view text) {
 struct Option {
     int number = 0;
     std::size_t indent = 0;
+    std::size_t offset = 0;
 };
 Option numberedLine(std::string_view line) {
     const auto indent = line.find_first_not_of(' ');
@@ -159,11 +160,11 @@ Option numberedLine(std::string_view line) {
     constexpr std::array circled{"①"sv, "②"sv, "③"sv, "④"sv, "⑤"sv, "⑥"sv, "⑦"sv, "⑧"sv, "⑨"sv, "⑩"sv};
     const auto mark = std::ranges::find_if(circled, [&](auto glyph) { return normal.starts_with(glyph); });
     if (mark != circled.end()) return {static_cast<int>(mark - circled.begin()) + 1, indent};
-    const auto number = ordinal(normal);
-    return number && !normal.empty() && any(normal.substr(0, 9), {"案目", "番目", "つ目"}) ? Option{number, indent} : Option{};
+    if (any(std::string_view(normal).substr(0, 9), {"案目", "番目", "つ目"})) return {ordinal(normal), indent};
+    return {};
 }
-std::optional<std::string> findOptionExcerpt(std::string_view fullText, int wanted) {
-    std::size_t start = fullText.npos, end = fullText.size(), indent = 0;
+std::vector<Option> numberedLines(std::string_view fullText) {
+    std::vector<Option> options;
     bool code = false;
     for (std::size_t pos = 0; pos < fullText.size();) {
         const auto newline = fullText.find('\n', pos);
@@ -171,20 +172,28 @@ std::optional<std::string> findOptionExcerpt(std::string_view fullText, int want
         if (starts(trim(line), {"```", "~~~"})) {
             code = !code;
         } else if (!code) {
-            const auto option = numberedLine(line);
-            if (start == std::string_view::npos && option.number == wanted) {
-                start = pos;
-                indent = option.indent;
-            } else if (start != std::string_view::npos && option.indent <= indent && option.number > 0) {
-                if (option.number == wanted) return std::nullopt;
-                end = std::min(end, pos);
+            auto option = numberedLine(line);
+            if (option.number > 0) {
+                option.offset = pos;
+                options.push_back(option);
             }
         }
         if (newline == fullText.npos) break;
         pos = newline + 1;
     }
-    if (start == fullText.npos) return std::nullopt;
-    return bounded(trim(fullText.substr(start, end - start)), 8192);
+    return options;
+}
+
+std::string_view optionExcerpt(std::string_view fullText, const std::vector<Option>& lines, int wanted) {
+    const auto first = std::ranges::find(lines,wanted,&Option::number);
+    if (first == lines.end()) return {};
+    auto end = fullText.size();
+    for (auto next = first + 1; next != lines.end(); ++next) {
+        if (next->indent > first->indent) continue;
+        if (next->number == wanted) return {};
+        end = std::min(end,next->offset);
+    }
+    return trim(fullText.substr(first->offset,end - first->offset));
 }
 
 const Task* taskById(const Context& context, Id id) {
@@ -423,8 +432,28 @@ std::vector<std::string> segments(const Json& routes, std::string_view text) {
 }
 
 Json resultData(const Result& result, std::size_t limit) {
-    return {{"taskId",result.taskId},{"messageId",result.messageId},{"request",result.taskName},
-            {"state",result.state},{"text",bounded(result.text, limit)}};
+    Json data = {{"taskId",result.taskId},{"messageId",result.messageId},{"request",result.taskName},
+                 {"state",result.state},{"text",bounded(result.text, limit)}};
+    if (result.option) data["option"] = result.option;
+    return data;
+}
+
+Json resultOptions(const Result& result) {
+    const auto lines = numberedLines(result.text);
+    std::set<int> seen;
+    std::vector<std::pair<int,std::string_view>> excerpts;
+    for (const auto& line : lines) {
+        if (!seen.insert(line.number).second) continue;
+        const auto text = optionExcerpt(result.text,lines,line.number);
+        if (!text.empty()) excerpts.emplace_back(line.number,text);
+    }
+    auto options = Json::array();
+    if (!excerpts.empty()) {
+        const auto limit = std::min<std::size_t>(512,4096 / excerpts.size());
+        for (const auto& [number,text] : excerpts)
+            options.push_back({{"option",number},{"text",bounded(text,limit)}});
+    }
+    return options;
 }
 
 Json clarificationData(const Reply& reply) {
@@ -456,7 +485,11 @@ Json decisionContext(std::string_view text, const Context& context) {
                         {"doneWhen",task.doneWhen},{"wait",wait},{"environmentId",task.environmentId},
                         {"projectId",task.projectId}});
     }
-    for (const auto& result : context.rankedResults) results.push_back(resultData(result, 512));
+    for (const auto& result : context.rankedResults) {
+        auto data = resultData(result,512);
+        data["options"] = resultOptions(result);
+        results.push_back(std::move(data));
+    }
     const auto& reply = context.reply;
     const auto kind = [&] {
         switch (reply.kind) {
@@ -488,8 +521,41 @@ bool refersToResult(std::string_view text) {
                                "use that","use this","do that"});
 }
 
-std::optional<Result> selectResult(Id id, int numbered, const Context& context, const Reply& anchor,
-                                   std::string_view segment) {
+Result selectOption(Result result, int numbered, const Context& context) {
+    if (result.option == numbered) return result;
+    if (result.option) {
+        const auto full = std::ranges::find(context.rankedResults,result.messageId,&Result::messageId);
+        if (full == context.rankedResults.end()) {
+            require(!numbered);
+            return result;
+        }
+        result = *full;
+    }
+    if (!numbered) return result;
+    const auto excerpt = optionExcerpt(result.text,numberedLines(result.text),numbered);
+    require(!excerpt.empty());
+    result.text = bounded(excerpt,8192);
+    result.option = numbered;
+    return result;
+}
+
+std::optional<Result> selectReadOnlyResult(Id id, int numbered, const Context& context, const Reply& anchor) {
+    if (anchor.result) {
+        require(!id || id == anchor.result->messageId);
+        if (anchor.kind == Reply::Kind::clarification && anchor.result->option) {
+            require(!numbered || numbered == anchor.result->option);
+            if (!numbered) return *anchor.result;
+        }
+        return selectOption(*anchor.result,numbered,context);
+    }
+    if (!id) return std::nullopt;
+    const auto match = std::ranges::find(context.rankedResults,id,&Result::messageId);
+    require(match != context.rankedResults.end());
+    return selectOption(*match,numbered,context);
+}
+
+std::optional<Result> selectWorkResult(Id id, int numbered, const Context& context, const Reply& anchor,
+                                       std::string_view segment) {
     const auto normal = normalize(segment);
     if (anchor.result && anchor.kind == Reply::Kind::clarification) {
         require(!id || id == anchor.result->messageId);
@@ -520,19 +586,7 @@ std::optional<Result> selectResult(Id id, int numbered, const Context& context, 
         }
     }
     require(source || !needsSource);
-    if (!source) return std::nullopt;
-    auto result = *source;
-    if (!numbered || result.option == numbered) return result;
-    if (result.option) {
-        const auto full = std::ranges::find(context.rankedResults,result.messageId,&Result::messageId);
-        require(full != context.rankedResults.end());
-        result = *full;
-    }
-    auto excerpt = findOptionExcerpt(result.text,numbered);
-    require(excerpt.has_value());
-    result.text = std::move(*excerpt);
-    result.option = numbered;
-    return result;
+    return source ? std::optional{selectOption(*source,numbered,context)} : std::nullopt;
 }
 
 std::set<std::string> mentionedDestinations(const Context& context, std::string_view text) {
@@ -581,16 +635,17 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto* task = taskById(context, id);
     const auto resultId = readId(route, "resultMessageId");
     const auto proposedOption = readId(route, "resultOption");
-    const auto mentionedOption = (resultId || anchor.result || proposedOption ||
-        kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
-    const auto selectedOption = kind == "answer_result" && !proposedOption && mentionedOption < 0
-        ? 0 : mentionedOption;
-    require(proposedOption <= 99 && selectedOption >= 0 &&
-            (!selectedOption || !proposedOption || selectedOption == proposedOption));
-    const auto option = static_cast<int>(proposedOption ? proposedOption : selectedOption);
-    require(!id || task);
+    require(proposedOption <= 99 && (!id || task));
+    if (kind == "answer_result") {
+        checkFields(route, {"kind","segment","resultMessageId","resultOption"});
+        const auto mentioned = (resultId || anchor.result || proposedOption) ? ordinal(normalize(segment)) : 0;
+        require(mentioned <= 0 || !proposedOption || proposedOption == mentioned);
+        auto source = selectReadOnlyResult(resultId,static_cast<int>(proposedOption),context,anchor);
+        require(source && !source->text.empty() && anchor.kind != Reply::Kind::wait);
+        return Respond{{}, std::move(source)};
+    }
     if (kind == "clarify") {
-        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId"});
+        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId","resultOption"});
         auto question = readText(route, "text", 2000);
         require(!question.empty());
         std::vector<Id> choices;
@@ -605,15 +660,28 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         }
         auto operation = readText(route,"operation",32);
         require(operation.empty() || oneOf(operation,{"cancel_task","revise_task","destination"}));
+        require(operation.empty() || !proposedOption);
         if (operation == "destination") require(choices.size() <= 1);
         if (operation == "cancel_task" && !explicitCancellation(segment)) operation.clear();
-        auto source = resultId || anchor.result ? selectResult(resultId,option,context,anchor,segment) : std::nullopt;
+        std::optional<Result> source;
+        if (operation.empty()) {
+            source = selectReadOnlyResult(resultId,static_cast<int>(proposedOption),context,anchor);
+            require(!proposedOption || source);
+        } else if (resultId || anchor.result) {
+            const auto option = ordinal(normalize(segment));
+            require(option >= 0);
+            source = selectWorkResult(resultId,option,context,anchor,segment);
+        }
         std::optional<RevisionDraft> draft;
         if (operation == "destination" && choices.size() == 1)
             draft = RevisionDraft{target(*taskById(context,choices.front())),{},{}};
         return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation),
                        std::move(draft)};
     }
+    const auto mentionedOption = (resultId || anchor.result || proposedOption ||
+        kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
+    require(mentionedOption >= 0 && (!mentionedOption || !proposedOption || mentionedOption == proposedOption));
+    const auto option = static_cast<int>(proposedOption ? proposedOption : mentionedOption);
     if (kind == "status") {
         checkFields(route, {"kind","segment","taskId"});
         return status(segment, context, task);
@@ -624,16 +692,10 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         require(!text.empty() && anchor.kind != Reply::Kind::result);
         return Respond{std::move(text), std::nullopt};
     }
-    if (kind == "answer_result") {
-        checkFields(route, {"kind","segment","resultMessageId","resultOption"});
-        auto source = selectResult(resultId,option,context,anchor,segment);
-        require(source && !source->text.empty() && anchor.kind != Reply::Kind::wait);
-        return Respond{{}, std::move(source)};
-    }
     if (kind == "create_task") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption","environment"});
         require(anchor.kind != Reply::Kind::wait && !genericAnswer(segment) && !explicitBudgetGrant(segment));
-        auto source = selectResult(resultId,option,context,anchor,segment);
+        auto source = selectWorkResult(resultId,option,context,anchor,segment);
         const auto mentioned = mentionedDestinations(context,segment);
         auto environment = readText(route,"environment",256);
         if (!mentioned.empty() && (environment.empty() || !destinationMatches(context,environment,mentioned)))
@@ -671,7 +733,7 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     }
 
     require(namedTargetMatches(segment,context,task->id));
-    auto source = selectResult(resultId,option,context,anchor,segment);
+    auto source = selectWorkResult(resultId,option,context,anchor,segment);
     require(!source || (source->taskId == task->id && source->revision == task->revision));
     if (kind == "append_instruction") {
         checkFields(route, {"kind","segment","taskId","resultMessageId","resultOption"});
@@ -798,11 +860,12 @@ std::string quoteText(std::string_view text) {
     return result;
 }
 
-Action answerResult(Model& model, std::string_view question, Result source, const Json& config) {
-    const auto decision = model.decide({
+Action answerResult(const DecideModel& model, std::string_view question, Result source, const BotNotes& notes,
+                    const Json& config) {
+    const auto decision = model({
         .task = Json::object(),
         .event = {{"kind","answer_conversation_result"},{"text",question},{"source",resultData(source, 8192)}},
-        .history = Json::array(), .notes = {}, .tools = {"answer_conversation_result","clarify_conversation_result"},
+        .history = Json::array(), .notes = notes, .tools = {"answer_conversation_result","clarify_conversation_result"},
         .feedback = {}, .config = config
     });
     checkFields(decision.args, {"text"});
@@ -924,20 +987,24 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     return std::nullopt;
 }
 
-Plan decide(std::string_view text, const Context& context, Model& model, const Json& config) {
+Plan decide(std::string_view text, const Context& context, const DecideModel& model, const BotNotes& notes,
+            const Json& config, const std::function<void(Id)>& resolvedClarification) {
     if (auto result = shortcut(text, context)) return std::move(*result);
-    const auto decision = model.decide({
+    const auto decision = model({
         .task = Json::object(), .event = decisionContext(text, context), .history = context.history,
-        .notes = {}, .tools = {"route_conversation"}, .feedback = {}, .config = config
+        .notes = notes, .tools = {"route_conversation"}, .feedback = {}, .config = config
     });
     std::set<Id> targets;
     try {
         require(decision.tool == "route_conversation" && decision.args.is_object());
         auto plan = parsePlan(decision.args, text, context, targets);
+        if (resolvedClarification && plan.resolution &&
+            plan.resolution->kind == Resolution::Kind::resolved)
+            resolvedClarification(plan.resolution->replyId);
         for (auto& route : plan.routes) {
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
-            auto answer = answerResult(model, route.segment, std::move(*response->source), config);
+            auto answer = answerResult(model, route.segment, std::move(*response->source), notes, config);
             if (std::holds_alternative<Clarify>(answer) && plan.routes.size() != 1)
                 return unclear(text,targets);
             route.action = std::move(answer);
