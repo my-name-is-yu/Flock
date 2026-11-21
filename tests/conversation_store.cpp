@@ -664,6 +664,58 @@ void comparisonsDoNotSelectOneOfSeveralOptions() {
           "a mutating request selected between multiple referenced options");
 }
 
+void excerptRepliesExpandToWholeResult() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto taskId = task(writer,"Report with options");
+    const std::string report = "1. Keep the current flow\n2. Compare both options";
+    execution.finish(store,taskId,report);
+    const auto resultId = store.latestTaskResult(taskId).at("id").get<Id>();
+    int answered = 0;
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto& text = input.event.at("text").get_ref<const std::string&>();
+        if (input.tools.front() == "answer_conversation_result") {
+            ++answered;
+            if (answered == 1)
+                check(input.event.at("source").at("option") == 1 &&
+                      input.event.at("source").at("text") == "1. Keep the current flow",
+                      "the selected excerpt did not reach the answer model");
+            else
+                check(input.event.at("source").value("option",0) == 0 &&
+                      input.event.at("source").at("text") == report,
+                      "the excerpt follow-up did not receive the whole result");
+            return Decision{"answer_conversation_result",{{"text","Here is the answer."}},{}};
+        }
+        if (text == "Explain option 1")
+            return route("answer_result",{{"resultMessageId",resultId},{"resultOption",1}});
+        if (text == "Explain option 2" || text == "Compare option 2 with the rest.")
+            return route("answer_result",{{"resultMessageId",resultId}});
+        if (text == "Tell me about option 2")
+            return route("answer_result",{{"resultMessageId",resultId},{"resultOption",1}});
+        return route("create_task");
+    };
+    const auto firstId = receive(writer,"first","Explain option 1",resultId);
+    execution.runtime.routeConversation();
+    const auto first = reply(store,firstId);
+    check(first.at("route") == "respond" && first.at("source").at("option") == 1,
+          "the first answer did not select option 1");
+    const auto secondId = receive(writer,"second","Explain option 2",first.at("messageId"));
+    execution.runtime.routeConversation();
+    const auto second = reply(store,secondId);
+    check(second.at("route") == "respond" && second.at("source").at("option") == 0 &&
+          second.at("source").at("text") == report && answered == 2,
+          "the omitted option kept the replied excerpt");
+    const auto compareId = receive(writer,"compare","Compare option 2 with the rest.",first.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,compareId).at("route") == "respond" && answered == 3,
+          "the comparison to an excerpt did not reach the answer model");
+    const auto conflictId = receive(writer,"conflict","Tell me about option 2",first.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,conflictId).at("route") == "clarify" && answered == 3,
+          "a conflicting option was answered instead of rejected");
+}
+
 void longResultOptionsStayAvailable() {
     for (const auto paddingSize : {3000, 3500}) {
         Fixture fixture;
@@ -1013,6 +1065,7 @@ int main() {
         explicitFactsReplaceResultClarificationAtomically();
         followUpsKeepThePriorResult();
         comparisonsDoNotSelectOneOfSeveralOptions();
+        excerptRepliesExpandToWholeResult();
         resultTargetMustComeFromTheCandidatesOrReply();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();

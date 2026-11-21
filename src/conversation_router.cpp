@@ -522,12 +522,16 @@ bool refersToResult(std::string_view text) {
 }
 
 Result selectOption(Result result, int numbered, const Context& context) {
-    if (!numbered || result.option == numbered) return result;
+    if (result.option == numbered) return result;
     if (result.option) {
         const auto full = std::ranges::find(context.rankedResults,result.messageId,&Result::messageId);
-        require(full != context.rankedResults.end());
+        if (full == context.rankedResults.end()) {
+            require(!numbered);
+            return result;
+        }
         result = *full;
     }
+    if (!numbered) return result;
     const auto excerpt = optionExcerpt(result.text,numberedLines(result.text),numbered);
     require(!excerpt.empty());
     result.text = bounded(excerpt,8192);
@@ -538,8 +542,10 @@ Result selectOption(Result result, int numbered, const Context& context) {
 std::optional<Result> selectReadOnlyResult(Id id, int numbered, const Context& context, const Reply& anchor) {
     if (anchor.result) {
         require(!id || id == anchor.result->messageId);
-        if (anchor.kind == Reply::Kind::clarification && anchor.result->option)
+        if (anchor.kind == Reply::Kind::clarification && anchor.result->option) {
             require(!numbered || numbered == anchor.result->option);
+            if (!numbered) return *anchor.result;
+        }
         return selectOption(*anchor.result,numbered,context);
     }
     if (!id) return std::nullopt;
@@ -632,6 +638,8 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     require(proposedOption <= 99 && (!id || task));
     if (kind == "answer_result") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption"});
+        const auto mentioned = (resultId || anchor.result || proposedOption) ? ordinal(normalize(segment)) : 0;
+        require(mentioned <= 0 || !proposedOption || proposedOption == mentioned);
         auto source = selectReadOnlyResult(resultId,static_cast<int>(proposedOption),context,anchor);
         require(source && !source->text.empty() && anchor.kind != Reply::Kind::wait);
         return Respond{{}, std::move(source)};
