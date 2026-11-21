@@ -42,6 +42,16 @@ struct Store::Impl {
     Json taskDetails(Id, bool includeBlocker) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
+    void migrateModelBudget();
+    std::string messageModelBudget(Id messageId, Id clarificationReplyId = 0);
+    void inheritModelBudget(Id messageId, Id clarificationReplyId);
+    std::string taskModelBudget(const Json& task);
+    std::string ensureModelBudget(std::string key, const Json& config);
+    Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    void grantModelCall(std::string_view budget);
+    std::optional<Decision> savedRouteCall(Id messageId, unsigned step, const Json& input) const;
+    Decision callModel(Model&, const ModelInput&, Id attemptId, unsigned routeStep = 0,
+                       const Json& routeInput = nullptr);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool routeMessage(Id, Model&, const Runtime::NotesLoader&);
     void applyRoutes(const conversation::Message&, const conversation::Context&, const conversation::Plan&);

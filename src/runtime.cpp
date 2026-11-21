@@ -1315,7 +1315,24 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             const auto evidence = event["evidence"];
             event.erase("evidence");
             event.erase("consumed");
-            const Decision decision = model.decide({summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]});
+            Id attempt = 0;
+            {
+                std::lock_guard lock(db.mutex);
+                Transaction transaction(db.db);
+                auto current = db.load(task["id"]);
+                if (current["generation"] != task["generation"]) return;
+                const auto budget = db.taskModelBudget(current);
+                attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+                if (!attempt) {
+                    db.wait(current,"model_budget",{{"text",
+                        "The model call limit is exhausted. Approve one more model call to continue."}});
+                    db.save(current);
+                }
+                transaction.commit();
+            }
+            if (!attempt) return;
+            const Decision decision = db.callModel(model,
+                {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]},attempt);
             event["evidence"] = evidence;
             if (!task["activeRun"].is_null()) {
                 const auto observed = observe(task);

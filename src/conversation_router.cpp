@@ -856,8 +856,9 @@ std::string quoteText(std::string_view text) {
     return result;
 }
 
-Action answerResult(Model& model, std::string_view question, Result source, const BotNotes& notes, const Json& config) {
-    const auto decision = model.decide({
+Action answerResult(const DecideModel& model, std::string_view question, Result source, const BotNotes& notes,
+                    const Json& config) {
+    const auto decision = model({
         .task = Json::object(),
         .event = {{"kind","answer_conversation_result"},{"text",question},{"source",resultData(source, 8192)}},
         .history = Json::array(), .notes = notes, .tools = {"answer_conversation_result","clarify_conversation_result"},
@@ -982,8 +983,10 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     return std::nullopt;
 }
 
-Plan decide(std::string_view text, const Context& context, Model& model, const BotNotes& notes, const Json& config) {
-    const auto decision = model.decide({
+Plan decide(std::string_view text, const Context& context, const DecideModel& model, const BotNotes& notes,
+            const Json& config, const std::function<void(Id)>& resolvedClarification) {
+    if (auto result = shortcut(text, context)) return std::move(*result);
+    const auto decision = model({
         .task = Json::object(), .event = decisionContext(text, context), .history = context.history,
         .notes = notes, .tools = {"route_conversation"}, .feedback = {}, .config = config
     });
@@ -991,6 +994,9 @@ Plan decide(std::string_view text, const Context& context, Model& model, const B
     try {
         require(decision.tool == "route_conversation" && decision.args.is_object());
         auto plan = parsePlan(decision.args, text, context, targets);
+        if (resolvedClarification && plan.resolution &&
+            plan.resolution->kind == Resolution::Kind::resolved)
+            resolvedClarification(plan.resolution->replyId);
         for (auto& route : plan.routes) {
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
