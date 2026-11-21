@@ -1,0 +1,4 @@
+/build*/
+/.flock/
+/.env*
+.DS_Store

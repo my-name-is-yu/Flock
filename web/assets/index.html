@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ef">
+  <title>Flock</title>
+  <link rel="icon" type="image/svg+xml" href="/flock.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="workspace">
+    <aside id="navigation" class="sidebar" aria-label="Bot ナビゲーション">
+      <div class="brand">
+        <img width="34" height="34" src="/flock.svg" alt="">
+        <span>Flock</span>
+        <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="一覧を閉じる">×</button>
+      </div>
+      <div class="sidebar-scroll">
+        <section class="nav-section bots" aria-labelledby="bots-heading">
+          <h2 id="bots-heading">Bots</h2>
+          <div id="pinned" class="pins" aria-label="ピン留め" hidden></div>
+          <div id="bot-list" class="bot-list"></div>
+        </section>
+        <section class="nav-section" aria-labelledby="waits-heading">
+          <div class="section-heading"><h2 id="waits-heading">確認待ち</h2><span id="wait-count" class="count">0</span></div>
+          <div id="wait-list" class="activity-list"></div>
+        </section>
+        <section class="nav-section" aria-labelledby="sessions-heading">
+          <h2 id="sessions-heading">セッション</h2>
+          <div id="session-list" class="activity-list"></div>
+          <button id="more-sessions" class="text-button load-sessions" type="button" hidden>以前のセッションを表示</button>
+        </section>
+      </div>
+      <div id="connection" class="connection" role="status"><span class="status-dot"></span><span id="connection-text">接続中</span></div>
+    </aside>
+    <main id="main" class="main">
+      <header class="conversation-header">
+        <div class="header-inner">
+          <button id="open-navigation" class="icon-button narrow-only" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Bot 一覧を開く">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Bot 設定を開く" hidden>
+            <span id="profile-avatar" class="avatar avatar-profile"></span>
+            <span class="profile-info"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
+            <svg viewBox="0 0 24 24" class="profile-arrow" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <h1 id="profile-placeholder" class="profile-name">会話</h1>
+          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Bot 設定を開く" aria-haspopup="dialog" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+          </button>
+        </div>
+      </header>
+      <section id="conversation" class="conversation" aria-label="会話履歴" tabindex="0">
+        <div class="conversation-inner">
+          <button id="older" type="button" class="text-button older" hidden>以前の会話を表示</button>
+          <div id="timeline" class="timeline"></div>
+        </div>
+      </section>
+      <div class="composer-container" id="composer-container" hidden>
+        <form id="composer" class="composer">
+          <div id="reply-context" class="reply-context" hidden>
+            <span class="reply-mark" aria-hidden="true">↳</span>
+            <div class="reply-target"><strong>質問への返信</strong><span id="reply-question"></span></div>
+            <button id="cancel-reply" type="button" class="icon-button" aria-label="返信を取り消す">×</button>
+          </div>
+          <div class="compose-input">
+            <label class="sr-only" id="compose-label" for="message">新しい依頼</label>
+            <textarea rows="2" id="message" required></textarea>
+            <button id="send" class="send" type="submit" aria-label="新しい依頼を送る">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+            </button>
+          </div>
+        </form>
+        <div class="composer-foot"><span id="composer-mode">新しい依頼</span><span id="notice" role="status"></span></div>
+      </div>
+    </main>
+  </div>
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="dialog-head">
+      <h2 id="detail-title"></h2>
+      <button id="close-detail" type="button" class="icon-button" aria-label="閉じる">×</button>
+    </div>
+    <div id="detail-body" class="dialog-body"></div>
+  </dialog>
+</body>
+</html>
