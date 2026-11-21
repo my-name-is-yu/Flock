@@ -2,6 +2,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -138,11 +139,14 @@ void boundary(Browser& browser) {
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
 }
 
-void samePresence(Browser& browser) {
-    for (const auto& row : browser.get("/api/bots")) {
-        const auto view = browser.get("/api/view?bot=" + row["id"].get<std::string>());
-        check(row["presence"] == view["presence"],"Bot list presence differs from the Bot view");
-    }
+void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
+    const auto row = std::find_if(list.begin(),list.end(),[&](const Json& candidate) {
+        return candidate.at("id") == bot;
+    });
+    check(row != list.end(),"Bot list is missing " + bot);
+    check(row->at("presence") == expected,"unexpected Bot list presence for " + bot);
+    const auto view = browser.get("/api/view?bot=" + bot);
+    check(view.at("presence") == expected,"unexpected Bot view presence for " + bot);
 }
 
 void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
@@ -168,6 +172,7 @@ void exercise(const std::filesystem::path& path) {
     Browser browser(*server);
     boundary(browser);
     check(store.tasks().empty(),"rejected requests changed SQLite");
+    checkPresence(browser,browser.get("/api/bots"),"release","idle");
     const auto release = browser.request("release","下書きの掲載範囲を確認する");
     const auto triage = browser.request("triage","昨日届いた不具合を確認する");
     const auto settings = browser.request("settings","接続設定を確認する");
@@ -193,15 +198,17 @@ void exercise(const std::filesystem::path& path) {
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
     check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
-    samePresence(browser);
-    check(list[0]["presence"] == "waiting" && list[3]["id"] == "broken" && list[3]["presence"] == "idle",
-          "Bot list presence did not follow task states");
+    checkPresence(browser,list,"release","waiting");
+    checkPresence(browser,list,"triage","waiting");
+    checkPresence(browser,list,"settings","waiting");
+    checkPresence(browser,list,"broken","idle");
     const Id waitId = waits[0]["wait"]["id"];
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
+    checkPresence(browser,browser.get("/api/bots"),"release","waiting");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
     browser.post("/api/operations",reply,404);
@@ -213,8 +220,9 @@ void exercise(const std::filesystem::path& path) {
           t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
-    samePresence(browser);
-    check(browser.get("/api/bots")[0]["presence"] == "working","resumed Bot was not listed as working");
+    const auto resumed = browser.get("/api/bots");
+    checkPresence(browser,resumed,"release","working");
+    checkPresence(browser,resumed,"triage","waiting");
 
     server.reset();
     runtime.reset();
