@@ -106,9 +106,8 @@ struct Fixture {
             {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}};
     }
     Json receive(std::string_view key,std::string_view text,Id replyTo = 0) {
-        // Reproduce independent HTTP and Runtime SQLite connections.
-        Store writer(dir/"state.db");
-        return writer.receive(routing(),key,text,replyTo);
+        Store httpWriter(dir/"state.db");
+        return httpWriter.receive(routing(),key,text,replyTo);
     }
     Json task(Id id) { return store->task(id); }
     void tick(int times = 1) {
@@ -136,7 +135,6 @@ void rawInboxSurvivesRestartAndBlocksCompletion() {
     f.reach(id,"deciding");
     const auto generation = f.task(id)["generation"];
     f.model.beforeComplete = [&](const ModelInput&) {
-        // Simulate a process ending after committing the inbox receipt but before routing it.
         sqlite3* writer = nullptr;
         check(sqlite3_open((f.dir/"state.db").c_str(),&writer) == SQLITE_OK,"cannot open the raw inbox fixture");
         const auto saved = sqlite3_exec(writer,R"SQL(
@@ -408,7 +406,7 @@ void keepQueuedCriteriaProvisionalUntilFirstLaunch() {
           task["revisions"][0]["doneWhen"] == "p99 レイテンシを報告" &&
           task["runs"][0]["revisionId"] == task["currentRevision"],"the initial Run did not capture the explicitly revised criteria");
 }
-} // namespace
+}
 
 int main() {
     try {
