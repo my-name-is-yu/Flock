@@ -109,9 +109,8 @@ class Fixture(BaseHTTPRequestHandler):
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": "code" in content}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
-                # The accepted Run is visible to a new client, but the old client has no response.
                 self.server.launch_accepted.set()
-                assert self.server.release_launch.wait(15), "crash harness did not kill the Runtime"
+                assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
                 self.close_connection = True
                 return
             self.reply(envelope)
@@ -272,7 +271,7 @@ def check_pending_send(db_path, action_id):
 
 def test_peer_recovery(server, runner, temp):
     server.launch_accepted = threading.Event()
-    server.release_launch = threading.Event()
+    server.allow_launch_disconnect = threading.Event()
     server.state.update(launches=[], reconciliations=0)
     db_path = temp + "/state.db"
     command = [runner, server.origin, temp + "/creds", db_path]
@@ -289,7 +288,7 @@ def test_peer_recovery(server, runner, temp):
         finally:
             if process.poll() is None:
                 process.kill()
-            server.release_launch.set()
+            server.allow_launch_disconnect.set()
     subprocess.run(command + ["recover"], timeout=15, check=True)
     assert server.state["launches"] == [action_id], "recovery resent the launch"
     assert server.state["reconciliations"] == 1, "recovery did not perform one project history scan"
