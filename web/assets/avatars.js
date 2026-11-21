@@ -1,7 +1,6 @@
 import { DEFAULT_COLOR, getExample, renderAvatarSvg, validateAvatar } from '/vendor/open-bot-avatar/index.js';
 import { mountAvatar } from '/vendor/open-bot-avatar/dom/index.js';
 
-// Open Bot Avatar 0.3.0 editor defaults, in Flock's existing shape assignment order.
 // https://github.com/DominikScholz/open-bot-avatar/blob/5e64c081971eb296f562544641bad37d40fb36b6/gallery/colors.json
 const galleryColors = {
   mug: '#f4f4f4',
@@ -12,7 +11,7 @@ const galleryColors = {
   'watering-can': '#14b3a5',
   barbell: '#f2384b',
 };
-const shapes = Object.keys(galleryColors);
+const defaultShapeOrder = Object.keys(galleryColors);
 const ink = '#14121c';
 const lightInk = '#fafaff';
 const hex = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -27,8 +26,7 @@ function luminance(color) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-// Eyes for a configured body color: whichever of the two inks contrasts more with it.
-function eyesFor(color) {
+function contrastingEyeColor(color) {
   const body = luminance(color);
   return (body + 0.05) / (luminance(ink) + 0.05) >= (luminance(lightInk) + 0.05) / (body + 0.05) ? ink : lightInk;
 }
@@ -39,7 +37,7 @@ function avatarOptions(bot) {
   let hash = 2166136261;
   for (const char of bot.id) hash = Math.imul(hash ^ char.codePointAt(0), 16777619) >>> 0;
   const avatar = typeof bot.avatar === 'string' ? { example: bot.avatar } : bot.avatar;
-  const example = getExample(avatar?.example) ?? getExample(shapes[hash % shapes.length]);
+  const example = getExample(avatar?.example) ?? getExample(defaultShapeOrder[hash % defaultShapeOrder.length]);
   const definition = avatar?.definition;
   let validated;
   if (definition && /^[a-z0-9_-]{1,64}$/i.test(definition.id) && definition.body?.path?.length <= 12000) {
@@ -51,7 +49,7 @@ function avatarOptions(bot) {
   const options = {
     definition: validated ?? example,
     color: customColor ?? (validated ? DEFAULT_COLOR : galleryColors[example.id]),
-    eyeColor: customEyeColor ?? (customColor ? eyesFor(customColor) : undefined),
+    eyeColor: customEyeColor ?? (customColor ? contrastingEyeColor(customColor) : undefined),
     reducedMotion: 'system',
     label: '',
   };
