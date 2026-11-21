@@ -411,7 +411,6 @@ Bot Bots::get(std::string_view id) const {
             stored["workspaceStrategy"] = session["workspaceStrategy"];
         }
     }
-    if (config.contains("avatar")) bot.avatar = config["avatar"];
     const auto allowedBots = config.value("allowedBots",Json::array());
     if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
     std::set<std::string> allowedIds;
