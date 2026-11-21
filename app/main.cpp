@@ -191,6 +191,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
                 return bots.updateProfile(botId,profile,image);
             },
             [&](std::string_view botId) { return bots.avatarImage(botId); },
+            options.peers,
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

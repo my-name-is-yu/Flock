@@ -148,6 +148,9 @@ public:
     Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
+    // Same chronological page for either participant. Each exchange is journaled under both tasks.
+    Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
+    std::vector<std::string> peerPartners(std::string_view bot) const;
     const std::filesystem::path& path() const;
 
 private:

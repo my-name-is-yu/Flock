@@ -9,6 +9,8 @@
 #include <cctype>
 #include <charconv>
 #include <limits>
+#include <map>
+#include <set>
 #include <thread>
 
 namespace flockv0 {
@@ -73,6 +75,11 @@ std::string requiredText(const Json& body, std::string_view key, std::size_t byt
     if (text.find_first_not_of(" \t\r\n") == std::string::npos || text.size() > bytes || text.find('\0') != std::string::npos)
         throw InputError("invalid_text");
     return text;
+}
+
+const Json* botById(const Json& bots, std::string_view id) {
+    const auto bot = std::ranges::find_if(bots,[&](const Json& descriptor) { return web::field(descriptor,"id") == id; });
+    return bot == bots.end() ? nullptr : &*bot;
 }
 
 template <std::size_t N>
@@ -270,7 +277,7 @@ public:
                 });
         }
         server_.Get("/api/bots",[this](const Request&, Response& res) {
-            json(res,200,web::botList(store_,bots()));
+            json(res,200,botList());
         });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
@@ -281,12 +288,13 @@ public:
                 return error(res,404,"avatar_not_found");
             res.set_content(image->bytes.data(),image->bytes.size(),image->contentType);
         });
-        for (const auto path : {"/api/view","/api/conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
-                const auto bot = findBot(id);
-                if (bot.is_null()) return error(res,404,"bot_not_found");
+                const auto known = bots();
+                const auto* bot = botById(known,id);
+                if (!bot) return error(res,404,"bot_not_found");
                 try {
                     if (req.path == "/api/task") {
                         const auto taskId = queryId(req,"taskId",false);
@@ -295,7 +303,8 @@ public:
                         return json(res,200,web::taskDetail(task,store_.latestTaskResult(taskId)));
                     }
                     const auto before = queryId(req,"before",true);
-                    if (req.path == "/api/view") json(res,200,web::botView(store_,bot));
+                    if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
                     else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));
                 } catch (const InputError& e) { error(res,400,e.what()); }
@@ -404,13 +413,58 @@ private:
         return nullptr;
     }
 
+    std::vector<PeerBot> peers(std::string_view bot) const {
+        return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{};
+    }
+
+    bool grantsPeer(std::string_view bot, std::string_view peer) const {
+        return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
+    }
+
+    Json botList() const {
+        auto list = web::botList(store_,bots());
+        std::set<std::string> known;
+        for (const auto& bot : list) known.insert(web::field(bot,"id"));
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& id : known) {
+            for (const auto& entry : peers(id)) {
+                const auto& peer = entry.intake.botId;
+                if (id == peer || !known.contains(peer)) continue;
+                connections[id].insert(peer);
+                connections[peer].insert(id);
+            }
+            for (const auto& peer : store_.peerPartners(id))
+                if (id != peer) connections[id].insert(peer);
+        }
+        for (auto& bot : list) {
+            auto& entries = bot["peers"] = Json::array();
+            for (const auto& id : connections[web::field(bot,"id")]) entries.push_back({{"id",id}});
+        }
+        return list;
+    }
+
+    void readPeerConversation(const Request& req, Response& res, const Json& known,
+                              std::string_view bot, Id before) {
+        const auto peer = req.get_param_value("peer");
+        if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
+            return error(res,400,"invalid_peer");
+        const bool configured = botById(known,peer) != nullptr;
+        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
+            const auto partners = store_.peerPartners(bot);
+            if (std::ranges::find(partners,peer) == partners.end())
+                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
+        }
+        json(res,200,web::peerConversation(store_,bot,peer,before));
+    }
+
     void mutate(const Request& req, Response& res, Mutation mutation) {
         if (req.body.size() > maxStandardPayload) return error(res,413,"payload_too_large");
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
             const auto bot = requiredText(body,"botId",1024);
-            if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
+            const auto known = bots();
+            if (!botById(known,bot)) return error(res,404,"bot_not_found");
             if (mutation != Mutation::Operation) {
                 const auto message = mutation == Mutation::Message;
                 const auto request = requiredText(body,message ? "text" : "request",16000);

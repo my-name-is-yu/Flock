@@ -19,6 +19,7 @@ struct WebCallbacks {
     std::function<Json(const Json& profile, const std::optional<AvatarImage>& image)> createBot;
     std::function<Json(std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)> updateBot;
     std::function<std::optional<AvatarImage>(std::string_view botId)> botAvatar;
+    std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
 };
 class WebServer {
 public:

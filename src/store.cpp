@@ -155,6 +155,11 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateConversation();
         migrateModelBudget();
+        exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
+             " WHERE kind='bot_message'");
+        // Databases from the DM preview may contain queued messages without a sending Bot task.
+        exec("UPDATE tasks SET state='cancelled',generation=generation+1 WHERE state NOT IN ('completed','cancelled')"
+             " AND id IN (SELECT recipient_task FROM peer_exchanges WHERE sender_task IS NULL)");
         exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
              " WHERE environment_id<>json_extract(data,'$.environmentId')");
     } catch (...) { sqlite3_close(db); throw; }
@@ -189,7 +194,7 @@ Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
-                      " WHERE phase<>'closed' AND (sender_task=? OR recipient_task=?)", {id,id});
+                      " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
@@ -570,6 +575,8 @@ FROM (
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
+    AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
+      AND json_extract(j.data,'$.recipient') IS NOT 'user'))
   UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN route_decisions decision ON decision.message_id=m.id
@@ -580,6 +587,34 @@ WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
     std::reverse(result.begin(),result.end());
+    return result;
+}
+
+Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT j.id,j.task_id,j.time,j.kind,j.data
+FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message' AND json_extract(j.data,'$.exchangeId')=p.id
+WHERE ((sender.bot_id=? AND recipient.bot_id=?) OR (sender.bot_id=? AND recipient.bot_id=?))
+  AND (?=0 OR j.id<?)
+ORDER BY j.id DESC LIMIT ?
+)SQL",{bot,peer,peer,bot,before,before,std::clamp(limit,1u,200u)});
+    Json result = Json::array();
+    while (rows.next()) result.push_back(journalRow(rows));
+    std::reverse(result.begin(),result.end());
+    return result;
+}
+
+std::vector<std::string> Store::peerPartners(std::string_view bot) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT DISTINCT CASE WHEN sender.bot_id=? THEN recipient.bot_id ELSE sender.bot_id END
+FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+WHERE sender.bot_id=? OR recipient.bot_id=?
+)SQL",{bot,bot,bot});
+    std::vector<std::string> result;
+    while (rows.next()) result.push_back(rows.string(0));
     return result;
 }
 } // namespace flockv0

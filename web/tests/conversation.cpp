@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
 
@@ -420,6 +421,100 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
+void botMediatedConversation(const std::filesystem::path& path, std::string_view note) {
+    constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
+    constexpr auto greeting = "こんにちは。";
+    constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
+    constexpr auto review = "前のバージョンから更新し、署名が有効であることを確認してください。";
+    constexpr auto response = "Reviewer に確認しました。前のバージョンから更新し、署名が有効であることを確認してください。";
+    Json original;
+    struct ForwardingModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        Decision decide(const ModelInput& input) override { return script(input); }
+    } model;
+    model.script = [&](const ModelInput& input) -> Decision {
+        const auto kind = input.event.at("kind");
+        if (kind == "route_conversation") {
+            if (input.event.at("text") == greeting)
+                return {"route_conversation",{{"routes",Json::array({{{"kind","respond"},{"text",greetingReply}}})}}, {}};
+            check(input.event.at("text") == request,"the responsible Bot did not receive the user's original message");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","create_task"}}})}}, {}};
+        }
+        if (kind == "intake") {
+            check(input.task.at("botId") == "ernest" && input.task.at("request") == request &&
+                  input.task.at("forwardableUserMessage") == original &&
+                  input.task.at("peers") == Json::array({{{"botId","reviewer"},{"name","Reviewer"}}}) &&
+                  std::ranges::find(input.tools,"send_bot_message") != input.tools.end(),
+                  "Ernest did not receive the saved user message and choose its permitted peer");
+            Json args = {{"botId","reviewer"},{"kind","consult"},{"forwardUserMessage",true}};
+            if (!note.empty()) args["text"] = note;
+            return {"send_bot_message",std::move(args),"Reviewer knows the release procedure"};
+        }
+        if (kind == "bot_request") {
+            check(input.task.at("botId") == "reviewer" && input.event.at("fromBotId") == "ernest" &&
+                  input.event.at("toBotId") == "reviewer" && input.event.value("text",std::string{}) == note &&
+                  input.event.at("forwardedMessage") == original,
+                  "Reviewer did not receive Ernest's forwarded message and separate note");
+            return {"reply_to_bot",{{"kind","result"},{"text",review}},"Answer Ernest's consultation"};
+        }
+        check(kind == "bot_result" && input.task.at("botId") == "ernest" && input.event.at("fromBotId") == "reviewer" &&
+              input.event.at("text") == review,"the peer reply did not return to the responsible Bot");
+        return {"complete",{{"report",response}},"Relay the answer in Ernest's chat"};
+    };
+
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot != "ernest") return {};
+        return {{"Reviewer",{"reviewer","","local-env","ernest"}}};
+    };
+    auto web = callbacks();
+    web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
+    web.peers = peers;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },RuntimeOptions{.peers=peers});
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
+
+    const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=ernest"),hello.at("messageId")).at("text") == greetingReply &&
+          store.tasks().empty() && browser.get(dm).at("messages").empty(),"ordinary user chat forwarded without a Bot decision");
+
+    const auto receipt = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","rollout"},{"text",request}},201);
+    check(store.tasks().empty() && browser.get(dm).at("messages").empty(),"HTTP intake started a Bot-to-Bot exchange");
+    const auto received = browser.get("/api/view?bot=ernest").at("events");
+    const auto userMessage = std::ranges::find_if(received,[&](const Json& event) {
+        return event.at("id") == receipt.at("messageId") && event.at("kind") == "conversation_message";
+    });
+    check(userMessage != received.end() && userMessage->at("data").at("text") == request,
+          "the original user message was not saved verbatim");
+    original = {{"text",userMessage->at("data").at("text")},{"time",userMessage->at("time")}};
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=ernest"),receipt.at("messageId")).at("route") == "create_task" &&
+          store.tasks("ernest").size() == 1 && store.tasks("reviewer").empty() && browser.get(dm).at("messages").empty(),
+          "routing the user's request bypassed Ernest's decision and contacted Reviewer");
+
+    tick(runtime,8);
+    const auto ernest = browser.get("/api/view?bot=ernest");
+    const auto& events = ernest.at("events");
+    check(ernest.at("bot").at("id") == "ernest" && hasEvent(events,"conversation_message",request) &&
+          (hasEvent(events,"completed",response) || hasEvent(events,"conversation_reply",response)),
+          "Ernest's normal conversation did not receive the answer to the user's request");
+    const auto messages = browser.get(dm).at("messages");
+    check(messages.size() == 2 && messages == browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages"),
+          "the exchange was not the same two-message thread from both Bots");
+    const auto& forwarded = messages.front().at("data");
+    const auto& answered = messages.back().at("data");
+    check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
+          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
+          answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
+          !forwarded.contains("initiator") && !answered.contains("recipient") && !answered.contains("forwardedMessage") &&
+          t3.launches == 0,"the exchange did not preserve the forward, its Bot authors, or the reply");
+    check(std::ranges::none_of(messages,[](const Json& row) {
+        return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
+    }),"the DM exposed task or evidence details");
+}
 
 struct StopModel : FixedModel {
     Id other = 0;
@@ -614,7 +709,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto page = view();
     Json messages = Json::array();
     for (const auto& event : page.at("events"))
-        if (event.at("kind") == "bot_message" && event.at("taskId") == consultTask)
+        if (event.at("kind") == "bot_message")
             messages.push_back(event.at("data"));
     check(messages.size() == 2,"the originating conversation did not show one request and one peer reply");
     const auto& outgoing = messages.at(0);
@@ -733,6 +828,8 @@ int main(int argc,char** argv) {
         TestDirectory directory;
         destinationChoicesInView(directory.path / "destination.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
+        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
+        botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         sameNameStop(directory.path / "stop.sqlite");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";

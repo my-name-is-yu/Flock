@@ -160,3 +160,11 @@ button.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--r
   .detail:not([open]) { transform: none; }
   @starting-style { .detail[open] { transform: none; } }
 }
+.peer-picker-list { display: grid; gap: .15rem; padding: 0; margin: 0; list-style: none; }
+.peer-choice {
+  display: flex; align-items: center; gap: .65rem; min-height: 2.9rem; padding: .3rem .55rem;
+  border-radius: var(--radius-md); color: var(--text); text-decoration: none; font-size: var(--text-md);
+}
+.peer-choice:hover { background: var(--hover); }
+.peer-choice-avatar { width: 2.1rem; height: 2.1rem; }
+.peer-choice-name { flex: 1; font-weight: 600; overflow-wrap: anywhere; }

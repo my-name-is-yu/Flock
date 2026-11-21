@@ -3,6 +3,7 @@
 #include <httplib.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -276,33 +277,26 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
     check(expectedTasks.empty(),"session pagination skipped tasks");
 }
 
-void peerHistory(const std::filesystem::path& path) {
-    struct PeerModel final : Model {
-        Decision decide(const ModelInput& input) override {
-            if (input.event["kind"] == "intake") {
-                return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
-                    "Triage owns the criteria"};
-            }
-            if (input.event["kind"] == "bot_request") {
-                return {"reply_to_bot",{{"kind","result"},{"text","再現条件を確認してください"}},
-                    "The requested criteria are already known"};
-            }
-            check(input.event["kind"] == "bot_result","unexpected peer history fixture event");
-            return {"complete",{{"report","判定基準を確認しました"}},"Triage answered the request"};
-        }
-    } model;
+struct PeerModel final : Model {
+    Decision decide(const ModelInput& input) override {
+        if (input.event["kind"] == "intake")
+            return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
+                "Triage owns the criteria"};
+        if (input.event["kind"] == "bot_request")
+            return {"reply_to_bot",{{"kind","result"},{"text","再現条件を確認してください"}},
+                "The requested criteria are already known"};
+        check(input.event["kind"] == "bot_result","unexpected peer history fixture event");
+        return {"complete",{{"report","判定基準を確認しました"}},"Triage answered the request"};
+    }
+};
 
-    Store store(path);
-    FixedT3 t3;
-    RuntimeOptions options;
-    options.peers = [](std::string_view sender) -> std::vector<PeerBot> {
-        if (sender != "release") return {};
-        return {{"Triage",{"triage","","local-env","release"}}};
-    };
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
-    const auto server = startWeb(store,0,callbacks());
-    Browser browser(*server);
-    browser.request("release","判定基準の確認");
+std::vector<PeerBot> fixturePeers(std::string_view sender) {
+    if (sender != "release") return {};
+    return {{"Triage",{"triage","","local-env","release"}}};
+}
+
+Id seedPeerHistory(Browser& browser, Runtime& runtime, const FixedT3& t3) {
+    const auto task = browser.request("release","判定基準の確認");
     Json waiting;
     for (unsigned attempt = 0; attempt < 8; ++attempt) {
         runtime.tick();
@@ -315,6 +309,19 @@ void peerHistory(const std::filesystem::path& path) {
     const auto finished = browser.get("/api/view?bot=release");
     check(hasEvent(finished.at("events"),"completed","text","判定基準を確認しました") && t3.launches.empty(),
           "consultation did not show the result without starting a T3 Session");
+    return task;
+}
+
+void peerHistory(const std::filesystem::path& path) {
+    Store store(path);
+    PeerModel model;
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = fixturePeers;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    seedPeerHistory(browser,runtime,t3);
 
     for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
     const auto newest = browser.get("/api/view?bot=release");
@@ -366,6 +373,87 @@ void peerHistory(const std::filesystem::path& path) {
           "sender and recipient see different message identities");
     check(peerMessages(browser.get("/api/view?bot=settings")).empty(),
           "peer history appeared in a third Bot's conversation");
+}
+
+void peerConversation(const std::filesystem::path& path) {
+    constexpr auto primary = "/api/peer-conversation?bot=release&peer=triage";
+    constexpr auto reverse = "/api/peer-conversation?bot=triage&peer=release";
+    constexpr auto separate = "/api/peer-conversation?bot=release&peer=settings";
+    std::atomic_bool allowed = true, configured = true;
+    RuntimeOptions options;
+    options.peers = [&](std::string_view sender) -> std::vector<PeerBot> {
+        if (sender != "release") return {};
+        auto peers = allowed ? fixturePeers(sender) : std::vector<PeerBot>{};
+        peers.push_back({"Settings",{"settings","","local-env","settings"}});
+        return peers;
+    };
+    auto web = callbacks();
+    web.bots = [all = web.bots,&configured] {
+        auto bots = all();
+        if (!configured) {
+            const auto archived = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
+            bots.erase(archived);
+        }
+        return bots;
+    };
+    web.peers = options.peers;
+    PeerModel model;
+    FixedT3 t3;
+    Json history;
+    {
+        Store store(path);
+        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+        const auto server = startWeb(store,0,web);
+        Browser browser(*server);
+        const auto empty = browser.get(primary);
+        check(empty.at("messages").empty() && empty.at("hasOlder") == false &&
+              !empty.contains("canSend") && browser.get(reverse) == empty,
+              "an unused permitted pair did not open as the same read-only history");
+        browser.post("/api/peer-messages",{{"botId","release"},{"peerId","triage"},
+            {"clientMessageId","direct-send"},{"text","Send directly to the peer"}},404);
+        runtime.tick();
+        check(store.tasks().empty() && t3.launches.empty(),"opening a DM or posting to the old route started work");
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
+
+        seedPeerHistory(browser,runtime,t3);
+        history = browser.get(primary).at("messages");
+        check(history.size() == 2 && history == browser.get(reverse).at("messages"),
+              "an exchange was missing, duplicated, or different from the opposite Bot page");
+        check(history.at(0).at("data").at("text") == "判定基準を教えて" &&
+              history.at(1).at("data").at("text") == "再現条件を確認してください" &&
+              history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
+              "the conversation lost its messages or order");
+        check(browser.get(separate).at("messages").empty(),"an exchange leaked to another allowed pair");
+        const auto before = std::to_string(history.back().at("id").get<Id>());
+        check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == Json::array({history.front()}),
+              "the peer history cursor repeated the anchor or skipped older messages");
+
+        const auto checkProjection = [](const Json& messages) {
+            for (const auto& message : messages) {
+                if (message.at("kind") != "bot_message") continue;
+                check(!message.contains("taskId") && !message.contains("taskBotId") &&
+                      !message.at("data").contains("evidence"),"peer chat leaked internal task information");
+            }
+        };
+        checkProjection(history);
+        checkProjection(browser.get("/api/view?bot=release").at("events"));
+        checkProjection(browser.get("/api/view?bot=triage").at("events"));
+    }
+    {
+        Store store(path);
+        const auto server = startWeb(store,0,web);
+        Browser browser(*server);
+        check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
+        allowed = false;
+        check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
+        configured = false;
+        check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
+        const auto list = browser.get("/api/bots");
+        const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
+        check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
+            return peer == Json{{"id","triage"}};
+        }),"the picker lost the archived conversation or exposed a send action");
+    }
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -669,6 +757,7 @@ int main() {
         TestDirectory directory;
         exercise(directory.path / "state.db");
         peerHistory(directory.path / "peers.db");
+        peerConversation(directory.path / "peer-conversations.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

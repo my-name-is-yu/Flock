@@ -1075,14 +1075,28 @@ CREATE TABLE tasks(
 CREATE TABLE journal(id INTEGER PRIMARY KEY,task_id INTEGER NOT NULL REFERENCES tasks(id),
   time INTEGER NOT NULL,kind TEXT NOT NULL,data TEXT NOT NULL);
 CREATE INDEX journal_task ON journal(task_id,id);
+CREATE TABLE peer_exchanges(
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
+  sender_task INTEGER NOT NULL REFERENCES tasks(id),
+  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
+CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 INSERT INTO tasks VALUES
   (1,'alpha','env','p',NULL,0,'completed',2,
      '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Previous work","doneWhen":"Check all cases","wait":null}'),
   (2,'alpha','env','p',NULL,0,'queued',0,
-     '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Pending legacy work","doneWhen":"","wait":null}');
+     '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Pending legacy work","doneWhen":"","wait":null}'),
+  (3,'beta','env','p',NULL,0,'completed',2,
+     '{"botId":"beta","environmentId":"env","projectId":"p","request":"Review the previous work","doneWhen":"","wait":null}');
 INSERT INTO journal VALUES(8,1,99,'report',json_object('report','1. First approach'||char(10)||'2. Chosen approach'));
 INSERT INTO journal VALUES(9,1,100,'completed',json_object('text','Proposed two approaches'));
 INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","source":"manual"}');
+INSERT INTO peer_exchanges VALUES('legacy-exchange','consult','closed','legacy-reply',1,3);
+INSERT INTO journal SELECT NULL,id,100,'bot_message',
+  '{"exchangeId":"legacy-exchange","messageId":"legacy-request","fromBotId":"alpha","toBotId":"beta","messageType":"request","requestKind":"consult","text":"Review the previous work"}'
+FROM tasks WHERE id IN (1,3);
+INSERT INTO journal SELECT NULL,id,100,'bot_message',
+  '{"exchangeId":"legacy-exchange","messageId":"legacy-reply","fromBotId":"beta","toBotId":"alpha","messageType":"result","requestKind":"consult","text":"The previous work is ready"}'
+FROM tasks WHERE id IN (1,3);
 )SQL",nullptr,nullptr,nullptr);
     sqlite3_close(db);
     check(rc == SQLITE_OK,"Legacy schema fixture failed");
@@ -1096,6 +1110,11 @@ INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","so
     const auto queued = store.task(2);
     check(queued.at("revisions").empty() && queued.at("state") == "queued",
           "Migration changed queued legacy work before its criteria were set");
+    const auto dm = store.peerConversation("alpha","beta");
+    check(dm.size() == 2 && dm == store.peerConversation("beta","alpha") &&
+          dm.front().at("data").at("messageId") == "legacy-request" &&
+          dm.back().at("data").at("messageId") == "legacy-reply" && dm.back().at("taskId") == 1,
+          "The original peer exchange did not migrate to one chronological pair history");
     {
         sqlite3* oldReader = nullptr;
         check(sqlite3_open_v2(fixture.database().c_str(),&oldReader,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
