@@ -432,9 +432,13 @@ void answersStayOnTheirQuestion() {
 void answersNeedTheirOwnReplyTargetAndAStableTask() {
     Fixture f;
     const auto color = f.store->submit(f.routing("色を決める"));
-    f.model.questions.emplace(color,Json{{"question","どの色にしますか？"}});
+    f.model.questions.emplace(color,Json{{"question","どの色にしますか？"},{"choices",{"青","赤"}}});
     f.reach(color,"waiting");
     const auto wait = f.task(color)["wait"];
+    f.script("どちらだっけ",{say("青か赤です。")});
+    f.receive("ask-back","どちらだっけ",wait.at("messageId").get<Id>());
+    check(f.model.turnInputs.back().event["replyTo"]["choices"] == Json::array({"青","赤"}),
+          "a reply to a question did not show the question's choices");
     f.script("hello",{say("Hi.")});
     const auto greeting = f.receive("hello","hello");
     f.script("yes",{answer(color)});

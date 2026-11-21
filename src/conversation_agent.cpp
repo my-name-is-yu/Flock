@@ -220,6 +220,8 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 replyTo.update({{"kind","task_question"},{"taskId",taskId},{"waitId",integer(data,"id")},
                     {"reason",field(data,"reason")},{"text",bounded(field(data,"text"),1000)},
                     {"current",current.is_object() && integer(current,"id") == integer(data,"id")}});
+                if (const auto question = waitView(data,message.id); question.contains("choices"))
+                    replyTo["choices"] = question.at("choices");
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
                 replyTo.update({{"kind","result"},{"taskId",taskId},
