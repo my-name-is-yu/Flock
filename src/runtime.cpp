@@ -114,6 +114,7 @@ struct Runtime::Impl {
     RuntimeOptions options;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
+    std::map<std::string,std::future<void>> conversationWorkers;
 
     Impl(Store::Impl& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
         : db(store), model(m), t3(adapter), notes(std::move(loader)), options(std::move(opts)) {
@@ -125,6 +126,7 @@ struct Runtime::Impl {
         }
     }
     ~Impl() {
+        conversationWorkers.clear();
         workers.clear();
         close(lockFd);
     }
@@ -944,18 +946,39 @@ AND kind IN ('decision','report','user_answer','session_answered') ORDER BY id D
 Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeOptions options)
     : p_(std::make_unique<Impl>(*store.p_,model,t3,std::move(notes),std::move(options))) {}
 Runtime::~Runtime() = default;
+void Runtime::routeConversation() {
+    constexpr auto messagesPerTick = 20;
+    for (int i = 0; i < messagesPerTick; ++i) {
+        const auto pending = p_->db.pendingConversations(1);
+        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model)) break;
+    }
+}
 void Runtime::tick() {
-    p_->db.routePending();
+    routeConversation();
     for (auto id : p_->eligible()) p_->step(id);
 }
 void Runtime::tickConcurrent() {
-    p_->db.routePending();
-    for (auto it = p_->workers.begin(); it != p_->workers.end();) {
-        if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            auto result = std::move(it->second);
-            it = p_->workers.erase(it);
-            result.get();
-        } else ++it;
+    const auto collect = [](auto& workers) {
+        for (auto it = workers.begin(); it != workers.end();) {
+            if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                auto result = std::move(it->second);
+                it = workers.erase(it);
+                result.get();
+            } else ++it;
+        }
+    };
+    collect(p_->conversationWorkers);
+    collect(p_->workers);
+    constexpr auto maxConversationWorkers = 4u;
+    if (p_->conversationWorkers.size() < maxConversationWorkers) {
+        for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {
+            if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
+            if (!p_->conversationWorkers.contains(bot)) {
+                p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
+                    p_->db.routeMessage(id,p_->model);
+                }));
+            }
+        }
     }
     for (auto id : p_->eligible()) {
         if (!p_->workers.contains(id))

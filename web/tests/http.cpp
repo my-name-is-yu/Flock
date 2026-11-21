@@ -2,6 +2,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <iostream>
@@ -11,7 +12,12 @@ using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
 constexpr auto comparisonRequest = "3案を比較して";
-constexpr auto proposedOptions = "1. 手動で照合する\n2. 差分を先に集計する\n3. 公開後に見直す";
+constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
+constexpr auto proposedOptions = "1. 手動で照合する\n"
+    "2. 差分を先に集計する\n"
+    "   - 前回と今回の明細を ID で突き合わせる。\n"
+    "   - 追加・削除・更新の件数を出し、金額が変わった明細を人が確認する。\n"
+    "3. 公開後に見直す";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -29,7 +35,13 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
+    unsigned explained = 0, summarized = 0;
+    Id comparisonResult = 0;
+    std::size_t summarySourceSize = 0;
+
     Decision decide(const ModelInput& input) override {
+        if (input.event["kind"] == "route_conversation") return routeMessage(input);
+        if (input.event["kind"] == "answer_conversation_result") return answerResult(input);
         if (input.event["kind"] == "intake")
             return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
         if (input.event["kind"] == "question") {
@@ -42,6 +54,50 @@ struct FixedModel : Model {
         if (input.task["request"] == comparisonRequest)
             return {"complete",{{"report",proposedOptions}},"The Session compared all three options"};
         return {"complete",{{"report","Draft complete"}},"The Session report matches the criterion"};
+    }
+
+    Decision routeMessage(const ModelInput& input) {
+        const auto& event = input.event;
+        check(event.dump().find(privateValue) == std::string::npos &&
+              input.history.dump().find(privateValue) == std::string::npos,"Connection settings entered model-visible context");
+        Json route;
+        if (event.at("text") == "2案目を詳しく" || event.at("text") == "2案目を要約して" ||
+            event.at("text") == missingBudgetQuestion) {
+            const auto& results = event.at("results");
+            const auto selected = std::ranges::find_if(results,[&](const Json& result) {
+                return result.at("messageId") == comparisonResult && result.at("request") == comparisonRequest &&
+                       result.at("text") == proposedOptions;
+            });
+            check(selected != results.end(),"The comparison was not available to the model fixture");
+            route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")}};
+        } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
+            route = {{"kind","status"}};
+        } else {
+            const auto& anchor = event.at("reply");
+            check(anchor.at("kind") == "wait" && event.at("text") == "利用者向けのみ",
+                  "Unexpected route in HTTP fixture");
+            route = {{"kind","answer_wait"},{"taskId",anchor.at("taskId")}};
+        }
+        return {"route_conversation",{{"routes",Json::array({route})}},{}};
+    }
+
+    Decision answerResult(const ModelInput& input) {
+        const auto& source = input.event.at("source").at("text").get_ref<const std::string&>();
+        check(source.find("ID で突き合わせる") != std::string::npos &&
+              source.find("金額が変わった明細を人が確認する") != std::string::npos &&
+              source.find("手動で照合する") == std::string::npos && source.find("公開後に見直す") == std::string::npos,
+              "The result answer did not receive only the selected option");
+        if (input.event.at("text") == "2案目を詳しく") {
+            ++explained;
+            return {"answer_conversation_result",{{"text","差分を先に集計する案です。ID ごとに前回と今回の記録を比べるので、"
+                    "追加・削除・更新を分けて数えられます。そのうち金額が変わった更新だけを人が確かめる手順です。"}},{}};
+        }
+        if (input.event.at("text") == missingBudgetQuestion)
+            return {"clarify_conversation_result",{{"text","見積もりに必要な明細の件数を教えてください。"}},{}};
+        check(input.event.at("text") == "2案目を要約して","The answer model lost the user's summary request");
+        ++summarized;
+        summarySourceSize = source.size();
+        return {"answer_conversation_result",{{"text","ID で明細の差分を集計し、金額変更を人が確認する案です。"}},{}};
     }
 };
 
@@ -189,6 +245,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto& result = completed.at("result");
     check(result["kind"] == "completed" && result["taskId"] == taskId && result["data"]["text"] == proposedOptions,
           "task details lost the completion report");
+    model.comparisonResult = result.at("id");
     const auto& reportRun = result.at("data").at("run");
     check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
           "task details did not point to the Run and report item that produced the result");
@@ -197,6 +254,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
+    check(model.explained == 0 && store.tasks().size() == 1,"HTTP intake ran model routing before returning its receipt");
     disableIntake = true;
     check(browser.post("/api/messages",message,201) == receipt,"retry did not recover its receipt with changed Bot settings");
     auto changed = message;
@@ -222,6 +280,9 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto response = conversationReply(page,messageId);
     const auto responseText = response.at("text").get<std::string>();
     check(response["route"] == "respond" && responseText.find("差分を先に集計する") != std::string::npos &&
+          responseText.find("ID ごとに前回と今回の記録を比べる") != std::string::npos &&
+          responseText.find("追加・削除・更新を分けて数えられます") != std::string::npos &&
+          responseText.find("金額が変わった更新だけを人が確かめる") != std::string::npos &&
           responseText.find("手動で照合する") == std::string::npos && responseText.find("公開後に見直す") == std::string::npos,
           "answer did not explain only the second option");
     check(response["source"]["taskId"] == taskId && response["source"]["messageId"] == result["id"],
@@ -233,7 +294,30 @@ void conversationEntry(const std::filesystem::path& path) {
           "task details omitted the comparison Run or exposed config");
     Browser::checked(browser.client.Get("/api/task?bot=triage&taskId=" + std::to_string(taskId)),404);
 
-    const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","進捗は？"}};
+    const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
+        {"text","2案目を要約して"}},201);
+    tick(runtime,3);
+    const auto summarized = conversationReply(browser.get("/api/view?bot=release"),summary.at("messageId"));
+    const auto summaryText = summarized.at("text").get<std::string>();
+    check(summarized.at("route") == "respond" && summarized.at("source").at("messageId") == result.at("id") &&
+          summaryText.find("ID で明細の差分を集計") != std::string::npos &&
+          summaryText.find("金額変更を人が確認") != std::string::npos &&
+          summaryText.find("手動で照合する") == std::string::npos && summaryText.find("公開後に見直す") == std::string::npos &&
+          summaryText.size() < model.summarySourceSize,"The summary did not condense the selected option");
+    check(model.explained == 1 && model.summarized == 1 && store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Two read-only answers added work or missed the model calls");
+
+    const auto estimate = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","estimate"},
+        {"text",missingBudgetQuestion}},201);
+    runtime.routeConversation();
+    const auto estimateReply = conversationReply(browser.get("/api/view?bot=release"),estimate.at("messageId"));
+    check(estimateReply.at("route") == "clarify" &&
+          estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" &&
+          store.clarifications("release") == Json::array({estimateReply}) &&
+          store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Insufficient evidence did not yield a durable read-only clarification");
+
+    const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","進捗どうなってる"}};
     const auto statusReceipt = browser.post("/api/messages",status,201);
     tick(runtime,3);
     const auto statusReply = conversationReply(browser.get("/api/view?bot=release"),statusReceipt.at("messageId"));

@@ -247,6 +247,30 @@ void responseContract() {
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
         Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
 
+    input.tools = {"route_conversation"};
+    input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
+    const auto routing = responseRequest(input);
+    const auto& routingTool = routing["tools"][0]["tools"][0];
+    check(routingTool["name"] == "route_conversation" &&
+          routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
+          "conversation provider request must use the routing tool");
+    check(routing.dump().find("must-stay-local") == std::string::npos,
+          "conversation adapter config leaked into the prompt");
+    input.tools = {"answer_conversation_result","clarify_conversation_result"};
+    input.event = {{"kind","answer_conversation_result"},{"text","Explain the selected option"},
+                   {"source",{{"text","Selected evidence"}}}};
+    const auto resultAnswer = responseRequest(input);
+    const auto& answerTool = resultAnswer["tools"][0]["tools"][0];
+    check(answerTool["name"] == "answer_conversation_result" &&
+          answerTool["parameters"]["required"] == Json::array({"reason","text"}),
+          "result provider request must use the answer tool");
+    const auto& clarificationTool = resultAnswer["tools"][0]["tools"][1];
+    check(clarificationTool["name"] == "clarify_conversation_result" &&
+          clarificationTool["parameters"]["required"] == Json::array({"reason","text"}),
+          "result provider request must support clarification for insufficient evidence");
+    const auto answerContext = Json::parse(resultAnswer["input"][0]["content"].get<std::string>());
+    check(answerContext["event"] == input.event,"result provider request lost the question or selected evidence");
+
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
     const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),{"complete"});

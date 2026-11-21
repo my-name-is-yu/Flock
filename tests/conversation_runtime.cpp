@@ -1,9 +1,9 @@
 #include "flock/core.hpp"
-#include <sqlite3.h>
-
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -18,9 +18,25 @@ void check(bool ok, const char* why) {
 }
 
 struct Script : Model {
+    std::map<std::string,Json> routes;
+    std::function<void(const ModelInput&)> beforeRoute;
+    std::function<void(const ModelInput&)> beforeIntake;
     std::function<void(const ModelInput&)> beforeComplete;
+    std::map<Id,Json> questions;
     Decision decide(const ModelInput& input) override {
+        if (std::find(input.tools.begin(),input.tools.end(),"route_conversation") != input.tools.end()) {
+            const auto text = input.event.at("text").get<std::string>();
+            const auto plan = routes.find(text);
+            if (plan == routes.end()) throw std::runtime_error("Missing routing fixture for: " + text);
+            Decision proposed{"route_conversation",plan->second,"Scripted conversation decision"};
+            if (beforeRoute) beforeRoute(input);
+            return proposed;
+        }
         if (input.event["kind"] == "intake") {
+            if (beforeIntake) beforeIntake(input);
+            const auto question = questions.find(input.task["id"].get<Id>());
+            if (question != questions.end() && !input.event.contains("userAnswer"))
+                return {"ask_user",question->second,"The fixture needs a user answer"};
             Json args = {{"instruction","Measure and report the fixture"}};
             if (input.task["doneWhen"] == "") args["doneWhen"] = "Report baseline latency";
             return {"delegate",args,"Collect the fixture evidence"};
@@ -30,6 +46,14 @@ struct Script : Model {
         return {"complete",{{"report",input.event["report"]}},"The fixture report includes the requested evidence"};
     }
 };
+
+Json target(std::string_view kind, Id id) { return {{"kind",kind},{"taskId",id}}; }
+
+Json revision(Id id, std::string_view property, std::string_view value) {
+    auto route = target("revise_task",id);
+    route[property] = value;
+    return route;
+}
 
 struct SimulatedT3 : T3 {
     std::vector<Command> sent, reconciled;
@@ -101,13 +125,24 @@ struct Fixture {
         runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; },
                                              RuntimeOptions{[&] { return now; }});
     }
-    Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop") {
-        return {std::move(bot),std::move(request),std::move(environment),"project",
-            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}};
+    Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
+                   std::string project = "project") {
+        return {std::move(bot),std::move(request),std::move(environment),std::move(project),
+            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}, {},0};
     }
-    Json receive(std::string_view key,std::string_view text,Id replyTo = 0) {
+    Json enqueue(std::string_view key,std::string_view text,Id replyTo = 0) {
         Store httpWriter(dir/"state.db");
         return httpWriter.receive(routing(),key,text,replyTo);
+    }
+    void script(std::string_view text, Json route, std::string_view resolution = {}) {
+        Json decision = {{"routes",Json::array({std::move(route)})}};
+        if (!resolution.empty()) decision["resolution"] = resolution;
+        model.routes.insert_or_assign(std::string(text),std::move(decision));
+    }
+    Json receive(std::string_view key,std::string_view text,Id replyTo = 0) {
+        const auto receipt = enqueue(key,text,replyTo);
+        runtime->routeConversation();
+        return receipt;
     }
     Json task(Id id) { return store->task(id); }
     void tick(int times = 1) {
@@ -136,31 +171,19 @@ struct Fixture {
     }
 };
 
-void rawInboxSurvivesRestartAndBlocksCompletion() {
+void durableInboxSurvivesRestartAndBlocksCompletion() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
     f.t3.finish("run-1","Old report");
     f.reach(id,"deciding");
-    f.model.beforeComplete = [&](const ModelInput&) {
-        // Store::receive also classifies messages. Seed the persisted state left by a crash between the two commits.
-        sqlite3* writer = nullptr;
-        check(sqlite3_open((f.dir/"state.db").c_str(),&writer) == SQLITE_OK,"cannot open the raw inbox fixture");
-        const auto saved = sqlite3_exec(writer,R"SQL(
-BEGIN IMMEDIATE;
-INSERT INTO journal(time,kind,data,bot_id) VALUES(0,'conversation_message','{}','alpha');
-INSERT INTO messages(id,bot_id,client_message_id,sequence,text,routing)
-VALUES(last_insert_rowid(),'alpha','raw',1,'完了条件は CPU 時間を計測',
-       '{"environmentId":"desktop","projectId":"project","config":{}}');
-COMMIT;
-)SQL",nullptr,nullptr,nullptr);
-        sqlite3_close(writer);
-        check(saved == SQLITE_OK,"cannot save the unclassified message");
-    };
+    constexpr auto criteria = "完了条件は CPU 時間を計測";
+    f.script(criteria,revision(id,"doneWhen","CPU 時間を計測"));
+    f.model.beforeComplete = [&](const ModelInput&) { f.enqueue("raw",criteria); };
     f.tick();
     check(f.event(id,"completed").is_null() && f.t3.sent.size() == 1,
           "the unclassified message allowed stale completion or new work");
-    const auto receipt = f.store->receipt("alpha","raw","完了条件は CPU 時間を計測");
+    const auto receipt = f.store->receipt("alpha","raw",criteria);
     check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "received",
           "the saved message was not visible before routing");
     f.model.beforeComplete = {};
@@ -179,6 +202,8 @@ void linkedResultStartsANewSession() {
     f.t3.finish("run-1","1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release");
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
+    const auto resultId = f.store->latestTaskResult(original).at("id");
+    f.script("2案目で実装して",{{"kind","create_task"},{"resultMessageId",resultId}});
     f.receive("implement","2案目で実装して");
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
@@ -197,6 +222,7 @@ void appendWaitsForSafeBoundary() {
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
     const auto next = f.store->submit(f.routing("別件","beta"));
+    f.script("補足として表をCSV形式で出して",target("append_instruction",id));
     const auto message = f.receive("format","補足として表をCSV形式で出して");
     check(f.receive("format","補足として表をCSV形式で出して") == message,"retry changed a durable receipt");
     f.tick(3);
@@ -228,6 +254,7 @@ void unknownSendThenScopeChange() {
     f.t3.loseNextSend = true;
     f.reach(id,"waiting");
     const auto before = f.task(id);
+    f.script("完了条件は p95 レイテンシを報告",revision(id,"doneWhen","p95 レイテンシを報告"));
     const auto change = f.receive("revision","完了条件は p95 レイテンシを報告");
     check(f.task(id)["revisions"].size() == 2 && f.task(id)["doneWhen"] == "p95 レイテンシを報告",
           "explicit criteria did not create a revision");
@@ -237,10 +264,12 @@ void unknownSendThenScopeChange() {
     f.tick(3);
     check(f.t3.sent.size() == 1 && !f.t3.reconciled.empty() && f.t3.interrupted.empty(),
           "an unconfirmed launch was resent, skipped reconciliation, or stopped before identifying its Run");
-    const auto firstAction = f.t3.sent.front().actionId;
+    const auto firstCommand = f.t3.sent.front();
     check(std::all_of(f.t3.reconciled.begin(),f.t3.reconciled.end(),[&](const Command& command) {
-        return command.actionId == firstAction && command.authGeneration == "original-login";
-    }),"recovery used a different action or login generation");
+        return command.actionId == firstCommand.actionId && command.authGeneration == firstCommand.authGeneration &&
+            command.instruction == firstCommand.instruction && command.tool == firstCommand.tool &&
+            command.environmentId == firstCommand.environmentId && command.projectId == firstCommand.projectId;
+    }),"recovery changed the original action ID, payload or authentication generation");
     f.restart();
     f.now += 3;
     f.t3.deliveryVisible = true;
@@ -285,6 +314,7 @@ void completeRacingWithNewCriteria() {
     f.reach(id,"running");
     f.t3.finish("run-1","Old report offered for completion");
     f.reach(id,"deciding");
+    f.script("完了条件はメモリを計測",revision(id,"doneWhen","メモリを計測"));
     f.model.beforeComplete = [&](const ModelInput& input) {
         if (input.event["resultRunId"] == "run-1") f.receive("racing-revision","完了条件はメモリを計測");
     };
@@ -301,12 +331,85 @@ void completeRacingWithNewCriteria() {
           result["doneWhen"] == "メモリを計測","the final result relied on stale work or criteria");
 }
 
+void staleRoutingDecisionIsRecomputed() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    constexpr auto instruction = "計測結果を表にして";
+    f.script(instruction,target("append_instruction",id));
+    int decisions = 0;
+    f.model.beforeRoute = [&](const ModelInput&) {
+        if (++decisions != 1) return;
+        Store writer(f.dir/"state.db");
+        writer.operate(id,0,"cancel");
+        f.script(instruction,{{"kind","clarify"},{"text","停止した作業の結果を使いますか？"}});
+    };
+    const auto receipt = f.receive("racing-instruction",instruction);
+    check(decisions == 2 && f.task(id)["state"] == "cancelled" &&
+          f.event(id,"instruction_accepted").is_null() && f.store->clarifications("alpha").size() == 1 &&
+          f.conversationMessage(receipt["messageId"])["status"] == "needs_you" && f.t3.sent.empty(),
+          "routing applied a stale task generation or skipped redeciding against the current task");
+}
+
+void pendingRouterDoesNotBlockIndependentProject() {
+    using namespace std::chrono_literals;
+    Fixture f;
+    const auto project = f.store->submit(f.routing("Separate project", "beta", "desktop", "other-project"));
+    f.reach(project,"deciding");
+    std::promise<void> routeEntered, allowRoute, projectDeciding;
+    const auto routing = routeEntered.get_future().share();
+    const auto resume = allowRoute.get_future();
+    const auto projectProgress = projectDeciding.get_future();
+    f.model.beforeRoute = [&](const ModelInput&) {
+        routeEntered.set_value();
+        resume.wait();
+    };
+    f.model.beforeIntake = [&](const ModelInput&) {
+        if (routing.wait_for(5s) == std::future_status::ready) projectDeciding.set_value();
+    };
+    constexpr auto request = "Create a release note";
+    f.script(request,{{"kind","create_task"}});
+    f.enqueue("slow-router",request);
+    auto dispatch = std::async(std::launch::async,[&] { f.runtime->tickConcurrent(); });
+    const bool started = projectProgress.wait_for(5s) == std::future_status::ready;
+    allowRoute.set_value();
+    dispatch.get();
+    f.runtime.reset();
+    check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 1,
+          "a pending conversation decision blocked an independent project's model decision");
+}
+
+void inFlightAnswerCannotMoveToAnUnrelatedWait() {
+    Fixture f;
+    const auto naming = f.store->submit(f.routing("名前を決める"));
+    const auto color = f.store->submit(f.routing("色を決める","alpha","cloud"));
+    f.model.questions.emplace(naming,Json{{"question","何という名前にしますか？"},{"choices",{"Flockです","別の名前"}}});
+    f.model.questions.emplace(color,Json{{"question","どの色にしますか？"}});
+    f.reach(naming,"waiting");
+    f.reach(color,"waiting");
+    const auto wait = f.task(naming)["wait"]["id"].get<Id>();
+    const auto colorWait = f.task(color)["wait"];
+    f.script("Flockです",target("answer_wait",naming));
+    bool changed = false;
+    f.model.beforeRoute = [&](const ModelInput&) {
+        if (std::exchange(changed,true)) return;
+        Store writer(f.dir/"state.db");
+        writer.operate(naming,wait,"answer",{{"text","別の名前"}});
+        f.script("Flockです",target("answer_wait",color));
+    };
+    f.receive("late-answer","Flockです");
+    check(changed && f.event(naming,"user_answer")["text"] == "別の名前" &&
+          f.event(color,"user_answer").is_null() && f.task(color)["wait"] == colorWait &&
+          f.store->tasks("alpha").size() == 2 && f.t3.sent.empty(),
+          "an in-flight wait reply overwrote an answer, moved to another wait or created work");
+}
+
 void unresolvedStopHoldsOnlyItsCandidates() {
     Fixture f;
     const auto a = f.store->submit(f.routing("計測作業"));
     const auto b = f.store->submit(f.routing("リリース作業","alpha","cloud"));
     const auto other = f.store->submit(f.routing("Separate task","beta","third"));
     for (auto id : {a,b,other}) f.reach(id,"running");
+    f.script("それ止めて",{{"kind","clarify"},{"text","どの作業を停止しますか？"},{"candidates",{a,b}}});
     f.receive("ambiguous-stop","それ止めて");
     const auto clarifications = f.store->clarifications("alpha");
     check(clarifications.size() == 1 && clarifications[0]["candidates"].size() == 2 && f.t3.interrupted.empty(),
@@ -321,6 +424,7 @@ void unresolvedStopHoldsOnlyItsCandidates() {
     f.reach(other,"completed");
     check(f.event(a,"completed").is_null() && f.event(b,"completed").is_null(),
           "a candidate published a completion while its stop request remained ambiguous");
+    f.script("計測作業",target("cancel_task",a),"resolved");
     f.receive("resolved-stop","計測作業",clarifications[0]["messageId"]);
     f.reach(a,"cancelled");
     f.reach(b,"completed");
@@ -328,13 +432,43 @@ void unresolvedStopHoldsOnlyItsCandidates() {
           "resolving the target did not release exactly the intended holds");
 }
 
+void cancellationReleasesOnlyAfterStopConfirmation() {
+    Fixture f;
+    const auto stopped = f.store->submit(f.routing("計測作業"));
+    const auto follower = f.store->submit(f.routing("同じプロジェクトの次の作業"));
+    f.reach(stopped,"running");
+    const auto independent = f.store->submit(f.routing("別プロジェクトの作業","alpha","desktop","other-project"));
+    f.script("計測作業を停止して",target("cancel_task",stopped));
+    f.receive("cancel-active","計測作業を停止して");
+    f.t3.loseNextStop = true;
+    f.reach(independent,"running");
+    check(f.task(stopped)["state"] == "cancelling" && f.task(follower)["state"] == "queued" &&
+          f.t3.interrupted == std::vector{std::pair<std::string,std::string>{"desktop","run-1"}} &&
+          f.t3.sent.size() == 2 && f.t3.sent.back().projectId == "other-project",
+          "a lost stop acknowledgment released the same-project gate or blocked an independent project");
+    f.restart();
+    f.t3.finish("run-1","Stopped, with delegated work still settling",false);
+    f.now += 20;
+    f.tick(3);
+    check(f.task(stopped)["state"] == "cancelling" && f.task(follower)["state"] == "queued" &&
+          f.t3.interrupted.size() == 1 && f.t3.sent.size() == 2,
+          "cancellation was published or the follower ran before the prior Run settled");
+    f.t3.finish("run-1","Delegated work settled");
+    f.reach(stopped,"cancelled");
+    f.reach(follower,"running");
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().projectId == "project" &&
+          f.task(independent)["state"] == "running", "settled cancellation did not release its own queue");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
     const auto occupied = f.store->submit(f.routing("Cloud work","beta","cloud"));
     const auto moving = f.store->submit(f.routing());
+    f.script("補足として表をCSV形式で出して",target("append_instruction",moving));
     f.receive("format-before-launch","補足として表をCSV形式で出して");
     f.reach(occupied,"running");
     f.reach(moving,"running");
+    f.script("計測はクラウドMacで",revision(moving,"environment","クラウドMac"));
     f.receive("where","計測はクラウドMacで");
     const auto following = f.store->submit(f.routing("Cloud follower","beta","cloud"));
     f.tick(3);
@@ -360,12 +494,15 @@ void latestTargetPrecedesABatchedBacklog() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
+    f.script("計測はクラウドMacで",revision(id,"environment","クラウドMac"));
     f.receive("old-location","計測はクラウドMacで");
     std::vector<std::string> notes;
     for (int i = 0; i < 5; ++i) {
         notes.push_back("補足として表をCSV形式で出して " + std::string(14500,'a') + " fixture note " + std::to_string(i));
+        f.script(notes.back(),target("append_instruction",id));
         f.receive("notes-" + std::to_string(i),notes.back());
     }
+    f.script("計測はローカルMacで",revision(id,"environment","ローカルMac"));
     f.receive("new-location","計測はローカルMacで");
     f.t3.finish("run-1","Settled before the next destination");
     f.advanceUntil([&] { return f.t3.sent.size() > 1; },"the backlog did not reach T3");
@@ -396,7 +533,9 @@ void continuationUsesTheCurrentBudget() {
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
     for (int run = 1; run <= 4; ++run) {
-        f.receive("instruction-" + std::to_string(run),"補足として表をCSV形式で出して for fixture " + std::to_string(run));
+        const auto instruction = "補足として表をCSV形式で出して for fixture " + std::to_string(run);
+        f.script(instruction,target("append_instruction",id));
+        f.receive("instruction-" + std::to_string(run),instruction);
         f.t3.finish("run-" + std::to_string(run),"Prior evidence");
         f.reach(id,"deciding");
         f.reach(id,run < 4 ? "running" : "waiting");
@@ -404,6 +543,19 @@ void continuationUsesTheCurrentBudget() {
     check(f.task(id)["wait"]["reason"] == "budget" && f.task(id)["remaining"] == 0 &&
           f.t3.sent.size() == 4 && f.store->tasks("alpha").size() == 1,
           "the exhausted budget still permitted a new Run or Task");
+    const auto wait = f.task(id)["wait"];
+    f.script("はい",target("resolve_wait",id));
+    f.receive("unrelated-agreement","はい");
+    check(f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
+          f.event(id,"budget_granted").is_null(),"an unanchored generic agreement approved a budget wait");
+    f.script("追加を許可しない",target("resolve_wait",id));
+    f.receive("declined-budget","追加を許可しない",wait["messageId"].get<Id>());
+    f.script(f.routing().request,{{"kind","create_task"}});
+    f.receive("repeat-active-task",f.routing().request);
+    check(f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
+          f.store->tasks("alpha").size() == 1 && f.event(id,"budget_granted").is_null(),
+          "a declined grant or duplicate request reset the active budget");
+    f.script("追加1回",target("resolve_wait",id));
     f.receive("budget","追加1回");
     f.reach(id,"running");
     check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 0 && f.task(id)["additionalUsed"] == 4 &&
@@ -416,6 +568,7 @@ void revisionOfProvablyUnsentAction() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"sending");
+    f.script("完了条件はレポートを出す",revision(id,"doneWhen","レポートを出す"));
     f.receive("ready-revision","完了条件はレポートを出す");
     f.reach(id,"running");
     const auto task = f.task(id);
@@ -431,6 +584,7 @@ void revisionOfProvablyUnsentAction() {
 void queuedCriteriaAreUsedForFirstDelegation() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
+    f.script("完了条件は p99 レイテンシを報告",revision(id,"doneWhen","p99 レイテンシを報告"));
     const auto receipt = f.receive("criteria-before-launch","完了条件は p99 レイテンシを報告");
     f.reach(id,"running");
     const auto task = f.task(id);
@@ -447,8 +601,12 @@ int main() {
         appendWaitsForSafeBoundary();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();
+        staleRoutingDecisionIsRecomputed();
+        pendingRouterDoesNotBlockIndependentProject();
+        inFlightAnswerCannotMoveToAnUnrelatedWait();
         unresolvedStopHoldsOnlyItsCandidates();
-        rawInboxSurvivesRestartAndBlocksCompletion();
+        cancellationReleasesOnlyAfterStopConfirmation();
+        durableInboxSurvivesRestartAndBlocksCompletion();
         linkedResultStartsANewSession();
         cloudDestinationWaitsForItsProject();
         latestTargetPrecedesABatchedBacklog();
