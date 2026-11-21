@@ -45,7 +45,7 @@
 }
 .studio-start .studio-head { margin-bottom: var(--space-4); }
 .studio-start-heading { margin: var(--space-5) 0 var(--space-2) .15rem; color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
-.studio-start-list { display: grid; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
+.studio-start-list { display: grid; flex-shrink: 0; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
 .studio-start-option {
   display: flex;
   align-items: center;

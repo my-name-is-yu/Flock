@@ -309,7 +309,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       const look = `${avatar.example}|${avatar.color}`;
       if (look !== celebratedLook) {
         celebratedLook = look;
-        celebrate();
+        if (state.lookChanged) celebrate();
       }
     } else {
       destroyHero();

@@ -564,7 +564,7 @@ void botProfilesAndAvatars() {
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
     std::filesystem::create_directories(customDir);
-    const Json customAvatar = {{"definition",{{"body","M0 0h10v10z"}}},{"color","#123456"},{"eyeColor","#0000ff"}};
+    const Json customAvatar = {{"definition",{{"id","badge"},{"body",{{"path","M0 0h10v10z"}}}}},{"color","#123456"},{"eyeColor","#0000ff"}};
     { std::ofstream(customDir / "config.json") << Json{{"name","Custom"},{"avatar",customAvatar}}.dump(); }
     { std::ofstream(customDir / "avatar.png") << pngBytes; }
     const auto customRenamed = bots.updateProfile("custom",{{"name","Custom Two"}});
