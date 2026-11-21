@@ -491,6 +491,21 @@ void exercise(const std::filesystem::path& path) {
           t3.replies.back().target.runId == "run-triage-1" && t3.replies.back().questionId == "scope-question" &&
           t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
 
+    auto& completedTriage = t3.observations["thread-triage"];
+    completedTriage.kind = Observation::Kind::Finished;
+    completedTriage.status = "completed";
+    completedTriage.report = "Triage evidence is complete";
+    completedTriage.resultRunId = "run-triage-1-result";
+    completedTriage.itemId = "triage-result-item";
+    completedTriage.settled = true;
+    tick(*runtime,3);
+    const auto completedTriagePage = reopened.get("/api/view?bot=triage");
+    const auto completedTriageEvent = std::find_if(completedTriagePage["events"].begin(),completedTriagePage["events"].end(),
+        [&](const Json& event) { return event["kind"] == "completed" && event["taskId"] == triage; });
+    check(completedTriageEvent != completedTriagePage["events"].end() &&
+          (*completedTriageEvent)["data"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
+          "completed source lost its saved local T3 link");
+
     conversationPages(reopened,cli,release,next,triage,earlierRequests);
     sessionPages(reopened,cli,*runtime,triage);
 }

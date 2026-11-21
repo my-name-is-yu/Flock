@@ -1149,12 +1149,18 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         }
         change(snapshot,[&](Json& current) {
             const auto id = current["id"].get<Id>();
-            if (tool == "complete" && (db.completionHeld(current) || hasPending(current) ||
-                current.value("replanning",false) ||
-                (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr))))) {
-                return false;
+            if (tool == "complete") {
+                if (hasPending(current) || current.value("replanning",false) ||
+                    (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))) {
+                    return false;
+                }
+                if (db.completionHeld(current)) {
+                    current["deferredCompletionEventId"] = event["id"];
+                    return true;
+                }
             }
-            const bool charge = work && !current["lastRun"].is_null();
+            const bool charge = work && (!current["lastRun"].is_null() || db.query(
+                "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
             if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
             if (initial && work) {
                 const auto source = current.value("criteriaSourceMessageId",current.value("sourceMessageId",Id{0}));
@@ -1163,6 +1169,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 current.erase("criteriaSourceMessageId");
             }
             db.consumeEvent(current);
+            current.erase("deferredCompletionEventId");
             const auto action = actionId();
             recordDecision(current,event,decision,action);
             current.erase("feedback");
@@ -1174,7 +1181,8 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 db.journal(id,"completed",{{"text",field(args,"report")},{"reason",decision.reason},{"doneWhen",current["doneWhen"]},
                     {"revisionId",revision(current)},{"source",{{"environmentId",field(event,"environmentId")},
                         {"threadId",field(event.value("run",Json(nullptr)),"threadId")},
-                        {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")}}}});
+                        {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")},
+                        {"link",field(event.value("run",Json(nullptr)),"link")}}}});
             } else {
                 const auto pending = work ? pendingBatch(current) : InstructionBatch{};
                 supersedeInstructions(current,pending.superseded);
@@ -1199,6 +1207,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
+            if (task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>() && db.completionHeld(task)) return;
             peer = db.peerExchange(task["id"]);
             if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
                 auto report = settledSessionReport(task);

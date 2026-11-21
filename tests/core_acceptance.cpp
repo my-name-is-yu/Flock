@@ -693,6 +693,48 @@ void peerWorkAndRestart() {
     }
 }
 
+void peerWorkSharesBudgetWithDirectT3Work() {
+    Fixture f;
+    f.allowBeta();
+    const auto root = f.submit("Verify and report the PR");
+    int results = 0;
+    const auto requestPeerWork = [](int number) {
+        Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR, pass " + std::to_string(number)}};
+        if (number == 1) args["doneWhen"] = Evidence;
+        return Decision{"send_bot_message",std::move(args),"Use the configured verifier"};
+    };
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == root) {
+            if (input.event["kind"] == "intake") return requestPeerWork(++results);
+            if (input.event["kind"] == "bot_result") {
+                ++results;
+                if (results <= 4) return requestPeerWork(results);
+                return work("delegate",false);
+            }
+            if (input.event["kind"] == "result") return work("follow_up",false);
+            throw std::runtime_error("Unexpected sender event in peer budget test");
+        }
+        check(input.event["kind"] == "bot_request","peer work received an unexpected event");
+        return botReply("result","Verified the requested pass");
+    };
+
+    for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
+    check(f.task(root)["state"] == "waiting","peer work did not reach its exhausted-budget wait");
+    const auto budget = f.wait(root,"budget");
+    check(f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 3 &&
+          f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
+          "direct T3 work bypassed the allowance exhausted by peer work");
+    f.store->operate(root,budget,"approve");
+    f.reach(root,"running");
+    check(f.t3.launches == 1 && f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 4,
+          "one approval did not admit exactly one direct T3 action");
+    f.t3.finish("run-1");
+    const auto secondBudget = f.wait(root,"budget");
+    check(secondBudget != budget && f.t3.launches == 1 && f.task(root)["remaining"] == 0 &&
+          f.task(root)["additionalUsed"] == 4 && f.task(root)["wait"]["attempted"] == "follow_up",
+          "the approved direct T3 action granted an additional unapproved action");
+}
+
 void checkPeerClarificationAfterRun(std::string_view readMode) {
     Fixture f;
     f.read = readMode;
@@ -1174,7 +1216,8 @@ int main() {
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"history reading restart",evidenceResume},
-            {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
+            {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
+            {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
             {"Bot consultation and permission",peerConsultationAndPermission},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},

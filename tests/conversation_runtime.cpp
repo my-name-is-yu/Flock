@@ -675,6 +675,11 @@ void unresolvedStopHoldsOnlyItsCandidates() {
     const auto a = f.store->submit(f.routing("計測作業"));
     const auto b = f.store->submit(f.routing("リリース作業","alpha","cloud"));
     const auto other = f.store->submit(f.routing("Separate task","beta","third"));
+    std::map<Id,int> completionCalls;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        const auto id = input.task["id"].get<Id>();
+        if (id == a || id == b) ++completionCalls[id];
+    };
     for (auto id : {a,b,other}) f.reach(id,"running");
     f.script("それ止めて",{{"kind","clarify"},{"text","どの作業を停止しますか？"},{"operation","cancel_task"},{"candidates",{a,b}}});
     f.receive("ambiguous-stop","それ止めて");
@@ -691,11 +696,19 @@ void unresolvedStopHoldsOnlyItsCandidates() {
     f.reach(other,"completed");
     check(f.event(a,"completed").is_null() && f.event(b,"completed").is_null(),
           "a candidate published a completion while its stop request remained ambiguous");
+    f.tick(4);
+    check(completionCalls[a] == 1 && completionCalls[b] == 1,
+          "a held result was repeatedly sent to the model before restart");
+    f.restart();
+    f.tick(4);
+    check(completionCalls[a] == 1 && completionCalls[b] == 1,
+          "restart repeated a completion decision for a held result");
     f.script("計測作業",target("cancel_task",a),"resolved");
     f.receive("resolved-stop","計測作業",clarifications[0]["messageId"]);
     f.reach(a,"cancelled");
     f.reach(b,"completed");
-    check(f.store->clarifications("alpha").empty() && f.t3.interrupted.empty() && f.t3.sent.size() == 3,
+    check(f.store->clarifications("alpha").empty() && f.t3.interrupted.empty() && f.t3.sent.size() == 3 &&
+          completionCalls[a] == 1 && completionCalls[b] == 2,
           "resolving the target did not release exactly the intended holds");
 }
 
