@@ -1120,7 +1120,8 @@ void consultationRepliesAfterUserInstructions() {
         const auto sender = f.submit("Release consultation");
         Id recipient = 0;
         const std::string instruction = revise ? "Revise Check the release to inspect rollback policy" :
-            "Also inspect rollback policy for Check the release";
+            "Also inspect rollback policy for Check the release\n" + std::string(7000,'x') +
+            std::string(7000,'\n') + "exclude deprecated branches";
         f.model.script = [&](const ModelInput& input) -> Decision {
             const auto& event = input.event;
             const auto& kind = event.at("kind");
@@ -1141,7 +1142,8 @@ void consultationRepliesAfterUserInstructions() {
             }
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && event["text"] == "Use main" && !hasTool(input,"delegate") &&
-                  input.task.value("userInstructions",std::string{}).find(instruction) != std::string::npos,
+                  input.task.value("userInstructions",std::string{})
+                          .find(revise ? instruction : "exclude deprecated branches") != std::string::npos,
                   "the consultation lost the peer answer or the user instruction");
             return botReply("result","Rollback policy confirmed");
         };

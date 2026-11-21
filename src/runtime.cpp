@@ -1321,7 +1321,16 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
             if (hasPending(task)) {
                 const auto pending = pendingBatch(task);
-                summary["userInstructions"] = bounded(pending.instructions.dump(),16000);
+                Json applicable = Json::array();
+                std::size_t bytes = 2, omitted = 0;
+                for (const auto& item : pending.instructions) {
+                    const auto size = item.dump().size() + 1;
+                    if (!applicable.empty() && bytes + size > 32000) { ++omitted; continue; }
+                    applicable.push_back(item);
+                    bytes += size;
+                }
+                if (omitted) applicable.push_back({{"omittedInstructions",omitted}});
+                summary["userInstructions"] = applicable.dump();
             }
             if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
             if (!choices.empty()) summary["peers"] = std::move(choices);
