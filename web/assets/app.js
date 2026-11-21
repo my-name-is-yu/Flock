@@ -153,7 +153,7 @@ function selectBot(botId) {
   if (view) void refreshView(view);
 }
 
-const icons = {
+const sidebarIcons = {
   more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
@@ -199,7 +199,7 @@ async function openBotSettings(bot) {
 }
 function menuButton(bot) {
   const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
-  toggle.innerHTML = icons.more;
+  toggle.innerHTML = sidebarIcons.more;
   toggle.dataset.focus = `menu:${bot.id}`;
   toggle.setAttribute('aria-label', `${bot.name} のメニュー`);
   toggle.setAttribute('aria-haspopup', 'menu');
@@ -218,8 +218,8 @@ function menuPopover(bot) {
   list.setAttribute('role', 'menu');
   list.setAttribute('aria-label', `${bot.name} のメニュー`);
   const actions = [
-    [pins.has(bot.id) ? 'ピン留めを解除' : 'ピン留め', icons.pin, () => togglePin(bot)],
-    ['設定を開く', icons.settings, () => void openBotSettings(bot)],
+    [pins.has(bot.id) ? 'ピン留めを解除' : 'ピン留め', sidebarIcons.pin, () => togglePin(bot)],
+    ['設定を開く', sidebarIcons.settings, () => void openBotSettings(bot)],
   ];
   actions.forEach(([label, icon, run], index) => {
     const item = button(null, null, run);
@@ -370,7 +370,7 @@ function sessionRow(task, session, status, live) {
     row.href = link;
     row.target = '_blank';
     row.rel = 'noopener noreferrer';
-    row.insertAdjacentHTML('beforeend', icons.open);
+    row.insertAdjacentHTML('beforeend', sidebarIcons.open);
     row.lastElementChild.classList.add('activity-open');
     row.append(node('span', 'sr-only', '（T3 で開く）'));
   }
