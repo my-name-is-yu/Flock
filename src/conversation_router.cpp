@@ -608,7 +608,11 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         if (operation == "destination") require(choices.size() <= 1);
         if (operation == "cancel_task" && !explicitCancellation(segment)) operation.clear();
         auto source = resultId || anchor.result ? selectResult(resultId,option,context,anchor,segment) : std::nullopt;
-        return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation)};
+        std::optional<RevisionDraft> draft;
+        if (operation == "destination" && choices.size() == 1)
+            draft = RevisionDraft{target(*taskById(context,choices.front())),{},{}};
+        return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation),
+                       std::move(draft)};
     }
     if (kind == "status") {
         checkFields(route, {"kind","segment","taskId"});
