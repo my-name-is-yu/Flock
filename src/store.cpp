@@ -204,6 +204,7 @@ void Store::Impl::requestCancellation(Json& task) {
     if (!task.value("pendingInstructions",Json::array()).empty())
         task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
+    task.erase("deferredCompletionEventId");
     consumeEvent(task);
     journal(id,"cancel_requested",Json::object());
     if (task["state"] == "queued" && !peer) {

@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "demo.hpp"
 #include "model.hpp"
 
 #include <chrono>
@@ -278,6 +279,36 @@ void responseContract() {
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
         Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
 
+    input.tools = {"route_conversation"};
+    input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
+    const auto routing = responseRequest(input);
+    const auto& routingTool = routing["tools"][0]["tools"][0];
+    check(routingTool["name"] == "route_conversation" &&
+          routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
+          "conversation provider request must use the routing tool");
+    check(routing["instructions"].get<std::string>().find("You are the Flock Bot routing") != std::string::npos &&
+          routing["instructions"].get<std::string>().find("Only event.text") != std::string::npos,
+          "conversation provider request must select routing instructions");
+    check(routing.dump().find("must-stay-local") == std::string::npos,
+          "conversation adapter config leaked into the prompt");
+    input.tools = {"answer_conversation_result","clarify_conversation_result"};
+    input.event = {{"kind","answer_conversation_result"},{"text","Explain the selected option"},
+                   {"source",{{"text","Selected evidence"}}}};
+    const auto resultAnswer = responseRequest(input);
+    const auto& answerTool = resultAnswer["tools"][0]["tools"][0];
+    check(answerTool["name"] == "answer_conversation_result" &&
+          answerTool["parameters"]["required"] == Json::array({"reason","text"}),
+          "result provider request must use the answer tool");
+    const auto& clarificationTool = resultAnswer["tools"][0]["tools"][1];
+    check(clarificationTool["name"] == "clarify_conversation_result" &&
+          clarificationTool["parameters"]["required"] == Json::array({"reason","text"}),
+          "result provider request must support clarification for insufficient evidence");
+    const auto answerContext = Json::parse(resultAnswer["input"][0]["content"].get<std::string>());
+    check(answerContext["event"] == input.event,"result provider request lost the question or selected evidence");
+    check(resultAnswer["instructions"].get<std::string>().find("Answer event.text in the user's language") != std::string::npos &&
+          resultAnswer.dump().find("must-stay-local") == std::string::npos,
+          "result provider request must select its prompt without exposing adapter config");
+
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
@@ -350,6 +381,70 @@ void acceptanceRunner() {
     }
     check(count == 6,"six trial rows were not recorded");
 }
+
+void fixedDemoWithUserCriteriaAndContinuation() {
+    Sandbox fixture;
+    Store store(fixture.path / "state.db");
+    struct ChangeRouter final : Model {
+        Json route;
+        Decision decide(const ModelInput&) override {
+            return {"route_conversation",{{"routes",Json::array({route})}},"Apply the fixture's request"};
+        }
+    } changes;
+    auto t3 = makeDemoT3();
+    const auto demo = makeDemoModel();
+    const auto notes = [](auto) { return BotNotes{}; };
+    const Intake intake{"demo","Measure the result","local","project"};
+    const auto tickUntil = [](Runtime& runtime,const auto& ready,std::string_view message) {
+        for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
+        check(ready(),message);
+    };
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        store.receive(intake,"bare-status","progress");
+        runtime.routeConversation();
+        check(store.tasks("demo").empty() && store.conversation("demo").back()["data"]["route"] == "status",
+              "bare progress started a new Task in the fixed demo");
+    }
+    const auto task = store.submit(intake);
+    {
+        Runtime routing(store,changes,*t3,notes);
+        changes.route = {{"kind","revise_task"},{"taskId",task},{"doneWhen","Confirm the output"}};
+        store.receive(intake,"criteria","Completion criteria: Confirm the output");
+        routing.routeConversation();
+    }
+    check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
+          "the requested criteria was prematurely marked as fixed");
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        tickUntil(runtime,[&] { return store.task(task)["state"] == "running"; },"the fixed demo never started");
+    }
+    const auto first = store.task(task);
+    check(first["doneWhen"] == "Confirm the output" && first["remaining"] == 3 && first["runs"].size() == 1,
+          "the fixed demo failed to delegate with the user's provisional criteria");
+    {
+        Runtime routing(store,changes,*t3,notes);
+        changes.route = {{"kind","append_instruction"},{"taskId",task}};
+        store.receive(intake,"follow-up","Include the exact sample count");
+        routing.routeConversation();
+    }
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        tickUntil(runtime,[&] { return store.task(task)["state"] == "completed"; },
+                  "the fixed demo did not finish its continuation");
+    }
+    const auto runs = store.task(task).at("runs");
+    check(runs.size() == 2 && runs[0]["threadId"] == runs[1]["threadId"] && runs[0]["runId"] != runs[1]["runId"],
+          "the fixed demo follow-up started another Session");
+    Command followUp;
+    followUp.tool = "follow_up";
+    followUp.actionId = "persisted-demo-action";
+    followUp.target = {runs[0]["threadId"],runs[0]["runId"],""};
+    const auto sent = t3->send(followUp);
+    const auto reconciled = t3->reconcile(followUp);
+    check(sent.run.threadId == followUp.target.threadId && sent.run.runId == reconciled.run.runId &&
+          sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
+}
 }
 
 int main() {
@@ -360,6 +455,7 @@ int main() {
         directionalPeerConfiguration();
         responseContract();
         acceptanceRunner();
+        fixedDemoWithUserCriteriaAndContinuation();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
