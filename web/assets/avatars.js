@@ -66,3 +66,5 @@ export function showAvatar(host, bot, { still = true, state = 'idle' } = {}) {
   }
   return mountAvatar(host, { ...options, definition, color, eyeColor, state });
 }
+
+export function accentColor(bot) { return avatarOptions(bot).color; }

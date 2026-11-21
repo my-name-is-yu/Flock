@@ -414,6 +414,13 @@ void exercise(const std::filesystem::path& path) {
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
     const Id waitId = waits[0]["wait"]["id"];
+    for (int i = 0; i < 45; ++i)
+        cli.submit({"release","Earlier request " + std::to_string(i),"local-env","release"});
+    const auto beforeAnswer = browser.get("/api/view?bot=release");
+    check(std::none_of(beforeAnswer["events"].begin(),beforeAnswer["events"].end(),[&](const Json& row) {
+        return row["kind"] == "waiting" && row["data"]["id"] == waitId;
+    }),"question fixture did not cross a history page boundary");
+
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
@@ -425,6 +432,11 @@ void exercise(const std::filesystem::path& path) {
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
     cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
+    const auto answered = browser.get("/api/view?bot=release");
+    check(std::any_of(answered["events"].begin(),answered["events"].end(),[&](const Json& row) {
+        return row["kind"] == "user_answer" && row["taskId"] == release &&
+               row["data"]["question"] == "利用者向けの変更だけを載せますか？";
+    }),"the answer did not carry the question from the older page");
     browser.post("/api/operations",reply,409);
     tick(*runtime,2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&

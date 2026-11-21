@@ -1,4 +1,5 @@
 import { showAvatar } from '/avatars.js';
+import { accentColor } from '/avatars.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -16,12 +17,10 @@ const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long'
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
-  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
-  cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
-  idle: 'Idle', thinking: 'Thinking', working: 'Session in progress', peer_waiting: 'Waiting for a Bot',
-};
-const peerMessageLabels = {
-  request: 'Request', question: 'Question', answer: 'Answer', result: 'Result', cancelled: 'Cancelled', failed: 'Failed',
+  queued: '受付済み', deciding: '判定中', sending: '送信中', running: '作業中', waiting: '確認待ち',
+  cancelling: '中止処理中', completed: '完了', cancelled: '中止', ended: '実行終了',
+  failed: '失敗', interrupted: '中断', rolled_back: 'ロールバック',
+  idle: '待機中', thinking: '判断中', working: 'セッション作業中',
 };
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
@@ -367,30 +366,38 @@ function renderBots() {
   if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
+const presenceLabels = { idle: '待機中', thinking: '判断中', working: '作業中', waiting: '確認待ち' };
 function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
-  elements.profile.hidden = !bot;
+  const profile = elements.profile;
+  profile.hidden = !bot;
   elements['settings-button'].hidden = !bot;
   elements['profile-placeholder'].hidden = !!bot;
   if (!bot) {
     profileAvatar?.destroy();
     profileAvatar = null;
     profileKey = '';
+    elements.conversation.style.removeProperty('--bot-accent');
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' : presence;
+  const avatarState = presence === 'peer_waiting' ? 'waiting' :
+    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
-  const avatarState = presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   if (key !== profileKey) {
     profileAvatar?.destroy();
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
-  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: avatarState });
+    elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  const offline = connection === 'offline';
+  const status = offline ? 'Runtime に未接続' : presenceLabels[presence] ?? presence;
+  profile.dataset.presence = presence;
+  profile.dataset.state = offline ? 'offline' : presence;
+  profile.title = `${bot.name} · ${status}`;
+  profile.setAttribute('aria-label', `${bot.name} の設定を開く`);
   elements['profile-name'].textContent = bot.name;
-  elements.profile.setAttribute('aria-label', `Open settings for ${bot.name}`);
-  elements['profile-status'].dataset.state = presence;
-  elements['profile-status'].textContent = connection === 'offline' ? 'Disconnected from the runtime' : stateLabels[presence];
+  elements['profile-status'].textContent = status;
 }
 
 function activityRow(tag, className, title, status, statusClass) {
@@ -494,9 +501,43 @@ function beginReply(target, text = '') {
   renderComposer();
   elements.message.focus();
 }
+const icons = {
+  copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
+  copied: '<path d="m5.5 12.5 4 4 9-9"/>',
+  reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
+  check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
+};
+function icon(name, className = 'glyph') {
+  const host = node('span', className);
+  host.setAttribute('aria-hidden', 'true');
+  host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
+  return host;
+}
+function iconButton(name, label, click) {
+  const control = button(null, 'icon-button msg-action', click);
+  control.setAttribute('aria-label', label);
+  control.title = label;
+  control.append(icon(name));
+  return control;
+}
+async function copyMessage(control, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    control.replaceChildren(icon('copied'));
+    control.setAttribute('aria-label', 'コピーしました');
+    control.title = 'コピーしました';
+    setTimeout(() => {
+      control.replaceChildren(icon('copy'));
+      control.setAttribute('aria-label', 'テキストをコピー');
+      control.title = 'テキストをコピー';
+    }, 1600);
+  } catch { if (view) setNotice(view, 'コピーできませんでした。', true); }
+}
 function questionActions(task) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
-  const actions = node('div', 'event-actions');
+  const actions = node('div', 'event-actions question-actions');
   for (const choice of task.wait.choices ?? []) {
     const option = button(choice, 'button', () => beginReply(target, choice));
     option.disabled = pendingWaits.has(task.wait.id);
@@ -525,10 +566,20 @@ function detailText(label, value) {
   row.append(node('strong', null, label), document.createTextNode(value));
   return row;
 }
-function eventTime(event) {
+function messageSide(event) {
+  if (event.kind === 'cancelled') return 'system';
+  return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'cron') ? 'user' : 'bot';
+}
+function reasonText(text) {
+  const reason = node('p', 'event-reason');
+  reason.append(node('span', 'sr-only', '判断理由: '), document.createTextNode(text));
+  return reason;
+}
+function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
-  const time = node('time', null, clock.format(timestamp));
+  const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
+  time.title = [`#${event.taskId}`, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
 function sourceAction(source, label = 'Open source') {
@@ -567,75 +618,157 @@ function resultActions(event, text, run) {
     beginReply({ kind: 'result', messageId: event.id, summary: text })));
   return actions;
 }
-function eventCard(event, waits, closed, queued, clarifications) {
+function eventCard(event, context, place) {
   const data = event.data;
-  const outbound = ['conversation_message', 'user_answer'].includes(event.kind) ||
-    (event.kind === 'request' && data.source !== 'cron');
-  const row = node('article', `event${outbound ? ' outbound' : ''}`);
+  const bot = context.bot;
+  const side = messageSide(event);
+  if (side === 'system') {
+    const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · Task #${event.taskId} cancelled · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    return note;
+  }
+  const row = node('article', `msg ${side}`);
   row.id = `event-${event.id}`;
   row.tabIndex = -1;
-  const card = node('div', 'event-card');
-  const metadata = node('div', 'event-meta');
-  const labels = { request: data.source === 'cron' ? 'Recurring request' : 'You', user_answer: 'Your answer',
-    conversation_message: 'You', conversation_reply: view.data.bot.name,
-    report: 'Session report', completed: 'Completion report', cancelled: 'Task cancelled' };
-  const label = event.kind === 'waiting' ? waitLabel(data.reason) : labels[event.kind];
-  metadata.append(node('strong', null, label), node('span', null, `#${event.taskId}`), eventTime(event));
-  if (event.taskId && ['request', 'completed', 'report', 'conversation_message'].includes(event.kind)) {
-    metadata.append(button('Task details', 'text-button event-task', () => void openTask(event.taskId)));
+  row.classList.toggle('group-start', place.groupStart);
+  row.classList.toggle('task-start', place.taskStart);
+  const cron = event.kind === 'request' && data.source === 'cron';
+  const scheduled = cron && data.scheduledAt ? `予定 ${fullTime.format(data.scheduledAt * 1000)}` : '';
+  const showMeta = side === 'bot' ? place.groupStart || place.taskStart : place.taskStart;
+  const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
+  const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
+    side === 'bot' ? bot?.name ?? 'Bot' : 'あなた');
+  const task = node('span', place.taskStart ? 'msg-task' : 'msg-task sr-only', event.taskId ? `#${event.taskId}` : '');
+  meta.append(name, task, eventTime(event, scheduled));
+  if (event.taskId) meta.append(button('Task details', 'text-button event-task', () => void openTask(event.taskId)));
+  row.append(meta);
+
+  const line = node('div', 'msg-line');
+  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  const bubble = node('div', 'bubble');
+  const text = node('p', 'event-text');
+  const actions = node('div', 'msg-actions');
+  if (!showMeta) {
+    const hoverTime = eventTime(event, scheduled);
+    hoverTime.setAttribute('aria-hidden', 'true');
+    actions.append(hoverTime);
   }
-  row.append(metadata, card);
+  const extras = [];
+  let copy = data.text ?? '';
+  const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+
   if (event.kind === 'waiting') {
-    card.classList.add('question-card');
-    card.append(node('p', 'event-text', waitText(data)));
-    if (data.decisionReason) card.append(detailText('Reason for decision', data.decisionReason));
-    const task = waits.get(data.id);
-    if (task?.wait.reason === 'user_question') card.append(questionActions(task));
-    else if (task) {
-      const actions = node('div', 'event-actions');
-      actions.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: task.id, waitId: data.id })));
-      card.append(actions);
-    } else card.append(node('p', 'event-note', closedLabels[closed.get(data.id)] ?? 'Request closed'));
-  } else if (event.kind === 'report') {
-    card.append(node('p', 'event-text', data.report || 'The session submitted a report.'));
-    if (data.status) card.append(detailText('Run status', stateLabels[data.status] ?? data.status));
-    if (data.truncated) card.append(node('p', 'event-note', 'Open T3 to read the full report.'));
-    card.append(resultActions(event, data.report, data.run));
-  } else if (event.kind === 'completed') {
-    card.classList.add('finished-card');
-    card.append(node('p', 'event-text', data.text));
-    if (data.reason) card.append(detailText('Reason for decision', data.reason));
-    card.append(resultActions(event, data.text, data.run));
+    copy = waitText(data);
+    text.textContent = copy;
+    bubble.append(text);
+    if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
+    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(openTask));
+    else if (openTask) {
+      const open = node('div', 'event-actions question-actions');
+      open.append(button('確認内容を開く', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
+      extras.push(open);
+    } else {
+      const resolution = node('p', 'msg-resolution');
+      resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? '確認待ちは終了しました'));
+      extras.push(resolution);
+    }
   } else if (event.kind === 'conversation_reply') {
-    card.append(node('p', 'event-text', data.text));
-    const clarification = clarifications.get(data.messageId);
-    if (clarification) {
-      card.classList.add('question-card');
-      card.append(clarificationActions(clarification));
-    }
+    text.textContent = data.text;
+    bubble.append(text);
+    const clarification = context.clarifications.get(data.messageId);
+    if (clarification) extras.push(clarificationActions(clarification));
     if (data.source?.messageId) {
-      const actions = node('div', 'event-actions');
-      actions.append(sourceAction(data.source));
-      if (data.route === 'respond') actions.append(button('Reply to this answer', 'text-button', () =>
+      const links = node('div', 'event-actions');
+      links.append(sourceAction(data.source));
+      if (data.route === 'respond') links.append(button('Reply to this answer', 'text-button', () =>
         beginReply({ kind: 'result', messageId: event.id, summary: data.text })));
-      card.append(actions);
+      extras.push(links);
     }
-  } else if (event.kind === 'cancelled') card.append(node('p', 'event-text', 'The task was cancelled.'));
-  else {
-    card.append(node('p', 'event-text', data.text));
-    if (event.kind === 'conversation_message' && data.replyToMessageId) {
-      card.append(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+  } else if (event.kind === 'report') {
+    extras.push(resultActions(event, data.report));
+    copy = data.report || 'セッションから報告がありました';
+    text.textContent = copy;
+    const link = linkToRun(data.run);
+    if (link) {
+      link.className = 'run-link';
+      link.title = 'T3 で開く';
+      link.setAttribute('aria-label', 'T3 で開く');
+      link.replaceChildren(icon('open'));
+      text.append(link);
     }
-    if (data.status === 'received') card.append(node('p', 'event-note', 'Received'));
-    if (data.deliveredToT3) card.append(node('p', 'event-note', 'Sent to T3'));
-    if (data.source === 'cron' && data.scheduledAt) card.append(node('p', 'event-note', `Scheduled for ${fullTime.format(data.scheduledAt * 1000)}`));
-    const blocker = queued.get(event.taskId)?.blockedBy;
-    if (['request', 'conversation_message'].includes(event.kind) && blocker) {
-      card.append(node('p', 'event-note', 'Waiting for earlier work on the same project.'));
-      if (blocker.request) card.append(node('p', 'event-note', blocker.request));
+    bubble.append(text);
+    if (data.status && data.status !== 'completed') {
+      bubble.append(node('p', 'event-reason', `Run の状態：${stateLabels[data.status] ?? data.status}`));
+    }
+    if (data.truncated) bubble.append(node('p', 'event-reason', '続きは T3 で確認できます。'));
+  } else if (event.kind === 'completed') {
+    extras.push(resultActions(event, data.text, data.run));
+    bubble.classList.add('completed');
+    text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', '完了: '), document.createTextNode(data.text ?? ''));
+    bubble.append(text);
+    if (data.reason) bubble.append(reasonText(data.reason));
+  } else {
+    if (cron) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', '定期依頼: '));
+    text.append(document.createTextNode(data.text ?? ''));
+    bubble.append(text);
+    if (event.kind === 'user_answer') {
+      const question = data.question;
+      if (question && !place.afterQuestion) {
+        const quote = node('p', 'msg-quote');
+        quote.append(icon('reply'), node('span', null, question));
+        quote.title = question;
+        row.insertBefore(quote, meta.nextSibling);
+      }
+    }
+    if (event.kind === 'conversation_message' && data.replyToMessageId)
+      extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
+    if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
+    if (blocker) {
+      const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
+      const note = node('p', 'msg-note', `#${blocker.id}（${owner}）の完了を待っています · ${blocker.request}`);
+      note.title = blocker.request;
+      extras.push(note);
     }
   }
+  if (copy) {
+    const control = iconButton('copy', 'テキストをコピー', () => void copyMessage(control, copy));
+    actions.append(control);
+  }
+  if (openTask?.wait.reason === 'user_question') {
+    const reply = iconButton('reply', '返信を書く', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
+    reply.disabled = pendingWaits.has(openTask.wait.id);
+    actions.append(reply);
+  }
+  line.append(bubble, actions);
+  row.append(line, ...extras);
   return row;
+}
+function workingLine(data) {
+  const row = node('div', 'msg bot working group-start');
+  const line = node('div', 'msg-line');
+  const dots = node('span', 'typing');
+  dots.setAttribute('aria-hidden', 'true');
+  dots.append(node('span'), node('span'), node('span'));
+  let label = presenceLabels.thinking;
+  if (data.presence === 'working') {
+    const active = data.activeSessions?.[0];
+    label = data.sessionTasks?.find((task) => task.id === active?.taskId)?.request ?? presenceLabels.working;
+  }
+  const text = node('span', 'working-label', label);
+  text.title = label;
+  line.append(avatar(data.bot, 'msg-avatar'), dots, text);
+  row.append(line);
+  return row;
+}
+function dayLabel(seconds) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - new Date(seconds * 1000).setHours(0, 0, 0, 0)) / 86400000);
+  return days === 0 ? '今日' : days === 1 ? '昨日' : dayFormat.format(seconds * 1000);
 }
 
 function peerConversation(messages, activeBot, names) {
@@ -669,64 +802,82 @@ function peerConversation(messages, activeBot, names) {
   return group;
 }
 
-function renderTimeline(scroll = 'auto') {
+function timelineScrollPosition() {
+  const scroller = elements.conversation;
+  const height = scroller.scrollHeight;
+  const top = scroller.scrollTop;
+  return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
+}
+
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
   const data = view?.data;
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !view?.olderBefore;
   older.disabled = !!view?.loadingOlder;
-  const names = new Map(bots.map((bot) => [bot.id, bot.name]));
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, data?.clarifications,
-    [...pendingWaits], listLoaded, [...names])) return;
+  older.textContent = view?.loadingOlder ? '読み込み中…' : '以前の会話を表示';
+  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
   const scroller = elements.conversation;
-  const previousHeight = scroller.scrollHeight;
-  const previousTop = scroller.scrollTop;
-  const atBottom = previousHeight - previousTop - scroller.clientHeight < 65;
-  const waits = new Map((data?.waits ?? []).map((task) => [task.wait.id, task]));
-  const clarifications = new Map((data?.clarifications ?? []).map((item) => [item.messageId, item]));
-  const queued = new Map((data?.queued ?? []).map((task) => [task.id, task]));
-  const closed = new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution]));
-  const opened = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')]
-    .map((group) => group.dataset.firstMessage));
-  const focused = elements.timeline.contains(document.activeElement)
-    ? document.activeElement.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage : null;
+  const names = new Map(bots.map(bot => [bot.id, bot.name]));
+  const expanded = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')].map(group => group.dataset.firstMessage));
+  const focused = elements.timeline.contains(document.activeElement) ? document.activeElement.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage : null;
   let focusTarget = null;
+  const context = {
+    bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    clarifications: new Map((data?.clarifications ?? []).map(item => [item.messageId, item])),
+    waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
+    queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
+    closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
+  };
+  const shown = events.filter((event) => event.kind !== 'wait_closed');
   const fragment = document.createDocumentFragment();
   let peerMessages = [];
   const appendPeerMessages = () => {
     if (!peerMessages.length) return;
     const group = peerConversation(peerMessages, view.id, names);
-    if (peerMessages.some((message) => opened.has(String(message.id)))) group.open = true;
-    if (peerMessages.some((message) => String(message.id) === focused)) focusTarget = group.firstElementChild;
+    group.open = expanded.has(group.dataset.firstMessage);
+    if (focused === group.dataset.firstMessage) focusTarget = group.querySelector('summary');
     fragment.append(group);
     peerMessages = [];
   };
   let day = '';
-  for (const event of events) {
-    if (event.kind === 'wait_closed') continue;
-    const eventDay = dayFormat.format(event.time * 1000);
-    if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId)
-      appendPeerMessages();
+  let previous = null;
+  shown.forEach((event, index) => {
+    const eventDay = dayLabel(event.time);
+    if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
       fragment.append(node('p', 'day', eventDay));
       day = eventDay;
+      previous = null;
     }
-    if (event.kind === 'bot_message') peerMessages.push(event);
-    else fragment.append(eventCard(event, waits, closed, queued, clarifications));
-  }
+    if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
+    const side = messageSide(event);
+    const next = shown[index + 1];
+    const place = {
+      groupStart: previous?.side !== side,
+      groupEnd: !next || next.kind === 'bot_message' || messageSide(next) !== side || dayLabel(next.time) !== day,
+      taskStart: previous?.taskId !== event.taskId,
+      afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
+    };
+    fragment.append(eventCard(event, context, place));
+    previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
+  });
   appendPeerMessages();
   if (!fragment.childElementCount) {
     const empty = node('div', 'empty-state');
     if (data?.bot) empty.append(avatar(data.bot));
     const loaded = !!data || (!view && listLoaded);
-    empty.append(node('h2', null, loaded ? (data ? `Conversation with ${data.bot.name}` : 'No Bots') : 'Loading…'));
+    empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'Bot がありません') : '読み込み中…'));
+    if (data) empty.append(node('p', null, '新しい依頼を送ると、ここに会話が続きます。'));
     fragment.append(empty);
   }
+  if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
   elements.timeline.replaceChildren(fragment);
   focusTarget?.focus({ preventScroll: true });
-  if (scroll === 'older') scroller.scrollTop = previousTop + scroller.scrollHeight - previousHeight;
-  else if (scroll === 'bottom' || atBottom) scroller.scrollTop = scroller.scrollHeight;
-  else scroller.scrollTop = previousTop;
+  if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
+  else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop = previousScroll.top;
 }
 
 const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
@@ -1016,8 +1167,9 @@ function render(scroll) {
   renderBots();
   renderHeader();
   renderActivity();
-  renderTimeline(scroll);
+  const previousScroll = timelineScrollPosition();
   renderComposer();
+  renderTimeline(scroll, previousScroll);
   renderDetail();
 }
 

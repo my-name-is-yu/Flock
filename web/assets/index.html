@@ -55,16 +55,16 @@
     <main id="main" class="main">
       <header class="conversation-header">
         <div class="header-inner">
-          <button id="open-navigation" class="icon-button narrow-only" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
+          <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Bot 一覧を開く">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" hidden>
-            <span id="profile-avatar" class="avatar avatar-profile"></span>
-            <span class="profile-info"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
-            <svg viewBox="0 0 24 24" class="profile-arrow" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Bot 設定を開く" aria-describedby="profile-status" hidden>
+            <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
+            <span class="profile-pill"><span id="profile-name" class="profile-name"></span><span class="profile-offline" aria-hidden="true">未接続</span></span>
+            <span id="profile-status" class="sr-only"></span>
           </button>
-          <h1 id="profile-placeholder" class="profile-name">Conversation</h1>
-          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
+          <h1 id="profile-placeholder" class="profile-placeholder">会話</h1>
+          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Bot 設定を開く" aria-haspopup="dialog" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
           </button>
         </div>
