@@ -89,14 +89,21 @@ function avatar(bot, className = '') {
   showAvatar(host, bot);
   return host;
 }
-function linkToRun(run, label = 'Open in T3') {
+function runHref(run) {
   if (!run?.link) return null;
-  const url = new URL(run.link);
+  let url;
+  try { url = new URL(run.link); }
+  catch { return null; }
   const hosted = url.origin === 'https://app.t3.codes' && url.pathname.startsWith('/threads/');
   const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
   if ((!hosted && !local) || url.username || url.password) return null;
+  return url.href;
+}
+function linkToRun(run, label = 'Open in T3') {
+  const href = runHref(run);
+  if (!href) return null;
   const link = node('a', 'link', `${label} ↗`);
-  link.href = url.href;
+  link.href = href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   return link;
@@ -161,9 +168,10 @@ function setTheme(mode) {
 }
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
+  const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
-  if (focus && narrow.matches) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
+  if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
 function selectBot(botId) {
   menu = null;
@@ -181,55 +189,182 @@ function selectBot(botId) {
   if (view) void refreshView(view);
 }
 
+const sidebarIcons = {
+  more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
+  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
+};
+const activePresence = new Set(['working', 'thinking', 'waiting']);
+const busyPresence = new Set(['working', 'thinking']);
+const sidebar = byId('navigation');
+
+function pinnedBotsInShortcutOrder() {
+  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+}
+function focusKey(key) {
+  sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
+}
+function setMenu(botId, focus) {
+  menu = botId;
+  renderBots();
+  if (focus === 'first' || focus === 'last') {
+    const items = sidebar.querySelectorAll('.menu-popover [role="menuitem"]');
+    items[focus === 'first' ? 0 : items.length - 1]?.focus();
+  } else if (focus) focusKey(focus);
+}
+function closeMenu(restore = true) {
+  const botId = menu;
+  if (!botId) return;
+  setMenu(null, restore ? `menu:${botId}` : null);
+}
+function togglePin(bot) {
+  if (pins.has(bot.id)) pins.delete(bot.id);
+  else pins.add(bot.id);
+  save('flock-pins', [...pins]);
+  setMenu(null, `menu:${bot.id}`);
+}
+let settingsReturnFocus = null;
+function openSettingsFromMenu(botId) {
+  settingsReturnFocus = botId;
+  openDetail({ kind: 'settings' });
+}
+function openBotSettings(bot) {
+  menu = null;
+  if (view?.id !== bot.id) selectBot(bot.id);
+  else renderBots();
+  if (view?.data) openSettingsFromMenu(bot.id);
+  else if (view) view.openSettingsOnLoad = bot.id;
+}
+function menuButton(bot) {
+  const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
+  toggle.innerHTML = sidebarIcons.more;
+  toggle.dataset.focus = `menu:${bot.id}`;
+  toggle.setAttribute('aria-label', `${bot.name} のメニュー`);
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', menu === bot.id);
+  toggle.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    setMenu(bot.id, event.key === 'ArrowDown' ? 'first' : 'last');
+  });
+  if (menu === bot.id) toggle.setAttribute('aria-controls', 'bot-menu');
+  return toggle;
+}
+function menuPopover(bot) {
+  const list = node('div', 'menu-popover');
+  list.id = 'bot-menu';
+  list.setAttribute('role', 'menu');
+  list.setAttribute('aria-label', `${bot.name} のメニュー`);
+  const actions = [
+    [pins.has(bot.id) ? 'ピン留めを解除' : 'ピン留め', sidebarIcons.pin, () => togglePin(bot)],
+    ['設定を開く', sidebarIcons.settings, () => openBotSettings(bot)],
+  ];
+  actions.forEach(([label, icon, run], index) => {
+    const item = button(null, null, run);
+    item.innerHTML = icon;
+    item.append(node('span', null, label));
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.dataset.focus = `item:${bot.id}:${index}`;
+    list.append(item);
+  });
+  list.addEventListener('keydown', (event) => {
+    const items = [...list.querySelectorAll('[role="menuitem"]')];
+    const index = items.indexOf(document.activeElement);
+    const moves = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 };
+    if (event.key in moves) {
+      event.preventDefault();
+      items[(moves[event.key] + items.length) % items.length].focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+    } else if (event.key === 'Tab') closeMenu();
+  });
+  return list;
+}
+function presenceText(bot) {
+  return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
+}
+function botRow(bot) {
+  const row = node('div', 'bot-row');
+  const active = view?.id === bot.id;
+  row.classList.toggle('selected', active);
+  row.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'bot-select', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', bot.name));
+  if (bot.presence === 'waiting') name.append(node('span', 'presence-dot'));
+  const preview = node('span', 'bot-preview');
+  if (busyPresence.has(bot.presence)) {
+    const dots = node('span', 'working-dots');
+    dots.setAttribute('aria-hidden', 'true');
+    dots.append(node('i'), node('i'), node('i'));
+    preview.append(dots);
+  }
+  preview.append(bot.preview || '会話はまだありません');
+  const text = node('span', 'bot-text');
+  text.append(name, preview);
+  select.append(avatar(bot, 'bot-avatar'), text);
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  row.append(select, menuButton(bot));
+  if (menu === bot.id) row.append(menuPopover(bot));
+  return row;
+}
+function pinTile(bot, index) {
+  const tile = node('div', 'pin-tile');
+  const active = view?.id === bot.id;
+  tile.classList.toggle('selected', active);
+  tile.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'pin', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const shortcut = index < 9 ? index + 1 : null;
+  if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
+  const face = node('span', 'pin-face');
+  face.append(avatar(bot, 'pin-avatar'));
+  if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
+  select.append(face, node('span', 'pin-name', bot.name));
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  const tooltip = node('span', 'pin-tooltip');
+  tooltip.setAttribute('aria-hidden', 'true');
+  tooltip.append(node('span', null, bot.name));
+  if (shortcut) tooltip.append(node('kbd', null, `⌥⇧${shortcut}`));
+  tile.append(select, tooltip, menuButton(bot));
+  if (menu === bot.id) tile.append(menuPopover(bot));
+  return tile;
+}
+function skeletonRows(count, className = 'skeleton-row') {
+  return Array.from({ length: count }, () => {
+    const row = node('div', className);
+    row.setAttribute('aria-hidden', 'true');
+    if (className === 'skeleton-bot') row.append(node('span', 'skeleton-avatar'));
+    const lines = node('span', 'skeleton-lines');
+    lines.append(node('span', 'skeleton-line'), node('span', 'skeleton-line short'));
+    row.append(lines);
+    return row;
+  });
+}
+
 function renderBots() {
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
-  const pinned = [];
-  const rest = [];
-  for (const bot of bots) {
-    const isPinned = pins.has(bot.id);
-    const row = node('div', isPinned ? 'pinned-bot' : 'bot-row');
-    const active = view?.id === bot.id;
-    row.classList.toggle('selected', active);
-    const select = button(null, isPinned ? 'pin' : 'bot-select', () => selectBot(bot.id));
-    select.title = bot.name;
-    select.setAttribute('aria-label', bot.name);
-    if (active) select.setAttribute('aria-current', 'true');
-    select.append(avatar(bot));
-    if (!isPinned) {
-      const text = node('span', 'bot-text');
-      text.append(node('span', 'bot-name', bot.name), node('span', 'bot-preview', bot.preview || 'No conversation yet'));
-      select.append(text);
-    }
-    const toggle = button('⋯', 'icon-button pin-menu', () => {
-      const opened = menu !== bot.id;
-      menu = opened ? bot.id : null;
-      renderBots();
-      const replacement = [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id);
-      if (opened) replacement?.nextElementSibling?.querySelector('button')?.focus();
-      else replacement?.focus();
-    });
-    toggle.dataset.bot = bot.id;
-    toggle.setAttribute('aria-label', `Menu for ${bot.name}`);
-    toggle.setAttribute('aria-expanded', menu === bot.id);
-    row.append(select, toggle);
-    if (menu === bot.id) {
-      const popover = node('div', 'pin-popover');
-      popover.append(button(isPinned ? 'Unpin' : 'Pin', null, () => {
-        if (isPinned) pins.delete(bot.id);
-        else pins.add(bot.id);
-        save('flock-pins', [...pins]);
-        menu = null;
-        renderBots();
-        [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id)?.focus();
-      }));
-      row.append(popover);
-    }
-    (isPinned ? pinned : rest).push(row);
-  }
-  elements.pinned.replaceChildren(...pinned);
+  const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+  const pinned = pinnedBotsInShortcutOrder();
+  const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
+  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
-  elements['bot-list'].replaceChildren(...rest);
-  if (!bots.length) elements['bot-list'].append(node('p', 'activity-empty', listLoaded ? 'No Bots configured' : 'Loading…'));
+  const list = elements['bot-list'];
+  list.setAttribute('aria-busy', !listLoaded);
+  list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
+  else if (!bots.length) list.append(node('p', 'activity-empty', '設定済みの Bot はありません'));
+  if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
 function renderHeader() {
@@ -258,26 +393,46 @@ function renderHeader() {
   elements['profile-status'].textContent = connection === 'offline' ? 'Disconnected from the runtime' : stateLabels[presence];
 }
 
-function activityTitle(request, className) {
-  const title = node('span', className, request);
-  title.title = request;
-  return title;
+function activityRow(tag, className, title, status, statusClass) {
+  const row = node(tag, `activity ${className}`);
+  const heading = node('span', 'activity-title', title);
+  const line = node('span', `activity-status ${statusClass}`.trim());
+  line.append(node('span', 'activity-mark'), node('span', null, status));
+  row.append(heading, line);
+  return row;
+}
+function sessionRow(task, session, status, live) {
+  const link = runHref(session);
+  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
+  row.title = `#${task.id} ${task.request}`;
+  if (link) {
+    row.href = link;
+    row.target = '_blank';
+    row.rel = 'noopener noreferrer';
+    row.insertAdjacentHTML('beforeend', sidebarIcons.open);
+    row.lastElementChild.classList.add('activity-open');
+    row.append(node('span', 'sr-only', '（T3 で開く）'));
+  }
+  return row;
 }
 function renderActivity() {
   const data = view?.data;
+  const loading = !!view && !data;
   const waits = data?.waits ?? [];
   const clarifications = data?.clarifications ?? [];
-  if (changed('waits', view?.id, waits, clarifications)) {
+  if (changed('waits', view?.id, loading, waits, clarifications)) {
     elements['wait-count'].textContent = waits.length + clarifications.length;
     elements['wait-count'].classList.toggle('has-waits', waits.length + clarifications.length > 0);
+    elements['wait-count'].hidden = !(waits.length + clarifications.length);
+    elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = waits.map((task) => {
-      const row = button(null, 'activity wait-select', () => {
+      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
+      row.type = 'button';
+      row.title = waitText(task.wait);
+      row.addEventListener('click', () => {
         openNavigation(false);
         openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
       });
-      const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', waitLabel(task.wait.reason)));
-      row.append(line, activityTitle(task.request, 'activity-subtitle'));
       return row;
     });
     for (const clarification of clarifications) {
@@ -291,7 +446,8 @@ function renderActivity() {
       rows.push(row);
     }
     elements['wait-list'].replaceChildren(...rows);
-    if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
+    if (loading) elements['wait-list'].append(...skeletonRows(1));
+    else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', '確認待ちはありません'));
   }
   const groups = new Map(view?.loadedSessions);
   for (const task of data?.sessionTasks ?? []) groups.set(task.id, task);
@@ -299,26 +455,34 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, [...groups.values()], active)) return;
-  const rows = [];
+  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
+  const activeKeys = new Set();
+  const live = [];
+  for (const run of active) {
+    const identity = key(run.taskId, run);
+    if (activeKeys.has(identity)) continue;
+    activeKeys.add(identity);
+    live.push(sessionRow({ id: run.taskId, request: run.request }, run, stateLabels[run.state] ?? run.state, true));
+  }
+  const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      const row = node('article', 'activity session-entry');
-      const status = active.find((run) => run.taskId === task.id && run.threadId === session.threadId &&
-        run.environmentId === session.environmentId)?.state ?? 'ended';
-      const line = node('span', 'activity-line');
-      line.append(badge(status), button('Task details', 'text-button', () => {
-        openNavigation(false);
-        void openTask(task.id);
-      }));
-      row.append(activityTitle(task.request, 'activity-title'), line);
-      const link = linkToRun(session);
-      if (link) row.append(link);
-      rows.push(row);
+      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, '終了', false));
     }
   }
-  elements['session-list'].replaceChildren(...rows);
-  if (!rows.length) elements['session-list'].append(node('p', 'activity-empty', 'No sessions yet'));
+  const rows = [];
+  for (const [label, items] of [['進行中', live], ['終了', ended]]) {
+    if (!items.length) continue;
+    const heading = node('h3', 'activity-group');
+    heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
+    rows.push(heading, ...items);
+  }
+  const list = elements['session-list'];
+  list.setAttribute('aria-busy', loading);
+  list.replaceChildren(...rows);
+  if (loading) list.append(...skeletonRows(2));
+  else if (!rows.length) list.append(node('p', 'activity-empty', 'セッションはまだありません'));
 }
 
 function beginReply(target, text = '') {
@@ -884,6 +1048,11 @@ async function refreshView(context, scroll) {
     mergeLatest(context, latest);
     setConnection('ready');
     render(scroll);
+    if (context.openSettingsOnLoad) {
+      const botId = context.openSettingsOnLoad;
+      context.openSettingsOnLoad = null;
+      openSettingsFromMenu(botId);
+    }
   } catch (error) {
     if (context !== view || generation !== context.generation) return;
     if (error.status === 404) void refreshBots();
@@ -1008,6 +1177,12 @@ narrow.addEventListener('change', () => openNavigation(false, false));
 for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open || !settingsReturnFocus) return;
+  if (narrow.matches) openNavigation(true, false);
+  focusKey(`menu:${settingsReturnFocus}`);
+  settingsReturnFocus = null;
+});
 elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
@@ -1052,16 +1227,22 @@ function resizeComposerAndKeepTimelineAtBottom() {
 }
 new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
-  if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
+  if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });
 document.addEventListener('keydown', (event) => {
+  const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
+  if (digit && !event.isComposing && !elements.detail.open &&
+      !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
+    const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
+    if (bot) {
+      event.preventDefault();
+      selectBot(bot.id);
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
-  if (menu) {
-    const bot = menu;
-    menu = null;
-    renderBots();
-    [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot)?.focus();
-  } else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  if (menu) closeMenu();
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
 });
 
 function refresh() {

@@ -8,6 +8,7 @@
 #include <map>
 #include <set>
 #include <regex>
+#include <set>
 
 using namespace flockv0;
 namespace {
@@ -166,6 +167,16 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
+}
+
+void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
+    const auto row = std::find_if(list.begin(),list.end(),[&](const Json& candidate) {
+        return candidate.at("id") == bot;
+    });
+    check(row != list.end(),"Bot list is missing " + bot);
+    check(row->at("presence") == expected,"unexpected Bot list presence for " + bot);
+    const auto view = browser.get("/api/view?bot=" + bot);
+    check(view.at("presence") == expected,"unexpected Bot view presence for " + bot);
 }
 
 void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
@@ -392,7 +403,8 @@ void exercise(const std::filesystem::path& path) {
     check(schedule.at("schedule") == "0 9 * * *" && schedule.at("timezone") == "Asia/Tokyo" &&
           schedule.at("request") == "前日の変更を確認する","Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
-          triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
+          triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
+          triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
     const auto settingsPage = browser.get("/api/view?bot=settings");
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
@@ -407,6 +419,7 @@ void exercise(const std::filesystem::path& path) {
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
+    checkPresence(browser,browser.get("/api/bots"),"release","waiting");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
     browser.post("/api/operations",reply,404);
@@ -419,6 +432,9 @@ void exercise(const std::filesystem::path& path) {
           t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
+    const auto resumed = browser.get("/api/bots");
+    checkPresence(browser,resumed,"release","working");
+    checkPresence(browser,resumed,"triage","waiting");
 
     server.reset();
     runtime.reset();

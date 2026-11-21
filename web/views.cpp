@@ -1,5 +1,6 @@
 #include "views.hpp"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <set>
@@ -64,7 +65,7 @@ Json runView(const Json& run, std::string_view environment) {
         return nullptr;
     const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
     const auto saved = field(run,"link");
-    return {{"threadId",thread},{"runId",field(run,"runId")},
+    return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
             {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
 }
 
@@ -219,10 +220,12 @@ Json activity(Store& store, std::string_view bot) {
             copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
             result["queued"].push_back(std::move(queued));
         }
-        const auto& active = task.at("activeRun");
+        auto active = runView(task.at("activeRun"),field(task,"environmentId"));
         if (!active.is_null()) {
-            result["activeSessions"].push_back({{"taskId",task.at("id")},{"threadId",field(active,"threadId")},
-                {"runId",field(active,"runId")},{"state",state}});
+            active["taskId"] = task.at("id");
+            active["request"] = task.at("request");
+            active["state"] = state;
+            result["activeSessions"].push_back(std::move(active));
         }
     }
     return result;
@@ -236,6 +239,7 @@ Json botList(Store& store, const Json& bots) {
         if (id.empty()) continue;
         auto row = botSummary(bot);
         row["preview"] = preview(store,id);
+        row["presence"] = activity(store,id).at("presence");
         result.push_back(std::move(row));
     }
     return result;

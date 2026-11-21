@@ -17,24 +17,22 @@
 </head>
 <body>
   <div class="workspace">
-    <aside id="navigation" class="sidebar" aria-label="Bot navigation">
-      <div class="brand">
-        <img width="34" height="34" src="/flock.svg" alt="">
-        <span>Flock</span>
-        <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">×</button>
+    <aside id="navigation" class="sidebar" aria-label="Bot ナビゲーション">
+      <div class="sidebar-head">
+        <h2 id="bots-heading" class="sidebar-title">Bots</h2>
+        <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="一覧を閉じる">×</button>
       </div>
       <div class="sidebar-scroll">
         <section class="nav-section bots" aria-labelledby="bots-heading">
-          <h2 id="bots-heading">Bots</h2>
-          <div id="pinned" class="pins" aria-label="Pinned Bots" hidden></div>
+          <div id="pinned" class="pins" role="group" aria-label="ピン留め" hidden></div>
           <div id="bot-list" class="bot-list"></div>
         </section>
         <section class="nav-section" aria-labelledby="waits-heading">
-          <div class="section-heading"><h2 id="waits-heading">Waiting for input</h2><span id="wait-count" class="count">0</span></div>
+          <div class="section-heading"><h2 id="waits-heading">確認待ち</h2><span id="wait-count" class="count" hidden>0</span></div>
           <div id="wait-list" class="activity-list"></div>
         </section>
         <section class="nav-section" aria-labelledby="sessions-heading">
-          <h2 id="sessions-heading">Sessions</h2>
+          <div class="section-heading"><h2 id="sessions-heading">セッション</h2></div>
           <div id="session-list" class="activity-list"></div>
           <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier sessions</button>
         </section>

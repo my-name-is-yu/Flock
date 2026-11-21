@@ -17,6 +17,8 @@ Switching Bots updates “Waiting for input,” “Sessions,” and the conversa
 
 Bot-to-Bot exchanges appear in both participants' conversations, grouped by exchange with the sender, recipient, message type, text, and any T3 evidence links. The initiating Bot shows that it is waiting for the peer; items requiring human action remain in “Waiting for input.”
 
+T3 links in Sessions, reports, and waiting items use the saved local URL for the correct environment and Thread when available. Active Sessions remain visible independently of history pagination.
+
 ## New requests and replies to questions
 
 Use the composer to send a request, add to work in progress, or ask about a result. The Bot uses the conversation to decide how to handle the message and asks for clarification when the target is unclear. If another task is already running in the same project, the UI shows which task must finish first.
