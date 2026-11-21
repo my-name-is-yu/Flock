@@ -5,6 +5,8 @@
 #include <charconv>
 #include <initializer_list>
 #include <regex>
+#include <utility>
+#include <variant>
 
 namespace flockv0::conversation {
 namespace {
@@ -79,11 +81,11 @@ bool refersTo(std::string_view text, std::string_view normalizedName) {
                    std::string("\"") + std::string(normalizedName) + "\""})) return true;
     for (std::size_t at = text.find(normalizedName); at != text.npos; at = text.find(normalizedName, at + 1)) {
         const auto after = at + normalizedName.size();
-        // ASCII task names must match a whole word, including adjacent Japanese particles.
-        const auto word = [](unsigned char c) {
+        const auto asciiTaskNameChar = [](unsigned char c) {
             return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
         };
-        if ((at == 0 || !word(text[at - 1])) && (after == text.size() || !word(text[after]))) return true;
+        if ((at == 0 || !asciiTaskNameChar(text[at - 1])) &&
+            (after == text.size() || !asciiTaskNameChar(text[after]))) return true;
     }
     return false;
 }
@@ -188,8 +190,11 @@ Option numberedLine(std::string_view line) {
     const auto number = ordinal(normal);
     return number && !normal.empty() && any(normal.substr(0, 9), {"案目", "番目", "つ目"}) ? Option{number, indent} : Option{};
 }
-// A present but empty excerpt signals an ambiguous match within the source.
-std::optional<std::string> optionExcerpt(std::string_view fullText, int wanted) {
+struct MissingOption {};
+struct AmbiguousOption {};
+using OptionExcerpt = std::variant<MissingOption, AmbiguousOption, std::string>;
+
+OptionExcerpt findOptionExcerpt(std::string_view fullText, int wanted) {
     std::size_t start = fullText.npos, end = fullText.size(), indent = 0;
     bool code = false;
     for (std::size_t pos = 0; pos < fullText.size();) {
@@ -203,15 +208,22 @@ std::optional<std::string> optionExcerpt(std::string_view fullText, int wanted) 
                 start = pos;
                 indent = option.indent;
             } else if (start != std::string_view::npos && option.indent <= indent && option.number > 0) {
-                if (option.number == wanted) return std::string{};
+                if (option.number == wanted) return AmbiguousOption{};
                 end = std::min(end, pos);
             }
         }
         if (newline == fullText.npos) break;
         pos = newline + 1;
     }
-    if (start == fullText.npos) return std::nullopt;
+    if (start == fullText.npos) return MissingOption{};
     return bounded(trim(fullText.substr(start, end - start)), 8192);
+}
+
+std::string resultExcerpt(std::string_view text, int numbered) {
+    if (!numbered) return bounded(text, 8192);
+    auto match = findOptionExcerpt(text, numbered);
+    if (auto* excerpt = std::get_if<std::string>(&match)) return std::move(*excerpt);
+    return {};
 }
 
 bool statusRequest(std::string_view text) {
@@ -311,8 +323,8 @@ Route status(std::string_view segment, std::string_view normal, const Context& c
     if (tasks.size() == 1) {
         output.taskId = tasks.front()->id;
         if (oneOf(tasks.front()->state, {"completed", "cancelled"})) {
-            const auto result = std::ranges::find(context.results, output.taskId, &Result::taskId);
-            if (result != context.results.end() && !result->text.empty()) {
+            const auto result = std::ranges::find(context.rankedResults, output.taskId, &Result::taskId);
+            if (result != context.rankedResults.end() && !result->text.empty()) {
                 output.source = *result;
                 output.source->text = bounded(result->text, 512);
                 output.text += "\n\n" + output.source->text;
@@ -323,7 +335,7 @@ Route status(std::string_view segment, std::string_view normal, const Context& c
 }
 
 Route resultReply(std::string_view segment, const Result& source, int numbered) {
-    auto quote = numbered ? optionExcerpt(source.text, numbered).value_or("") : bounded(source.text, 8192);
+    auto quote = resultExcerpt(source.text, numbered);
     if (quote.empty()) return clarify(segment, "I couldn't identify that option in the referenced response. Which result should I use?");
     auto out = chosen(Kind::respond, segment);
     out.source = source;
@@ -481,8 +493,8 @@ const Task* taskById(const Context& context, Id id) {
     return found == context.tasks.end() ? nullptr : &*found;
 }
 const Result* resultForTask(const Context& context, Id id) {
-    const auto found = std::ranges::find(context.results, id, &Result::taskId);
-    return found == context.results.end() ? nullptr : &*found;
+    const auto found = std::ranges::find(context.rankedResults, id, &Result::taskId);
+    return found == context.rankedResults.end() ? nullptr : &*found;
 }
 bool question(std::string_view text) {
     return text.ends_with('?') || text.ends_with("？") ||
@@ -506,7 +518,7 @@ Candidates targets(const Candidates& qualified, std::string_view normal, Id pref
     return named.empty() ? qualified : named;
 }
 Route resultWork(std::string_view segment, const Context& context, const Result& source, int numbered) {
-    auto selected = numbered ? optionExcerpt(source.text, numbered).value_or("") : bounded(source.text, 8192);
+    auto selected = resultExcerpt(source.text, numbered);
     if (selected.empty()) return clarify(segment, "Which result should I use for the new work?");
     const auto* task = taskById(context, source.taskId);
     const auto state = task ? std::string_view(task->state) : std::string_view(source.state);
@@ -540,8 +552,7 @@ Route classify(std::string_view segment, const Context& context, bool independen
     const auto named = namedTasks(all, normal);
     const auto anchoredTask = anchor.result ? anchor.result->taskId : preferred;
     const auto liveTargets = targets(open, normal, anchoredTask);
-    // A named closed task must never silently fall back to an unrelated active task.
-    const bool namesClosed = !named.empty() && namedTasks(open, normal).empty();
+    const bool namesOnlyClosedTasks = !named.empty() && namedTasks(open, normal).empty();
     if (unsafeApproval(normal))
         return clarify(segment, "Use the approval control for the request you want to approve.");
     if (cancellationMention(normal))
@@ -549,7 +560,8 @@ Route classify(std::string_view segment, const Context& context, bool independen
     if (!independent && cancellation(normal)) {
         const bool anchorMismatch = anchoredTask && !named.empty() &&
                                     std::ranges::none_of(named, [&](const Task* task) { return task->id == anchoredTask; });
-        const bool unresolved = namesClosed || anchorMismatch || (!anchoredTask && named.empty() && !deicticCancellation(normal));
+        const bool unresolved = namesOnlyClosedTasks || anchorMismatch ||
+                                (!anchoredTask && named.empty() && !deicticCancellation(normal));
         if (unresolved || question(normal) || liveTargets.size() != 1) return chooseTask(segment, unresolved ? Candidates{} : liveTargets);
         return chosen(Kind::cancelTask, segment, liveTargets.front());
     }
@@ -580,13 +592,13 @@ Route classify(std::string_view segment, const Context& context, bool independen
         if (!linkedResult) {
             if (preferred) linkedResult = resultForTask(context, preferred);
             else if (named.size() == 1) linkedResult = resultForTask(context, named.front()->id);
-            else if (!context.results.empty()) linkedResult = &context.results.front();
-            if (linkedResult && option > 0 && !optionExcerpt(linkedResult->text, option).has_value()) {
-                const auto alternative = std::ranges::find_if(context.results, [&](const Result& source) {
+            else if (!context.rankedResults.empty()) linkedResult = &context.rankedResults.front();
+            if (linkedResult && option > 0 && std::holds_alternative<MissingOption>(findOptionExcerpt(linkedResult->text, option))) {
+                const auto alternative = std::ranges::find_if(context.rankedResults, [&](const Result& source) {
                     return source.taskId == linkedResult->taskId && source.revision == linkedResult->revision &&
-                           optionExcerpt(source.text, option).has_value();
+                           !std::holds_alternative<MissingOption>(findOptionExcerpt(source.text, option));
                 });
-                if (alternative != context.results.end()) linkedResult = &*alternative;
+                if (alternative != context.rankedResults.end()) linkedResult = &*alternative;
             }
         }
         if (!linkedResult)
@@ -627,7 +639,7 @@ Route classify(std::string_view segment, const Context& context, bool independen
     const bool criteria = criteriaChange(normal), scope = scopeChange(normal);
     const bool branch = any(normal, {"mainで", "main で", "main branch", "on main", "on the main", "ブランチに変更"});
     if (!independent && (!environment.alias.empty() || environment.ambiguous || criteria || scope || continuation(normal))) {
-        const bool unresolved = namesClosed || (!preferred && named.empty() && hasUnmatchedTarget(normal, environment.alias));
+        const bool unresolved = namesOnlyClosedTasks || (!preferred && named.empty() && hasUnmatchedTarget(normal, environment.alias));
         if (unresolved || question(normal) || liveTargets.size() != 1) return chooseTask(segment, unresolved ? Candidates{} : liveTargets);
         if (environment.ambiguous)
             return clarify(segment, "Which execution environment should I use?", liveTargets);
@@ -696,7 +708,7 @@ Id selectedCandidate(std::string_view segment, const Context& context) {
     return selected;
 }
 
-} // namespace
+}
 
 bool namesCandidate(std::string_view reply, std::string_view taskName) {
     if (!trim(reply).empty() && trim(reply) == trim(taskName)) return true;
@@ -751,4 +763,4 @@ std::vector<Route> route(std::string_view text, const Context& context) {
     }
     return result;
 }
-} // namespace flockv0::conversation
+}

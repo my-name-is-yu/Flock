@@ -43,26 +43,25 @@ InstructionBatch pendingBatch(const Json& task) {
     InstructionBatch batch;
     if (!hasPending(task)) return batch;
     const auto& pending = task["pendingInstructions"];
-    std::map<std::string,std::size_t> latest;
+    std::map<std::string,std::size_t> latestOverrideIndices;
     for (std::size_t i = 0; i < pending.size(); ++i) {
-        if (auto key = replacementKey(pending[i]); !key.empty()) latest[std::move(key)] = i;
+        if (auto key = replacementKey(pending[i]); !key.empty()) latestOverrideIndices[std::move(key)] = i;
     }
-    // Include every latest override on the first Run after replanning, even if it
-    // arrived behind a long backlog of independent instructions.
-    std::size_t bytes = 0;
-    for (const auto& [key,i] : latest) bytes += field(pending[i],"text").size() + 4;
-    bool followedOrder = true;
+    std::size_t reservedOverrideBytes = 0;
+    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += field(pending[i],"text").size() + 4;
+    auto batchBytes = reservedOverrideBytes;
+    bool acceptsIndependentInstructions = true;
     for (std::size_t i = 0; i < pending.size(); ++i) {
         const auto& item = pending[i];
         if (const auto key = replacementKey(item); !key.empty()) {
-            if (latest.at(key) == i) batch.instructions.push_back(item);
+            if (latestOverrideIndices.at(key) == i) batch.instructions.push_back(item);
             else batch.superseded.push_back(item);
-        } else if (followedOrder) {
+        } else if (acceptsIndependentInstructions) {
             const auto size = field(item,"text").size() + 4;
-            if (bytes + size <= 64000) {
+            if (batchBytes + size <= 64000) {
                 batch.instructions.push_back(item);
-                bytes += size;
-            } else followedOrder = false;
+                batchBytes += size;
+            } else acceptsIndependentInstructions = false;
         }
     }
     return batch;
@@ -158,8 +157,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         return db.load(id);
     }
 
-    // A moved Session has a second execution location while its Task keeps the original FIFO position.
-    bool environmentBusy(const Json& task, std::string_view environment) {
+    bool hasUnreleasedExecutionInEnvironment(const Json& task, std::string_view environment) {
         auto rows = db.query(R"SQL(
 SELECT 1 FROM tasks WHERE project_id=? AND id<>? AND state NOT IN ('queued','completed','cancelled')
 AND COALESCE(json_extract(data,'$.environmentReleased'),0)=0
@@ -170,7 +168,7 @@ AND COALESCE(json_extract(data,'$.environmentId'),environment_id)=? LIMIT 1
 
     void activate(const Json& task) {
         change(task,[&](Json& current) {
-            if (environmentBusy(current,field(current,"environmentId"))) return false;
+            if (hasUnreleasedExecutionInEnvironment(current,field(current,"environmentId"))) return false;
             db.event(current,"intake",{{"kind","intake"}});
             current["state"] = "deciding";
             return true;
@@ -427,7 +425,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 return true;
             }
             if ((target != old || current.value("environmentReleased",false) || current["state"] == "queued") &&
-                environmentBusy(current,target)) return false;
+                hasUnreleasedExecutionInEnvironment(current,target)) return false;
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;

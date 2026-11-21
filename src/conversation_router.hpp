@@ -29,7 +29,7 @@ struct Reply {
 
 struct Context {
     std::vector<Task> tasks;
-    std::vector<Result> results; // Newest first, with source identity and bounded text.
+    std::vector<Result> rankedResults;
     Reply reply;
     std::optional<Result> recentSource;
     std::vector<std::string> environments;
@@ -48,4 +48,4 @@ struct Route {
 std::vector<Route> route(std::string_view text, const Context&);
 bool usesResults(std::string_view text);
 bool namesCandidate(std::string_view reply, std::string_view taskName);
-} // namespace flockv0::conversation
+}

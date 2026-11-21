@@ -125,7 +125,7 @@ function pendingMessage(bot) {
     try {
       const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
       if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
-    } catch { /* Keep session retries available in memory. */ }
+    } catch {}
   }
   return pendingMessages.get(bot);
 }
@@ -135,7 +135,7 @@ function rememberMessage(bot, pending) {
   try {
     if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
     else sessionStorage.removeItem(messageStorageKey(bot));
-  } catch { /* Keep session retries available in memory. */ }
+  } catch {}
 }
 
 function setConnection(state) {

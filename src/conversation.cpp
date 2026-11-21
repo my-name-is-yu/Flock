@@ -203,8 +203,8 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 }
 
 void Store::Impl::routePending() {
-    // Bound each drain so the execution loop can continue even during sustained input.
-    for (int i = 0; i < 20; ++i) {
+    constexpr int maxMessagesPerDrain = 20;
+    for (int i = 0; i < maxMessagesPerDrain; ++i) {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         Id id = 0;
@@ -416,19 +416,18 @@ WHERE m.bot_id=? AND r.status='awaiting_resolution' ORDER BY m.sequence DESC
         context.reply.kind == Reply::Kind::clarification) &&
         conversation::usesResults(reference);
     if (gatherResults) {
-        // Explicitly named old results are searched across the Bot; recent results supply ordinal context.
-        const auto sql = std::string(resultQuery) + latestResultFilter + R"SQL(
+        const auto rankedResultsSql = std::string(resultQuery) + latestResultFilter + R"SQL(
 AND j.id<? ORDER BY (length(json_extract(t.data,'$.request'))>0 AND
   instr(lower(?),lower(json_extract(t.data,'$.request')))>0) DESC,
   coalesce((SELECT final.id FROM journal final WHERE final.task_id=j.task_id
     AND final.kind='completed' ORDER BY final.id DESC LIMIT 1),j.id) DESC,j.id DESC LIMIT 10)SQL";
-        auto results = query(sql.c_str(),{bot,id,reference});
+        auto results = query(rankedResultsSql.c_str(),{bot,id,reference});
         std::size_t remaining = 24 * 1024;
         while (results.next()) {
             auto result = resultRow(results);
             result.text = bounded(result.text,remaining);
             remaining -= result.text.size();
-            context.results.push_back(std::move(result));
+            context.rankedResults.push_back(std::move(result));
         }
     }
     return context;
@@ -446,7 +445,7 @@ void Store::Impl::routeMessage(Id id) {
 
     const auto routes = conversation::route(text,context);
     Json segments = Json::array(), candidates = Json::array();
-    std::set<Id> candidateIds, modified;
+    std::set<Id> candidateIds;
     bool clarify = false;
     std::string response;
     Json replySource = nullptr;
@@ -469,46 +468,49 @@ void Store::Impl::routeMessage(Id id) {
             response += route.text;
         }
     }
-    // Recheck every affected Task and wait before applying any segment.
-    if (!clarify) for (const auto& route : routes) {
+    std::set<Id> modificationTargets;
+    const auto validateRouteTarget = [&](const Route& route) {
         if (route.kind == Kind::createTask &&
             (field(routing,"environmentId").empty() || field(routing,"projectId").empty())) {
-            clarify = true;
             response = "The Bot needs an execution environment and project before it can start work.";
-            break;
+            return false;
         }
         if (route.kind == Kind::createTask && route.source) {
             const auto original = load(route.source->taskId);
             if (!terminal(original) || field(original,"botId") != bot) {
-                clarify = true;
                 response = "The task behind that result is still open. Please confirm which work to continue.";
                 candidateIds.insert(route.source->taskId);
-                break;
+                return false;
             }
         }
         if (!route.taskId || route.kind == Kind::status || route.kind == Kind::respond ||
-            route.kind == Kind::createTask) continue;
+            route.kind == Kind::createTask) return true;
         const auto task = load(route.taskId);
         if (field(task,"botId") != bot || terminal(task) || task["state"] == "cancelling" ||
             integer(task,"generation") != route.generation || integer(task,"currentRevision") != route.revision ||
             (route.waitId && integer(task["wait"],"id") != route.waitId) ||
             (route.kind == Kind::answerWait && (!hasText(route.text) || route.text.size() > 8000)) ||
-            !modified.insert(route.taskId).second) {
-            clarify = true;
+            !modificationTargets.insert(route.taskId).second) {
             response = "Please confirm the task and instruction. The task or question is no longer current.";
             candidateIds.insert(route.taskId);
-            break;
+            return false;
         }
         if (route.source && route.source->taskId == route.taskId && route.source->revision != route.revision) {
-            clarify = true;
             response = "This task’s criteria changed after that result. Please specify what to do under the current criteria.";
             candidateIds.insert(route.taskId);
-            break;
+            return false;
         }
         if (!route.environment.empty() && verifiedEnvironment(task,routing,route).empty()) {
-            clarify = true;
             response = "I couldn't match that execution environment to this Bot's configured destinations. Please confirm the environment.";
             candidateIds.insert(route.taskId);
+            return false;
+        }
+        return true;
+    };
+    if (!clarify) {
+        for (const auto& route : routes) {
+            if (validateRouteTarget(route)) continue;
+            clarify = true;
             break;
         }
     }
@@ -619,7 +621,6 @@ void Store::Impl::routeMessage(Id id) {
         }
     } else {
         status = "needs_you";
-        // In a compound message these targets also wait for the entire request to become unambiguous.
         if (routes.size() > 1) for (const auto& route : routes) if (route.taskId) candidateIds.insert(route.taskId);
         for (const auto& task : context.tasks) if (candidateIds.contains(task.id))
             candidates.push_back({{"taskId",task.id},{"request",task.name}});
@@ -654,4 +655,4 @@ WHERE j.bot_id=? AND r.status='awaiting_resolution' ORDER BY j.id DESC
     while (rows.next()) result.push_back(rows.json(0));
     return result;
 }
-} // namespace flockv0
+}
