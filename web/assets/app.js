@@ -499,7 +499,7 @@ function renderTimeline(scroll = 'auto') {
   older.disabled = !!view?.loadingOlder;
   older.textContent = view?.loadingOlder ? '読み込み中…' : '以前の会話を表示';
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks)) return;
+    data?.presence, data?.activeSessions, data?.sessionTasks, dayFormat.format(Date.now()))) return;
   const scroller = elements.conversation;
   const previousHeight = scroller.scrollHeight;
   const previousTop = scroller.scrollTop;
