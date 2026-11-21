@@ -17,36 +17,36 @@
 </head>
 <body>
   <div class="workspace">
-    <aside id="navigation" class="sidebar" aria-label="Bot ナビゲーション">
+    <aside id="navigation" class="sidebar" aria-label="Bot navigation">
       <div class="sidebar-head">
         <h2 id="bots-heading" class="sidebar-title">Bots</h2>
-        <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="一覧を閉じる">×</button>
+        <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">×</button>
       </div>
       <div class="sidebar-scroll">
         <section class="nav-section bots" aria-labelledby="bots-heading">
-          <div id="pinned" class="pins" role="group" aria-label="ピン留め" hidden></div>
+          <div id="pinned" class="pins" role="group" aria-label="Pin" hidden></div>
           <div id="bot-list" class="bot-list"></div>
         </section>
         <section class="nav-section" aria-labelledby="waits-heading">
-          <div class="section-heading"><h2 id="waits-heading">確認待ち</h2><span id="wait-count" class="count" hidden>0</span></div>
+          <div class="section-heading"><h2 id="waits-heading">Waiting for input</h2><span id="wait-count" class="count" hidden>0</span></div>
           <div id="wait-list" class="activity-list"></div>
         </section>
         <section class="nav-section" aria-labelledby="sessions-heading">
-          <div class="section-heading"><h2 id="sessions-heading">セッション</h2></div>
+          <div class="section-heading"><h2 id="sessions-heading">Sessions</h2></div>
           <div id="session-list" class="activity-list"></div>
           <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier sessions</button>
         </section>
       </div>
       <div class="sidebar-foot">
-        <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">接続中…</span></div>
-        <div id="theme-switch" class="theme-switch" role="group" aria-label="テーマ">
-          <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="システムに合わせる" title="システムに合わせる">
+        <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div>
+        <div id="theme-switch" class="theme-switch" role="group" aria-label="Theme">
+          <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="Use system theme" title="Use system theme">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/></svg>
           </button>
-          <button type="button" data-theme-mode="light" aria-pressed="false" aria-label="ライト" title="ライト">
+          <button type="button" data-theme-mode="light" aria-pressed="false" aria-label="Light" title="Light">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 3v1.8M12 19.2V21M3 12h1.8M19.2 12H21M5.6 5.6l1.3 1.3M17.1 17.1l1.3 1.3M5.6 18.4l1.3-1.3M17.1 6.9l1.3-1.3"/></svg>
           </button>
-          <button type="button" data-theme-mode="dark" aria-pressed="false" aria-label="ダーク" title="ダーク">
+          <button type="button" data-theme-mode="dark" aria-pressed="false" aria-label="Dark" title="Dark">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 14.6A7.6 7.6 0 0 1 9.4 4.5a7.6 7.6 0 1 0 10.1 10.1Z"/></svg>
           </button>
         </div>
@@ -55,16 +55,16 @@
     <main id="main" class="main">
       <header class="conversation-header">
         <div class="header-inner">
-          <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Bot 一覧を開く">
+          <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Bot 設定を開く" aria-describedby="profile-status" hidden>
+          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status" hidden>
             <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
-            <span class="profile-pill"><span id="profile-name" class="profile-name"></span><span class="profile-offline" aria-hidden="true">未接続</span></span>
+            <span class="profile-pill"><span id="profile-name" class="profile-name"></span><span class="profile-offline" aria-hidden="true">Offline</span></span>
             <span id="profile-status" class="sr-only"></span>
           </button>
-          <h1 id="profile-placeholder" class="profile-placeholder">会話</h1>
-          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Bot 設定を開く" aria-haspopup="dialog" hidden>
+          <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
+          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
           </button>
         </div>
@@ -100,11 +100,11 @@
   <dialog id="detail" class="detail" aria-labelledby="detail-title">
     <div class="dialog-head">
       <h2 id="detail-title"></h2>
-      <button id="close-detail" type="button" class="icon-button dialog-close" aria-label="閉じる">
+      <button id="close-detail" type="button" class="icon-button dialog-close" aria-label="Close">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
       </button>
     </div>
-    <div id="detail-nav" class="detail-nav" role="tablist" aria-label="設定の項目" hidden></div>
+    <div id="detail-nav" class="detail-nav" role="tablist" aria-label="Settings sections" hidden></div>
     <div id="detail-body" class="dialog-body"></div>
   </dialog>
 </body>

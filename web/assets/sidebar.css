@@ -37,8 +37,10 @@
 .pin-tile:nth-child(3n) .pin-tooltip { left: auto; right: 0; translate: none; }
 .pin-tooltip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pin-tooltip kbd { font: inherit; font-weight: 500; opacity: .62; letter-spacing: .04em; }
-.pin:hover ~ .pin-tooltip { opacity: 1; transition-delay: .4s; }
-.pin:focus-visible ~ .pin-tooltip { opacity: 1; }
+@media (hover: hover) and (pointer: fine) {
+  .pin:hover ~ .pin-tooltip { opacity: 1; transition-delay: .4s; }
+}
+.pin:focus-visible ~ .pin-tooltip { opacity: 1; transition: none; }
 .pin-tile.menu-open .pin-tooltip { display: none; }
 
 .bot-list, .activity-list { display: grid; gap: 2px; }
@@ -57,7 +59,6 @@
 .working-dots i:nth-child(2) { animation-delay: .16s; }
 .working-dots i:nth-child(3) { animation-delay: .32s; }
 
-/* Row ⋯ stays in the tab order (opacity, not visibility) and is always visible without a hover pointer. */
 .row-menu { flex: none; width: 1.75rem; height: 1.75rem; margin-right: .35rem; padding: 0; border: 0; border-radius: var(--radius-sm); display: grid; place-items: center; background: transparent; color: var(--text-2); opacity: 0; }
 .row-menu svg { width: 1rem; height: 1rem; }
 .row-menu:hover, .row-menu[aria-expanded="true"] { background: var(--press); color: var(--text); }
