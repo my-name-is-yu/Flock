@@ -98,6 +98,8 @@ struct FixedModel : Model {
             route = {{"kind","respond"},{"text","I'm the release Bot."}};
         } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
             route = {{"kind","status"}};
+        } else if (event.at("text") == "Prepare the notes in local-env or backup") {
+            route = {{"kind","create_task"}};
         } else {
             const auto& anchor = event.at("reply");
             check(anchor.at("kind") == "wait" && event.at("text") == "利用者向けのみ",
@@ -225,6 +227,42 @@ Json conversationReply(const Json& page, Id messageId) {
     }
     check(!result.is_null(),"message received no Bot reply");
     return result;
+}
+
+void destinationChoicesInView(const std::filesystem::path& path) {
+    Store store(path);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto config = callbacks();
+    const auto configuredIntake = config.intake;
+    config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
+        auto intake = configuredIntake(bot,request);
+        intake.config["conversationEnvironments"]["backup"] = "backup-env";
+        return intake;
+    };
+    const auto server = startWeb(store,0,std::move(config));
+    Browser browser(*server);
+    const auto send = [&](std::string_view key, std::string_view message, Id replyTo) {
+        Json input = {{"botId","release"},{"clientMessageId",key},{"text",message}};
+        if (replyTo) input["replyToMessageId"] = replyTo;
+        return browser.post("/api/messages",input,201);
+    };
+    send("request-destination","Prepare the notes in local-env or backup",0);
+    runtime.routeConversation();
+    const auto page = browser.get("/api/view?bot=release");
+    const auto& clarifications = page.at("clarifications");
+    check(clarifications.size() == 1 && clarifications[0].contains("destinations") &&
+          clarifications[0]["destinations"] == Json::array({"local-env","backup","backup-env"}) &&
+          store.tasks().empty(),"the Web view lost the configured destination choices");
+    const auto receipt = send("choose-backup","backup",clarifications[0].at("messageId"));
+    tick(runtime,4);
+    const auto resolved = browser.get("/api/view?bot=release");
+    const auto tasks = store.tasks("release");
+    check(resolved.at("clarifications").empty() && tasks.size() == 1 &&
+          conversationReply(resolved,receipt.at("messageId")).at("route") == "create_task" &&
+          store.task(tasks[0]["id"]).at("runs").back().at("environmentId") == "backup-env",
+          "the selected Web destination did not receive the new Run");
 }
 
 void conversationEntry(const std::filesystem::path& path) {
@@ -570,6 +608,7 @@ int main(int argc,char** argv) {
         }
 #endif
         TestDirectory directory;
+        destinationChoicesInView(directory.path / "destination.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";

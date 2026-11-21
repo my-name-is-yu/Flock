@@ -462,24 +462,121 @@ void modelDestinationClarificationKeepsRevision() {
     const auto id = f.store->submit(routing);
     f.reach(id,"running");
 
-    const auto request = "Move Release notes to mock";
+    constexpr auto intent = "Measure acceptance on the release branch";
+    constexpr auto doneWhen = "all tests pass";
+    const auto request = "Move Release notes to mock, change its scope to ‘Measure acceptance on the release branch’, "
+                         "and require that all tests pass";
     f.script(request,{{"kind","clarify"},{"text","Which destination should I use?"},
-                      {"operation","destination"},{"candidates",{id}}});
+                      {"operation","destination"},{"candidates",{id}},
+                      {"intent",intent},{"doneWhen",doneWhen}});
     const auto before = f.task(id);
     const auto message = f.store->receive(routing,"move-destination",request);
     f.runtime->routeConversation();
     const auto clarification = f.response(message);
-    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+    check(clarification["route"] == "clarify" && clarification.contains("destinations") &&
           f.task(id) == before,
           "the model's destination question changed the task before confirmation");
+    f.restart();
     const auto destination = f.store->receive(routing,"pick-destination","mock",clarification["messageId"]);
     f.runtime->routeConversation();
     const auto response = f.response(destination);
     const auto revised = f.task(id);
-    check(response["route"] == "revise_task" && revised["intent"] == before["intent"] &&
-          revised["doneWhen"] == before["doneWhen"] && revised["pendingEnvironmentId"] == "mock-executor" &&
+    check(response["route"] == "revise_task" && revised["intent"] == intent && revised["doneWhen"] == doneWhen &&
+          revised["pendingEnvironmentId"] == "mock-executor" &&
+          revised["revisions"].back()["intent"] == intent && revised["revisions"].back()["doneWhen"] == doneWhen &&
           f.store->clarifications("alpha").empty(),
           "the destination answer dropped the revision instead of applying the chosen environment");
+}
+
+void compoundDestinationKeepsRequestsOnTheirOwnEnvironments() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on desktop";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","desktop"}}
+    })}};
+    const auto message = f.store->receive(routing,"compound-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+          f.store->tasks("alpha").empty() && f.t3.sent.empty(),
+          "a compound request applied an effect before destination confirmation");
+    f.restart();
+    const auto reply = f.store->receive(routing,"choose-backup","backup",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(f.response(reply)["route"] == "compound" && tasks.size() == 2 && f.store->clarifications("alpha").empty(),
+          "confirming the destination did not apply the original two routes");
+    for (const auto& task : tasks) f.reach(task["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark)) {
+            check(saved.find(archive) == std::string::npos && task["runs"].back()["environmentId"] == "backup-executor",
+                  "the chosen destination or separate benchmark instruction was lost");
+        } else {
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "confirming the benchmark changed the archive request or destination");
+        }
+    }
+}
+
+void destinationChoiceCannotApplyPartOfAStaleCompoundRequest() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing("Old inventory audit"));
+    f.reach(old,"running");
+    const std::string work = "Run a benchmark on cloud or desktop";
+    const std::string revise = "Require a signed report for Old inventory audit";
+    const auto request = work + "; " + revise;
+    auto companion = revision(old,"doneWhen","a signed report");
+    companion["segment"] = revise;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",work}},companion
+    })}};
+    const auto clarification = f.response(f.receive("compound-stale",request));
+    check(clarification.contains("destinations") && f.store->tasks("alpha").size() == 1,
+          "a compound task was created before the destination was confirmed");
+
+    f.script(revise,revision(old,"doneWhen","a signed report"));
+    f.receive("revise-original-task",revise);
+    const auto updated = f.task(old);
+    const auto answer = f.response(f.receive("choose-after-change","cloud",clarification["messageId"]));
+    check(answer["route"] == "respond" && f.store->tasks("alpha").size() == 1 &&
+          f.task(old) == updated && f.store->clarifications("alpha").empty(),
+          "a stale companion route did not prevent the entire pending compound request from being applied");
+}
+
+void canonicalDestinationWinsOverAlias() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["cloud"] = "staging";
+    constexpr auto first = "Run the benchmark on cloud";
+    f.script(first,{{"kind","create_task"},{"environment","cloud"}});
+    const auto direct = f.store->receive(routing,"canonical-id",first);
+    f.runtime->routeConversation();
+    check(f.response(direct)["route"] == "create_task","the canonical ID was not accepted directly");
+    const auto task = f.store->tasks("alpha").front()["id"].get<Id>();
+    f.reach(task,"running");
+    f.t3.finish("run-1","Benchmark evidence");
+    f.reach(task,"completed");
+
+    constexpr auto second = "Run the comparison on cloud or staging";
+    f.script(second,{{"kind","create_task"}});
+    const auto ambiguous = f.store->receive(routing,"canonical-clarification",second);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(ambiguous);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array(),
+          "the destination choice was not offered");
+    const auto reply = f.store->receive(routing,"canonical-choice","cloud",clarification["messageId"]);
+    f.runtime->routeConversation();
+    check(f.response(reply)["route"] == "create_task","the canonical ID was not accepted as a choice");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the confirmed task did not start");
+    check(f.t3.sent[0].environmentId == "cloud" && f.t3.sent[1].environmentId == "cloud",
+          "a canonical destination was shadowed by an alias during dispatch");
 }
 
 void lastConfiguredDestinationIsAvailable() {
@@ -1147,6 +1244,9 @@ int main() {
         destinationClarificationPreservesAndValidatesRevisionDraft();
         deferredCompletionPreservesDestinationRevisionDraft();
         modelDestinationClarificationKeepsRevision();
+        compoundDestinationKeepsRequestsOnTheirOwnEnvironments();
+        destinationChoiceCannotApplyPartOfAStaleCompoundRequest();
+        canonicalDestinationWinsOverAlias();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
         restartRestoresCancelledTaskDirections();
