@@ -1,5 +1,4 @@
-import { showAvatar } from '/avatars.js';
-import { accentColor } from '/avatars.js';
+import { accentColor, showAvatar } from '/avatars.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -535,15 +534,19 @@ async function copyMessage(control, text) {
     }, 1600);
   } catch { if (view) setNotice(view, 'コピーできませんでした。', true); }
 }
-function questionActions(task) {
+function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
-  const actions = node('div', 'event-actions question-actions');
+  const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
   for (const choice of task.wait.choices ?? []) {
-    const option = button(choice, 'button', () => beginReply(target, choice));
+    const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
+      if (view?.id === context.id) beginReply(target, choice);
+    });
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);
   }
-  const reply = button('Write a reply', 'text-button', () => beginReply(target));
+  const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
+    if (view?.id === context.id) beginReply(target);
+  });
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
   return actions;
@@ -664,7 +667,7 @@ function eventCard(event, context, place) {
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(openTask));
+    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(view, openTask));
     else if (openTask) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('確認内容を開く', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
@@ -937,16 +940,33 @@ function renderComposer() {
   scheduleNoticeFade(context, notice);
 }
 
+const detailNav = byId('detail-nav');
+const settingsSections = {
+  general: ['一般', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
+  cron: ['定期依頼', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+};
+const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
+let detailAvatar = null;
+let detailOrigin = null;
+
+function releaseDetailAvatar() {
+  detailAvatar?.handle?.destroy();
+  detailAvatar = null;
+}
 function closeDetail() {
   detail = null;
+  releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
 }
 function openDetail(selection) {
   if (!view?.data) return;
-  detail = selection;
+  detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
-  if (!elements.detail.open) elements.detail.showModal();
+  if (elements.detail.open) return;
+  detailOrigin = document.activeElement;
+  elements.detail.showModal();
+  if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
 async function openTask(taskId) {
   const context = view;
@@ -1026,26 +1046,172 @@ function taskContent(task) {
   }
   return parts;
 }
-function settingsContent(bot) {
-  elements['detail-title'].textContent = 'Bot settings';
-  const profile = node('div', 'dialog-profile');
-  profile.append(avatar(bot), node('span', null, bot.name));
-  const role = node('section', 'dialog-section');
-  role.append(node('h3', null, 'Role'), node('p', 'prose', bot.soul || 'No role configured.'));
-  const schedule = node('section', 'dialog-section');
-  schedule.append(node('h3', null, 'Recurring requests'));
-  for (const item of bot.cron) {
-    const row = node('div', 'schedule-row');
-    const specification = [item.schedule ?? item.expression ?? item.cron, item.timezone ?? item.timeZone, item.id,
-      item.enabled === false ? 'Disabled' : ''].filter(Boolean).join(' · ');
-    row.append(node('p', 'prose', item.request), node('p', 'dialog-meta', specification));
-    schedule.append(row);
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open) return;
+  releaseDetailAvatar();
+  const origin = detailOrigin;
+  detailOrigin = null;
+  const active = document.activeElement;
+  if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
+});
+
+const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
+const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+function cronValues(field, min, max, names = {}) {
+  const value = (text) => {
+    const number = /^\d+$/.test(text) ? Number(text) : names[text.toLowerCase()];
+    return number >= min && number <= max ? number : null;
+  };
+  const values = new Set();
+  for (const part of field.split(',')) {
+    const [from, to, extra] = part.split('-').map(value);
+    if (extra !== undefined || from == null || (part.includes('-') && (to == null || to < from))) return null;
+    for (let item = from; item <= (to ?? from); item += 1) values.add(item);
   }
-  if (!bot.cron.length) schedule.append(node('p', 'prose', 'No recurring requests.'));
-  return [profile, role, schedule];
+  return [...values].sort((a, b) => a - b);
 }
-function waitForm(label, fields, submit) {
+function describeCron(expression) {
+  const fields = String(expression).trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minute, hour, day, month, weekday] = fields;
+  const interval = (field, cycle) => {
+    const step = Number(/^\*\/([1-9]\d?)$/.exec(field)?.[1]);
+    return cycle % step === 0 ? step : null;
+  };
+  const daily = day === '*' && month === '*' && weekday === '*';
+  if (daily && hour === '*' && minute === '*') return '毎分';
+  const minuteInterval = interval(minute, 60);
+  if (daily && hour === '*' && minuteInterval) return `${minuteInterval} 分ごと`;
+  if (!/^\d+$/.test(minute) || Number(minute) > 59) return null;
+  const mm = minute.padStart(2, '0');
+  if (daily && hour === '*') return `毎時 ${mm} 分`;
+  const hourInterval = interval(hour, 24);
+  if (daily && hourInterval) return `${hourInterval} 時間ごと${minute === '0' ? '' : `（${mm} 分）`}`;
+  const hours = cronValues(hour, 0, 23);
+  if (!hours || hours.length > 4) return null;
+  const times = hours.map((item) => `${item}:${mm}`).join('、');
+  if (day === '*' && month === '*') {
+    if (weekday === '*') return `毎日 ${times}`;
+    const days = cronValues(weekday, 0, 7, cronNames);
+    if (!days) return null;
+    const unique = [...new Set(days.map((item) => item % 7))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+    const key = unique.join(',');
+    if (unique.length === 7) return `毎日 ${times}`;
+    if (key === '1,2,3,4,5') return `平日 ${times}`;
+    if (key === '6,0') return `土日 ${times}`;
+    return `毎週${unique.map((item) => weekdayNames[item]).join('・')}曜 ${times}`;
+  }
+  if (weekday !== '*') return null;
+  const days = cronValues(day, 1, 31);
+  if (!days || days.length > 4) return null;
+  if (month === '*') return `毎月 ${days.join('・')} 日 ${times}`;
+  const months = cronValues(month, 1, 12);
+  if (!months || months.length !== 1 || days.length !== 1) return null;
+  return `毎年 ${months[0]} 月 ${days[0]} 日 ${times}`;
+}
+
+function sectionsFor(bot) {
+  return bot.cron.length ? ['general', 'cron'] : ['general'];
+}
+function selectSection(section, focus = false) {
+  if (detail?.kind !== 'settings' || detail.section === section) return;
+  detail.section = section;
+  renderDetail();
+  elements['detail-body'].scrollTop = 0;
+  if (focus) byId(`detail-tab-${section}`)?.focus();
+}
+function renderDetailNav(sections, current) {
+  const body = elements['detail-body'];
+  elements.detail.classList.toggle('has-nav', sections.length > 1);
+  detailNav.hidden = sections.length < 2;
+  if (detailNav.hidden) {
+    body.removeAttribute('role');
+    body.removeAttribute('aria-labelledby');
+    return;
+  }
+  if (changed('detail-nav', sections)) {
+    detailNav.replaceChildren(...sections.map((section) => {
+      const [label, icon] = settingsSections[section];
+      const tab = button(null, 'detail-tab', () => selectSection(section));
+      tab.id = `detail-tab-${section}`;
+      tab.dataset.section = section;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', 'detail-body');
+      tab.innerHTML = icon;
+      tab.append(node('span', null, label));
+      return tab;
+    }));
+  }
+  detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
+  for (const tab of detailNav.children) {
+    const selected = tab.dataset.section === current;
+    tab.setAttribute('aria-selected', selected);
+    tab.tabIndex = selected ? 0 : -1;
+  }
+  body.setAttribute('role', 'tabpanel');
+  body.setAttribute('aria-labelledby', `detail-tab-${current}`);
+}
+detailNav.addEventListener('keydown', (event) => {
+  const tabs = [...detailNav.children];
+  const index = tabs.indexOf(document.activeElement);
+  if (index < 0) return;
+  const next = { ArrowDown: index + 1, ArrowRight: index + 1, ArrowUp: index - 1, ArrowLeft: index - 1,
+    Home: 0, End: tabs.length - 1 }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  selectSection(tabs[(next + tabs.length) % tabs.length].dataset.section, true);
+});
+
+function settingsRow(label, value, click) {
+  const row = click ? button(null, 'settings-row', click) : node('div', 'settings-row');
+  row.append(node('span', 'settings-row-label', label), node('span', 'settings-row-value', value));
+  if (click) row.insertAdjacentHTML('beforeend', chevron);
+  return row;
+}
+function generalContent(bot) {
+  const presence = view.data.presence ?? 'idle';
+  const hero = node('div', 'settings-hero');
+  const face = node('span', 'settings-avatar');
+  // The live avatar sizes itself from its host, so it mounts once the host is in the document.
+  detailAvatar = { state: presence, mount: () => {
+    const handle = showAvatar(face, bot, { still: false, state: presence });
+    hero.style.setProperty('--hero-tint', accentColor(bot));
+    return handle;
+  } };
+  hero.append(face, node('p', 'settings-name', bot.name));
+  const role = node('section', 'settings-card');
+  role.setAttribute('aria-label', '役割');
+  role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', '役割は設定されていません。'));
+  const schedules = node('div', 'settings-card settings-rows');
+  schedules.append(bot.cron.length
+    ? settingsRow('定期依頼', `${bot.cron.length} 件`, () => selectSection('cron', true))
+    : settingsRow('定期依頼', 'なし'));
+  return [hero, role, schedules];
+}
+function cronContent(bot) {
+  const list = node('div', 'settings-card cron-list');
+  for (const item of bot.cron) {
+    const expression = String(item.schedule ?? item.expression ?? item.cron ?? '');
+    const timezone = item.timezone ?? item.timeZone;
+    const readable = describeCron(expression);
+    const row = node('div', `cron-row${item.enabled === false ? ' disabled' : ''}`);
+    const when = node('p', 'cron-when');
+    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
+    if (timezone) when.append(node('span', 'cron-zone', timezone));
+    if (readable) when.append(node('code', 'cron-expression', expression));
+    row.append(when, node('span', 'cron-state', item.enabled === false ? '停止中' : '有効'),
+      node('p', 'cron-request', item.request));
+    list.append(row);
+  }
+  return [list];
+}
+function settingsContent(bot, section = 'general') {
+  elements['detail-title'].textContent = settingsSections[section][0];
+  return section === 'cron' ? cronContent(bot) : generalContent(bot);
+}
+function waitForm(label, fields, submit, id) {
   const form = node('form', 'wait-form');
+  if (id) form.id = id;
   for (const field of fields) {
     const wrapper = node('label', null, field.label);
     const input = node('input');
@@ -1053,14 +1219,15 @@ function waitForm(label, fields, submit) {
     wrapper.append(input);
     form.append(wrapper);
   }
-  const action = button(label, 'button');
+  const action = button(label, 'dialog-button');
   action.type = 'submit';
-  form.append(action);
+  if (id) action.setAttribute('form', id);
+  else form.append(action);
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     submit(Object.fromEntries(new FormData(form)));
   });
-  return form;
+  return [form, action];
 }
 function localDateTime(timestamp) {
   const date = new Date(timestamp);
@@ -1069,59 +1236,93 @@ function localDateTime(timestamp) {
 function waitContent(context, task) {
   const wait = task.wait;
   elements['detail-title'].textContent = waitLabel(wait.reason);
-  const request = node('section', 'dialog-section');
-  request.append(node('h3', null, 'Task'), node('p', 'dialog-request', task.request));
-  const reason = node('section', 'dialog-section');
-  reason.append(node('h3', null, 'Reason for waiting'), node('p', 'prose', waitText(wait)));
-  if (wait.decisionReason) reason.append(detailText('Reason for decision', wait.decisionReason));
-  const actions = node('section', 'dialog-section');
-  actions.append(node('h3', null, 'Available actions'));
-  const buttons = node('div', 'event-actions');
-  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'Approve in T3' : 'Open in T3');
-  if (runLink) buttons.append(runLink);
+  const request = node('blockquote', 'wait-request');
+  const marker = node('span', 'wait-task', `#${task.id}`);
+  marker.setAttribute('aria-label', `依頼 #${task.id}`);
+  request.append(node('p', 'wait-request-text', task.request), marker);
+  const reason = node('div', 'wait-reason');
+  reason.append(node('p', 'wait-text', waitText(wait)));
+  if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
+  const content = [request, reason];
+  const actions = node('div', 'wait-actions');
+  const primary = node('div', 'wait-primary');
   const perform = (operation, fields) => void operate(context, task, operation, fields);
-  if (wait.reason === 'user_question') actions.append(questionActions(task));
-  else if (wait.reason === 'budget') buttons.append(button('Approve one more run', 'button', () => perform('approve')));
-  else if (wait.reason === 'model_failure') buttons.append(button('Retry decision', 'button', () => perform('retry')));
+  const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
+  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'T3 で承認する' : 'T3 で開く');
+  if (runLink) {
+    runLink.className = wait.reason === 't3_input' ? 'dialog-button primary' : 'dialog-button quiet';
+    primary.append(runLink);
+  }
+  if (wait.reason === 'user_question') {
+    primary.append(questionActions(context, task, { dialog: true }));
+  } else if (wait.reason === 'budget') primary.append(action('追加 1 回を許可', 'approve'));
+  else if (wait.reason === 'model_failure') primary.append(action('再判定', 'retry'));
   else if (wait.reason === 'deadline') {
-    if (task.deadline) reason.append(node('p', 'dialog-meta', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
-    actions.append(waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
+    if (task.deadline) reason.append(node('p', 'wait-why', `現在の期限 ${fullTime.format(task.deadline * 1000)}`));
+    const [form, submit] = waitForm('期限を延長', [{ name: 'deadline', label: '新しい期限（端末の時刻）',
       type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
       if (next > Date.now() / 1000) perform('extend', { deadline: next });
       else showDetailError(errors.invalid_deadline);
-    }));
+    }, 'wait-deadline-form');
+    submit.classList.add('primary');
+    content.push(form);
+    primary.append(submit);
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
-    buttons.append(button('Reconcile', 'button', () => perform('reconcile')));
+    primary.append(action('再照合', 'reconcile'));
     if (wait.reason === 'unknown_delivery') {
-      const advanced = node('details');
-      advanced.append(node('summary', 'dialog-meta', 'Specify the assigned run'), waitForm('Reconcile with this run', [
+      const advanced = node('details', 'wait-advanced');
+      advanced.append(node('summary', null, '担当する Run を指定'), waitForm('指定した Run と照合', [
         { name: 'threadId', label: 'Thread ID', required: true }, { name: 'runId', label: 'Run ID', required: true },
-        { name: 'questionId', label: 'Question ID (optional)' },
-      ], (fields) => perform('reconcile', Object.fromEntries(Object.entries(fields).filter(([, value]) => value.trim())))));
-      actions.append(advanced);
+        { name: 'questionId', label: '質問 ID（任意）' },
+      ], (fields) => perform('reconcile', Object.fromEntries(Object.entries(fields).filter(([, value]) => value.trim()))))[0]);
+      content.push(advanced);
     }
   }
-  buttons.append(button('Cancel task', 'button danger', () => {
-    if (window.confirm(`Cancel “${task.request}”?`)) perform('cancel');
-  }));
-  actions.append(buttons);
+  actions.append(button('タスクを中止', 'wait-cancel', () => {
+    if (window.confirm(`タスク #${task.id} を中止しますか？`)) perform('cancel');
+  }), primary);
   const feedback = node('p', 'dialog-feedback');
   feedback.id = 'detail-feedback';
   feedback.setAttribute('role', 'status');
-  return [request, reason, actions, feedback];
+  return [...content, actions, feedback];
 }
 function showDetailError(text) {
   const output = byId('detail-feedback');
   if (output) output.textContent = text;
 }
+function labelDetail(label) {
+  if (label) {
+    elements.detail.setAttribute('aria-label', label);
+    elements.detail.removeAttribute('aria-labelledby');
+  } else {
+    elements.detail.removeAttribute('aria-label');
+    elements.detail.setAttribute('aria-labelledby', 'detail-title');
+  }
+}
+function replaceDetail(render) {
+  releaseDetailAvatar();
+  elements['detail-body'].replaceChildren(...render());
+  if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
+}
 function renderDetail() {
   if (!detail || !view?.data) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    if (changed('detail', detail, bot)) elements['detail-body'].replaceChildren(...settingsContent(bot));
+    const sections = sectionsFor(bot);
+    if (!sections.includes(detail.section)) detail.section = 'general';
+    labelDetail(`${bot.name} の設定`);
+    renderDetailNav(sections, detail.section);
+    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    const presence = view.data.presence ?? 'idle';
+    if (detailAvatar && detailAvatar.state !== presence) {
+      detailAvatar.handle?.update({ state: presence });
+      detailAvatar.state = presence;
+    }
     return;
   }
+  labelDetail(null);
+  renderDetailNav([], null);
   if (detail.kind === 'task') {
     if (changed('detail', detail)) {
       elements['detail-title'].textContent = 'Task details';
@@ -1155,12 +1356,12 @@ function renderDetail() {
   const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);
   if (!task) {
     if (changed('detail', detail, null)) {
-      elements['detail-title'].textContent = 'Request closed';
-      elements['detail-body'].replaceChildren(node('p', 'prose', 'Check the conversation for the latest update.'));
+      elements['detail-title'].textContent = '確認待ちは終了しました';
+      replaceDetail(() => [node('p', 'wait-why', '最新の内容は会話で確認できます。')]);
     }
     return;
   }
-  if (changed('detail', detail, task)) elements['detail-body'].replaceChildren(...waitContent(view, task));
+  if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
   for (const control of elements['detail-body'].querySelectorAll('button, input')) control.disabled = pendingWaits.has(task.wait.id);
 }
 function render(scroll) {

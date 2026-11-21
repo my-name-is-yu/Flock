@@ -97,11 +97,14 @@
       </div>
     </main>
   </div>
-  <dialog id="detail" aria-labelledby="detail-title">
+  <dialog id="detail" class="detail" aria-labelledby="detail-title">
     <div class="dialog-head">
       <h2 id="detail-title"></h2>
-      <button id="close-detail" type="button" class="icon-button" aria-label="Close">×</button>
+      <button id="close-detail" type="button" class="icon-button dialog-close" aria-label="閉じる">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>
+      </button>
     </div>
+    <div id="detail-nav" class="detail-nav" role="tablist" aria-label="設定の項目" hidden></div>
     <div id="detail-body" class="dialog-body"></div>
   </dialog>
 </body>
