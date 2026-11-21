@@ -665,17 +665,17 @@ function eventCard(event, context, place) {
   }
   const extras = [];
   let copy = data.text ?? '';
-  const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(view, openTask));
-    else if (openTask) {
+    if (pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
+    else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
-      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
+      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
     } else {
       const resolution = node('p', 'msg-resolution');
@@ -746,9 +746,9 @@ function eventCard(event, context, place) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (openTask?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
-    reply.disabled = pendingWaits.has(openTask.wait.id);
+  if (pendingWait?.wait.reason === 'user_question') {
+    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
   }
   line.append(bubble, actions);
