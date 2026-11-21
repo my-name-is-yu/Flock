@@ -636,10 +636,10 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto* task = taskById(context, id);
     const auto resultId = readId(route, "resultMessageId");
     const auto proposedOption = readId(route, "resultOption");
+    require(proposedOption <= 99 && (!id || task));
     const auto resumeField = route.find("resume");
     require(resumeField == route.end() || resumeField->is_boolean());
     const bool resume = resumeField != route.end() && resumeField->get<bool>();
-    require(proposedOption <= 99 && (!id || task));
     if (kind == "answer_result") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption"});
         const auto mentioned = (resultId || anchor.result || proposedOption) ? ordinal(normalize(segment)) : 0;
