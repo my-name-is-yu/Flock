@@ -121,9 +121,16 @@ class Fixture(BaseHTTPRequestHandler):
     def tool(self, name, args):
         state = self.server.state
         scenario = state.get("scenario", "settled")
-        questions = [{"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
-                      "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
-                                                              {"label": "blue", "description": ""}]}]
+        questions = [
+            {"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
+             "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
+                                                     {"label": "blue", "description": ""}]},
+            {"id": "note", "header": "Note", "question": "Any notes?", "options": [], "required": False},
+            {"id": "message", "header": "Message", "question": "Edit the message", "options": [],
+             "initialAnswer": "Proposed message"},
+            {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
+             "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
+        ]
         if (name in ("t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
@@ -180,7 +187,7 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
                 return {"requestId": "request", "questions": questions}
-            assert action == "respond" and scenario != "ambiguous" and args["answers"] == {"color": ["green", "blue"]}
+            assert action == "respond" and scenario != "ambiguous"
             state["scenario"] = "running"
             if scenario == "race":
                 return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request",

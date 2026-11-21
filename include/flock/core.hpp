@@ -71,6 +71,8 @@ struct Question {
     std::string requestId;
     Json fields = Json::array();
 };
+// Validate a model answer against the observed fields and encode it for Session submission.
+Json sessionQuestionAnswers(const Json& fields, const Json& answers);
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Finished, Unavailable } kind = Kind::Running;
     Question question;

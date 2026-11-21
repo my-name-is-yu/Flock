@@ -331,8 +331,10 @@ Json questionFields(const Json& questions) {
         std::set<std::string> values;
         for (const auto& option : question["options"]) {
             const auto label = str(option, "label");
-            const auto value = option.contains("value") ? str(option, "value") : trim(label);
-            if (trim(label).empty() || trim(value).empty() || !values.insert(value).second) return {};
+            const auto specified = option.find("value");
+            if (trim(label).empty() || (specified != option.end() && !specified->is_string())) return {};
+            const auto value = specified == option.end() ? trim(label) : specified->get<std::string>();
+            if (!values.insert(value).second) return {};
             options.push_back({{"label", label}, {"value", value}, {"description", str(option, "description")}});
         }
         if (!freeform && required && options.empty()) return {};
@@ -383,42 +385,6 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
     }
     if (unverified || matching != 1 || !exactOwner) return {Attribution::Kind::Ambiguous, {}, {}};
     return {Attribution::Kind::Owned, std::move(fields), std::move(questions)};
-}
-
-std::optional<Json> wireAnswers(const Json& fields, const Json& answers) {
-    if (!answers.is_object()) return std::nullopt;
-    auto result = Json::object();
-    std::size_t consumed = 0;
-    for (const auto& field : fields) {
-        const auto id = str(field, "id");
-        const auto answer = answers.find(id);
-        const auto& options = field["options"];
-        if (answer == answers.end()) {
-            if (field["required"].get<bool>()) return std::nullopt;
-            if (options.empty()) result[id] = "";
-            continue;
-        }
-        ++consumed;
-        auto selected = answer->is_array() ? *answer : Json::array({*answer});
-        if (selected.empty() || (!field["multiple"].get<bool>() && selected.size() != 1)) return std::nullopt;
-        std::set<std::string> seen;
-        bool custom = false;
-        for (const auto& value : selected) {
-            if (!value.is_string()) return std::nullopt;
-            const auto& text = value.get_ref<const std::string&>();
-            if (trim(text).empty() || text.size() > 8000 || !seen.insert(text).second) return std::nullopt;
-            const bool offered = std::any_of(options.begin(), options.end(), [&](const Json& option) {
-                return option["value"] == value;
-            });
-            if (!offered) {
-                if (!field["freeform"].get<bool>() || selected.size() != 1) return std::nullopt;
-                custom = true;
-            }
-        }
-        result[id] = field["multiple"].get<bool>() && !custom ? selected : selected.front();
-    }
-    if (consumed != answers.size()) return std::nullopt;
-    return result;
 }
 
 std::string actionPrompt(const Command& command) {
@@ -639,13 +605,14 @@ Delivery answer(Client& client, const Command& command) {
     if (attribution.kind == Attribution::Kind::Resolved) return result(Outcome::QuestionGone);
     if (attribution.kind != Attribution::Kind::Owned)
         return result(Outcome::NotAccepted, "Answer in T3 because the question could not be attributed to the assigned Run");
-    const auto answers = wireAnswers(attribution.fields, command.answers);
-    if (!answers) return result(Outcome::NotAccepted, "The saved answers do not satisfy the T3 question fields");
+    Json answers;
+    try { answers = sessionQuestionAnswers(attribution.fields, command.answers); }
+    catch (const Conflict& error) { return result(Outcome::NotAccepted, error.what()); }
     try {
         if (readQuestion(client, thread, command.questionId) != attribution.raw)
             return result(Outcome::NotAccepted, "The T3 question changed before the saved answer could be sent");
         const auto responded = client.call(PendingRequest, {{"action", "respond"}, {"threadId", thread},
-            {"requestId", command.questionId}, {"answers", *answers}});
+            {"requestId", command.questionId}, {"answers", answers}});
         position(member(responded, "sequence"));
         return result(Outcome::Accepted, {}, command.target);
     } catch (const Failure& error) {

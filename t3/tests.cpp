@@ -88,8 +88,8 @@ int main(int argc, char** argv) {
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request" &&
-              observation.question.fields.size() == 1, "owned question is exposed with its field");
+        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request",
+              "owned question is exposed");
         const auto& field = observation.question.fields.at(0);
         check(field.at("id") == "color" && field.at("question") == "Which colors?" && field.at("multiple") == true &&
               field.at("freeform") == false, "question retains its prompt and input constraints");
@@ -101,9 +101,9 @@ int main(int argc, char** argv) {
         answer.tool = "answer_session_question";
         answer.target = run;
         answer.questionId = "request";
-        answer.answers = {{"color", "missing option"}};
+        answer.answers = {{"color", "missing option"}, {"message", ""}, {"tag", ""}};
         check(adapter->send(answer).kind == Delivery::Kind::NotAccepted, "invalid option is rejected");
-        answer.answers = {{"color", Json::array({"green", "blue"})}};
+        answer.answers["color"] = Json::array({"green", "blue"});
         fixture({{"scenario", "ambiguous"}});
         check(adapter->observe("env-1", launch.config, run).kind == Observation::Kind::ExternalInput &&
               adapter->send(answer).kind == Delivery::Kind::NotAccepted, "identical content in another Run blocks auto-answer");
@@ -119,8 +119,9 @@ int main(int argc, char** argv) {
         const auto replies = effects("t3_pending_request");
         check(replies.size() == 1, "T3 receives exactly one reply across restart and retry");
         check(replies.at(0).at("threadId") == "thread" && replies.at(0).at("requestId") == "request" &&
-              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})}},
-              "selected values are sent to the original T3 question");
+              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})},
+                  {"note", ""}, {"message", ""}, {"tag", ""}},
+              "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
