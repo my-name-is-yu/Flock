@@ -1217,20 +1217,20 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 (!present(text) && !(text.empty() && args.value("forwardUserMessage",false))))
                 throw Conflict("A Bot message requires text or a forwarded user message");
             if (tool == "reply_to_bot") {
+                // Check unfinished turns in the same transaction that closes the exchange.
                 const auto kind = field(args,"kind");
-                if (kind == "result" || kind == "failed") {
-                    std::lock_guard lock(db.mutex);
-                    Transaction transaction(db.db);
-                    const auto current = db.load(snapshot["id"]);
-                    if (current["generation"] != snapshot["generation"]) return;
-                    const bool deferred = deferUntilTurnsFinish(current,event["id"].get<Id>(),decision);
+                std::lock_guard lock(db.mutex);
+                Transaction transaction(db.db);
+                auto current = db.load(snapshot["id"]);
+                if (current["generation"] != snapshot["generation"]) return;
+                if ((kind == "result" || kind == "failed") &&
+                    deferUntilTurnsFinish(current,event["id"].get<Id>(),decision)) {
                     transaction.commit();
-                    if (deferred) return;
+                    return;
                 }
-                change(snapshot,[&](Json& current) {
-                    replyPeer(current,event,decision,actionId());
-                    return true;
-                });
+                replyPeer(current,event,decision,actionId());
+                db.save(current);
+                transaction.commit();
                 return;
             }
             const auto kind = field(args,"kind");

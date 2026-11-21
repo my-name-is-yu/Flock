@@ -194,6 +194,31 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
           "A saved decision was decided again or applied twice");
 }
 
+void sessionNoteIsNotResentAfterARestart() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto id = task(writer,"Benchmark startup");
+    execution.reach(store,id,"running");
+    const auto message = receive(store,"note","Use the staging database");
+    const auto mid = std::to_string(message);
+    const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
+                         {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
+                         {"actionId","flock-turn-" + mid + "-1"}};
+    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
+    fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
+                Json{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},{"reason","Saved"}}.dump() +
+                "','" + effect.dump() + "')");
+    Json seen;
+    execution.model.conversation = [&](const ModelInput& input) {
+        seen = turn(input);
+        return say("I may have sent that already.");
+    };
+    execution.runtime.runConversations();
+    check(seen.size() == 1 && seen[0]["result"]["ok"] == false && seen[0]["result"]["delivery"] == "unknown" &&
+          execution.t3.launches == 1,"a note interrupted by a restart was sent again or reported as not delivered");
+}
+
 void transientFailureResumesAfterTheLastFinishedStep() {
     Fixture fixture;
     Id message = 0;
@@ -412,7 +437,8 @@ void replyTargetsReachTheTurn() {
     execution.runtime.runConversations();
     check(seen.size() == 3 && seen[0]["kind"] == "result" && seen[0]["taskId"] == id &&
           seen[0]["text"] == "Startup took 100ms","A reply to a result did not reach the turn");
-    check(seen[1]["kind"] == "bot_message" && seen[1]["text"] == "Noted.","A reply to a Bot message did not reach the turn");
+    check(seen[1]["kind"] == "bot_message" && seen[1]["text"] == "Noted." &&
+          seen[1]["inReplyTo"]["text"] == "Why so slow?","A reply to a Bot message lost the message it answered");
     check(seen[2]["kind"] == "unavailable","A reply to another Bot's message was exposed");
 }
 }
@@ -422,6 +448,7 @@ int main() {
         retryAcrossConnections();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         transientFailureResumesAfterTheLastFinishedStep();
+        sessionNoteIsNotResentAfterARestart();
         modelFailureReportsWhatWasAlreadyDone();
         notesFailureEndsTheTurnWithoutWork();
         toolErrorsReturnToTheModel();

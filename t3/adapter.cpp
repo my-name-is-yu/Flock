@@ -636,10 +636,12 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     invoked = true;
     const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
         {"message", command.instruction}, {"clientRequestId", command.actionId}});
-    const auto runId = str(reply, "runId");
-    if (str(reply, "threadId") != command.target.threadId || (!runId.empty() && runId != command.target.runId) ||
-        str(reply, "delivery") != "steered") invalidResponse();
-    return result(Outcome::Accepted, {}, command.target);
+    // T3 v0.1.11 cannot require the expected Run on send. If another Run of the task's Thread took over in
+    // between, report the Run that actually received the note.
+    if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
+    RunRef received = command.target;
+    if (const auto runId = str(reply, "runId"); !runId.empty()) received.runId = runId;
+    return result(Outcome::Accepted, {}, std::move(received));
 }
 
 Delivery answer(Client& client, const Command& command) {

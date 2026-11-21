@@ -429,6 +429,46 @@ void answersStayOnTheirQuestion() {
           "an in-flight answer overwrote an answered question or answered one that opened later");
 }
 
+void answersNeedTheirOwnReplyTargetAndAStableTask() {
+    Fixture f;
+    const auto color = f.store->submit(f.routing("色を決める"));
+    f.model.questions.emplace(color,Json{{"question","どの色にしますか？"}});
+    f.reach(color,"waiting");
+    const auto wait = f.task(color)["wait"];
+    f.script("hello",{say("Hi.")});
+    const auto greeting = f.receive("hello","hello");
+    f.script("yes",{answer(color)});
+    f.receive("unrelated-yes","yes",f.response(greeting)["messageId"].get<Id>());
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
+          "a reply to an unrelated message answered a task question");
+    f.script("青。完了条件も色見本を付けることに",{change(color,{{"doneWhen","Attach a color sample"}}),answer(color)});
+    f.receive("change-then-answer","青。完了条件も色見本を付けることに");
+    check(f.lastTurn()[0]["result"]["ok"] == true && f.lastTurn()[1]["result"]["ok"] == false &&
+          f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
+}
+
+void pausedTurnHoldsCompletion() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.finish("run-1","Timing evidence");
+    f.reach(id,"deciding");
+    auto limited = f.routing();
+    limited.config["modelCallLimit"] = 1;
+    f.script("Check what is running, then change the criteria",{
+        [](const ModelInput&) { return Decision{"find_tasks",Json::object(),"Look first"}; },
+        change(id,{{"doneWhen","Report p95 timing"}})});
+    const auto receipt = f.store->receive(limited,"paused","Check what is running, then change the criteria");
+    f.tick();
+    check(f.store->pausedConversations("alpha").size() == 1 && f.event(id,"completed").is_null(),
+          "a task completed while a turn that may change it was paused");
+    f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
+    f.tick();
+    check(f.task(id)["doneWhen"] == "Report p95 timing" && f.event(id,"completed").is_null(),
+          "the approved turn did not apply its change before completion");
+    (void)receipt;
+}
+
 void cancelledReportCanBeReferencedWithoutRestarting() {
     Fixture f;
     const auto old = f.store->submit(f.routing("Benchmark the reference dataset"));
@@ -1123,6 +1163,8 @@ int main() {
         followUpCarriesTheReferencedReport();
         questionAnswerReachesTheBotBeforeContinuingWork();
         answersStayOnTheirQuestion();
+        answersNeedTheirOwnReplyTargetAndAStableTask();
+        pausedTurnHoldsCompletion();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
         appendWaitsForSafeBoundary();

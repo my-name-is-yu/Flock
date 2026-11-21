@@ -24,7 +24,7 @@ constexpr int terminalTaskLimit = 8;
 constexpr int historyLimit = 24;
 constexpr int findLimit = 10;
 constexpr int maxSteps = 24;
-constexpr std::size_t historyBytes = 12000;
+constexpr std::size_t historyBytes = 24000;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
 
@@ -227,6 +227,10 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 addTask(taskId);
             } else if (kind == "conversation_reply") {
                 replyTo.update({{"kind","bot_message"},{"text",bounded(field(data,"text"),2000)}});
+                auto original = query("SELECT id,text FROM messages WHERE id=? AND bot_id=?",
+                                      {integer(data,"replyToMessageId"),message.bot});
+                if (original.next())
+                    replyTo["inReplyTo"] = {{"messageId",original.number(0)},{"text",bounded(original.string(1),messageSize)}};
             } else if (kind == "conversation_message") {
                 replyTo.update({{"kind","user_message"},{"text",bounded(row.string(3),2000)}});
             } else {
@@ -267,7 +271,8 @@ ORDER BY j.id DESC LIMIT ?
                     entry["waitId"] = integer(data,"id");
                 }
             }
-            body = bounded(body,std::min<std::size_t>(700,remaining));
+            const std::size_t limit = entry["role"] == "user" ? 4000 : entry["role"] == "bot" ? 1500 : 700;
+            body = bounded(body,std::min(limit,remaining));
             remaining -= body.size();
             entry["text"] = std::move(body);
             history.push_back(std::move(entry));
@@ -378,9 +383,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (message.replyTo) {
             auto anchor = query("SELECT task_id,json_extract(data,'$.id') FROM journal WHERE id=? AND kind='waiting'",
                                 {message.replyTo});
-            if (anchor.next() && (anchor.number(0) != task.at("id").get<Id>() || anchor.number(1) != waitId))
-                throw ToolError("This message replies to a different question; it can only answer that question");
+            if (!anchor.next() || anchor.number(0) != task.at("id").get<Id>() || anchor.number(1) != waitId)
+                throw ToolError("This message replies to something else, so it can only answer the question it replies to");
         }
+        if (task.value("replanning",false))
+            throw ToolError("The task is replanning, so this question will close. Its Bot asks again if it still needs to know",
+                            {{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
         const auto& wait = task.at("wait");
         if (task.at("state") != "waiting" || !wait.is_object() || integer(wait,"id") != waitId)
             throw ToolError("That question is no longer open",{{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
@@ -482,7 +490,12 @@ Json performSessionEffect(T3& t3, const Json& effect) {
     const auto run = runRef(effect.at("run"));
     try {
         if (effect.at("kind") == "interrupt") {
-            t3.interrupt(environment,config,run);
+            try {
+                t3.interrupt(environment,config,run);
+            } catch (const std::exception& error) {
+                return {{"ok",false},{"taskId",taskId},{"delivery","unknown"},
+                        {"error",std::string("T3 may have received the interrupt: ") + error.what()}};
+            }
             return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
         }
         Command command;
@@ -495,10 +508,11 @@ Json performSessionEffect(T3& t3, const Json& effect) {
         command.target = run;
         command.authGeneration = t3.authGeneration(environment,config);
         const auto delivery = t3.send(command);
-        if (delivery.kind == Delivery::Kind::Accepted) return {{"ok",true},{"effect","delivered"},{"taskId",taskId}};
+        if (delivery.kind == Delivery::Kind::Accepted)
+            return {{"ok",true},{"effect","delivered"},{"taskId",taskId},{"run",runJson(delivery.run)}};
         Json failed = {{"ok",false},{"taskId",taskId},
             {"error",delivery.detail.empty() ? "T3 did not accept the note" : delivery.detail}};
-        if (delivery.kind == Delivery::Kind::Unknown) failed["delivery"] = "unknown";
+        if (delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent) failed["delivery"] = "unknown";
         return failed;
     } catch (const std::exception& error) {
         return {{"ok",false},{"taskId",taskId},{"error",error.what()}};
@@ -648,8 +662,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 if (!current) return true;
                 auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND effect IS NOT NULL",
                                    {id,step});
-                if (saved.next()) effect = saved.json(0);
-                else {
+                if (saved.next()) {
+                    // The earlier attempt may have reached T3 before the restart. Report it instead of sending again.
+                    exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=? AND result IS NULL",
+                         {Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},{"delivery","unknown"},
+                               {"error","Flock restarted while sending this, so T3 may have received it. "
+                                        "Check the Session before sending it again"}},id,step});
+                } else {
                     try {
                         effect = prepareSessionEffect(*current,step,*decision);
                         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",{effect,id,step});
@@ -666,9 +685,11 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             const auto outcome = performSessionEffect(t3,effect);
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            if (!turnMessage(id)) return true;
+            // Record what T3 did even if an older turn became runnable meanwhile.
+            if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
+                return true;
             if (outcome.value("ok",false)) {
-                Json entry = {{"messageId",id},{"step",step},{"run",effect.at("run")}};
+                Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect.at("run"))}};
                 if (effect.contains("text")) entry["text"] = effect.at("text");
                 journal(effect.at("taskId"),effect.at("kind") == "steer" ? "instruction_steered" : "interrupt_requested",entry);
             }
