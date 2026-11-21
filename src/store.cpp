@@ -365,8 +365,17 @@ Json Store::task(Id id) const {
     return p_->taskDetails(id,true);
 }
 
+static void restoreWaitAnchor(Store::Impl& store, Json& task) {
+    auto& wait = task["wait"];
+    if (wait.is_null() || wait.contains("messageId")) return;
+    auto row = store.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
+                           " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {task["id"],wait["id"]});
+    if (row.next()) wait["messageId"] = row.number(0);
+}
+
 Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     auto result = load(id);
+    restoreWaitAnchor(*this,result);
     result["blockedBy"] = nullptr;
     auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
@@ -417,6 +426,7 @@ ORDER BY task.id DESC)SQL", {bot});
         task["id"] = rows.number(0);
         task["state"] = rows.string(1);
         task["blockedBy"] = nullptr;
+        restoreWaitAnchor(*p_,task);
         if (rows.number(3)) task["blockedBy"] = {{"id",rows.number(3)},{"botId",rows.string(4)},
                                                 {"state",rows.string(5)},{"request",rows.string(6)}};
         result.push_back(std::move(task));
