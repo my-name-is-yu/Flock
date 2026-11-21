@@ -539,6 +539,7 @@ function renderActivity() {
 function beginReply(target, text = '', choice = null) {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   const current = replies.get(view.id);
+  if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
   if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
     replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
   closeDetail();
@@ -991,6 +992,7 @@ function renderComposer() {
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
+  const closedReply = reply?.closed === true;
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
@@ -1003,15 +1005,16 @@ function renderComposer() {
     elements.message.value = body;
     fitMessage();
   }
-  elements.message.readOnly = busy;
+  elements.message.readOnly = busy || closedReply;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.textContent = notice?.isError ? notice.text :
+    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
   elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !!notice?.fading);
+  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1426,12 +1429,18 @@ function mergeLatest(context, latest) {
   const reply = replies.get(context.id);
   if (!reply || sendingMessages.has(context.id)) return;
   if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    replies.delete(context.id);
-    setNotice(context, 'That question is no longer open, so your reply was not sent.');
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That question is no longer open, so your reply was not sent.');
+    }
   } else if (reply.kind === 'clarification' &&
              !latest.clarifications.some((item) => item.messageId === reply.messageId)) {
-    replies.delete(context.id);
-    setNotice(context, 'That confirmation has closed, so your reply was not sent.');
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That confirmation has closed, so your reply was not sent.');
+    }
   }
 }
 async function refreshView(context, scroll) {
