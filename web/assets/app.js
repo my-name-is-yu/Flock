@@ -465,14 +465,19 @@ function describeCron(expression) {
   const fields = String(expression).trim().split(/\s+/);
   if (fields.length !== 5) return null;
   const [minute, hour, day, month, weekday] = fields;
-  const step = (field) => /^\*\/([1-9]\d?)$/.exec(field)?.[1];
+  const interval = (field, cycle) => {
+    const step = Number(/^\*\/([1-9]\d?)$/.exec(field)?.[1]);
+    return cycle % step === 0 ? step : null;
+  };
   const daily = day === '*' && month === '*' && weekday === '*';
   if (daily && hour === '*' && minute === '*') return '毎分';
-  if (daily && hour === '*' && step(minute)) return `${step(minute)} 分ごと`;
+  const minuteInterval = interval(minute, 60);
+  if (daily && hour === '*' && minuteInterval) return `${minuteInterval} 分ごと`;
   if (!/^\d+$/.test(minute) || Number(minute) > 59) return null;
   const mm = minute.padStart(2, '0');
   if (daily && hour === '*') return `毎時 ${mm} 分`;
-  if (daily && step(hour)) return `${step(hour)} 時間ごと${minute === '0' ? '' : `（${mm} 分）`}`;
+  const hourInterval = interval(hour, 24);
+  if (daily && hourInterval) return `${hourInterval} 時間ごと${minute === '0' ? '' : `（${mm} 分）`}`;
   const hours = cronValues(hour, 0, 23);
   if (!hours || hours.length > 4) return null;
   const times = hours.map((item) => `${item}:${mm}`).join('、');
