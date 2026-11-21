@@ -225,6 +225,121 @@ void notesAndRoutingOnRestart() {
     rejects<Conflict>([&] { bots.get("../first"); },"path traversal accepted as Bot ID");
 }
 
+Json requestContext(const Json& request) {
+    return Json::parse(request.at("input").at(0).at("content").get<std::string>());
+}
+
+void notesAcrossConversationAndWork() {
+    static constexpr auto criterion = "Confirm the required evidence";
+    static constexpr auto conclusion = "The evidence meets the saved criterion.";
+    static constexpr auto explanation = "The Session supplied the evidence required for completion.";
+    struct ModelFixture final : Model {
+        std::vector<Json> requests;
+        Decision decide(const ModelInput& input) override {
+            requests.push_back(responseRequest(input));
+            const auto context = requestContext(requests.back());
+            const auto& event = context.at("event");
+            if (event.at("kind") == "route_conversation") {
+                const auto& reply = event.at("reply");
+                Json route = {{"kind","create_task"}};
+                if (reply.at("kind") == "result")
+                    route = {{"kind","answer_result"},{"resultMessageId",reply.at("resultMessageId")}};
+                return {"route_conversation",{{"routes",Json::array({route})}},"Route the user request"};
+            }
+            if (event.at("kind") == "intake")
+                return {"delegate",{{"instruction","Collect the required evidence"},{"doneWhen",criterion}},"Gather evidence"};
+
+            const bool answer = event.at("kind") == "answer_conversation_result";
+            check(answer || event.at("kind") == "result","unexpected model request");
+            const auto& memory = context.at("memory").get_ref<const std::string&>();
+            std::string text = answer ? explanation : "The Session returned the required evidence.";
+            if (memory.starts_with("Lead with the conclusion.")) text = std::string(conclusion) + " " + text;
+            if (memory.starts_with("Lead with the evidence.")) text += " " + std::string(conclusion);
+            if (answer) return {"answer_conversation_result",{{"text",text}},"Explain the saved result"};
+            return {"complete",{{"report",text}},"The Session evidence meets the criterion"};
+        }
+    } model;
+
+    Sandbox temp;
+    const auto folder = temp.path / "bots";
+    BotNotes first{"Verify evidence before reporting.\n","Lead with the conclusion.\n"};
+    first.soul.resize(8191,'s');
+    first.memory.resize(8192,'m');
+    const BotNotes second{"Verify independently.","Use a short explanation."};
+    createBot(folder / "first",botConfig("first-model"),first.soul + "界tail",first.memory + "tail");
+    createBot(folder / "second",botConfig("second-model"),second.soul,second.memory);
+    const Bots bots(folder);
+    Store store(temp.path / "tasks.db");
+    NotesT3 t3;
+    t3.finished = true;
+    Runtime runtime(store,model,t3,[&](std::string_view botId) { return bots.notes(botId); });
+
+    const auto checkRequest = [](const Json& request, const Intake& bot, const BotNotes& notes, std::string_view kind) {
+        const auto context = requestContext(request);
+        check(request.at("model") == bot.config.at("model") && context.at("event").at("kind") == kind,
+            "unexpected configured model request");
+        check(context.at("soul") == notes.soul && context.at("memory") == notes.memory,
+            "model request must contain only the selected Bot's current bounded notes");
+    };
+    const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
+        const auto start = model.requests.size();
+        store.receive(bot,"new-work","Collect the validation evidence");
+        runtime.routeConversation();
+        const auto tasks = store.tasks(bot.botId);
+        check(tasks.size() == 1,"the request should create one Task for this Bot");
+        const Id task = tasks.at(0).at("id");
+        for (int step = 0; step < 10 && store.task(task).at("state") != "completed"; ++step) runtime.tick();
+        const auto result = store.latestTaskResult(task);
+        check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
+              result.at("data").at("doneWhen") == criterion && store.task(task).at("runs").size() == 1,
+            "the Bot's completion report should apply its notes and preserve the saved criterion");
+        check(model.requests.size() == start + 3,"expected routing, task intake, and completion requests");
+        checkRequest(model.requests.at(start),bot,notes,"route_conversation");
+        checkRequest(model.requests.at(start + 1),bot,notes,"intake");
+        checkRequest(model.requests.at(start + 2),bot,notes,"result");
+        return task;
+    };
+    const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
+        const Id result = store.latestTaskResult(task).at("id");
+        return store.receive(bot,key,"Why does that evidence support the result?",result).at("messageId");
+    };
+    const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
+                                       const BotNotes& notes, std::string_view expectedReply) {
+        const auto before = store.task(task);
+        const auto taskCount = store.tasks().size();
+        const auto commands = t3.commands.size();
+        const auto start = model.requests.size();
+        const Id result = store.latestTaskResult(task).at("id");
+        runtime.tick();
+        const auto reply = store.conversation(bot.botId).back().at("data");
+        check(reply.at("replyToMessageId") == question && reply.at("text") == expectedReply &&
+              reply.at("source").at("messageId") == result,"the explanation should apply current notes to the selected result");
+        check(model.requests.size() == start + 2,"expected routing and a separate explanation request");
+        checkRequest(model.requests.at(start),bot,notes,"route_conversation");
+        checkRequest(model.requests.at(start + 1),bot,notes,"answer_conversation_result");
+        check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
+            "explaining a result must preserve the Task and its Runs without starting any new work");
+    };
+
+    const auto firstIntake = bots.get("first").intake("");
+    const auto firstTask = completeTask(firstIntake,first,std::string(conclusion) + " The Session returned the required evidence.");
+    checkResultAnswer(firstIntake,firstTask,askAboutResult(firstIntake,firstTask,"original-notes"),
+                      first,std::string(conclusion) + " " + explanation);
+    const auto secondIntake = bots.get("second").intake("");
+    const auto secondTask = completeTask(secondIntake,second,"The Session returned the required evidence.");
+    checkResultAnswer(secondIntake,secondTask,askAboutResult(secondIntake,secondTask,"second-bot"),second,explanation);
+
+    const auto edited = askAboutResult(firstIntake,firstTask,"edited-notes");
+    first = {"Use the verified report.","Lead with the evidence."};
+    write(folder / "first" / "SOUL.md",first.soul);
+    write(folder / "first" / "MEMORY.md",first.memory);
+    checkResultAnswer(firstIntake,firstTask,edited,first,std::string(explanation) + " " + conclusion);
+    const auto deleted = askAboutResult(firstIntake,firstTask,"deleted-notes");
+    std::filesystem::remove(folder / "first" / "SOUL.md");
+    std::filesystem::remove(folder / "first" / "MEMORY.md");
+    checkResultAnswer(firstIntake,firstTask,deleted,{},explanation);
+}
+
 void directionalPeerConfiguration() {
     Sandbox temp;
     const Bots bots(temp.path);
@@ -269,9 +384,11 @@ void responseContract() {
     check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4,"only allowed tools grouped in namespace");
     check(!tool["tools"][1]["parameters"]["properties"].contains("doneWhen"),"later delegate must omit doneWhen");
     check(request.dump().find("must-stay-local") == std::string::npos,"adapter config leaked into the prompt");
-    const auto context = Json::parse(request["input"][0]["content"].get<std::string>());
+    const auto context = requestContext(request);
     check(context["task"]["doneWhen"] == "An existing requirement" && context["soul"] == "New SOUL" &&
         context["memory"] == "Current MEMORY","missing model context");
+    check(request.at("instructions").get<std::string>().find("when writing your report") != std::string::npos,
+          "the task provider prompt must apply the notes to the Bot's own report");
 
     input.task["doneWhen"] = "";
     input.tools = {"delegate","ask_user"};
@@ -286,9 +403,11 @@ void responseContract() {
     check(routingTool["name"] == "route_conversation" &&
           routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
           "conversation provider request must use the routing tool");
-    check(routing["instructions"].get<std::string>().find("You are the Flock Bot routing") != std::string::npos &&
-          routing["instructions"].get<std::string>().find("Only event.text") != std::string::npos,
-          "conversation provider request must select routing instructions");
+    const auto& routingPrompt = routing.at("instructions").get_ref<const std::string&>();
+    check(routingPrompt.find("You are the Flock Bot routing") != std::string::npos &&
+          routingPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
+          routingPrompt.find("Only event.text") != std::string::npos,
+          "routing instructions must scope Bot notes to the user's authorized request");
     check(routing.dump().find("must-stay-local") == std::string::npos,
           "conversation adapter config leaked into the prompt");
     input.tools = {"answer_conversation_result","clarify_conversation_result"};
@@ -303,11 +422,14 @@ void responseContract() {
     check(clarificationTool["name"] == "clarify_conversation_result" &&
           clarificationTool["parameters"]["required"] == Json::array({"reason","text"}),
           "result provider request must support clarification for insufficient evidence");
-    const auto answerContext = Json::parse(resultAnswer["input"][0]["content"].get<std::string>());
+    const auto answerContext = requestContext(resultAnswer);
     check(answerContext["event"] == input.event,"result provider request lost the question or selected evidence");
-    check(resultAnswer["instructions"].get<std::string>().find("Answer event.text in the user's language") != std::string::npos &&
+    const auto& answerPrompt = resultAnswer.at("instructions").get_ref<const std::string&>();
+    check(answerPrompt.find("Answer event.text in the user's language") != std::string::npos &&
+          answerPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
+          answerPrompt.find("Ground claims about the result in event.source.text") != std::string::npos &&
           resultAnswer.dump().find("must-stay-local") == std::string::npos,
-          "result provider request must select its prompt without exposing adapter config");
+          "result instructions must apply Bot notes within the selected evidence and keep adapter config private");
 
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
@@ -452,6 +574,7 @@ int main() {
         cronSyntaxAndTimeZones();
         cronIntakeAndRestart();
         notesAndRoutingOnRestart();
+        notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
         acceptanceRunner();

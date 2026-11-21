@@ -43,7 +43,7 @@ struct Store::Impl {
     Json queueBlocker(Id) const;
     void migrateConversation();
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool routeMessage(Id, Model&);
+    bool routeMessage(Id, Model&, const Runtime::NotesLoader&);
     void applyRoutes(const conversation::Message&, const conversation::Context&, const conversation::Plan&);
     conversation::Context routeContext(std::string_view bot, Id message, std::string_view text,
                                        Id replyTo, const Json& routing);

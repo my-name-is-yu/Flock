@@ -118,7 +118,14 @@ struct Runtime::Impl {
     std::map<std::string,std::future<void>> conversationWorkers;
 
     Impl(Store::Impl& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
-        : db(store), model(m), t3(adapter), notes(std::move(loader)), options(std::move(opts)) {
+        : db(store), model(m), t3(adapter),
+          notes([load = std::move(loader)](std::string_view botId) {
+              constexpr auto limit = 8192;
+              auto bot = load(botId);
+              bot.soul = bounded(bot.soul,limit);
+              bot.memory = bounded(bot.memory,limit);
+              return bot;
+          }), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
@@ -1243,9 +1250,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             auto tools = available(task,event,peer,!choices.empty(),canRead);
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
-            auto bot = notes(field(task,"botId"));
-            bot.soul = bounded(bot.soul,8192);
-            bot.memory = bounded(bot.memory,8192);
+            const auto bot = notes(field(task,"botId"));
             Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",intent(task)},
                 {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
@@ -1320,7 +1325,7 @@ void Runtime::routeConversation() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model)) break;
+        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model,p_->notes)) break;
     }
 }
 void Runtime::tick() {
@@ -1345,7 +1350,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.routeMessage(id,p_->model);
+                    p_->db.routeMessage(id,p_->model,p_->notes);
                 }));
             }
         }
