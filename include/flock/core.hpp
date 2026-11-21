@@ -150,7 +150,8 @@ public:
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
-    std::vector<std::string> peerPartners(std::string_view bot) const;
+    std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;
+    bool hasPeerExchange(std::string_view bot, std::string_view peer) const;
     const std::filesystem::path& path() const;
 
 private:

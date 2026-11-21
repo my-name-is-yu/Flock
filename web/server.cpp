@@ -421,20 +421,28 @@ private:
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
+    bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
+        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        return store_.hasPeerExchange(bot,peer);
+    }
+
     Json botList() const {
         auto list = web::botList(store_,bots());
+        if (list.empty()) return list;
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::set<std::string>> connections;
+        auto pairs = store_.peerExchangePairs();
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
-                if (id == peer || !known.contains(peer)) continue;
-                connections[id].insert(peer);
-                connections[peer].insert(id);
+                if (known.contains(peer)) pairs.emplace_back(id,peer);
             }
-            for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].insert(peer);
+        }
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& [sender,recipient] : pairs) {
+            if (sender == recipient) continue;
+            if (known.contains(sender)) connections[sender].insert(recipient);
+            if (known.contains(recipient)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
@@ -449,11 +457,8 @@ private:
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
         const bool configured = botById(known,peer) != nullptr;
-        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
-            const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end())
-                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        }
+        if (!canReadPeer(bot,peer,configured))
+            return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         json(res,200,web::peerConversation(store_,bot,peer,before));
     }
 

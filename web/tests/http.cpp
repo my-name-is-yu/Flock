@@ -446,8 +446,17 @@ void peerConversation(const std::filesystem::path& path) {
         check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
         allowed = false;
         check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"),403);
+        Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"),404);
+        const auto bots = browser.get("/api/bots");
+        const auto triage = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
+        check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id","release"}}}),
+              "the recipient lost its historical partner after the grant was removed");
         configured = false;
         check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
+        const auto beforeFirst = std::to_string(history.front().at("id").get<Id>());
+        check(browser.get(std::string(primary) + "&before=" + beforeFirst) ==
+              Json{{"messages",Json::array()},{"hasOlder",false}},"an empty page of archived history could not be read");
         const auto list = browser.get("/api/bots");
         const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
         check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
