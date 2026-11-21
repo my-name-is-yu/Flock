@@ -511,7 +511,7 @@ function renderActivity() {
 function beginReply(target, text = '', choice = null) {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   const current = replies.get(view.id);
-  if (current?.messageId !== target.messageId || text || choice)
+  if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
     replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
   closeDetail();
   renderComposer();
@@ -1496,6 +1496,11 @@ elements.message.addEventListener('input', () => {
   if (!view) return;
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
+  // A hidden choice only stands for the label it filled in. Once the user rewrites it, send plain text.
+  if (reply?.candidateTaskId && reply.text !== reply.choice) {
+    delete reply.candidateTaskId;
+    delete reply.choice;
+  }
   else drafts.set(view.id, elements.message.value);
   fitMessage();
   notices.delete(view.id);
