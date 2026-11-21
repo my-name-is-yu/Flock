@@ -855,8 +855,8 @@ void restartRestoresCancelledTaskDirections() {
     f.script("Use a pinned regression fixture",target("append_instruction",old));
     f.receive("past-direction","Use a pinned regression fixture");
     f.reach(old,"running");
-    f.script("Keep the raw timing file",target("append_instruction",old));
-    f.receive("pending-direction","Keep the raw timing file");
+    f.script("Stay on ローカルMac and keep the raw timing file",revision(old,"environment","ローカルMac"));
+    f.receive("pending-direction","Stay on ローカルMac and keep the raw timing file");
     f.store->operate(old,0,"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
@@ -899,7 +899,7 @@ void restartRestoresCancelledTaskDirections() {
               f.task(task)["intent"] == goal && f.task(task)["doneWhen"] == criteria,
               "the fresh Session started with the wrong destination or work contract");
         for (const auto* expected : {goal,criteria,"Use a pinned regression fixture",
-                                     "Keep the raw timing file"}) {
+                                     "Stay on ローカルMac and keep the raw timing file"}) {
             const auto pos = command.instruction.find(expected);
             if (pos == std::string::npos || pos != command.instruction.rfind(expected))
                 throw std::runtime_error("Expected once in " + command.environmentId + " Session: " + expected);
@@ -954,7 +954,7 @@ void restartRestoresCancelledTaskDirections() {
     f.advanceUntil([&] { return f.t3.sent.back().tool == "follow_up"; },"the supplement never reached the Session");
     const auto& follow = f.t3.sent.back().instruction;
     check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos &&
-          follow.find("Keep the raw timing file") == follow.npos,"the follow-up omitted or replayed directions");
+          follow.find("Stay on ローカルMac and keep the raw timing file") == follow.npos,"the follow-up omitted or replayed directions");
 
     constexpr auto move = "Continue the measurement on ローカルMac";
     f.script(move,revision(last,"environment","ローカルMac"));

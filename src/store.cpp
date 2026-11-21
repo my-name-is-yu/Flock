@@ -310,8 +310,6 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     const auto workKey = [](const Json& item) -> std::string {
         if (item.contains("doneWhen")) return "criteria";
         if (item.contains("intent")) return "intent";
-        // Repeating the current destination creates a non-conflicting direction without a replacement key.
-        if (item.contains("environmentId") && !item.at("conflicting").get<bool>()) return "environment";
         return field(item,"replaceKey");
     };
     std::set<std::string> replaced{"environment"};
