@@ -33,6 +33,41 @@
   min-height: 0;
 }
 
+/* Step 1: preset or blank. Same dialog box as step 2, so nothing jumps. */
+.studio-start {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4) var(--space-4) var(--space-5) var(--space-5);
+}
+.studio-start .studio-head { margin-bottom: var(--space-4); }
+.studio-start-heading { margin: var(--space-5) 0 var(--space-2) .15rem; color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
+.studio-start-list { display: grid; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
+.studio-start-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 3.6rem;
+  padding: .65rem var(--space-4);
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+.studio-start-option + .studio-start-option { box-shadow: inset 0 1px var(--hairline); }
+.studio-start-option:hover { background: var(--hover); }
+.studio-start-option:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
+.studio-start-icon { display: grid; place-items: center; width: 2rem; height: 2rem; flex: none; border-radius: var(--radius-md); background: var(--overlay); color: var(--text-2); }
+.studio-start-icon svg { width: 1rem; height: 1rem; }
+.studio-start-copy { display: grid; gap: .1rem; min-width: 0; flex: 1; }
+.studio-start-copy strong { font-size: var(--text-md); font-weight: 600; }
+.studio-start-copy small { color: var(--text-2); font-size: var(--text-sm); }
+.studio-start-option > svg { width: 1rem; height: 1rem; flex: none; color: var(--text-3); }
+
 /* Preview: the avatar and the name field are the same object. */
 .studio-stage {
   margin: var(--space-2);
@@ -76,7 +111,6 @@
   height: 1.9rem;
 }
 .studio-name-random svg, .studio-close svg, .studio-shuffle svg { width: 1rem; height: 1rem; }
-.studio-hero-role { max-width: 100%; margin-top: -.35rem; color: var(--text-2); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Controls */
 .studio-panel {
@@ -91,21 +125,6 @@
 .studio-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .studio-head h2 { font-size: var(--text-lg); font-weight: 600; }
 .studio-close { margin-right: -.35rem; color: var(--text-3); }
-
-.studio-role { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-4); font-size: var(--text-sm); color: var(--text-2); }
-.studio-select { position: relative; display: block; }
-.studio-select svg { position: absolute; top: 50%; right: .6rem; width: .85rem; height: .85rem; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
-.studio-role select {
-  min-width: 9rem;
-  padding: .4rem 2rem .4rem .65rem;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  background: var(--field);
-  color: var(--text);
-  font-size: var(--text-sm);
-  appearance: none;
-}
-.studio-role select:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
 
 .studio-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
 .studio-tabs { display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
@@ -200,14 +219,15 @@
   .bot-editor-dialog[open] { display: block; }
   .bot-editor-dialog:not([open]) { transform: translateY(1.5rem); }
   @starting-style { .bot-editor-dialog[open] { transform: translateY(1.5rem); } }
+  .studio-start { max-height: calc(100dvh - .75rem); padding: var(--space-3) var(--space-3) max(var(--space-4), env(safe-area-inset-bottom)) var(--space-4); }
   .studio { grid-template-columns: minmax(0, 1fr); max-height: calc(100dvh - .75rem); overflow-y: auto; overscroll-behavior: contain; }
   .studio-stage { padding: var(--space-4); gap: var(--space-2); }
   .studio-hero-avatar { width: 6.5rem; height: 6.5rem; }
   .studio-hero-avatar .avatar-photo { width: 5rem; height: 5rem; border-radius: 18px; }
   .studio-name-input { font-size: var(--text-lg); }
   .studio-panel { display: contents; }
-  .studio-head { order: -1; padding: var(--space-3) var(--space-3) 0 var(--space-4); }
-  .studio-role, .studio-bar, .studio-gallery, .studio-upload, .studio-colors-field, .studio-error { margin-left: var(--space-4); margin-right: var(--space-4); }
+  .studio .studio-head { order: -1; padding: var(--space-3) var(--space-3) 0 var(--space-4); }
+  .studio-bar, .studio-gallery, .studio-upload, .studio-colors-field, .studio-error { margin-left: var(--space-4); margin-right: var(--space-4); }
   .studio-footer { padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); }
 }
 

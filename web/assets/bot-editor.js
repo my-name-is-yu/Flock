@@ -6,11 +6,11 @@ import {
   showAvatar,
 } from '/avatars.js';
 
-const ROLES = [
-  { id: 'reviewer', title: 'Reviewer' },
-  { id: 'builder', title: 'Builder' },
-  { id: 'researcher', title: 'Researcher' },
-  { id: 'custom', title: 'No role yet' },
+// A preset only seeds the new Bot's SOUL.md; what the Bot does is up to the user afterwards.
+const PRESETS = [
+  { id: 'reviewer', title: 'Reviewer', detail: 'Reviews changes and verifies results with evidence', icon: 'shield-check' },
+  { id: 'builder', title: 'Builder', detail: 'Implements changes and runs the relevant tests', icon: 'wrench' },
+  { id: 'researcher', title: 'Researcher', detail: 'Investigates questions and summarizes findings', icon: 'telescope' },
 ];
 
 const RANDOM_NAMES = [
@@ -22,7 +22,11 @@ const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 const ALLOWED_MIME = /^image\/(png|jpeg|webp|gif)$/;
 
 const UI_ICONS = {
-  chevron: '<path d="m6 9 6 6 6-6"/>',
+  'chevron-right': '<path d="m9.5 6.5 5.5 5.5-5.5 5.5"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  'shield-check': '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  telescope: '<path d="m10.065 12.493-6.18 1.318a.934.934 0 0 1-1.108-.702l-.537-2.15a1.07 1.07 0 0 1 .691-1.265l13.504-4.44"/><path d="m13.56 11.747 4.332-.924"/><path d="m16 21-3.105-6.21"/><path d="M16.485 5.94a2 2 0 0 1 1.455-2.425l1.09-.272a1 1 0 0 1 1.212.727l1.515 6.06a1 1 0 0 1-.727 1.213l-1.09.272a2 2 0 0 1-2.425-1.455z"/><path d="m6.158 8.633 1.114 4.456"/><path d="m8 21 3.105-6.21"/><circle cx="12" cy="13" r="2"/>',
+  wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/>',
   close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
   dice: '<rect width="16" height="16" x="4" y="4" rx="3"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M12 12h.01"/><path d="M9 15h.01"/><path d="M15 15h.01"/>',
   shuffle: '<path d="m18 14 4 4-4 4"/><path d="m18 2 4 4-4 4"/><path d="M2 18h1.973a4 4 0 0 0 3.3-1.7l5.454-8.6a4 4 0 0 1 3.3-1.7H22"/><path d="M2 6h1.972a4 4 0 0 1 3.6 2.2"/><path d="M22 18h-6.041a4 4 0 0 1-3.3-1.8l-.359-.45"/>',
@@ -69,36 +73,38 @@ function colorNameFor(hex) {
   return match ? match[0] : normalized.toUpperCase();
 }
 
-function roleLabelFor(roleId, fallbackSoul = '') {
-  const found = ROLES.find((role) => role.id === roleId);
-  if (found) return found.title;
-  const line = String(fallbackSoul ?? '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-  if (line) return line.length > 42 ? `${line.slice(0, 41)}…` : line;
-  return 'Bot';
-}
-
 export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   dialog.innerHTML = `
-    <div class="studio">
+    <section class="studio-start" id="studio-start" hidden>
+      <header class="studio-head">
+        <h2 id="studio-start-title">New bot</h2>
+        <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
+      </header>
+      <div class="studio-start-list">
+        <button type="button" class="studio-start-option" data-preset="custom">
+          <span class="studio-start-icon">${uiIcon('plus')}</span>
+          <span class="studio-start-copy"><strong>Start from scratch</strong><small>Choose a name and look now, write its instructions later</small></span>
+          ${uiIcon('chevron-right')}
+        </button>
+      </div>
+      <h3 class="studio-start-heading" id="studio-presets-heading">Presets</h3>
+      <div class="studio-start-list" id="studio-presets" role="group" aria-labelledby="studio-presets-heading"></div>
+    </section>
+
+    <div class="studio" id="studio-editor" hidden>
       <div class="studio-stage">
         <div class="studio-hero-avatar" id="studio-hero-avatar"></div>
         <div class="studio-name">
           <input class="studio-name-input" id="studio-bot-name" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Bot name" aria-label="Name">
           <button type="button" id="studio-random-name" class="icon-button studio-name-random" aria-label="Random name" title="Random name">${uiIcon('dice')}</button>
         </div>
-        <span class="studio-hero-role" id="studio-hero-role"></span>
       </div>
 
       <div class="studio-panel">
         <header class="studio-head">
           <h2 id="studio-title">New bot</h2>
-          <button type="button" id="studio-close" class="icon-button studio-close" aria-label="Close">${uiIcon('close')}</button>
+          <button type="button" class="icon-button studio-close" data-close aria-label="Close">${uiIcon('close')}</button>
         </header>
-
-        <label class="studio-role" id="studio-role-field">
-          <span>Role</span>
-          <span class="studio-select"><select id="studio-role"></select>${uiIcon('chevron')}</span>
-        </label>
 
         <div class="studio-bar">
           <div class="studio-tabs" id="studio-tabs" role="group" aria-label="Avatar source">
@@ -135,17 +141,15 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       </div>
     </div>
   `;
-  dialog.setAttribute('aria-labelledby', 'studio-title');
 
   const el = (id) => dialog.querySelector(`#${id}`);
   const els = {
-    studio: dialog.querySelector('.studio'),
+    start: el('studio-start'),
+    startTitle: el('studio-start-title'),
+    presets: el('studio-presets'),
+    studio: el('studio-editor'),
     title: el('studio-title'),
-    close: el('studio-close'),
-    roleField: el('studio-role-field'),
-    role: el('studio-role'),
     heroAvatar: el('studio-hero-avatar'),
-    heroRole: el('studio-hero-role'),
     nameInput: el('studio-bot-name'),
     randomName: el('studio-random-name'),
     shuffle: el('studio-shuffle'),
@@ -165,8 +169,13 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     save: el('studio-save'),
   };
 
-  for (const role of ROLES) {
-    els.role.append(new Option(role.title, role.id));
+  for (const preset of PRESETS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'studio-start-option';
+    btn.dataset.preset = preset.id;
+    btn.innerHTML = `<span class="studio-start-icon">${uiIcon(preset.icon)}</span><span class="studio-start-copy"><strong>${preset.title}</strong><small>${preset.detail}</small></span>${uiIcon('chevron-right')}`;
+    els.presets.append(btn);
   }
 
   for (const [label, hex] of AVATAR_COLORS) {
@@ -181,6 +190,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   }
 
   let mode = 'create';
+  let step = 'start';
+  let celebrateFrame = 0;
+  let celebratedLook = '';
   let saving = false;
   let existingNames = [];
   let state = null;
@@ -201,9 +213,11 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   }
 
   function destroyHero() {
+    cancelAnimationFrame(celebrateFrame);
     heroHandle?.destroy();
     heroHandle = null;
     heroRenderedKind = '';
+    celebratedLook = '';
   }
 
   function setUploadError(message) {
@@ -242,6 +256,17 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     };
   }
 
+  // Picking a look plays Open Bot Avatar's "done" celebration. A mount in "done" starts at rest,
+  // so step through idle for a frame to make the animator see a fresh state.
+  function celebrate() {
+    if (!heroHandle) return;
+    cancelAnimationFrame(celebrateFrame);
+    heroHandle.update({ state: 'idle' });
+    celebrateFrame = requestAnimationFrame(() => {
+      celebrateFrame = requestAnimationFrame(() => heroHandle?.update({ state: 'done' }));
+    });
+  }
+
   function saveLabel() {
     if (saving) return mode === 'edit' ? 'Saving…' : 'Creating…';
     return mode === 'edit' ? 'Save' : 'Create';
@@ -252,7 +277,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   }
 
   function renderTextPreview() {
-    els.heroRole.textContent = roleLabelFor(state.role, state.soul);
     const hasValidImage = state.kind !== 'upload' || !!currentPreviewImageUrl();
     els.save.disabled = saving || !state.name.trim() || !hasValidImage;
     els.save.textContent = saveLabel();
@@ -279,6 +303,11 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           followPointer: true,
         });
         heroRenderedKind = 'shape';
+      }
+      const look = `${avatar.example}|${avatar.color}`;
+      if (look !== celebratedLook) {
+        celebratedLook = look;
+        celebrate();
       }
     } else {
       destroyHero();
@@ -347,13 +376,25 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.uploadLabel.textContent = hasImage ? (state.filename || 'Uploaded image') : 'Choose an image';
   }
 
-  function renderShell() {
-    els.title.textContent = mode === 'edit' ? 'Edit appearance' : 'New bot';
-    els.roleField.hidden = mode === 'edit';
-    els.role.value = state.role;
-    els.nameInput.value = state.name;
+  function setStep(next) {
+    step = next;
+    els.start.hidden = step !== 'start';
+    els.studio.hidden = step !== 'editor';
+    dialog.setAttribute('aria-labelledby', step === 'start' ? 'studio-start-title' : 'studio-title');
     setSubmitError('');
+    if (step === 'start') {
+      destroyHero();
+      onDraft?.(null);
+      const chosen = els.start.querySelector(`[data-preset="${state.role}"]`) ?? els.start.querySelector('[data-preset]');
+      chosen.focus({ preventScroll: true });
+      return;
+    }
+    els.title.textContent = mode === 'edit' ? 'Edit appearance' : 'New bot';
+    els.cancel.textContent = mode === 'edit' ? 'Cancel' : 'Back';
+    els.nameInput.value = state.name;
     renderAppearance();
+    els.nameInput.focus({ preventScroll: true });
+    if (mode === 'create') els.nameInput.select();
   }
 
   function handleSelectedFile(file) {
@@ -454,12 +495,18 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     target.focus();
   }
 
-  els.role.addEventListener('change', () => {
-    state.role = els.role.value;
-    renderTextPreview();
+  els.start.addEventListener('click', (event) => {
+    const preset = event.target.closest('button[data-preset]')?.dataset.preset;
+    if (!preset) return;
+    state.role = preset;
+    setStep('editor');
   });
-  els.cancel.addEventListener('click', () => dialog.close());
-  els.close.addEventListener('click', () => dialog.close());
+  els.start.addEventListener('keydown', (event) => arrowNavigate(els.start, 'button[data-preset]', event));
+  els.cancel.addEventListener('click', () => {
+    if (mode === 'create') setStep('start');
+    else dialog.close();
+  });
+  for (const btn of dialog.querySelectorAll('[data-close]')) btn.addEventListener('click', () => dialog.close());
 
   els.nameInput.addEventListener('input', () => {
     state.name = els.nameInput.value;
@@ -580,8 +627,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     state = {
       botId: '',
       name: pickRandomName('', existingNames),
-      role: 'reviewer',
-      soul: '',
+      role: 'custom',
       kind: 'shape',
       shape: 'sprout',
       icon: 'star',
@@ -591,10 +637,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       uploadFile: null,
       filename: '',
     };
-    renderShell();
     if (!dialog.open) dialog.showModal();
-    els.nameInput.focus({ preventScroll: true });
-    els.nameInput.select();
+    setStep('start');
   }
 
   function openEdit(bot, { bots = [], origin = document.activeElement } = {}) {
@@ -614,7 +658,6 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       botId: bot.id,
       name: bot.name || bot.id,
       role: bot.role || '',
-      soul: bot.soul || '',
       kind: resolved.kind === 'upload' && !resolved.imageUrl ? 'shape' : resolved.kind,
       shape: resolved.shape.example || 'sprout',
       icon: resolved.kind === 'icon' ? resolved.icon : 'star',
@@ -624,9 +667,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       uploadFile: null,
       filename: resolved.kind === 'upload' ? resolved.filename : '',
     };
-    renderShell();
     if (!dialog.open) dialog.showModal();
-    els.nameInput.focus({ preventScroll: true });
+    setStep('editor');
   }
 
   return { openCreate, openEdit };
