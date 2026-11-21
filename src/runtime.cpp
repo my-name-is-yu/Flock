@@ -1155,7 +1155,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                     if (field(args,"kind") == "result" &&
                         (hasPending(current) || current.value("replanning",false) ||
                          (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))))
-                        return false;
+                        throw Conflict("Apply the pending revision and complete revised work before returning a result");
                     replyPeer(current,event,decision,actionId());
                     return true;
                 });

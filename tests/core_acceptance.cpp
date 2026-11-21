@@ -1024,7 +1024,7 @@ void recipientRevisionDuringPeerQuestionPreservesTheAnswer() {
           alphaMessages.back()["text"] == "Retested main under revised criteria" &&
           alphaMessages.back()["evidence"][0]["runId"] == "run-2-result" &&
           f.logs(recipient,"peer_completed") == 1 && f.logs(sender,"completed") == 1 &&
-          f.logs(recipient,"model_failure") == 0 && f.logs(sender,"model_failure") == 0 &&
+          f.logs(recipient,"model_failure") == 1 && f.logs(sender,"model_failure") == 0 &&
           f.task(sender)["wait"].is_null() && f.task(recipient)["wait"].is_null(),
           "the revised result did not close the same exchange once without model-failure waits");
 }
