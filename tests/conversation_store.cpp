@@ -630,7 +630,8 @@ void followUpsKeepThePriorResult() {
     execution.finish(store,original,report);
     const auto sourceId = store.latestTaskResult(original).at("id").get<Id>();
     const auto unrelated = task(writer,"Unrelated report");
-    execution.finish(store,unrelated,"1. Compare earlier dates\n2. Discard the baseline");
+    const std::string unrelatedReport = "1. Compare earlier dates\n2. Discard the baseline";
+    execution.finish(store,unrelated,unrelatedReport);
     const auto unrelatedId = store.latestTaskResult(unrelated).at("id").get<Id>();
     execution.model.conversation = [&](const ModelInput& input) {
         if (input.tools.front() == "answer_conversation_result") {
@@ -639,8 +640,13 @@ void followUpsKeepThePriorResult() {
         }
         const auto& text = input.event.at("text");
         if (text == "Explain option 2") return route("answer_result",{{"resultMessageId",sourceId},{"resultOption",2}});
-        if (text == "Implement all approaches in the original report")
+        if (text == "Implement the whole report, including Option 2")
             return route("create_task",{{"resultMessageId",sourceId},{"resultOption",0}});
+        if (text == "Implement everything in the other report")
+            return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",0}});
+        if (text == "Implement the whole report in another environment")
+            return route("clarify",{{"text","Which configured execution destination should I use?"},
+                {"operation","destination"},{"resultMessageId",sourceId},{"resultOption",0}});
         if (text == "案2以外を実装") return route("create_task",{{"resultMessageId",sourceId},{"resultOption",2}});
         if (text == "案2を適用して") return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",2}});
         return route("create_task");
@@ -661,11 +667,22 @@ void followUpsKeepThePriorResult() {
     check(deictic["route"] == "create_task" && deictic["source"] == answer["source"] &&
           store.tasks("alpha").front()["sourceResultRefs"] == Json::array({answer["source"]}),
           "the deictic follow-up lost the cited result or selected option");
-    const auto whole = send("whole","Implement all approaches in the original report",answer.at("messageId"));
+    const auto whole = send("whole","Implement the whole report, including Option 2",answer.at("messageId"));
     check(whole.at("route") == "create_task" && whole.at("source").at("messageId") == sourceId &&
           whole.at("source").at("option") == 0 && whole.at("source").at("text") == report &&
           store.tasks("alpha").front()["sourceResultRefs"] == Json::array({whole.at("source")}),
           "an explicit whole-report request received only the explained option");
+    send("explain-before-other","Explain option 2",sourceId);
+    const auto other = send("other-whole","Implement everything in the other report");
+    check(other.at("route") == "create_task" && other.at("source").at("messageId") == unrelatedId &&
+          other.at("source").at("option") == 0 && other.at("source").at("text") == unrelatedReport,
+          "a whole-report reference was redirected to a recent excerpt");
+    const auto destination = send("whole-destination","Implement the whole report in another environment",answer.at("messageId"));
+    check(destination.at("route") == "clarify" && destination.at("source") == whole.at("source"),
+          "a destination question lost the whole-report scope");
+    const auto queued = send("whole-confirm","env",destination.at("messageId"));
+    check(queued.at("route") == "create_task" && queued.at("source") == whole.at("source"),
+          "choosing a destination lost the whole-report scope");
     const auto count = store.tasks("alpha").size();
     check(send("exclude","案2以外を実装",sourceId)["route"] == "clarify" &&
           send("ambiguous","案2を適用して")["route"] == "clarify" && store.tasks("alpha").size() == count,

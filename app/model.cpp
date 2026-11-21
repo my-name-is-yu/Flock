@@ -381,6 +381,7 @@ already identified task, or no task for new work. Never interpret Session result
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
 For work explicitly covering the whole result, set resultOption to 0. For "implement it" or a similar
 request referring to the last selected excerpt, omit resultOption to keep that excerpt.
+Include resultOption=0 on a destination clarification for whole-report work.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact messageId as resultMessageId.
 Respect an explicit reply's result. Use the bodies of results and their options, recentSource, and

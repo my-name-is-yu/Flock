@@ -581,12 +581,12 @@ std::optional<Result> selectWorkResult(Id id, std::optional<int> numbered, const
         require(!numbered || numbered == anchor.result->option || anchor.result->option == 0);
         return anchor.result;
     }
-    const bool needsSource = numbered || refersToResult(normal);
+    const bool needsDisambiguation = numbered.value_or(0) || refersToResult(normal);
     const Result* source = nullptr;
     if (anchor.result) {
         require(!id || anchor.result->messageId == id);
         source = &*anchor.result;
-    } else if (context.recentSource && needsSource &&
+    } else if (context.recentSource && (needsDisambiguation || (numbered && !id)) &&
                !std::ranges::any_of(context.tasks,[&](const Task& t) { return refersTo(normal,normalize(t.fullName)); })) {
         require(!id || context.recentSource->messageId == id);
         source = &*context.recentSource;
@@ -594,7 +594,7 @@ std::optional<Result> selectWorkResult(Id id, std::optional<int> numbered, const
         const auto match = std::ranges::find(context.rankedResults,id,&Result::messageId);
         require(match != context.rankedResults.end());
         source = &*match;
-        if (needsSource) {
+        if (needsDisambiguation) {
             std::set<Id> named, available;
             for (const auto& entry : context.rankedResults) {
                 available.insert(entry.taskId);
@@ -604,7 +604,7 @@ std::optional<Result> selectWorkResult(Id id, std::optional<int> numbered, const
             require(plausible.size() == 1 && plausible.contains(source->taskId));
         }
     }
-    require(source || !needsSource);
+    require(source || (!needsDisambiguation && !numbered));
     if (!source) return std::nullopt;
     return numbered ? selectOption(*source,*numbered,context) : *source;
 }
@@ -656,6 +656,7 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto resultId = readId(route, "resultMessageId");
     const bool hasResultOption = route.contains("resultOption");
     const auto proposedOption = hasResultOption ? readId(route.at("resultOption"),0) : 0;
+    const bool wholeResult = hasResultOption && proposedOption == 0;
     require(proposedOption <= 99 && (!id || task));
     if (kind == "answer_result") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption"});
@@ -681,17 +682,18 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         }
         auto operation = readText(route,"operation",32);
         require(operation.empty() || oneOf(operation,{"cancel_task","revise_task","destination"}));
-        require(operation.empty() || !hasResultOption);
+        require(operation.empty() || !hasResultOption || (operation == "destination" && wholeResult));
         if (operation == "destination") require(choices.size() <= 1);
         if (operation == "cancel_task" && !explicitCancellation(segment)) operation.clear();
         std::optional<Result> source;
         if (operation.empty()) {
             source = selectReadOnlyResult(resultId,static_cast<int>(proposedOption),context,anchor);
             require(!hasResultOption || source);
-        } else if (resultId || anchor.result) {
+        } else if (resultId || anchor.result || wholeResult) {
             const auto option = ordinal(normalize(segment));
             require(option >= 0);
-            source = selectWorkResult(resultId,option ? std::optional{option} : std::nullopt,context,anchor,segment);
+            const auto selection = wholeResult || option ? std::optional{wholeResult ? 0 : option} : std::nullopt;
+            source = selectWorkResult(resultId,selection,context,anchor,segment);
         }
         std::optional<RevisionDraft> draft;
         if (operation == "destination" && choices.size() == 1)
@@ -701,7 +703,7 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     }
     const auto mentionedOption = (resultId || anchor.result || proposedOption ||
         kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
-    require(mentionedOption >= 0 && (!mentionedOption || !hasResultOption || mentionedOption == proposedOption));
+    require(mentionedOption >= 0 && (!mentionedOption || !proposedOption || mentionedOption == proposedOption));
     std::optional<int> option;
     if (hasResultOption || mentionedOption)
         option = static_cast<int>(hasResultOption ? proposedOption : mentionedOption);
