@@ -1496,12 +1496,12 @@ elements.message.addEventListener('input', () => {
   if (!view) return;
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
+  else drafts.set(view.id, elements.message.value);
   // A hidden choice only stands for the label it filled in. Once the user rewrites it, send plain text.
   if (reply?.candidateTaskId && reply.text !== reply.choice) {
     delete reply.candidateTaskId;
     delete reply.choice;
   }
-  else drafts.set(view.id, elements.message.value);
   fitMessage();
   notices.delete(view.id);
   const limit = composerLimit(reply);

@@ -365,10 +365,16 @@ void conversationEntry(const std::filesystem::path& path) {
 
 struct StopModel : FixedModel {
     Id other = 0;
+    bool honorSelection = false;
     Decision decide(const ModelInput& input) override {
         if (input.event["kind"] != "route_conversation") return FixedModel::decide(input);
         const auto& event = input.event;
         const auto& reply = event.at("reply");
+        if (reply.at("kind") == "clarification" && honorSelection) {
+            check(reply.contains("selectedTaskId"),"the model did not receive the user's hidden choice");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},
+                    {"taskId",reply.at("selectedTaskId")}}})},{"resolution","resolved"}},{}};
+        }
         if (reply.at("kind") == "clarification") {
             // Deliberately route the resolved clarification to a request the user did not choose.
             return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},{"taskId",other}}})},
@@ -469,6 +475,14 @@ void sameNameStop(const std::filesystem::path& path) {
     const auto untouched = [&](Id task) { return store.task(task).value("pendingInstructions",Json::array()).empty(); };
     check(misroutedReply.at("route") == "clarify" && untouched(first) && untouched(third),
           "routing applied a chosen reply to a request the user did not choose");
+
+    model.honorSelection = true;
+    const auto honored = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","honored"},
+        {"text","ログイン画面の修正"},{"replyToMessageId",adjustQuestion.at("messageId")},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto honoredReply = conversationReply(browser.get("/api/view?bot=triage"),honored.at("messageId"));
+    check(honoredReply.at("route") == "append_instruction" && !untouched(first) && untouched(third),
+          "a chosen candidate did not resolve a non-stop clarification for that request only");
 }
 }
 

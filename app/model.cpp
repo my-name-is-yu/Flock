@@ -380,6 +380,8 @@ event.pendingClarification only when event.text clearly answers its question. Se
 and clarificationMessageId to its exact messageId, and route its originalText with the correction.
 Leave unrelated requests independent. If multiplePendingClarifications is true and the intended
 clarification lacks an anchor, ask the user to reply directly to the intended question.
+If event.reply.selectedTaskId is set, the user chose that candidate from the clarification. Resolve the
+clarification with it and target only that task; the reply text is just its label.
 Use only the clarification's supplied candidates. It can resolve a wait only if the user selects a
 recorded task and the same wait was open at first intake. Set resolution=superseded only if the user
 expressly withdraws the anchored clarification.

@@ -473,6 +473,8 @@ Json decisionContext(std::string_view text, const Context& context) {
     Json anchor = {{"kind",kind},{"messageId",reply.id},{"taskId",reply.taskId},{"waitId",reply.waitId},
                    {"originalText",reply.originalText},{"candidates",reply.candidates}};
     if (reply.kind == Reply::Kind::clarification) anchor.update(clarificationData(reply));
+    // The user picked this candidate with a verified hidden reference, not by typing its name.
+    if (context.selection) anchor["selectedTaskId"] = context.selection;
     if (reply.result) {
         anchor["resultMessageId"] = reply.result->messageId;
         anchor["result"] = resultData(*reply.result, 1024);
