@@ -111,7 +111,7 @@ bool fromRun(const Json& item, const RunRef& run) {
 }
 
 template<typename Visit>
-void walkThreadHistoryForward(Client& client, Scan& scan, const std::string& threadId, std::string_view view,
+bool walkThreadHistoryForward(Client& client, Scan& scan, const std::string& threadId, std::string_view view,
           int maxChars, Position after, Visit visit) {
     for (;;) {
         scan.step();
@@ -124,9 +124,9 @@ void walkThreadHistoryForward(Client& client, Scan& scan, const std::string& thr
             const auto next = position(member(item, "position"));
             if (next <= after) invalidResponse();
             after = next;
-            if (!visit(item)) return;
+            if (!visit(item)) return false;
         }
-        if (!boolean(page, "hasMore")) return;
+        if (!boolean(page, "hasMore")) return true;
         if (after <= start || cursor(page, "nextPosition") != after) invalidResponse();
     }
 }
@@ -194,99 +194,92 @@ bool sameDelegateTitle(std::string_view activity, std::string_view notice) {
            (second.size() >= 48 && second.size() != notice.size() && first.starts_with(second));
 }
 
-// A delegated completion is reported thread-wide by T3 wait. In v0.1.11 a
-// completion wake can be a typed notification with the child's title, with
-// no task ID in that item. Require a unique settled child in the already
-// owned chain and reject any intervening Run with an ordinary prompt.
+struct CompletionNotice { std::string title, updatedAt; };
+struct DelegatedChild {
+    std::string parentRun, title, settledAt;
+    bool consumed = false;
+};
+
+std::optional<CompletionNotice> completionNotice(const Json& item) {
+    constexpr std::string_view header = "Delegated task \"";
+    constexpr std::string_view footer = "\" finished";
+    const auto text = str(item,"text");
+    const auto updatedAt = str(item,"updatedAt");
+    if (str(item,"status") != "completed" || boolean(item,"textTruncated") || updatedAt.empty() ||
+        !text.starts_with(header) || !text.ends_with(footer) || text.size() <= header.size() + footer.size())
+        return std::nullopt;
+    return CompletionNotice{text.substr(header.size(),text.size() - header.size() - footer.size()),updatedAt};
+}
+
+bool consumeCompletion(const CompletionNotice& notice, std::map<std::string,DelegatedChild>& children,
+                       const std::set<std::string>& ownedRuns) {
+    DelegatedChild* match = nullptr;
+    for (auto& [id,child] : children) {
+        if (!sameDelegateTitle(child.title,notice.title)) continue;
+        if (match) return false;
+        match = &child;
+    }
+    if (!match || match->consumed || !ownedRuns.contains(match->parentRun) ||
+        match->settledAt.empty() || match->settledAt > notice.updatedAt) return false;
+    match->consumed = true;
+    return true;
+}
+
+// T3 wait reports thread-wide results. Only a chain of completion notifications
+// from children of already owned Runs can transfer ownership to a later Run.
 bool ownsResult(Client& client, const RunRef& requested, const std::string& effectiveRunId,
                 const std::string& resultRunId) {
     if (resultRunId == effectiveRunId || resultRunId == requested.runId) return true;
     const auto head = threadHead(client, requested.threadId, 50);
-    const auto& runs = array(head, "recentRuns");
-    std::map<Position, std::string> ordered;
+    std::map<Position,std::string> ordered;
     Position base = 0, ending = 0;
-    for (const auto& run : runs) {
-        const auto id = str(run, "runId");
-        const auto ordinal = position(member(run, "ordinal"));
-        if (id.empty() || !ordered.emplace(ordinal, id).second) invalidResponse();
+    for (const auto& run : array(head,"recentRuns")) {
+        const auto id = str(run,"runId");
+        const auto ordinal = position(member(run,"ordinal"));
+        if (id.empty() || !ordered.emplace(ordinal,id).second) invalidResponse();
         if (id == effectiveRunId) base = ordinal;
         if (id == resultRunId) ending = ordinal;
     }
     if (base == 0 || ending <= base) return false;
-    std::set<std::string> candidates;
+    std::map<std::string,std::vector<CompletionNotice>> notices;
     for (auto ordinal = base + 1; ordinal <= ending; ++ordinal) {
         const auto found = ordered.find(ordinal);
         if (found == ordered.end()) return false;
-        candidates.insert(found->second);
+        notices.try_emplace(found->second);
     }
-    struct Child {
-        std::string title, updatedAt;
-    };
-    struct Trigger {
-        std::string taskId, notice, updatedAt;
-    };
-    std::map<std::string, std::set<std::string>> subtasks;
-    std::map<std::string,Child> children;
-    std::map<std::string, std::vector<Trigger>> triggers;
-    std::set<std::string> ordinaryInputs;
+
+    std::map<std::string,DelegatedChild> children;
     Scan scan;
-    walkThreadHistoryForward(client, scan, requested.threadId, "activity", 700, -1, [&](const Json& item) {
-        if (!local(item, requested.threadId)) return true;
-        const auto run = str(item, "runId");
-        const auto type = str(item, "type");
+    const bool complete = walkThreadHistoryForward(client,scan,requested.threadId,"activity",700,-1,[&](const Json& item) {
+        if (!local(item,requested.threadId)) return true;
+        const auto run = str(item,"runId");
+        const auto type = str(item,"type");
         if (type == "subagent") {
-            const auto id = str(item, "subagentId");
-            const auto title = str(item, "title");
-            if (!id.empty()) {
-                subtasks[run].insert(id);
-                if (!title.empty())
-                    children.emplace(id,Child{title,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
-            }
+            const auto id = str(item,"subagentId");
+            const auto title = str(item,"title");
+            if (!id.empty() && !title.empty())
+                children.emplace(id,DelegatedChild{run,title,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
         }
-        if (!candidates.contains(run)) return true;
+        const auto candidate = notices.find(run);
+        if (candidate == notices.end()) return true;
+        if (type == "user_message") return false;
         if (type == "notification") {
-            const auto message = str(item,"text");
-            constexpr std::string_view header = "Delegated task \"";
-            constexpr std::string_view footer = "\" finished";
-            if (str(item,"status") == "completed" && !boolean(item,"textTruncated") &&
-                message.starts_with(header) && message.ends_with(footer) && message.size() > header.size()+footer.size()) {
-                triggers[run].push_back({{},message.substr(header.size(),message.size()-header.size()-footer.size()),
-                                         str(item,"updatedAt")});
-            } else ordinaryInputs.insert(run);
-        }
-        if (type == "user_message") {
-            const auto text = str(item, "text");
-            constexpr std::string_view prefix = "Delegated task ";
-            std::string taskId;
-            if (str(item, "createdBy") == "agent" && str(item, "creationSource") == "server" &&
-                text.starts_with(prefix) && !text.starts_with("Delegated task \"")) {
-                const auto end = text.find_first_of(" \r\n\t", prefix.size());
-                if (end != std::string::npos) taskId = text.substr(prefix.size(), end - prefix.size());
-            }
-            if (taskId.empty()) ordinaryInputs.insert(run);
-            else triggers[run].push_back({std::move(taskId),{},{}});
+            auto notice = completionNotice(item);
+            if (!notice) return false;
+            candidate->second.push_back(std::move(*notice));
         }
         return true;
     });
-    auto tasks = subtasks[requested.runId];
-    tasks.merge(subtasks[effectiveRunId]);
-    std::set<std::string> delivered;
+    if (!complete) return false;
+
+    std::set<std::string> ownedRuns{requested.runId,effectiveRunId};
     for (auto ordinal = base + 1; ordinal <= ending; ++ordinal) {
-        const auto& id = ordered.at(ordinal);
-        if (!triggers.contains(id) || ordinaryInputs.contains(id)) return false;
-        for (const auto& trigger : triggers.at(id)) {
-            auto childId = trigger.taskId;
-            if (!trigger.notice.empty()) {
-                if (trigger.updatedAt.empty()) return false;
-                for (const auto& [id,child] : children) {
-                    if (!sameDelegateTitle(child.title,trigger.notice)) continue;
-                    if (!childId.empty() || child.updatedAt.empty() || child.updatedAt > trigger.updatedAt) return false;
-                    childId = id;
-                }
-            }
-            if (!tasks.contains(childId) || !delivered.insert(childId).second) return false;
-        }
-        tasks.merge(subtasks[id]);
+        const auto& run = ordered.at(ordinal);
+        const auto& inputs = notices.at(run);
+        if (inputs.empty()) return false;
+        for (const auto& notice : inputs)
+            if (!consumeCompletion(notice,children,ownedRuns)) return false;
+        ownedRuns.insert(run);
     }
     return true;
 }

@@ -127,35 +127,32 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
-        fixture({{"scenario", "manual-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "unrelated manual result is not attributed to Flock");
-        fixture({{"scenario", "delegated-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "delegate result is tied to owned subagent activity");
-        fixture({{"scenario", "notification-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "v0.1.11 completion notification is tied to a unique owned delegate");
-        fixture({{"scenario", "shortened-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "independent T3 title truncation preserves unique delegate attribution");
-        fixture({{"scenario", "mixed-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "manual input in a continuation Run prevents attribution");
+        const auto checkResult = [&](const char* scenario, bool ownsLater) {
+            fixture({{"scenario", scenario}});
+            const auto observed = adapter->observe("env-1", launch.config, run);
+            check(observed.settled && observed.resultRunId == (ownsLater ? "later" : "root") &&
+                  observed.report == (ownsLater ? "later report" : "root report"),
+                  std::string("Incorrect result attribution in ") + scenario);
+        };
+        checkResult("notification-result", true);
+        checkResult("shortened-result", true);
+        checkResult("nested-result", true);
+        checkResult("mixed-result", false);
+        checkResult("server-input-result", false);
+        checkResult("ambiguous-title-result", false);
+        checkResult("reused-result", false);
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";
         follow.target = run;
         follow.instruction = std::string(700, 'x');
-        fixture({{"scenario", "manual-active"}});
-        check(adapter->send(follow).kind == Delivery::Kind::NotAccepted, "busy thread blocks queue send");
-        check(effects("t3_thread_send").empty(), "T3 receives no follow-up while another Run is active");
+        for (const auto* scenario : {"manual-active", "server-input-result"}) {
+            fixture({{"scenario", scenario}});
+            check(adapter->send(follow).kind == Delivery::Kind::NotAccepted,
+                  std::string("Follow-up accepted in ") + scenario);
+        }
+        check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy or unrelated Run");
         fixture({{"scenario", "settled"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
