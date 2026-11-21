@@ -551,9 +551,8 @@ SELECT page.id,page.task_id,page.time,page.kind,
               WITH instructions AS (
                 SELECT kind,task_id,coalesce(json_extract(data,'$.step'),0) AS step
                 FROM journal WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered')
-                -- The numeric key is indexed. The original value rules out lossy casts such as '12x' to 12.
-                AND CAST(json_extract(data,'$.messageId') AS NUMERIC)=m.id
-                AND json_extract(data,'$.messageId')=m.id
+                -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
+                AND json_extract(data,'$.messageId')=+m.id
               )
               -- min() requires every instruction to be delivered and yields NULL for an ordinary message.
               SELECT min(i.kind='instruction_steered' OR EXISTS (

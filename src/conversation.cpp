@@ -25,7 +25,7 @@ WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
-  CAST(json_extract(data,'$.messageId') AS NUMERIC),task_id,coalesce(json_extract(data,'$.step'),0))
+  json_extract(data,'$.messageId'),task_id,coalesce(json_extract(data,'$.step'),0))
   WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
