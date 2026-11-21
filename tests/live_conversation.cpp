@@ -164,7 +164,8 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         const auto id = s.task("Benchmark the startup time","benchmark");
         const auto reply = s.send("For the running benchmark, use the staging database from now on");
         if (s.store.tasks("release").size() != 1) return "a new task was started";
-        return count(reply.at("actions"),"message_session",id) + count(reply.at("actions"),"send_to_task",id) == 1
+        const auto& actions = reply.at("actions");
+        return count(actions,"message_session",id) + count(actions,"send_to_task",id) + count(actions,"change_task",id) == 1
             ? "" : "the note did not reach the benchmark";
     }},
 };
