@@ -55,6 +55,8 @@ struct Context {
     std::vector<std::string> environments;
     Json destinationIds = Json::object();
     Json history = Json::array(), expiredWaits = Json::array();
+    // A candidate the user chose from the anchored clarification. Routing may only act on this task.
+    Id selection = 0;
     bool moreTasks = false, moreWaits = false, staleWaits = false, multiplePendingClarifications = false;
     const Reply* clarification(Id replyId) const;
     bool operator==(const Context&) const = default;

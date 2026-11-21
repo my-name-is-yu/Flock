@@ -120,10 +120,11 @@ public:
 
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
+    // candidateTaskId is a hidden choice among the candidates of the clarification at replyToMessageId.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0);
+                 Id replyToMessageId = 0, Id candidateTaskId = 0);
     std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0) const;
+                                std::string_view text, Id replyToMessageId = 0, Id candidateTaskId = 0) const;
     Json clarifications(std::string_view botId) const;
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.

@@ -226,9 +226,10 @@ Status status(std::string_view text, const Context& context, const Task* selecte
         return {statusLine(task, ja), target(task)};
     }
     if (response.empty())
-        response = translate(ja, "There are no tasks for this Bot yet.", "この Bot にはまだ作業がありません。");
+        response = translate(ja, "I don't have any requests yet.", "まだ依頼はありません。");
     else if (count == 10 || context.moreTasks)
-        response += translate(ja, "\nOpen the task list for the full status.", "\nすべての進捗は作業一覧で確認できます。");
+        response += translate(ja, "\nThese are the most recent requests. Ask about one by name for details.",
+                                  "\n最近の依頼のみ表示しています。依頼名を添えて聞いていただければ詳しくお答えします。");
     return {std::move(response), std::nullopt};
 }
 
@@ -239,8 +240,8 @@ Plan single(std::string_view segment, T action) {
 
 Plan unclear(std::string_view text, const std::set<Id>& candidates) {
     return single(text, Clarify{
-        translate(japanese(text), "Please clarify which task, result, or question you mean and what you want me to do.",
-                                  "対象の作業・結果・質問と、希望する対応を教えてください。"),
+        translate(japanese(text), "Please tell me which request, result, or question you mean and what you'd like me to do.",
+                                  "対象の依頼・結果・質問と、希望する対応を教えてください。"),
         {candidates.begin(), candidates.end()}
     });
 }
@@ -281,20 +282,29 @@ std::optional<std::string_view> cancellationSubject(std::string_view text) {
     return std::nullopt;
 }
 
-bool groundedCancellation(std::string_view text, const Task& task, const Context& context,
-                          Id selected) {
-    const auto normal = normalize(text);
-    const auto subject = cancellationSubject(normal);
-    if (!subject) return false;
-    const bool wholeTask = oneOf(*subject,{"","it","that","this","the task","this task","that task","the current task",
+bool wholeTaskSubject(std::string_view subject) {
+    return oneOf(subject,{"","it","that","this","the task","this task","that task","the current task",
             "それ","それを","これ","これを","この作業を","その作業を","今の作業を","作業を","一旦","いったん"});
-    auto name = *subject;
+}
+
+std::string_view cancellationName(std::string_view subject) {
+    auto name = subject;
     if (name.starts_with("the task ")) name.remove_prefix(9);
     if (name.ends_with("を")) name.remove_suffix("を"sv.size());
     for (const auto& [left,right] : {std::pair{"「"sv,"」"sv},std::pair{"\""sv,"\""sv}}) {
         if (name.size() >= left.size() + right.size() && name.starts_with(left) && name.ends_with(right))
             name = name.substr(left.size(),name.size()-left.size()-right.size());
     }
+    return name;
+}
+
+bool groundedCancellation(std::string_view text, const Task& task, const Context& context,
+                          Id selected) {
+    const auto normal = normalize(text);
+    const auto subject = cancellationSubject(normal);
+    if (!subject) return false;
+    const bool wholeTask = wholeTaskSubject(*subject);
+    const auto name = cancellationName(*subject);
     const auto matches = [&](const Task& candidate) {
         return active(candidate) && name == normalize(trim(candidate.fullName));
     };
@@ -322,14 +332,6 @@ Id namedClarificationCandidate(std::string_view text, const Context& context, co
     auto number = positiveInt(label);
     for (auto suffix : {"件目"sv, "番目"sv}) {
         if (!number && label.ends_with(suffix)) number = positiveInt(label.substr(0, label.size() - suffix.size()));
-    }
-    if (label.starts_with('#')) {
-        const auto remainder = label.substr(1);
-        Id id = 0;
-        const auto parsed = std::from_chars(remainder.data(),remainder.data() + remainder.size(),id);
-        if (parsed.ec == std::errc{} && parsed.ptr == remainder.data() + remainder.size() &&
-            std::ranges::find(candidates,id) != candidates.end()) return id;
-        return 0;
     }
     if (number > 0 && static_cast<std::size_t>(number) <= candidates.size()) return candidates[number - 1];
     Id selected = 0;
@@ -725,12 +727,16 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
             require(resolution == "resolved" && !trim(pending->originalText).empty());
             resolved = pending;
             plan.resolution = Resolution{pending->id, Resolution::Kind::resolved};
-            selected = namedClarificationCandidate(text, context, pending->candidates);
+            if (context.selection) {
+                require(context.reply.kind == Reply::Kind::clarification && pending->id == context.reply.id);
+                selected = context.selection;
+            } else selected = namedClarificationCandidate(text, context, pending->candidates);
             require(selected || !genericAnswer(text) || (pending->result && context.reply.id == pending->id));
             clarificationReply = text;
             text = pending->originalText;
         }
     }
+    require(!context.selection || resolved);
     const auto parts = segments(args.at("routes"), text);
     require(!resolved || parts.size() == 1);
     bool selectedCandidate = !resolved || resolved->candidates.empty();
@@ -863,12 +869,16 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
             return single(text,Respond{translate(ja,"Use the available action on this waiting item.",
                                                    "確認待ちの項目から対応する操作を選んでください。"),std::nullopt});
         }
-        return single(text, Respond{translate(ja, "That question is no longer current. Check the task for its latest status.",
-                                                 "その質問の受付は終了しました。作業の最新状況を確認してください。"), std::nullopt});
+        return single(text, Respond{translate(ja, "That question has already closed, so I didn't apply your reply to any request. "
+                                                     "Check the latest messages.",
+                                                 "その質問の受付は終了しているため、どの依頼にも適用していません。"
+                                                 "最新のメッセージを確認してください。"), std::nullopt});
     }
     if (reply.kind == Reply::Kind::invalid || (reply.kind == Reply::Kind::result && !reply.result)) {
-        return single(text, Respond{translate(ja, "That reply target is unavailable in this Bot’s conversation.",
-                                                 "この Bot の会話では返信先を確認できません。"), std::nullopt});
+        return single(text, Respond{translate(ja, "What you replied to has closed or isn't in this conversation, "
+                                                     "so I didn't apply your message to any request.",
+                                                 "返信先の確認はすでに終了しているか、この会話にないため、"
+                                                 "どの依頼にも適用していません。"), std::nullopt});
     }
     if (reply.kind == Reply::Kind::clarification && dismissesClarification(text)) {
         auto plan = single(text, Respond{translate(ja, "I closed that clarification.", "この確認を閉じました。"), std::nullopt});
@@ -895,24 +905,60 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         else {
             const auto* selected = taskById(context,reply.candidates.front());
             if (reply.candidates.size() != 1 || !selected || !active(*selected)) {
-                return supersede("The task for this destination is no longer active.",
-                                 "実行先を変更する作業は終了しました。");
+                return supersede("The request for this destination is no longer active.",
+                                 "実行先を変更する依頼は終了しました。");
             }
             if (!reply.revisionDraft)
-                return supersede("The task revision details are no longer available. Submit the revision again.",
-                                 "変更内容を復元できません。作業の変更をもう一度送ってください。");
+                return supersede("The change details are no longer available. Please send the change again.",
+                                 "変更内容を復元できません。変更をもう一度送ってください。");
             const auto& draft = *reply.revisionDraft;
             if (draft.target.taskId != selected->id || draft.target.generation != selected->generation ||
                 draft.target.revision != selected->revision || draft.target.waitId != selected->waitId)
-                return supersede("The task changed while its destination was pending. Submit the revision again.",
-                                 "実行先の確認中に作業が更新されました。変更をもう一度送ってください。");
+                return supersede("The request changed while its destination was pending. Please send the change again.",
+                                 "実行先の確認中に依頼が更新されました。変更をもう一度送ってください。");
             plan = single(reply.originalText,ReviseTask{draft.target,std::move(instruction),draft.intent,draft.doneWhen,
                                                         std::string(destination),reply.result});
         }
         plan.resolution = Resolution{reply.id,Resolution::Kind::resolved};
         return plan;
     }
+    if (reply.kind == Reply::Kind::clarification && context.selection && reply.operation == "cancel_task") {
+        // The user chose one request from a stop confirmation. Act on that request only, without a model guess.
+        const auto* chosen = taskById(context, context.selection);
+        if (!chosen || !active(*chosen)) {
+            auto plan = single(text, Respond{translate(ja, "That request has already ended, so there was nothing to stop.",
+                                                           "その依頼はすでに終了しているため、停止するものはありませんでした。"),
+                                             std::nullopt});
+            plan.resolution = Resolution{reply.id, Resolution::Kind::superseded};
+            return plan;
+        }
+        if (groundedCancellation(reply.originalText, *chosen, context, chosen->id)) {
+            auto plan = single(reply.originalText, CancelTask{target(*chosen)});
+            plan.resolution = Resolution{reply.id, Resolution::Kind::resolved};
+            return plan;
+        }
+    }
     const auto normal = normalize(text);
+    if (reply.kind == Reply::Kind::none) {
+        // Requests that share a name cannot be told apart from the text, so confirm instead of guessing.
+        if (const auto subject = cancellationSubject(normal); subject && !wholeTaskSubject(*subject)) {
+            const auto name = cancellationName(*subject);
+            std::vector<Id> named;
+            const Task* first = nullptr;
+            for (const auto& task : context.tasks) {
+                if (!active(task) || name.empty() || name != normalize(trim(task.fullName))) continue;
+                if (!first) first = &task;
+                named.push_back(task.id);
+            }
+            if (named.size() > 1) {
+                const auto label = shortName(*first);
+                return single(text, Clarify{
+                    translate(ja, "There is more than one “" + label + "”. Which one should I stop?",
+                                  "「" + label + "」は複数あります。どれを中止しますか？"),
+                    std::move(named), std::nullopt, "cancel_task"});
+            }
+        }
+    }
     if (reply.kind == Reply::Kind::none &&
         oneOf(sentence(normal), {"進捗", "進捗は", "進捗はどう", "進捗状況", "進捗どうなってる",
                                  "status", "progress", "status update", "how is it going", "what's the status"}))

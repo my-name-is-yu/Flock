@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <map>
 #include <set>
 
 namespace flockv0::web {
@@ -122,13 +123,25 @@ Json waitView(const Json& wait) {
     return view;
 }
 
-Json candidateViews(const Json& candidates) {
+std::string displayState(const Json& task);
+
+// Candidates are offered by request text. Start time and state tell same-named requests apart.
+Json candidateViews(const Json& candidates, const std::map<Id,const Json*>* active = nullptr) {
     Json result = Json::array();
     if (!candidates.is_array()) return result;
     for (const auto& candidate : candidates) {
         Json view = Json::object();
         copyFields(view,candidate,{"taskId","request"});
-        if (!view.empty()) result.push_back(std::move(view));
+        if (view.empty()) continue;
+        const auto id = candidate.find("taskId");
+        if (active && id != candidate.end() && id->is_number_integer()) {
+            const auto task = active->find(id->get<Id>());
+            if (task != active->end()) {
+                copyFields(view,*task->second,{"createdAt"});
+                view["state"] = displayState(*task->second);
+            } else view["state"] = "ended";
+        }
+        result.push_back(std::move(view));
     }
     return result;
 }
@@ -149,6 +162,7 @@ Json eventView(const Json& event) {
     if (kind == "waiting") details = waitView(data);
     else if (kind == "request") copyFields(details,data,{"text","source","scheduleId","scheduledAt","messageId"});
     else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
+    else if (kind == "cancelled") copyFields(details,data,{"request"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "completed") {
         copyFields(details,data,{"text","reason","doneWhen","revisionId"});
@@ -208,7 +222,7 @@ std::string displayState(const Json& task) {
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt"});
     return result;
 }
 
@@ -268,6 +282,7 @@ Json activity(Store& store, std::string_view bot) {
             active["taskId"] = task.at("id");
             active["request"] = task.at("request");
             active["state"] = display;
+            copyFields(active,task,{"createdAt"});
             result["activeSessions"].push_back(std::move(active));
         }
     }
@@ -356,11 +371,15 @@ Json botView(Store& store, const Json& bot) {
     result.update(activity(store,id));
     result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
+    const auto activeTasks = store.activeTasks(id);
+    std::map<Id,const Json*> active;
+    for (const auto& task : activeTasks) active.emplace(task.at("id").get<Id>(),&task);
     auto& clarifications = result["clarifications"] = Json::array();
     for (const auto& clarification : store.clarifications(id)) {
         Json view = Json::object();
         copyFields(view,clarification,{"messageId","text","destinations"});
-        if (clarification.contains("candidates")) view["candidates"] = candidateViews(clarification.at("candidates"));
+        if (clarification.contains("candidates"))
+            view["candidates"] = candidateViews(clarification.at("candidates"),&active);
         clarifications.push_back(std::move(view));
     }
     if (!clarifications.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
