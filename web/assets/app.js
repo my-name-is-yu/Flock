@@ -960,6 +960,7 @@ function renderComposer() {
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
+  const closedReply = reply?.closed === true;
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
@@ -970,15 +971,15 @@ function renderComposer() {
     elements.message.value = body;
     fitMessage();
   }
-  elements.message.readOnly = busy;
+  elements.message.readOnly = busy || closedReply;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = notice?.text ?? '';
-  elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !!notice?.fading);
+  elements.notice.textContent = closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '';
+  elements.notice.classList.toggle('error', !closedReply && !!notice?.isError);
+  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1482,8 +1483,11 @@ function mergeLatest(context, latest) {
   context.data = latest;
   const reply = replies.get(context.id);
   if (reply?.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    replies.delete(context.id);
-    setNotice(context, 'That question is no longer open.');
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That question is no longer open.');
+    }
   }
 }
 async function refreshView(context, scroll) {
