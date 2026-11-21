@@ -175,10 +175,10 @@
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
 .peer-dm-message .msg-time { opacity: 1; }
-.peer-dm-message.peer-forward { justify-items: end; }
-.peer-forward .msg-meta { justify-content: flex-end; padding-inline: 0 var(--avatar-col); text-align: right; }
-.peer-forward .msg-line { flex-direction: row-reverse; }
-.peer-forward-content { display: grid; justify-items: end; gap: .35rem; min-width: 0; max-width: min(100%, 36rem); }
+.peer-forward-content {
+  display: grid; justify-self: end; justify-items: end; gap: .35rem; min-width: 0; max-width: min(100%, 36rem);
+}
+.peer-forward-content + .msg-meta { margin-top: .4rem; }
 .peer-forward-content .bubble { max-width: 100%; }
 .peer-forward-meta {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .35rem; padding-inline: .6rem;

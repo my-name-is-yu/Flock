@@ -872,27 +872,24 @@ function peerThread(events, dm) {
     const from = participant(fromBotId);
     const to = participant(toBotId);
     const row = node('article', 'msg group-start peer-dm-message');
-    const metadata = node('div', 'msg-meta');
-    metadata.append(node('span', 'msg-name', `${from.name} → ${to.name}`), eventTime({ time: event.time }));
-    const line = node('div', 'msg-line');
-    line.append(avatar(from, 'msg-avatar'));
-    let content = line;
     if (forwardedMessage) {
-      row.classList.add('peer-forward');
-      content = node('div', 'peer-forward-content');
+      const content = node('div', 'peer-forward-content');
       const label = node('div', 'peer-forward-meta');
       label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
       const card = node('div', 'bubble peer-forwarded-message');
       card.append(node('p', 'event-text', forwardedMessage.text));
       content.append(label, card);
-      line.append(content);
+      row.append(content);
     }
     if (text || !forwardedMessage) {
+      const metadata = node('div', 'msg-meta');
+      metadata.append(node('span', 'msg-name', `${from.name} → ${to.name}`), eventTime({ time: event.time }));
+      const line = node('div', 'msg-line');
       const bubble = node('div', 'bubble');
       bubble.append(node('p', 'event-text', text));
-      content.append(bubble);
+      line.append(avatar(from, 'msg-avatar'), bubble);
+      row.append(metadata, line);
     }
-    row.append(metadata, line);
     fragment.append(row);
   }
   return fragment;
