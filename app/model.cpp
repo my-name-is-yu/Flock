@@ -234,6 +234,8 @@ Json toolSchema(const std::string& name, bool initial) {
             {"segment",textParameter("Verbatim contiguous segment. Required for each route in a compound message.")},
             {"taskId",{{"type","integer"},{"minimum",1}}},
             {"resultMessageId",{{"type","integer"},{"minimum",1}}},
+            {"resultOption",{{"type","integer"},{"minimum",1},{"maximum",99},
+                {"description","The option number the user selects from the referenced result."}}},
             {"intent",textParameter("The user's explicitly revised scope, quoted verbatim from this segment.")},
             {"doneWhen",textParameter("The user's explicitly revised completion criteria, quoted verbatim from this segment.")},
             {"environment",textParameter("The chosen configured environment alias.")},
@@ -244,6 +246,8 @@ Json toolSchema(const std::string& name, bool initial) {
             {"items",{{"type","object"},{"properties",segment},{"required",Json::array({"kind"})},
                       {"additionalProperties",false}}}};
         fields["resolution"] = {{"type","string"},{"enum",Json::array({"resolved","superseded"})}};
+        fields["clarificationMessageId"] = {{"type","integer"},{"minimum",1},
+            {"description","The exact pending clarification message ID when resolving without a reply anchor."}};
         required.emplace_back("routes");
     } else if (name == "answer_conversation_result") {
         description = "Answer the actual question using the selected result excerpt as evidence.";
@@ -330,7 +334,10 @@ After terminal work, use create_task with resultMessageId when asked to do new w
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact resultMessageId. Think
 about the real request and selected result, including numbered choices, names, reply anchors, and recent
-context. Answering a question or showing progress creates no work. Status optionally takes a taskId and
+context. Supply resultOption only when the user clearly selects one numbered option from the result.
+A count, an excluded option, or a comparison between options is not a selection. Answering a question
+or showing progress creates no work. When resolving a clarification with a result, use answer_result
+and omit resultOption because the clarification already identifies the excerpt. Status optionally takes a taskId and
 is rendered from saved state. Use respond and text only for ordinary chat.
 answer_wait requires a direct answer to a specifically grounded current user_question. Explicit replies
 are scoped to that wait. Without an explicit reply, find the question that was current when this message
@@ -341,10 +348,15 @@ to the current budget wait. A positive confirmation applies only as a direct rep
 Do not grant permissions or handle secrets.
 cancel_task requires a clear user request to stop an identified active task. If the user is quoting or
 asking about cancellation, that is not a stop request. Use only the supplied task IDs and result IDs.
-When an awaiting clarification reply supplies the missing target or fact, set resolution=resolved and
-route the originalText with the correction. Use candidates supplied with that reply. A clarification
-can resolve a wait only if the user selects a recorded task and the same wait was open at first intake.
-Set resolution=superseded only if the user expressly withdraws that clarification.
+When event.reply is a clarification and the user supplies the missing target or fact, set
+resolution=resolved and route its originalText with the correction. Without a reply anchor, use
+event.pendingClarification only when event.text clearly answers its question. Set resolution=resolved
+and clarificationMessageId to its exact messageId, and route its originalText with the correction.
+Leave unrelated requests independent. If multiplePendingClarifications is true and the intended
+clarification lacks an anchor, ask the user to reply directly to the intended question.
+Use only the clarification's supplied candidates. It can resolve a wait only if the user selects a
+recorded task and the same wait was open at first intake. Set resolution=superseded only if the user
+expressly withdraws the anchored clarification.
 Use each route's kind and only its applicable fields. For one route omit segment. For multiple routes,
 use the actual contiguous original segments in order, accounting for every word including connective
 words. Separate independent effects, and clarify the entire message if any segment is ambiguous.

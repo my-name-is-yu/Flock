@@ -23,6 +23,7 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeIntake;
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id,Json> questions;
+    std::function<Decision(const ModelInput&)> onResult;
     Decision decide(const ModelInput& input) override {
         if (std::find(input.tools.begin(),input.tools.end(),"route_conversation") != input.tools.end()) {
             const auto text = input.event.at("text").get<std::string>();
@@ -43,6 +44,7 @@ struct Script : Model {
         }
         check(input.event["kind"] == "result","unexpected model event");
         if (beforeComplete) beforeComplete(input);
+        if (onResult) return onResult(input);
         return {"complete",{{"report",input.event["report"]}},"The fixture report includes the requested evidence"};
     }
 };
@@ -199,11 +201,12 @@ void linkedResultStartsANewSession() {
     Fixture f;
     const auto original = f.store->submit(f.routing("計測方法の提案"));
     f.reach(original,"running");
-    f.t3.finish("run-1","1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release");
+    f.t3.finish("run-1","1. Measure by hand\n" + std::string(3700,'x') +
+                "\n2. Capture a fixture trace\n3. Measure after release");
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
     const auto resultId = f.store->latestTaskResult(original).at("id");
-    f.script("2案目で実装して",{{"kind","create_task"},{"resultMessageId",resultId}});
+    f.script("2案目で実装して",{{"kind","create_task"},{"resultMessageId",resultId},{"resultOption",2}});
     f.receive("implement","2案目で実装して");
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
@@ -215,6 +218,79 @@ void linkedResultStartsANewSession() {
     check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "delegate" &&
           f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
           f.event(original,"completed") == earlier,"linked implementation changed prior work or reused its Thread");
+    const auto& instruction = f.t3.sent.back().instruction;
+    check(instruction.find("Capture a fixture trace") != std::string::npos &&
+          instruction.find("Measure by hand") == std::string::npos,
+          "the new Session did not receive the selected option");
+}
+
+void independentRequestQueuesSeparately() {
+    Fixture f;
+    const auto running = f.store->submit(f.routing());
+    f.reach(running,"running");
+    constexpr auto request = "依存パッケージのライセンス一覧も必要です";
+    f.script(request,{{"kind","create_task"}});
+    f.receive("new-request",request);
+    const auto tasks = f.store->tasks("alpha");
+    check(tasks.size() == 2 && tasks.front()["request"] == request &&
+          tasks.front()["state"] == "queued" && f.task(running)["pendingInstructions"].is_null() &&
+          f.t3.sent.size() == 1 && f.t3.interrupted.empty(),"a new request altered the running task");
+}
+
+void followUpCarriesTheRepliedToReport() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.finish("run-1","1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release");
+    f.reach(id,"deciding");
+    const Id report = f.store->latestTaskResult(id)["id"];
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"delegate",{{"instruction","Check the baseline separately"}},"Open a separate Session"};
+    };
+    f.reach(id,"running");
+    check(f.task(id)["activeRun"]["threadId"] == "session-2","the replacement Session did not start");
+    auto route = target("append_instruction",id);
+    route["resultOption"] = 2;
+    f.script("案2を実装",route);
+    const auto message = f.receive("selected-option","案2を実装",report);
+    f.restart();
+    f.t3.finish("run-2","Separate baseline checked");
+    f.reach(id,"deciding");
+    f.reach(id,"running");
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().tool == "follow_up" &&
+          f.t3.sent.back().target.threadId == "session-2" &&
+          f.t3.sent.back().instruction.find("案2を実装") != std::string::npos &&
+          f.t3.sent.back().instruction.find("Capture a fixture trace") != std::string::npos &&
+          f.t3.sent.back().instruction.find("Measure by hand") == std::string::npos &&
+          f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
+          "the other Session did not receive the explicitly referenced option");
+}
+
+void questionAnswerReachesTheBotBeforeContinuingWork() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    bool answered = false;
+    f.model.onResult = [&](const ModelInput& input) {
+        if (!input.event.contains("userAnswer"))
+            return Decision{"ask_user",{{"question","Which account should be used?"}},"The account is missing"};
+        check(input.event["userQuestion"] == "Which account should be used?" &&
+              input.event["userAnswer"] == "Use account Quartz-717","the Bot received the wrong question or answer");
+        answered = true;
+        return Decision{"follow_up",{{"instruction",input.event["userAnswer"]}},"Use the confirmed account"};
+    };
+    f.t3.finish("run-1","Baseline evidence");
+    f.reach(id,"waiting");
+    f.script("Include the table as CSV",target("append_instruction",id));
+    const auto added = f.receive("format","Include the table as CSV");
+    f.store->operate(id,f.task(id)["wait"]["id"],"answer",{{"text","Use account Quartz-717"}});
+    f.restart();
+    f.reach(id,"running");
+    check(answered && f.t3.sent.size() == 2 && f.t3.sent.back().target.threadId == "session-1" &&
+          f.t3.sent.back().instruction.find("Quartz-717") != std::string::npos &&
+          f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
+          f.conversationMessage(added["messageId"])["deliveredToT3"] == true,
+          "continuation lost the Bot's requested answer or the additional instruction");
 }
 
 void appendWaitsForSafeBoundary() {
@@ -464,30 +540,43 @@ void cloudDestinationWaitsForItsProject() {
     Fixture f;
     const auto occupied = f.store->submit(f.routing("Cloud work","beta","cloud"));
     const auto moving = f.store->submit(f.routing());
-    f.script("補足として表をCSV形式で出して",target("append_instruction",moving));
-    f.receive("format-before-launch","補足として表をCSV形式で出して");
+    f.script("Include the table as CSV",target("append_instruction",moving));
+    f.receive("format-before-launch","Include the table as CSV");
     f.reach(occupied,"running");
     f.reach(moving,"running");
-    f.script("計測はクラウドMacで",revision(moving,"environment","クラウドMac"));
-    f.receive("where","計測はクラウドMacで");
+    f.script("Run the measurement on the cloud Mac",revision(moving,"environment","クラウドMac"));
+    f.receive("where","Run the measurement on the cloud Mac");
     const auto following = f.store->submit(f.routing("Cloud follower","beta","cloud"));
+    const auto desktopFollowing = f.store->submit(f.routing("Desktop follower","beta"));
     f.tick(3);
     check(f.t3.interrupted.size() == 1 && f.t3.interrupted[0] == std::pair<std::string,std::string>{"desktop","run-2"} &&
           f.task(moving)["revisions"].size() == 1,
           "a confirmed environment change interrupted the wrong Run or revised the criteria");
+    f.t3.finish("run-2","Old location is still settling",false);
+    f.tick(2);
+    check(f.task(desktopFollowing)["state"] == "queued" && f.task(desktopFollowing)["blockedBy"]["id"] == moving,
+          "the desktop slot was released before the old Run settled");
     f.t3.finish("run-2","Old location stopped");
-    f.tick(4);
-    check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 2,
+    f.restart();
+    f.reach(desktopFollowing,"running");
+    check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 3 &&
+          f.t3.sent.back().environmentId == "desktop" && f.task(moving)["environmentId"] == "desktop",
           "work entered a Cloud project where another Task was still active");
     f.t3.finish("run-1","Cloud project complete");
     f.reach(occupied,"completed");
     f.reach(moving,"running");
     const auto task = f.task(moving);
-    check(f.t3.sent.size() == 3 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
-          f.t3.sent.back().instruction.find("CSV形式で") != std::string::npos &&
+    check(f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
+          f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&
           task["runs"][1]["environmentId"] == "cloud" && task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
-          f.task(following)["state"] == "queued","the Task switched Session or budget incorrectly");
+          f.task(following)["state"] == "queued" && f.task(following)["blockedBy"]["id"] == moving,
+          "the Task switched Session or budget incorrectly");
+    const auto nextDesktop = f.store->submit(f.routing("Next desktop task","beta"));
+    f.t3.finish("run-3","Desktop follower complete");
+    f.reach(nextDesktop,"running");
+    check(f.t3.sent.size() == 5 && f.t3.sent.back().environmentId == "desktop" && f.task(moving)["state"] == "running",
+          "the transferred Task still held the desktop queue after moving");
 }
 
 void latestTargetPrecedesABatchedBacklog() {
@@ -608,6 +697,9 @@ int main() {
         cancellationReleasesOnlyAfterStopConfirmation();
         durableInboxSurvivesRestartAndBlocksCompletion();
         linkedResultStartsANewSession();
+        independentRequestQueuesSeparately();
+        followUpCarriesTheRepliedToReport();
+        questionAnswerReachesTheBotBeforeContinuingWork();
         cloudDestinationWaitsForItsProject();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();

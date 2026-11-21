@@ -13,6 +13,7 @@ namespace {
 constexpr auto privateValue = "private-token-value";
 constexpr auto comparisonRequest = "3案を比較して";
 constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
+constexpr auto budgetDetail = "明細は100件です";
 constexpr auto proposedOptions = "1. 手動で照合する\n"
     "2. 差分を先に集計する\n"
     "   - 前回と今回の明細を ID で突き合わせる。\n"
@@ -37,6 +38,7 @@ struct TestDirectory {
 struct FixedModel : Model {
     unsigned explained = 0, summarized = 0;
     Id comparisonResult = 0;
+    Id estimateClarification = 0;
     std::size_t summarySourceSize = 0;
 
     Decision decide(const ModelInput& input) override {
@@ -61,6 +63,14 @@ struct FixedModel : Model {
         check(event.dump().find(privateValue) == std::string::npos &&
               input.history.dump().find(privateValue) == std::string::npos,"Connection settings entered model-visible context");
         Json route;
+        if (event.at("text") == budgetDetail) {
+            const auto& pending = event.at("pendingClarification");
+            check(pending.at("messageId") == estimateClarification &&
+                  pending.at("result").at("messageId") == comparisonResult,
+                  "The ordinary reply lost its pending question or selected result");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","answer_result"}}})},
+                    {"resolution","resolved"},{"clarificationMessageId",estimateClarification}},{}};
+        }
         if (event.at("text") == "2案目を詳しく" || event.at("text") == "2案目を要約して" ||
             event.at("text") == missingBudgetQuestion) {
             const auto& results = event.at("results");
@@ -69,7 +79,7 @@ struct FixedModel : Model {
                        result.at("text") == proposedOptions;
             });
             check(selected != results.end(),"The comparison was not available to the model fixture");
-            route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")}};
+            route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")},{"resultOption",2}};
         } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
             route = {{"kind","status"}};
         } else {
@@ -87,7 +97,12 @@ struct FixedModel : Model {
               source.find("金額が変わった明細を人が確認する") != std::string::npos &&
               source.find("手動で照合する") == std::string::npos && source.find("公開後に見直す") == std::string::npos,
               "The result answer did not receive only the selected option");
-        if (input.event.at("text") == "2案目を詳しく") {
+        const auto question = input.event.at("text").get<std::string>();
+        if (question.find(budgetDetail) != std::string::npos) {
+            check(question.starts_with(missingBudgetQuestion),"The original estimate question was lost");
+            return {"answer_conversation_result",{{"text","100件の明細を照合し、金額が変わった分の確認時間を見積もります。"}},{}};
+        }
+        if (question == "2案目を詳しく") {
             ++explained;
             return {"answer_conversation_result",{{"text","差分を先に集計する案です。ID ごとに前回と今回の記録を比べるので、"
                     "追加・削除・更新を分けて数えられます。そのうち金額が変わった更新だけを人が確かめる手順です。"}},{}};
@@ -311,11 +326,22 @@ void conversationEntry(const std::filesystem::path& path) {
         {"text",missingBudgetQuestion}},201);
     runtime.routeConversation();
     const auto estimateReply = conversationReply(browser.get("/api/view?bot=release"),estimate.at("messageId"));
+    const auto pending = store.clarifications("release");
     check(estimateReply.at("route") == "clarify" &&
           estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" &&
-          store.clarifications("release") == Json::array({estimateReply}) &&
+          pending.size() == 1 && pending.front().at("messageId") == estimateReply.at("messageId") &&
+          pending.front().at("source").at("messageId") == result.at("id") &&
           store.tasks().size() == 1 && t3.launches == 1 &&
           browser.get(taskPath).at("runs") == task.at("runs"),"Insufficient evidence did not yield a durable read-only clarification");
+    model.estimateClarification = estimateReply.at("messageId");
+    const auto detail = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","estimate-detail"},
+        {"text",budgetDetail}},201);
+    runtime.routeConversation();
+    const auto estimateAnswer = conversationReply(browser.get("/api/view?bot=release"),detail.at("messageId"));
+    check(estimateAnswer.at("route") == "respond" && estimateAnswer.at("source").at("messageId") == result.at("id") &&
+          estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos &&
+          store.clarifications("release").empty() && store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Answering the clarification created work or lost the result");
 
     const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","進捗どうなってる"}};
     const auto statusReceipt = browser.post("/api/messages",status,201);

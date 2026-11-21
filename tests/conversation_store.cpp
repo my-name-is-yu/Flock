@@ -208,7 +208,7 @@ void clarificationAndStatus() {
         const auto text = input.event.at("text").get<std::string>();
         if (text == "それ止めて")
             return route("clarify",{{"text","どの作業を停止しますか？"},{"candidates",{a,b}}});
-        if (text == "今どこまでできた？") return route("status");
+        if (text == "今どこまでできた？" || text == "進捗どうなってる") return route("status");
         if (text == "計測作業の方です")
             return routing(Json::array({{{"kind","cancel_task"},{"taskId",b}}}),"resolved");
         check(text == "計測作業を再開して","Unexpected clarification fixture input");
@@ -458,6 +458,121 @@ void clarificationKeepsTheUserInstruction() {
           "Resolving the clarification discarded the user's actionable instruction");
 }
 
+void implicitClarificationRequiresAnEligibleReply() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    constexpr auto original = "Set up automation for the project";
+    constexpr auto answer = "Use the repository's hosting service";
+    constexpr auto independent = "Write release notes";
+    constexpr auto another = "Prepare the deployment";
+    constexpr auto question = "Which hosting service should I use?";
+    Id clarificationId = 0;
+    const auto resolve = [](Id anchor) {
+        auto decision = routing(Json::array({{{"kind","create_task"}}}),"resolved");
+        if (anchor) decision.args["clarificationMessageId"] = anchor;
+        return decision;
+    };
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (event.at("text") == original || event.at("text") == another)
+            return route("clarify",{{"text",question}});
+        if (event.at("text") == independent) return route("create_task");
+        check(event.at("text") == answer,"Unexpected clarification fixture input");
+        if (event.at("reply").at("kind") == "clarification") return resolve(0);
+        return resolve(clarificationId);
+    };
+    const auto send = [&](std::string_view key, std::string_view text, Id anchor = 0) {
+        const auto id = receive(writer,key,text,anchor);
+        execution.runtime.routeConversation();
+        return reply(store,id);
+    };
+    clarificationId = send("original",original).at("messageId");
+    check(send("independent",independent).at("route") == "create_task" &&
+          store.tasks("alpha").front().at("request") == independent && store.clarifications("alpha").size() == 1,
+          "An independent request inherited or closed the pending clarification");
+    check(send("answer",answer).at("route") == "create_task","An unanchored answer did not resolve the clarification");
+    const auto tasks = store.tasks("alpha");
+    check(store.clarifications("alpha").empty() && tasks.size() == 2 &&
+          tasks.front().at("request") == std::string(original) + "\n\nUser clarification:\n" + answer &&
+          tasks.front().at("runs").empty(),"Implicit resolution lost the original request or answer");
+
+    const auto second = send("second",original).at("messageId").get<Id>();
+    const auto third = send("third",another).at("messageId").get<Id>();
+    clarificationId = second;
+    check(send("ambiguous",answer).at("route") == "clarify" && store.tasks("alpha") == tasks,
+          "An unanchored answer chose between competing clarifications");
+    if (store.clarifications("alpha").size() > 2) {
+        const auto extra = store.clarifications("alpha").front().at("messageId").get<Id>();
+        send("dismiss-ambiguous","dismiss this clarification",extra);
+    }
+    check(send("explicit",answer,third).at("route") == "create_task" &&
+          store.tasks("alpha").front().at("request") == std::string(another) + "\n\nUser clarification:\n" + answer &&
+          store.clarifications("alpha").size() == 1 &&
+          store.clarifications("alpha").front().at("messageId") == second,
+          "An explicit reply discarded the original request or closed a different clarification");
+    const auto afterExplicit = store.tasks("alpha");
+    clarificationId = third;
+    check(send("stale",answer).at("route") == "clarify" && store.tasks("alpha") == afterExplicit &&
+          std::ranges::any_of(store.clarifications("alpha"),[&](const Json& item) {
+              return item.at("messageId") == second;
+          }),"A model-supplied stale clarification ID changed work or closed a different question");
+    check(execution.t3.launches == 0,"Clarification routing started a Run");
+}
+
+void longResultOptionsStayAvailable() {
+    for (const auto paddingSize : {3000, 3500}) {
+        Fixture fixture;
+        Store store(fixture.database()), writer(fixture.database());
+        RuntimeFixture execution(store);
+        const auto id = task(writer,"Compare the proposals");
+        const std::string option = "## 2. Pair measurements\n"
+            "Compare both builds using exactly the same workload.\n"
+            "Repeat the paired run to separate variance from regressions.";
+        execution.finish(store,id,"## 1. Compare one build\n" + std::string(paddingSize,'A') +
+            "\n\n" + option + "\n\n## 3. Defer comparison\n\n## 3. Drop the comparison");
+        const auto history = store.history(id,0,100);
+        const auto report = std::ranges::find_if(history,[](const Json& row) { return row.at("kind") == "report"; });
+        check(report != history.end(),"Missing report in the long result fixture");
+        const auto sourceId = report->at("id").get<Id>();
+        const auto before = store.tasks("alpha");
+        const auto launches = execution.t3.launches;
+        std::string userQuestion;
+        int answers = 0;
+        int selectedOption = 2;
+        execution.model.conversation = [&](const ModelInput& input) {
+            const auto& event = input.event;
+            if (input.tools.front() == "route_conversation")
+                return route("answer_result",{{"resultMessageId",sourceId},{"resultOption",selectedOption}});
+            check(event.at("text") == userQuestion && event.at("source").at("messageId") == sourceId &&
+                  event.at("source").at("text") == option,
+                  "The answer model did not receive the exact option and question");
+            ++answers;
+            return Decision{"answer_conversation_result",{{"text","同じ負荷で両ビルドを比較する案です。"}},{}};
+        };
+        for (const auto anchor : {sourceId,Id{0}}) {
+            for (const auto request : {"2案目を詳しく","2案目を要約して","両方を同じ条件で測るほうを具体的に"}) {
+                userQuestion = request;
+                const auto message = receive(writer,std::to_string(anchor) + request,request,anchor);
+                execution.runtime.routeConversation();
+                const auto response = reply(store,message);
+                check(response.at("route") == "respond" && response.at("source").at("text") == option &&
+                      response.at("text") == "同じ負荷で両ビルドを比較する案です。",
+                      "Reading a long result did not answer with the complete, selected option");
+            }
+        }
+        for (const auto number : {3,4}) {
+            selectedOption = number;
+            userQuestion = std::to_string(number) + "案目を要約して";
+            const auto message = receive(writer,"unavailable-option-" + std::to_string(number),userQuestion);
+            execution.runtime.routeConversation();
+            check(reply(store,message).at("route") == "clarify","A missing or duplicated option was answered");
+        }
+        check(answers == 6 && store.tasks("alpha") == before && execution.t3.launches == launches,
+              "Reading the result changed work or failed to call the answer model");
+    }
+}
+
 void clarificationCannotTransferAnExpiredAnswer() {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
@@ -608,7 +723,7 @@ INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","so
                 return result.at("messageId") == 8;
             });
             check(source != results.end(),"The migrated Session report was absent from routing evidence");
-            return route("answer_result",{{"resultMessageId",source->at("messageId")}});
+            return route("answer_result",{{"resultMessageId",source->at("messageId")},{"resultOption",2}});
         }
         check(input.event.at("source").at("text") == "2. Chosen approach","The model received the wrong legacy option");
         return Decision{"answer_conversation_result",{{"text","Chosen approach is the second recorded option. The old report gives no further details."}},{}};
@@ -637,6 +752,8 @@ int main() {
         independentWorkAndSupplement();
         naturalWaitAnswer();
         clarificationKeepsTheUserInstruction();
+        implicitClarificationRequiresAnEligibleReply();
+        longResultOptionsStayAvailable();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
         legacyHistory();

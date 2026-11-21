@@ -33,6 +33,7 @@ struct Store::Impl {
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
+    Json queueBlocker(const Json&, std::string_view environment) const;
     Json load(Id) const;
     void save(Json&);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr);

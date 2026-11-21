@@ -395,37 +395,6 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
         context.staleWaits = !context.expiredWaits.empty();
     }
 
-    constexpr auto clarificationCandidates = R"SQL(
-SELECT json_extract(candidate.value,'$.taskId'),json_extract(candidate.value,'$.request')
-FROM route_decisions r, json_each(r.data,'$.candidates') candidate WHERE r.message_id=? LIMIT ?
-)SQL";
-    const auto readClarification = [&](Id reply) {
-        auto row = query(R"SQL(
-SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake')
-FROM route_decisions r JOIN messages m ON m.id=r.message_id
-WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
-)SQL",{reply,bot,id});
-        if (!row.next()) return false;
-        context.reply.kind = Reply::Kind::clarification;
-        context.reply.id = reply;
-        context.reply.originalText = row.string(1);
-        if (const auto captured = row.string(2); !captured.empty()) {
-            const auto waits = Json::parse(captured);
-            const auto& items = waits.at("items");
-            context.reply.incompleteWaitsAtIntake = waits.at("more").get<bool>() || items.size() > waitLimit;
-            for (const auto& item : items) {
-                if (context.reply.waitsAtIntake.size() == waitLimit) break;
-                context.reply.waitsAtIntake.emplace_back(integer(item,"taskId"),integer(item,"waitId"));
-            }
-        }
-        auto candidates = query(clarificationCandidates,{row.number(0),activeTaskLimit+waitLimit});
-        while (candidates.next()) {
-            const auto candidateId = candidates.number(0);
-            rememberTaskId(candidateId);
-            if (taskIds.contains(candidateId)) context.reply.candidates.push_back(candidateId);
-        }
-        return true;
-    };
     const auto readResult = [&](Id sourceId, const Json& excerpt = nullptr) -> std::optional<Result> {
         const auto sql = std::string(resultQuery)+" AND j.id=? AND j.id<?";
         auto row = query(sql.c_str(),{bot,sourceId,id});
@@ -435,9 +404,49 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         rememberTaskId(result.taskId);
         return result;
     };
+    constexpr auto clarificationCandidates = R"SQL(
+SELECT json_extract(candidate.value,'$.taskId'),json_extract(candidate.value,'$.request')
+FROM route_decisions r, json_each(r.data,'$.candidates') candidate WHERE r.message_id=? LIMIT ?
+)SQL";
+    const auto readClarification = [&](Id reply) -> std::optional<Reply> {
+        auto row = query(R"SQL(
+SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
+       json_extract(r.data,'$.segments[0].text')
+FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
+WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
+)SQL",{reply,bot,id});
+        if (!row.next()) return std::nullopt;
+        Reply pending;
+        pending.kind = Reply::Kind::clarification;
+        pending.id = reply;
+        pending.originalText = row.string(1);
+        const auto data = row.json(3);
+        pending.question = bounded(field(data,"text"),2000);
+        if (const auto source = data.find("source"); source != data.end()) {
+            pending.result = readResult(integer(*source,"messageId"),*source);
+            if (pending.result) pending.originalText = row.string(4);
+        }
+        if (const auto captured = row.string(2); !captured.empty()) {
+            const auto waits = Json::parse(captured);
+            const auto& items = waits.at("items");
+            pending.incompleteWaitsAtIntake = waits.at("more").get<bool>() || items.size() > waitLimit;
+            for (const auto& item : items) {
+                if (pending.waitsAtIntake.size() == waitLimit) break;
+                pending.waitsAtIntake.emplace_back(integer(item,"taskId"),integer(item,"waitId"));
+            }
+        }
+        auto candidates = query(clarificationCandidates,{row.number(0),activeTaskLimit+waitLimit});
+        while (candidates.next()) {
+            const auto candidateId = candidates.number(0);
+            rememberTaskId(candidateId);
+            if (taskIds.contains(candidateId)) pending.candidates.push_back(candidateId);
+        }
+        return pending;
+    };
     if (replyTo > 0) {
         context.reply.kind = Reply::Kind::invalid;
-        if (replyTo < id && !readClarification(replyTo)) {
+        if (auto pending = readClarification(replyTo)) context.reply = std::move(*pending);
+        else if (replyTo < id) {
             auto row = query(R"SQL(
 SELECT j.task_id,j.data FROM journal j JOIN tasks t ON t.id=j.task_id
 WHERE t.bot_id=? AND j.id=? AND j.kind='waiting'
@@ -474,8 +483,10 @@ SELECT r.reply_id,r.message_id FROM (
   ORDER BY sequence DESC LIMIT ?
 ) recent JOIN route_decisions r ON r.message_id=recent.id WHERE r.status='awaiting_resolution'
 )SQL",{bot,id,clarificationLookback});
-        Id match = 0;
+        Id match = 0, latest = 0;
         while (rows.next()) {
+            if (latest) context.multiplePendingClarifications = true;
+            else latest = rows.number(0);
             auto candidates = query(clarificationCandidates,{rows.number(1),activeTaskLimit+waitLimit});
             bool matches = false;
             while (!matches && candidates.next()) matches = conversation::namesCandidate(text,candidates.string(1));
@@ -487,7 +498,10 @@ SELECT r.reply_id,r.message_id FROM (
             }
             match = rows.number(0);
         }
-        if (match) readClarification(match);
+        if (match) {
+            if (auto pending = readClarification(match)) context.reply = std::move(*pending);
+        } else if (latest && !context.multiplePendingClarifications)
+            context.pendingClarification = readClarification(latest);
     }
 
     auto turns = query(R"SQL(
@@ -532,11 +546,16 @@ ORDER BY m.sequence DESC LIMIT ?
         }
     }
 
+    const auto& reference = context.reply.result ? context.reply.result : context.recentSource;
+    if (reference) {
+        if (auto report = readResult(reference->messageId)) context.rankedResults.push_back(std::move(*report));
+    }
     const auto resultFor = [&](const conversation::Task& task, std::string_view kind) {
         const auto sql = std::string(resultQuery)+" AND t.id=? AND j.kind=? AND j.id<? ORDER BY j.id DESC LIMIT 1";
         auto row = query(sql.c_str(),{bot,task.id,kind,id});
         if (!row.next()) return;
         auto result = resultRow(row);
+        if (reference && result.messageId == reference->messageId) return;
         if (kind != "cancelled" && (result.revision != task.revision || result.text.empty())) return;
         context.rankedResults.push_back(std::move(result));
     };
@@ -552,6 +571,7 @@ ORDER BY m.sequence DESC LIMIT ?
             primaryNamedResults.insert(context.rankedResults[before].messageId);
     }
     const auto priority = [&](const Result& result) {
+        if (reference && result.messageId == reference->messageId) return 3;
         if (primaryNamedResults.contains(result.messageId)) return 2;
         return namedTasks.contains(result.taskId) ? 1 : 0;
     };
@@ -560,7 +580,6 @@ ORDER BY m.sequence DESC LIMIT ?
         return a.messageId > b.messageId;
     });
     if (context.rankedResults.size() > resultLimit) context.rankedResults.resize(resultLimit);
-    for (auto& result : context.rankedResults) result.text = bounded(result.text,3072);
     return context;
 }
 
@@ -610,6 +629,8 @@ bool sameSource(const Result& excerpt, const Result& result) {
 
 bool knownSource(const Context& context, const Result& result) {
     return (context.reply.result && sameSource(result,*context.reply.result)) ||
+           (context.pendingClarification && context.pendingClarification->result &&
+                sameSource(result,*context.pendingClarification->result)) ||
            (context.recentSource && sameSource(result,*context.recentSource)) ||
            std::ranges::any_of(context.rankedResults,[&](const Result& entry) { return sameSource(result,entry); });
 }
@@ -702,12 +723,9 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (!response.empty()) response += '\n';
         response += line;
     };
-    const auto resolutionIsCurrent = [&] {
-        return !plan.resolution || (context.reply.kind == Reply::Kind::clarification &&
-                                    context.reply.id == plan.resolution->replyId);
-    };
-    const bool resolving = plan.resolution && plan.resolution->kind == Resolution::Kind::resolved;
-    bool clarify = routes.empty() || !resolutionIsCurrent();
+    const auto* clarification = plan.resolution ? context.clarification(plan.resolution->replyId) : nullptr;
+    const bool resolving = clarification && plan.resolution->kind == Resolution::Kind::resolved;
+    bool clarify = routes.empty() || (plan.resolution && !clarification);
     for (const auto& route : routes) {
         Json segment = {{"number",segments.size()+1},{"route",routeName(route.action)},{"text",route.segment}};
         if (const auto target = targetOf(route.action)) {
@@ -767,8 +785,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             if (task["state"] != "waiting" || !target->waitId ||
                 (!anchored && (!view->waitAtIntake || context.staleWaits || context.moreWaits))) return false;
             const auto originalWait = std::pair{target->taskId,target->waitId};
-            if (resolving && (context.reply.incompleteWaitsAtIntake ||
-                std::ranges::find(context.reply.waitsAtIntake,originalWait) == context.reply.waitsAtIntake.end()))
+            if (resolving && (clarification->incompleteWaitsAtIntake ||
+                std::ranges::find(clarification->waitsAtIntake,originalWait) == clarification->waitsAtIntake.end()))
                 return false;
             if (std::holds_alternative<GrantOne>(action) && !explicitBudgetGrant(route.segment) &&
                 !(anchored && budgetConfirmation(route.segment))) return false;
@@ -797,7 +815,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         }
     }
 
-    const auto saveInstruction = [&](const Target& target, std::string_view instruction, const ReviseTask* change) {
+    const auto saveInstruction = [&](const Target& target, std::string_view instruction,
+                                     const std::optional<Result>& source, const ReviseTask* change) {
         auto task = load(target.taskId);
         auto revision = target.revision;
         bool conflicting = change != nullptr;
@@ -820,6 +839,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                           environment != field(task,"environmentId") || task.value("replanning",false);
         }
         Json pending = {{"messageId",id},{"text",instruction},{"revisionId",revision},{"conflicting",conflicting}};
+        if (source) pending["source"] = sourceRef(*source);
         if (!environment.empty()) {
             pending["environmentId"] = environment;
             if (conflicting) task["pendingEnvironmentId"] = environment;
@@ -856,8 +876,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                                                : "I queued a new task linked to the earlier work.")
                                         : (ja ? "作業を受け付けました。" : "I queued the task."));
                 },
-                [&](const AppendInstruction& item) { saveInstruction(item.target,item.instruction,nullptr); },
-                [&](const ReviseTask& item) { saveInstruction(item.target,item.instruction,&item); },
+                [&](const AppendInstruction& item) { saveInstruction(item.target,item.instruction,item.source,nullptr); },
+                [&](const ReviseTask& item) { saveInstruction(item.target,item.instruction,item.source,&item); },
                 [&](const AnswerWait& item) {
                     operate(item.target.taskId,item.target.waitId,"answer",{{"text",item.answer}},true);
                     linkedTask = item.target.taskId;
@@ -880,17 +900,13 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                 [](const Clarify&) {}
             },routes[index].action);
         }
-        if (plan.resolution) {
-            exec("UPDATE route_decisions SET status=?,resolution_id=? WHERE reply_id=? AND status='awaiting_resolution'",
-                 {plan.resolution->kind == Resolution::Kind::superseded ? "superseded" : "resolved",
-                  id,plan.resolution->replyId});
-        }
     } else {
         status = "needs_you";
         for (const auto& route : routes) {
             const auto target = targetOf(route.action);
             if (target && !std::holds_alternative<Status>(route.action)) candidateIds.insert(target->taskId);
-            if (const auto source = sourceOf(route.action); source && !std::holds_alternative<Respond>(route.action))
+            if (const auto source = sourceOf(route.action); source &&
+                !std::holds_alternative<Respond>(route.action) && !std::holds_alternative<Clarify>(route.action))
                 candidateIds.insert(source->taskId);
         }
         for (const auto& task : context.tasks) {
@@ -899,6 +915,13 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         }
         if (response.empty()) addLine(ja ? "対象の作業と指示を確認してください。"
                                          : "Please confirm the task and instruction.");
+    }
+    const auto* question = routes.size() == 1 ? std::get_if<Clarify>(&routes.front().action) : nullptr;
+    const bool resultQuestion = question && question->source && knownSource(context,*question->source);
+    if (clarification && (!clarify || (resultQuestion && clarification->result))) {
+        exec("UPDATE route_decisions SET status=?,resolution_id=? WHERE reply_id=? AND status='awaiting_resolution'",
+             {clarify || plan.resolution->kind == Resolution::Kind::superseded ? "superseded" : "resolved",
+              id,plan.resolution->replyId});
     }
     if (response.empty()) addLine(ja ? "確認しました。" : "I’ve read your message.");
 
@@ -909,7 +932,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     const auto reply = last();
     Json answer = {{"messageId",reply},{"replyToMessageId",id},{"text",response},{"route",route},{"status",status}};
     if (!candidates.empty()) answer["candidates"] = candidates;
-    if (!replySource.is_null() && !clarify) answer["source"] = replySource;
+    if (!replySource.is_null() && (!clarify || resultQuestion)) answer["source"] = replySource;
     exec("UPDATE journal SET data=? WHERE id=?", {answer,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?", {linkedTask ? Json(linkedTask) : Json(nullptr),
         Json{{"status",status}},id});

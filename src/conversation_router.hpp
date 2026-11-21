@@ -25,7 +25,7 @@ struct Result {
 struct Reply {
     enum class Kind { none, invalid, wait, result, clarification } kind = Kind::none;
     Id id = 0, taskId = 0, waitId = 0;
-    std::string originalText;
+    std::string originalText, question;
     std::vector<Id> candidates;
     std::optional<Result> result;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
@@ -37,10 +37,12 @@ struct Context {
     std::vector<Task> tasks;
     std::vector<Result> rankedResults;
     Reply reply;
+    std::optional<Reply> pendingClarification;
     std::optional<Result> recentSource;
     std::vector<std::string> environments;
     Json history = Json::array(), expiredWaits = Json::array();
-    bool moreTasks = false, moreWaits = false, staleWaits = false;
+    bool moreTasks = false, moreWaits = false, staleWaits = false, multiplePendingClarifications = false;
+    const Reply* clarification(Id replyId) const;
     bool operator==(const Context&) const = default;
 };
 
@@ -59,7 +61,11 @@ struct ReviseTask {
 struct AnswerWait { Target target; std::string answer; };
 struct GrantOne { Target target; };
 struct CancelTask { Target target; };
-struct Clarify { std::string question; std::vector<Id> candidates; };
+struct Clarify {
+    std::string question;
+    std::vector<Id> candidates;
+    std::optional<Result> source = std::nullopt;
+};
 using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
                             AnswerWait, GrantOne, CancelTask, Clarify>;
 
