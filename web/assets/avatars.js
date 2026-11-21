@@ -80,6 +80,18 @@ export function avatarIconSvg(name) {
   return `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
 }
 
+export function presenceMotion(presence) {
+  switch (presence) {
+    case 'queued':
+    case 'peer_waiting':
+      return 'waiting';
+    case 'stopping':
+      return 'thinking';
+    default:
+      return presence;
+  }
+}
+
 function safeImageUrl(url) {
   if (typeof url !== 'string' || !url) return '';
   if (url.startsWith('/api/bot-avatar?') || url.startsWith('blob:')) return url;
