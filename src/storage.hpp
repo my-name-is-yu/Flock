@@ -44,6 +44,7 @@ struct Store::Impl {
     void migrateConversation();
     void migrateModelBudget();
     std::string messageModelBudget(Id messageId, Id clarificationReplyId = 0);
+    void inheritModelBudget(Id messageId, Id clarificationReplyId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);

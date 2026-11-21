@@ -54,6 +54,29 @@ std::string Store::Impl::messageModelBudget(Id messageId, Id clarificationReplyI
     return budget;
 }
 
+void Store::Impl::inheritModelBudget(Id messageId, Id clarificationReplyId) {
+    auto origin = query("SELECT message_id FROM route_decisions WHERE reply_id=? AND message_id<?",
+                        {clarificationReplyId,messageId});
+    if (!origin.next()) return;
+    const auto originating = messageModelBudget(origin.number(0));
+    auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
+    if (!row.next()) return;
+    const auto current = field(row.json(0),"modelBudgetId");
+    if (current.empty() || current == originating) return;
+    auto count = query("SELECT count(*) FROM model_attempts WHERE message_id=? AND budget_id=?",
+                       {messageId,current});
+    count.next();
+    if (const auto moved = count.number(0)) {
+        exec("UPDATE model_attempts SET budget_id=? WHERE message_id=? AND budget_id=?",
+             {originating,messageId,current});
+        exec("UPDATE model_budgets SET attempts=attempts-? WHERE id=?",{moved,current});
+        exec("UPDATE model_budgets SET attempts=min(attempts+?,call_limit) WHERE id=?",
+             {moved,originating});
+    }
+    exec("UPDATE messages SET routing=json_set(routing,'$.modelBudgetId',?) WHERE id=?",
+         {originating,messageId});
+}
+
 std::string Store::Impl::taskModelBudget(const Json& task) {
     // Exchanges are retained after closing. Follow them back to the original task.
     auto ancestor = query(R"SQL(

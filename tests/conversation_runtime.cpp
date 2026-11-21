@@ -1,4 +1,5 @@
 #include "flock/core.hpp"
+#include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -25,7 +26,12 @@ struct Script : Model {
     std::function<void(const ModelInput&)> beforeComplete;
     std::map<Id,Json> questions;
     std::function<Decision(const ModelInput&)> onResult;
+    std::function<Decision(const ModelInput&)> onAnswer;
     Decision decide(const ModelInput& input) override {
+        if (std::find(input.tools.begin(),input.tools.end(),"answer_conversation_result") != input.tools.end()) {
+            if (onAnswer) return onAnswer(input);
+            return {"answer_conversation_result",{{"text","The fixture answer."}},{}};
+        }
         if (std::find(input.tools.begin(),input.tools.end(),"route_conversation") != input.tools.end()) {
             const auto text = input.event.at("text").get<std::string>();
             const auto plan = routes.find(text);
@@ -932,6 +938,77 @@ void continuationUsesTheCurrentBudget() {
           "the approved Run lost the instruction that was held for approval");
 }
 
+void unanchoredClarificationInheritsOriginatingBudget() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.finish("run-1","Baseline evidence");
+    f.reach(id,"completed");
+    const auto resultId = f.store->latestTaskResult(id).at("id").get<Id>();
+
+    auto limited = f.routing("Tell me about the evidence");
+    limited.config["modelCallLimit"] = 1;
+    f.script("Tell me about the evidence",{{"kind","clarify"},{"text","Which detail do you need?"}});
+    const auto first = f.store->receive(limited,"first-question",limited.request);
+    f.runtime->routeConversation();
+    const auto question = f.response(first);
+    check(question.at("route") == "clarify" && f.store->clarifications("alpha").size() == 1,
+          "the estimate clarification was not saved");
+
+    // An unanchored answer resolves the pending clarification but keeps the originating budget.
+    f.model.routes.insert_or_assign("More detail",Json{
+        {"routes",Json::array({{{"kind","answer_result"},{"resultMessageId",resultId}}})},
+        {"resolution","resolved"},{"clarificationMessageId",question.at("messageId")}});
+    auto detail = f.routing("More detail");
+    detail.config["modelCallLimit"] = 1;
+    int explained = 0;
+    f.model.onAnswer = [&](const ModelInput&) {
+        ++explained;
+        return Decision{"answer_conversation_result",{{"text","The baseline covers it."}},{}};
+    };
+    const auto second = f.store->receive(detail,"detail",detail.request);
+    f.runtime->routeConversation();
+    const auto paused = f.response(second);
+    check(paused.at("route") == "model_budget" && explained == 0,
+          "the unanchored resolution did not inherit the exhausted allowance");
+
+    // The fresh allowance's routing call was reconciled onto the originating budget.
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
+          "could not read the attempt ledger");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    std::vector<std::pair<std::string,long long>> ledger;
+    auto result = sqlite3_exec(db.get(),
+        "SELECT budget_id,count(*) FROM model_attempts WHERE message_id IS NOT NULL GROUP BY budget_id",
+        [](void* context,int,char** values,char**) {
+            static_cast<std::vector<std::pair<std::string,long long>>*>(context)->emplace_back(
+                values[0],std::atoll(values[1]));
+            return 0;
+        },&ledger,nullptr);
+    check(result == SQLITE_OK && ledger.size() == 1 && ledger.front().second == 2,
+          "the unanchored resolution did not reconcile its routing call with the originating budget");
+    std::vector<std::string> owners;
+    result = sqlite3_exec(db.get(),
+        ("SELECT json_extract(routing,'$.modelBudgetId') FROM messages WHERE id IN (" +
+         std::to_string(first.at("messageId").get<Id>()) + "," +
+         std::to_string(second.at("messageId").get<Id>()) + ")").c_str(),
+        [](void* context,int,char** values,char**) {
+            static_cast<std::vector<std::string>*>(context)->emplace_back(values[0]);
+            return 0;
+        },&owners,nullptr);
+    check(result == SQLITE_OK && owners.size() == 2 && owners.front() == owners.back(),
+          "the resolved message kept a separate model budget");
+
+    f.store->approveMessageModelCall("alpha",paused.at("messageId"));
+    f.runtime->routeConversation();
+    Json answered;
+    for (const auto& row : f.store->conversation("alpha"))
+        if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == second["messageId"])
+            answered = row["data"];
+    check(answered.at("route") == "respond" && explained == 1 && f.store->clarifications("alpha").empty(),
+          "the approved allowance did not resume and answer the resolved message");
+}
+
 void revisionOfProvablyUnsentAction() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -990,6 +1067,7 @@ int main() {
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();
+        unanchoredClarificationInheritsOriginatingBudget();
         revisionOfProvablyUnsentAction();
         queuedCriteriaAreUsedForFirstDelegation();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";

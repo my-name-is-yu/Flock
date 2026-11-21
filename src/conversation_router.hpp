@@ -98,7 +98,8 @@ struct Plan {
 
 std::optional<Plan> shortcut(std::string_view text, const Context&);
 using DecideModel = std::function<Decision(const ModelInput&)>;
-Plan decide(std::string_view text, const Context&, const DecideModel&, const Json& config);
+Plan decide(std::string_view text, const Context&, const DecideModel&, const Json& config,
+            const std::function<void(Id resolvedClarificationId)>& resolvedClarification = {});
 bool explicitBudgetGrant(std::string_view text);
 bool explicitCancellation(std::string_view text);
 bool namedTargetMatches(std::string_view text, const Context&, Id target);

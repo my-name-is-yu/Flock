@@ -175,7 +175,13 @@ AND NOT EXISTS (
                 return callModel(model,input,modelAttempt,routeStep,checkpoint);
             };
             try {
-                plan = conversation::decide(message->text,context,decideModel,message->routing.at("config"));
+                plan = conversation::decide(message->text,context,decideModel,message->routing.at("config"),
+                    [&](Id resolvedId) {
+                        std::lock_guard lock(mutex);
+                        Transaction transaction(db);
+                        inheritModelBudget(id,resolvedId);
+                        transaction.commit();
+                    });
             } catch (const ModelBudgetPaused&) {
                 return true;
             } catch (const std::exception&) {

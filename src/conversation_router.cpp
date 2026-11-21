@@ -920,7 +920,8 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     return std::nullopt;
 }
 
-Plan decide(std::string_view text, const Context& context, const DecideModel& model, const Json& config) {
+Plan decide(std::string_view text, const Context& context, const DecideModel& model, const Json& config,
+            const std::function<void(Id)>& resolvedClarification) {
     if (auto result = shortcut(text, context)) return std::move(*result);
     const auto decision = model({
         .task = Json::object(), .event = decisionContext(text, context), .history = context.history,
@@ -930,6 +931,9 @@ Plan decide(std::string_view text, const Context& context, const DecideModel& mo
     try {
         require(decision.tool == "route_conversation" && decision.args.is_object());
         auto plan = parsePlan(decision.args, text, context, targets);
+        if (resolvedClarification && plan.resolution &&
+            plan.resolution->kind == Resolution::Kind::resolved)
+            resolvedClarification(plan.resolution->replyId);
         for (auto& route : plan.routes) {
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
