@@ -201,8 +201,13 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 
-function pinnedBotsInShortcutOrder() {
-  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+let botDraft = null;
+function sidebarBots() {
+  if (botDraft?.mode !== 'edit') return bots;
+  return bots.map((bot) => (bot.id === botDraft.botId ? { ...bot, name: botDraft.name, avatar: botDraft.avatar } : bot));
+}
+function pinnedBotsInShortcutOrder(source = bots) {
+  return [...pins].map((id) => source.find((bot) => bot.id === id)).filter(Boolean);
 }
 function focusKey(key) {
   sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
@@ -353,19 +358,33 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
+function draftRow(draft) {
+  const row = node('div', 'bot-row draft');
+  row.setAttribute('aria-hidden', 'true');
+  const select = node('span', 'bot-select');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', draft.name));
+  const text = node('span', 'bot-text');
+  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  select.append(avatar(draft, 'bot-avatar'), text);
+  row.append(select);
+  return row;
+}
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const pinned = pinnedBotsInShortcutOrder();
+  const source = sidebarBots();
+  const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
   elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
   list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
   if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length) list.append(node('p', 'activity-empty', 'No Bots configured'));
+  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
   if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -1181,6 +1200,10 @@ function settingsRow(label, value, click) {
 let reopenSettingsOnClose = false;
 const botEditor = createBotEditor(elements['bot-editor'], {
   api,
+  onDraft(draft) {
+    botDraft = draft;
+    renderBots();
+  },
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
