@@ -14,7 +14,8 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_router.cpp src/runtime.cpp)
+add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_context.cpp src/conversation_routes.cpp
+                       src/conversation_router.cpp src/runtime.cpp)
 target_include_directories(flock_core PUBLIC include)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
