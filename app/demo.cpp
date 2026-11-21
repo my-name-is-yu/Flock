@@ -1,14 +1,37 @@
 #include "demo.hpp"
 
+#include <algorithm>
+
 namespace flockv0::app {
 namespace {
 class DemoModel final : public Model {
     Decision decide(const ModelInput& in) override {
-        if (in.event.value("kind","") == "result") {
+        const auto event = in.event.value("kind","");
+        if (event == "route_conversation") {
+            Json route = {{"kind","create_task"}};
+            const auto& reply = in.event.at("reply");
+            if (reply["kind"] == "wait") {
+                for (const auto& task : in.event.at("tasks")) {
+                    if (task["taskId"] == reply["taskId"] && task["wait"]["reason"] == "user_question")
+                        route = {{"kind","answer_wait"},{"taskId",reply["taskId"]}};
+                }
+            } else if (reply["kind"] == "result") {
+                route = {{"kind","answer_result"},{"resultMessageId",reply["resultMessageId"]}};
+            } else if (reply["kind"] == "clarification") {
+                route = {{"kind","clarify"},{"text","Use a direct request or reply to a demo question."}};
+            }
+            return {"route_conversation",{{"routes",Json::array({route})}},"Fixed demo routing."};
+        }
+        if (event == "answer_conversation_result") {
+            return {"answer_conversation_result",
+                {{"text","The demo result records successful completion of simulated work. It contains no implementation details."}},
+                "The fixed demo reports only completion."};
+        }
+        if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
             return {"complete",{{"report",in.event.value("report","")}},
                 "The demo Session reported that it completed the requested work."};
         }
-        if (in.task.value("doneWhen","").empty()) {
+        if (std::ranges::find(in.tools,"delegate") != in.tools.end()) {
             std::string answer;
             for (const auto& row : in.history)
                 if (row.value("kind","") == "user_answer") answer = row.value("data",Json::object()).value("text","");
@@ -18,8 +41,9 @@ class DemoModel final : public Model {
                 if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo Session focus on?";
                 return {"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."};
             }
-            return {"delegate",{{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)},
-                {"doneWhen","The demo Session returns a completion report."}},"A demo Session can handle this request."};
+            Json args = {{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
+            if (in.task.value("doneWhen","").empty()) args["doneWhen"] = "The demo Session returns a completion report.";
+            return {"delegate",std::move(args),"A demo Session can handle this request."};
         }
         throw ModelError("No fixed demo decision for this event",false);
     }
@@ -29,7 +53,8 @@ class DemoT3 final : public T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "fixed-demo"; }
 
     RunRef run(const Command& command) {
-        return {"demo-thread-" + command.actionId,"demo-run-" + command.actionId,""};
+        const auto thread = command.tool == "follow_up" ? command.target.threadId : "demo-thread-" + command.actionId;
+        return {thread,"demo-run-" + command.actionId,""};
     }
 
     Delivery send(const Command& command) override {

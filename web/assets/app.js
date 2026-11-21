@@ -1,4 +1,4 @@
-import { showAvatar } from '/avatars.js';
+import { accentColor, showAvatar } from '/avatars.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -6,41 +6,44 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'compose-label', 'message', 'send', 'composer-mode', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'theme-switch',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
-const clock = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit' });
-const dayFormat = new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' });
-const fullTime = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
+const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
-  queued: '受付済み', deciding: '判定中', sending: '送信中', running: '作業中', waiting: '確認待ち',
-  cancelling: '中止処理中', completed: '完了', cancelled: '中止', ended: '実行終了',
-  idle: '待機中', thinking: '判断中', working: 'セッション作業中', peer_waiting: 'Bot の返事待ち',
+  queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
+  cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
+  failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
+  idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
 const peerMessageLabels = {
-  request: '依頼', question: '質問', answer: '回答', result: '結果', cancelled: '中止', failed: '失敗',
+  request: 'Request', question: 'Question', answer: 'Answer', result: 'Result', cancelled: 'Cancelled', failed: 'Failed',
 };
 const waitLabels = {
-  user_question: ['Bot からの質問', 'Bot が回答を待っています。'],
-  budget: ['追加作業の許可', '追加作業の上限に達しました。1 回分の追加を許可できます。'],
-  model_failure: ['再判定の確認', 'モデルの判定が複数回失敗しました。再判定を開始できます。'],
-  t3_input: ['T3 での操作', '担当する Thread を開き、T3 上で承認または回答してください。'],
-  deadline: ['期限の延長', '担当セッションが期限に達しました。新しい期限を指定できます。'],
-  unknown_delivery: ['受付結果の再照合', 'T3 が作業または回答を受け付けたか確認できませんでした。'],
-  auth: ['T3 の認証', 'T3 で再認証した後、再照合してください。'],
-  settings: ['T3 の実行設定', 'T3 の接続や実行設定を確認した後、再照合してください。'],
+  user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
+  budget: ['Approval for more work', 'The task reached its additional run limit. You can approve one more run.'],
+  model_failure: ['Retry decision', 'The model failed to make a decision after several attempts. You can retry.'],
+  t3_input: ['Action in T3', 'Open the assigned thread in T3 to approve or answer.'],
+  deadline: ['Deadline extension', 'The session reached its deadline. You can set a new one.'],
+  unknown_delivery: ['Delivery reconciliation', 'Flock could not confirm whether T3 received the task or answer.'],
+  auth: ['T3 authentication', 'Sign in to T3 again, then reconcile.'],
+  settings: ['T3 execution settings', 'Check the T3 connection and execution settings, then reconcile.'],
 };
 const closedLabels = {
-  answer: '回答済み', run_finished: 'セッションが終了しました', cancel: 'タスクを中止しました',
-  session_question: 'セッションで確認内容が更新されました',
+  answer: 'Answered', run_finished: 'Session ended', cancel: 'Task cancelled',
+  session_question: 'The session updated the question',
 };
 const errors = {
-  invalid_text: '入力内容と文字数を確認してください。', invalid_deadline: '現在より後の期限を指定してください。',
-  intake_settings: '依頼を受け付けられません。Bot の実行設定を確認してください。',
-  operation_conflict: 'この操作はすでに処理されたか、確認内容が変わりました。',
-  bot_not_found: 'Bot が見つかりません。',
+  invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
+  intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
+  message_conflict: 'A message was already recorded for this submission. Check the conversation.',
+  operation_conflict: 'Flock already processed this action or the pending request changed.',
+  bot_not_found: 'Bot not found.',
 };
 
 function saved(key, fallback) {
@@ -49,14 +52,15 @@ function saved(key, fallback) {
 }
 function save(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); }
-  catch { /* The session can continue with in-memory preferences. */ }
+  catch {}
 }
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const drafts = new Map();
 const replies = new Map();
-const pendingRequests = new Set();
-const pendingWaits = new Set();
+const sendingMessages = new Set();
+const pendingMessages = new Map();
+const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
 let bots = [];
@@ -86,20 +90,27 @@ function avatar(bot, className = '') {
   showAvatar(host, bot);
   return host;
 }
-function linkToRun(run, label = 'T3 で開く') {
+function runHref(run) {
   if (!run?.link) return null;
-  const url = new URL(run.link);
+  let url;
+  try { url = new URL(run.link); }
+  catch { return null; }
   const hosted = url.origin === 'https://app.t3.codes' && url.pathname.startsWith('/threads/');
   const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
   if ((!hosted && !local) || url.username || url.password) return null;
+  return url.href;
+}
+function linkToRun(run, label = 'Open in T3') {
+  const href = runHref(run);
+  if (!href) return null;
   const link = node('a', 'link', `${label} ↗`);
-  link.href = url.href;
+  link.href = href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   return link;
 }
-function waitLabel(reason) { return waitLabels[reason]?.[0] ?? '確認待ち'; }
-function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || '確認内容を更新してください。'; }
+function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for input'; }
+function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
 function badge(state) { return node('span', `badge ${state}`, stateLabels[state] ?? state); }
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
@@ -119,19 +130,49 @@ async function api(path, body) {
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
+const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
+
+function pendingMessage(bot) {
+  if (!pendingMessages.has(bot)) {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
+      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
+    } catch {}
+  }
+  return pendingMessages.get(bot);
+}
+function rememberMessage(bot, pending) {
+  if (pending) pendingMessages.set(bot, pending);
+  else pendingMessages.delete(bot);
+  try {
+    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
+    else sessionStorage.removeItem(messageStorageKey(bot));
+  } catch {}
+}
 
 function setConnection(state) {
   if (connection === state) return;
   connection = state;
   elements.connection.dataset.state = state;
-  elements['connection-text'].textContent = state === 'ready' ? 'ローカル Runtime に接続中' : 'Runtime に接続できません';
+  elements['connection-text'].textContent = state === 'offline' ? 'Could not connect to the runtime' : '';
   renderHeader();
+}
+function renderTheme(mode) {
+  for (const option of elements['theme-switch'].querySelectorAll('button')) {
+    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
+  }
+}
+function setTheme(mode) {
+  save('flock-theme', mode);
+  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
+  renderTheme(mode);
 }
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
+  const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
-  if (focus && narrow.matches) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
+  if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
 function selectBot(botId) {
   menu = null;
@@ -140,111 +181,284 @@ function selectBot(botId) {
   closeDetail();
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, loadingOlder: false, loadingSessions: false, generation: 0 } : null;
+  const pending = botId && pendingMessage(botId);
+  if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
+  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   save('flock-selected-bot', botId);
   render();
   elements.conversation.scrollTop = 0;
   if (view) void refreshView(view);
 }
 
-function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
-  const pinned = [];
-  const rest = [];
-  for (const bot of bots) {
-    const isPinned = pins.has(bot.id);
-    const row = node('div', isPinned ? 'pinned-bot' : 'bot-row');
-    const active = view?.id === bot.id;
-    row.classList.toggle('selected', active);
-    const select = button(null, isPinned ? 'pin' : 'bot-select', () => selectBot(bot.id));
-    select.title = bot.name;
-    select.setAttribute('aria-label', bot.name);
-    if (active) select.setAttribute('aria-current', 'true');
-    select.append(avatar(bot));
-    if (!isPinned) {
-      const text = node('span', 'bot-text');
-      text.append(node('span', 'bot-name', bot.name), node('span', 'bot-preview', bot.preview || '会話はまだありません'));
-      select.append(text);
-    }
-    const toggle = button('⋯', 'icon-button pin-menu', () => {
-      const opened = menu !== bot.id;
-      menu = opened ? bot.id : null;
-      renderBots();
-      const replacement = [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id);
-      if (opened) replacement?.nextElementSibling?.querySelector('button')?.focus();
-      else replacement?.focus();
-    });
-    toggle.dataset.bot = bot.id;
-    toggle.setAttribute('aria-label', `${bot.name} のメニュー`);
-    toggle.setAttribute('aria-expanded', menu === bot.id);
-    row.append(select, toggle);
-    if (menu === bot.id) {
-      const popover = node('div', 'pin-popover');
-      popover.append(button(isPinned ? 'ピン留めを解除' : 'ピン留めする', null, () => {
-        if (isPinned) pins.delete(bot.id);
-        else pins.add(bot.id);
-        save('flock-pins', [...pins]);
-        menu = null;
-        renderBots();
-        [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id)?.focus();
-      }));
-      row.append(popover);
-    }
-    (isPinned ? pinned : rest).push(row);
+const sidebarIcons = {
+  more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
+  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
+};
+const activePresence = new Set(['working', 'thinking', 'waiting']);
+const busyPresence = new Set(['working', 'thinking']);
+const sidebar = byId('navigation');
+
+function pinnedBotsInShortcutOrder() {
+  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+}
+function focusKey(key) {
+  sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
+}
+function setMenu(botId, focus) {
+  menu = botId;
+  renderBots();
+  if (focus === 'first' || focus === 'last') {
+    const items = sidebar.querySelectorAll('.menu-popover [role="menuitem"]');
+    items[focus === 'first' ? 0 : items.length - 1]?.focus();
+  } else if (focus) focusKey(focus);
+}
+function closeMenu(restore = true) {
+  const botId = menu;
+  if (!botId) return;
+  setMenu(null, restore ? `menu:${botId}` : null);
+}
+function togglePin(bot) {
+  if (pins.has(bot.id)) pins.delete(bot.id);
+  else pins.add(bot.id);
+  save('flock-pins', [...pins]);
+  setMenu(null, `menu:${bot.id}`);
+}
+let settingsReturnFocus = null;
+function openSettingsFromMenu(botId) {
+  settingsReturnFocus = botId;
+  openDetail({ kind: 'settings' });
+}
+function openBotSettings(bot) {
+  menu = null;
+  if (view?.id !== bot.id) selectBot(bot.id);
+  else renderBots();
+  if (view?.data) openSettingsFromMenu(bot.id);
+  else if (view) view.openSettingsOnLoad = bot.id;
+}
+function menuButton(bot) {
+  const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
+  toggle.innerHTML = sidebarIcons.more;
+  toggle.dataset.focus = `menu:${bot.id}`;
+  toggle.setAttribute('aria-label', `${bot.name} menu`);
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', menu === bot.id);
+  toggle.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    setMenu(bot.id, event.key === 'ArrowDown' ? 'first' : 'last');
+  });
+  if (menu === bot.id) toggle.setAttribute('aria-controls', 'bot-menu');
+  return toggle;
+}
+function menuPopover(bot) {
+  const list = node('div', 'menu-popover');
+  list.id = 'bot-menu';
+  list.setAttribute('role', 'menu');
+  list.setAttribute('aria-label', `${bot.name} menu`);
+  const actions = [
+    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot)],
+    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot)],
+  ];
+  actions.forEach(([label, icon, run], index) => {
+    const item = button(null, null, run);
+    item.innerHTML = icon;
+    item.append(node('span', null, label));
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.dataset.focus = `item:${bot.id}:${index}`;
+    list.append(item);
+  });
+  list.addEventListener('keydown', (event) => {
+    const items = [...list.querySelectorAll('[role="menuitem"]')];
+    const index = items.indexOf(document.activeElement);
+    const moves = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 };
+    if (event.key in moves) {
+      event.preventDefault();
+      items[(moves[event.key] + items.length) % items.length].focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+    } else if (event.key === 'Tab') closeMenu();
+  });
+  return list;
+}
+function presenceText(bot) {
+  return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
+}
+function botRow(bot) {
+  const row = node('div', 'bot-row');
+  const active = view?.id === bot.id;
+  row.classList.toggle('selected', active);
+  row.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'bot-select', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', bot.name));
+  if (bot.presence === 'waiting') name.append(node('span', 'presence-dot'));
+  const preview = node('span', 'bot-preview');
+  if (busyPresence.has(bot.presence)) {
+    const dots = node('span', 'working-dots');
+    dots.setAttribute('aria-hidden', 'true');
+    dots.append(node('i'), node('i'), node('i'));
+    preview.append(dots);
   }
-  elements.pinned.replaceChildren(...pinned);
-  elements.pinned.hidden = !pinned.length;
-  elements['bot-list'].replaceChildren(...rest);
-  if (!bots.length) elements['bot-list'].append(node('p', 'activity-empty', listLoaded ? '設定済みの Bot はありません' : '読み込み中…'));
+  preview.append(bot.preview || 'No conversation yet');
+  const text = node('span', 'bot-text');
+  text.append(name, preview);
+  select.append(avatar(bot, 'bot-avatar'), text);
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  row.append(select, menuButton(bot));
+  if (menu === bot.id) row.append(menuPopover(bot));
+  return row;
+}
+function pinTile(bot, index) {
+  const tile = node('div', 'pin-tile');
+  const active = view?.id === bot.id;
+  tile.classList.toggle('selected', active);
+  tile.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'pin', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const shortcut = index < 9 ? index + 1 : null;
+  if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
+  const face = node('span', 'pin-face');
+  face.append(avatar(bot, 'pin-avatar'));
+  if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
+  select.append(face, node('span', 'pin-name', bot.name));
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  const tooltip = node('span', 'pin-tooltip');
+  tooltip.setAttribute('aria-hidden', 'true');
+  tooltip.append(node('span', null, bot.name));
+  if (shortcut) tooltip.append(node('kbd', null, `⌥⇧${shortcut}`));
+  tile.append(select, tooltip, menuButton(bot));
+  if (menu === bot.id) tile.append(menuPopover(bot));
+  return tile;
+}
+function skeletonRows(count, className = 'skeleton-row') {
+  return Array.from({ length: count }, () => {
+    const row = node('div', className);
+    row.setAttribute('aria-hidden', 'true');
+    if (className === 'skeleton-bot') row.append(node('span', 'skeleton-avatar'));
+    const lines = node('span', 'skeleton-lines');
+    lines.append(node('span', 'skeleton-line'), node('span', 'skeleton-line short'));
+    row.append(lines);
+    return row;
+  });
 }
 
+function renderBots() {
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
+  const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+  const pinned = pinnedBotsInShortcutOrder();
+  const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
+  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  elements.pinned.replaceChildren(...pinned.map(pinTile));
+  elements.pinned.hidden = !pinned.length;
+  const list = elements['bot-list'];
+  list.setAttribute('aria-busy', !listLoaded);
+  list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
+  else if (!bots.length) list.append(node('p', 'activity-empty', 'No Bots configured'));
+  if (focusedSidebarKey) focusKey(focusedSidebarKey);
+}
+
+const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
 function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
-  elements.profile.hidden = !bot;
+  const profile = elements.profile;
+  profile.hidden = !bot;
   elements['settings-button'].hidden = !bot;
   elements['profile-placeholder'].hidden = !!bot;
   if (!bot) {
     profileAvatar?.destroy();
     profileAvatar = null;
     profileKey = '';
+    elements.conversation.style.removeProperty('--bot-accent');
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' : presence;
+  const avatarState = presence === 'peer_waiting' ? 'waiting' :
+    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
-  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: avatarState });
+    elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  const offline = connection === 'offline';
+  const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
+  profile.dataset.presence = presence;
+  profile.dataset.state = offline ? 'offline' : presence;
+  profile.title = `${bot.name} · ${status}`;
+  profile.setAttribute('aria-label', `${bot.name} settings`);
   elements['profile-name'].textContent = bot.name;
-  elements.profile.setAttribute('aria-label', `${bot.name} の設定を開く`);
-  elements['profile-status'].dataset.state = presence;
-  elements['profile-status'].textContent = connection === 'offline' ? 'Runtime に未接続' : stateLabels[presence];
+  elements['profile-status'].textContent = status;
 }
 
-function activityTitle(request, className) {
-  const title = node('span', className, request);
-  title.title = request;
-  return title;
+function activityRow(tag, className, title, status, statusClass) {
+  const row = node(tag, `activity ${className}`);
+  const heading = node('span', 'activity-title', title);
+  const line = node('span', `activity-status ${statusClass}`.trim());
+  line.append(node('span', 'activity-mark'), node('span', null, status));
+  row.append(heading, line);
+  return row;
+}
+function sessionRow(task, session, status, live) {
+  const link = runHref(session);
+  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
+  row.title = `#${task.id} ${task.request}`;
+  if (link) {
+    row.href = link;
+    row.target = '_blank';
+    row.rel = 'noopener noreferrer';
+    row.insertAdjacentHTML('beforeend', sidebarIcons.open);
+    row.lastElementChild.classList.add('activity-open');
+    row.append(node('span', 'sr-only', ' (Open in T3)'));
+  }
+  return row;
 }
 function renderActivity() {
   const data = view?.data;
+  const loading = !!view && !data;
   const waits = data?.waits ?? [];
-  if (changed('waits', view?.id, waits)) {
-    elements['wait-count'].textContent = waits.length;
-    elements['wait-count'].classList.toggle('has-waits', waits.length > 0);
+  const clarifications = data?.clarifications ?? [];
+  if (changed('waits', view?.id, loading, waits, clarifications)) {
+    elements['wait-count'].textContent = waits.length + clarifications.length;
+    elements['wait-count'].classList.toggle('has-waits', waits.length + clarifications.length > 0);
+    elements['wait-count'].hidden = !(waits.length + clarifications.length);
+    elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = waits.map((task) => {
-      const row = button(null, 'activity wait-select', () => {
+      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
+      row.type = 'button';
+      row.title = waitText(task.wait);
+      row.addEventListener('click', () => {
         openNavigation(false);
         openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
       });
-      const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', waitLabel(task.wait.reason)));
-      row.append(line, activityTitle(task.request, 'activity-subtitle'));
       return row;
     });
+    for (const clarification of clarifications) {
+      const row = button(null, 'activity wait-select', () => {
+        openNavigation(false);
+        openDetail({ kind: 'clarification', messageId: clarification.messageId });
+      });
+      const line = node('span', 'activity-line');
+      line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Clarification requested'));
+      const subtitle = node('span', 'activity-subtitle', clarification.text);
+      subtitle.title = clarification.text;
+      row.append(line, subtitle);
+      rows.push(row);
+    }
     elements['wait-list'].replaceChildren(...rows);
-    if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', '確認待ちはありません'));
+    if (loading) elements['wait-list'].append(...skeletonRows(1));
+    else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
   }
   const groups = new Map(view?.loadedSessions);
   for (const task of data?.sessionTasks ?? []) groups.set(task.id, task);
@@ -252,43 +466,107 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, [...groups.values()], active)) return;
-  const rows = [];
+  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
+  const activeKeys = new Set();
+  const live = [];
+  for (const run of active) {
+    const identity = key(run.taskId, run);
+    if (activeKeys.has(identity)) continue;
+    activeKeys.add(identity);
+    live.push(sessionRow({ id: run.taskId, request: run.request }, run, stateLabels[run.state] ?? run.state, true));
+  }
+  const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      const row = node('article', 'activity session-entry');
-      const status = active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
-      const line = node('span', 'activity-line');
-      line.append(badge(status), node('span', 'activity-subtitle', `#${task.id}`));
-      row.append(activityTitle(task.request, 'activity-title'), line);
-      const link = linkToRun(session);
-      if (link) row.append(link);
-      rows.push(row);
+      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
     }
   }
-  elements['session-list'].replaceChildren(...rows);
-  if (!rows.length) elements['session-list'].append(node('p', 'activity-empty', 'セッションはまだありません'));
+  const rows = [];
+  for (const [label, items] of [['Active', live], ['Ended', ended]]) {
+    if (!items.length) continue;
+    const heading = node('h3', 'activity-group');
+    heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
+    rows.push(heading, ...items);
+  }
+  const list = elements['session-list'];
+  list.setAttribute('aria-busy', loading);
+  list.replaceChildren(...rows);
+  if (loading) list.append(...skeletonRows(2));
+  else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
 }
 
-function beginReply(task) {
+function beginReply(target, text = '') {
+  if (!target.messageId || sendingMessages.has(view.id)) return;
   const current = replies.get(view.id);
-  if (current?.waitId !== task.wait.id) replies.set(view.id, {
-    taskId: task.id, waitId: task.wait.id, question: waitText(task.wait), text: '',
-  });
+  if (current?.messageId !== target.messageId || text)
+    replies.set(view.id, { ...target, text });
   closeDetail();
   renderComposer();
   elements.message.focus();
 }
-function questionActions(task) {
-  const actions = node('div', 'event-actions');
+const icons = {
+  copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
+  copied: '<path d="m5.5 12.5 4 4 9-9"/>',
+  reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
+  check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
+};
+function icon(name, className = 'glyph') {
+  const host = node('span', className);
+  host.setAttribute('aria-hidden', 'true');
+  host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
+  return host;
+}
+function iconButton(name, label, click) {
+  const control = button(null, 'icon-button msg-action', click);
+  control.setAttribute('aria-label', label);
+  control.title = label;
+  control.append(icon(name));
+  return control;
+}
+async function copyMessage(control, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    control.replaceChildren(icon('copied'));
+    control.setAttribute('aria-label', 'Copied');
+    control.title = 'Copied';
+    setTimeout(() => {
+      control.replaceChildren(icon('copy'));
+      control.setAttribute('aria-label', 'Copy text');
+      control.title = 'Copy text';
+    }, 1600);
+  } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
+}
+function questionActions(context, task, { dialog = false } = {}) {
+  const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
+  const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
   for (const choice of task.wait.choices ?? []) {
-    const option = button(choice, 'button', () => void operate(view, task, 'answer', { text: choice }));
+    const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
+      if (view?.id === context.id) beginReply(target, choice);
+    });
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);
   }
-  const reply = button('返信を書く', 'text-button', () => beginReply(task));
+  const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
+    if (view?.id === context.id) beginReply(target);
+  });
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
+  return actions;
+}
+function clarificationActions(clarification) {
+  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
+  const actions = node('div', 'event-actions');
+  if (clarification.destinations) {
+    for (const destination of clarification.destinations)
+      actions.append(button(destination, 'button', () => beginReply(target, destination)));
+  } else {
+    for (const candidate of clarification.candidates ?? [])
+      actions.append(button(candidate.request, 'button', () => beginReply(target, `#${candidate.taskId}`)));
+  }
+  actions.append(button('Write a reply', 'text-button', () => beginReply(target)));
   return actions;
 }
 function detailText(label, value) {
@@ -296,60 +574,209 @@ function detailText(label, value) {
   row.append(node('strong', null, label), document.createTextNode(value));
   return row;
 }
-function eventTime(event) {
+function messageSide(event) {
+  if (event.kind === 'cancelled') return 'system';
+  return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'cron') ? 'user' : 'bot';
+}
+function reasonText(text) {
+  const reason = node('p', 'event-reason');
+  reason.append(node('span', 'sr-only', 'Reason: '), document.createTextNode(text));
+  return reason;
+}
+function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
-  const time = node('time', null, clock.format(timestamp));
+  const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
+  time.title = [`#${event.taskId}`, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
-function eventCard(event, waits, closed, queued) {
+function sourceAction(source, label = 'Open source') {
+  return button(label, 'text-button', async () => {
+    if (!source.messageId && source.taskId) {
+      await openTask(source.taskId);
+      return;
+    }
+    const target = byId(`event-${source.messageId}`);
+    if (target) {
+      closeDetail();
+      target.focus();
+      target.scrollIntoView({ block: 'center' });
+      return;
+    }
+    const context = view;
+    const selection = { kind: 'source' };
+    openDetail(selection);
+    try {
+      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
+      if (detail !== selection) return;
+      selection.event = page.events.find((event) => event.id === source.messageId);
+      selection.failed = !selection.event;
+    } catch {
+      if (detail !== selection) return;
+      selection.failed = true;
+    }
+    renderDetail();
+  });
+}
+function resultActions(event, text, run) {
+  const actions = node('div', 'event-actions');
+  const link = linkToRun(run);
+  if (link) actions.append(link);
+  if (text) actions.append(button('Reply to this result', 'text-button', () =>
+    beginReply({ kind: 'result', messageId: event.id, summary: text })));
+  return actions;
+}
+function eventCard(event, context, place) {
   const data = event.data;
-  const outbound = event.kind === 'user_answer' || (event.kind === 'request' && data.source !== 'cron');
-  const row = node('article', `event${outbound ? ' outbound' : ''}`);
-  const card = node('div', 'event-card');
-  const metadata = node('div', 'event-meta');
-  const labels = { request: data.source === 'cron' ? '定期依頼' : 'あなた', user_answer: 'あなたの回答',
-    report: 'セッション報告', completed: '完了報告', cancelled: 'タスクを中止' };
-  const label = event.kind === 'waiting' ? waitLabel(data.reason) : labels[event.kind];
-  metadata.append(node('strong', null, label), node('span', null, `#${event.taskId}`), eventTime(event));
-  row.append(metadata, card);
+  const bot = context.bot;
+  const side = messageSide(event);
+  if (side === 'system') {
+    const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · Task #${event.taskId} cancelled · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    return note;
+  }
+  const row = node('article', `msg ${side}`);
+  row.id = `event-${event.id}`;
+  row.tabIndex = -1;
+  row.classList.toggle('group-start', place.groupStart);
+  row.classList.toggle('task-start', place.taskStart);
+  const cron = event.kind === 'request' && data.source === 'cron';
+  const scheduled = cron && data.scheduledAt ? `Scheduled for ${fullTime.format(data.scheduledAt * 1000)}` : '';
+  const showMeta = side === 'bot' ? place.groupStart || place.taskStart : place.taskStart;
+  const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
+  const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
+    side === 'bot' ? bot?.name ?? 'Bot' : 'You');
+  const task = node('span', place.taskStart ? 'msg-task' : 'msg-task sr-only', event.taskId ? `#${event.taskId}` : '');
+  meta.append(name, task, eventTime(event, scheduled));
+  if (event.taskId) meta.append(button('Task details', 'text-button event-task', () => void openTask(event.taskId)));
+  row.append(meta);
+
+  const line = node('div', 'msg-line');
+  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  const bubble = node('div', 'bubble');
+  const text = node('p', 'event-text');
+  const actions = node('div', 'msg-actions');
+  if (!showMeta) {
+    const hoverTime = eventTime(event, scheduled);
+    hoverTime.setAttribute('aria-hidden', 'true');
+    actions.append(hoverTime);
+  }
+  const extras = [];
+  let copy = data.text ?? '';
+  const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+
   if (event.kind === 'waiting') {
-    card.classList.add('question-card');
-    card.append(node('p', 'event-text', waitText(data)));
-    if (data.decisionReason) card.append(detailText('判断理由', data.decisionReason));
-    const task = waits.get(data.id);
-    if (task?.wait.reason === 'user_question') card.append(questionActions(task));
-    else if (task) {
-      const actions = node('div', 'event-actions');
-      actions.append(button('確認内容を開く', 'button', () => openDetail({ kind: 'wait', taskId: task.id, waitId: data.id })));
-      card.append(actions);
-    } else card.append(node('p', 'event-note', closedLabels[closed.get(data.id)] ?? '確認待ちは終了しました'));
+    copy = waitText(data);
+    text.textContent = copy;
+    bubble.append(text);
+    if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
+    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(view, openTask));
+    else if (openTask) {
+      const open = node('div', 'event-actions question-actions');
+      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
+      extras.push(open);
+    } else {
+      const resolution = node('p', 'msg-resolution');
+      resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
+      extras.push(resolution);
+    }
+  } else if (event.kind === 'conversation_reply') {
+    text.textContent = data.text;
+    bubble.append(text);
+    const clarification = context.clarifications.get(data.messageId);
+    if (clarification) extras.push(clarificationActions(clarification));
+    if (data.source?.messageId) {
+      const links = node('div', 'event-actions');
+      links.append(sourceAction(data.source));
+      if (data.route === 'respond') links.append(button('Reply to this answer', 'text-button', () =>
+        beginReply({ kind: 'result', messageId: event.id, summary: data.text })));
+      extras.push(links);
+    }
   } else if (event.kind === 'report') {
-    card.append(node('p', 'event-text', data.report || 'セッションから報告がありました'));
-    if (data.status) card.append(detailText('Run の状態', stateLabels[data.status] ?? data.status));
-    if (data.truncated) card.append(node('p', 'event-note', '報告の続きは T3 で確認できます。'));
+    extras.push(resultActions(event, data.report));
+    copy = data.report || 'The session submitted a report.';
+    text.textContent = copy;
     const link = linkToRun(data.run);
     if (link) {
-      const actions = node('div', 'event-actions');
-      actions.append(link);
-      card.append(actions);
+      link.className = 'run-link';
+      link.title = 'Open in T3';
+      link.setAttribute('aria-label', 'Open in T3');
+      link.replaceChildren(icon('open'));
+      text.append(link);
     }
+    bubble.append(text);
+    if (data.status && data.status !== 'completed') {
+      bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
+    }
+    if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
-    card.classList.add('finished-card');
-    card.append(node('p', 'event-text', data.text));
-    if (data.reason) card.append(detailText('判断理由', data.reason));
-  } else if (event.kind === 'cancelled') card.append(node('p', 'event-text', 'タスクを中止しました。'));
-  else {
-    card.append(node('p', 'event-text', data.text));
-    if (data.source === 'cron' && data.scheduledAt) card.append(node('p', 'event-note', `予定時刻 ${fullTime.format(data.scheduledAt * 1000)}`));
-    const blocker = queued.get(event.taskId)?.blockedBy;
-    if (event.kind === 'request' && blocker) {
-      const name = bots.find((bot) => bot.id === blocker.botId)?.name ?? blocker.botId;
-      card.append(node('p', 'event-note', `先行タスク #${blocker.id}（${name}）の完了を待っています。`));
-      card.append(node('p', 'event-note', blocker.request));
+    extras.push(resultActions(event, data.text, data.run));
+    bubble.classList.add('completed');
+    text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', 'Complete: '), document.createTextNode(data.text ?? ''));
+    bubble.append(text);
+    if (data.reason) bubble.append(reasonText(data.reason));
+  } else {
+    if (cron) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Recurring request: '));
+    text.append(document.createTextNode(data.text ?? ''));
+    bubble.append(text);
+    if (event.kind === 'user_answer') {
+      const question = data.question;
+      if (question && !place.afterQuestion) {
+        const quote = node('p', 'msg-quote');
+        quote.append(icon('reply'), node('span', null, question));
+        quote.title = question;
+        row.insertBefore(quote, meta.nextSibling);
+      }
+    }
+    if (event.kind === 'conversation_message' && data.replyToMessageId)
+      extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
+    if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
+    const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
+    if (blocker) {
+      const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
+      const note = node('p', 'msg-note', `#${blocker.id}（${owner}）Waiting for completion · ${blocker.request}`);
+      note.title = blocker.request;
+      extras.push(note);
     }
   }
+  if (copy) {
+    const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
+    actions.append(control);
+  }
+  if (openTask?.wait.reason === 'user_question') {
+    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
+    reply.disabled = pendingWaits.has(openTask.wait.id);
+    actions.append(reply);
+  }
+  line.append(bubble, actions);
+  row.append(line, ...extras);
   return row;
+}
+function workingLine(data) {
+  const row = node('div', 'msg bot working group-start');
+  const line = node('div', 'msg-line');
+  const dots = node('span', 'typing');
+  dots.setAttribute('aria-hidden', 'true');
+  dots.append(node('span'), node('span'), node('span'));
+  let label = presenceLabels.thinking;
+  if (data.presence === 'working') {
+    const active = data.activeSessions?.[0];
+    label = data.sessionTasks?.find((task) => task.id === active?.taskId)?.request ?? presenceLabels.working;
+  }
+  const text = node('span', 'working-label', label);
+  text.title = label;
+  line.append(avatar(data.bot, 'msg-avatar'), dots, text);
+  row.append(line);
+  return row;
+}
+function dayLabel(seconds) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((today - new Date(seconds * 1000).setHours(0, 0, 0, 0)) / 86400000);
+  return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
 }
 
 function peerConversation(messages, activeBot, names) {
@@ -360,7 +787,7 @@ function peerConversation(messages, activeBot, names) {
   const group = node('details', 'peer-exchange');
   group.dataset.firstMessage = first.id;
   const summary = node('summary');
-  summary.append(node('span', null, `${otherBot} とのやり取り（${messages.length}件）`),
+  summary.append(node('span', null, `${otherBot} conversation (${messages.length} messages)`),
     node('span', 'peer-exchange-task', `#${first.taskId}`));
   const list = node('ol', 'peer-message-list');
   list.setAttribute('role', 'list');
@@ -369,12 +796,12 @@ function peerConversation(messages, activeBot, names) {
     const item = node('li', 'peer-message');
     const metadata = node('div', 'event-meta');
     const label = messageType === 'request' && requestKind === 'consult'
-      ? '相談' : peerMessageLabels[messageType] ?? 'メッセージ';
-    metadata.append(node('strong', null, `${name(from)} から ${name(to)} へ`),
+      ? 'Consultation' : peerMessageLabels[messageType] ?? 'Message';
+    metadata.append(node('strong', null, `${name(from)} → ${name(to)}`),
       node('span', null, label), eventTime(message));
     item.append(metadata, node('p', 'event-text', text));
     for (const reference of evidence ?? []) {
-      const link = linkToRun(reference, 'T3 で根拠を見る');
+      const link = linkToRun(reference, 'View evidence in T3');
       if (link) item.append(link);
     }
     list.append(item);
@@ -383,123 +810,412 @@ function peerConversation(messages, activeBot, names) {
   return group;
 }
 
-function renderTimeline(scroll = 'auto') {
+function timelineScrollPosition() {
+  const scroller = elements.conversation;
+  const height = scroller.scrollHeight;
+  const top = scroller.scrollTop;
+  return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
+}
+
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
   const data = view?.data;
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !view?.olderBefore;
   older.disabled = !!view?.loadingOlder;
-  const names = new Map(bots.map((bot) => [bot.id, bot.name]));
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded, [...names])) return;
+  older.textContent = view?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
+  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
   const scroller = elements.conversation;
-  const previousHeight = scroller.scrollHeight;
-  const previousTop = scroller.scrollTop;
-  const atBottom = previousHeight - previousTop - scroller.clientHeight < 65;
-  const waits = new Map((data?.waits ?? []).map((task) => [task.wait.id, task]));
-  const queued = new Map((data?.queued ?? []).map((task) => [task.id, task]));
-  const closed = new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution]));
-  const opened = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')]
-    .map((group) => group.dataset.firstMessage));
-  const focused = elements.timeline.contains(document.activeElement)
-    ? document.activeElement.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage : null;
+  const names = new Map(bots.map(bot => [bot.id, bot.name]));
+  const expanded = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')].map(group => group.dataset.firstMessage));
+  const focused = elements.timeline.contains(document.activeElement) ? document.activeElement.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage : null;
   let focusTarget = null;
+  const context = {
+    bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    clarifications: new Map((data?.clarifications ?? []).map(item => [item.messageId, item])),
+    waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
+    queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
+    closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
+  };
+  const shown = events.filter((event) => event.kind !== 'wait_closed');
   const fragment = document.createDocumentFragment();
   let peerMessages = [];
   const appendPeerMessages = () => {
     if (!peerMessages.length) return;
     const group = peerConversation(peerMessages, view.id, names);
-    if (peerMessages.some((message) => opened.has(String(message.id)))) group.open = true;
-    if (peerMessages.some((message) => String(message.id) === focused)) focusTarget = group.firstElementChild;
+    group.open = expanded.has(group.dataset.firstMessage);
+    if (focused === group.dataset.firstMessage) focusTarget = group.querySelector('summary');
     fragment.append(group);
     peerMessages = [];
   };
   let day = '';
-  for (const event of events) {
-    if (event.kind === 'wait_closed') continue;
-    const eventDay = dayFormat.format(event.time * 1000);
-    if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId)
-      appendPeerMessages();
+  let previous = null;
+  shown.forEach((event, index) => {
+    const eventDay = dayLabel(event.time);
+    if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
       fragment.append(node('p', 'day', eventDay));
       day = eventDay;
+      previous = null;
     }
-    if (event.kind === 'bot_message') peerMessages.push(event);
-    else fragment.append(eventCard(event, waits, closed, queued));
-  }
+    if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
+    const side = messageSide(event);
+    const next = shown[index + 1];
+    const place = {
+      groupStart: previous?.side !== side,
+      groupEnd: !next || next.kind === 'bot_message' || messageSide(next) !== side || dayLabel(next.time) !== day,
+      taskStart: previous?.taskId !== event.taskId,
+      afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
+    };
+    fragment.append(eventCard(event, context, place));
+    previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
+  });
   appendPeerMessages();
   if (!fragment.childElementCount) {
     const empty = node('div', 'empty-state');
     if (data?.bot) empty.append(avatar(data.bot));
     const loaded = !!data || (!view && listLoaded);
-    empty.append(node('h2', null, loaded ? (data ? `${data.bot.name} との会話` : 'Bot がありません') : '読み込み中…'));
-    if (data) empty.append(node('p', null, '新しい依頼を送ると、ここに履歴が表示されます。'));
+    empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
+    if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
     fragment.append(empty);
   }
+  if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
   elements.timeline.replaceChildren(fragment);
   focusTarget?.focus({ preventScroll: true });
-  if (scroll === 'older') scroller.scrollTop = previousTop + scroller.scrollHeight - previousHeight;
-  else if (scroll === 'bottom' || atBottom) scroller.scrollTop = scroller.scrollHeight;
-  else scroller.scrollTop = previousTop;
+  if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
+  else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop = previousScroll.top;
 }
 
+const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (view?.id === context.id) renderComposer();
+}
+const replyLabels = { wait: 'Reply to a question', clarification: 'Reply to a clarification', result: 'Reply to a result' };
+const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+function scheduleNoticeFade(context, notice) {
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.id) || [...pendingWaits.values()].includes(context.id)) return;
+  notice.timer = setTimeout(() => {
+    notice.timer = null;
+    if (notices.get(context.id) !== notice || view?.id !== context.id) return;
+    notice.fading = true;
+    renderComposer();
+    setTimeout(() => {
+      if (notices.get(context.id) !== notice) return;
+      notices.delete(context.id);
+      if (view?.id === context.id) renderComposer();
+    }, 400);
+  }, 3600);
+}
+function fitMessage() {
+  const field = elements.message;
+  if (!field.offsetParent) return;
+  field.style.height = 'auto';
+  field.style.height = `${field.scrollHeight}px`;
 }
 function renderComposer() {
   const context = view;
   elements['composer-container'].hidden = !context?.data;
   if (!context?.data) return;
   const reply = replies.get(context.id);
-  const { text, isError } = notices.get(context.id) ?? {};
-  const target = reply ? '質問への返信' : '新しい依頼';
+  const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
-  const busy = pendingRequests.has(context.id) || (!!reply && pendingWaits.has(reply.waitId));
+  const busy = sendingMessages.has(context.id);
   elements['reply-context'].hidden = !reply;
-  elements['reply-question'].textContent = reply ? `#${reply.taskId} ${reply.question}` : '';
-  elements['compose-label'].textContent = target;
-  elements['composer-mode'].textContent = target;
+  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
+  elements['reply-question'].textContent = reply?.summary ?? '';
+  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  elements.message.placeholder = reply ? '質問への回答を入力' : `${context.data.bot.name} に依頼する`;
-  if (elements.message.value !== body) elements.message.value = body;
+  elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
+  if (elements.message.value !== body) {
+    elements.message.value = body;
+    fitMessage();
+  }
   elements.message.readOnly = busy;
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > (reply ? 8000 : 16000);
-  elements.send.setAttribute('aria-label', reply ? '質問に返信する' : '新しい依頼を送る');
-  elements.notice.textContent = text ?? '';
-  elements.notice.classList.toggle('error', !!isError);
+  elements.composer.setAttribute('aria-busy', String(busy));
+  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.composer.classList.toggle('can-send', !elements.send.disabled);
+  elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
+  elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
+  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.classList.toggle('error', !!notice?.isError);
+  elements.notice.classList.toggle('fading', !!notice?.fading);
+  scheduleNoticeFade(context, notice);
 }
 
+const detailNav = byId('detail-nav');
+const settingsSections = {
+  general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
+  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+};
+const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
+let detailAvatar = null;
+let detailOrigin = null;
+
+function releaseDetailAvatar() {
+  detailAvatar?.handle?.destroy();
+  detailAvatar = null;
+}
 function closeDetail() {
   detail = null;
+  releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
 }
 function openDetail(selection) {
   if (!view?.data) return;
-  detail = selection;
+  detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
-  if (!elements.detail.open) elements.detail.showModal();
+  if (elements.detail.open) return;
+  detailOrigin = document.activeElement;
+  elements.detail.showModal();
+  if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
-function settingsContent(bot) {
-  elements['detail-title'].textContent = 'Bot 設定';
-  const profile = node('div', 'dialog-profile');
-  profile.append(avatar(bot), node('span', null, bot.name));
-  const role = node('section', 'dialog-section');
-  role.append(node('h3', null, '役割'), node('p', 'prose', bot.soul || '役割は設定されていません。'));
-  const schedule = node('section', 'dialog-section');
-  schedule.append(node('h3', null, '定期依頼'));
-  for (const item of bot.cron) {
-    const row = node('div', 'schedule-row');
-    const specification = [item.schedule ?? item.expression ?? item.cron, item.timezone ?? item.timeZone, item.id,
-      item.enabled === false ? '無効' : ''].filter(Boolean).join(' · ');
-    row.append(node('p', 'prose', item.request), node('p', 'dialog-meta', specification));
-    schedule.append(row);
+async function openTask(taskId) {
+  const context = view;
+  if (!context?.data) return;
+  const selection = { kind: 'task', taskId };
+  openDetail(selection);
+  try {
+    const task = await api(`task?${new URLSearchParams({ bot: context.id, taskId })}`);
+    if (detail !== selection) return;
+    selection.task = task;
+  } catch {
+    if (detail !== selection) return;
+    selection.failed = true;
   }
-  if (!bot.cron.length) schedule.append(node('p', 'prose', '定期依頼はありません。'));
-  return [profile, role, schedule];
+  renderDetail();
 }
-function waitForm(label, fields, submit) {
+function taskContent(task) {
+  const purpose = node('section', 'dialog-section');
+  purpose.append(badge(task.state), node('h3', null, 'Goal'), node('p', 'prose', task.intent || task.request));
+  const parts = [purpose];
+  if (task.revisions.length || task.doneWhen) {
+    const revisions = node('section', 'dialog-section');
+    revisions.append(node('h3', null, 'Completion criteria'));
+    if (!task.revisions.length) revisions.append(node('p', 'prose', task.doneWhen));
+    for (const revision of [...task.revisions].reverse()) {
+      const row = node('div', 'schedule-row');
+      const label = revision.id === task.currentRevision ? `Revision ${revision.number} (current)` : `Revision ${revision.number}`;
+      row.append(node('p', 'dialog-meta', label), node('p', 'prose', revision.doneWhen));
+      if (revision.intent && revision.intent !== (task.intent || task.request)) row.append(detailText('Goal in this revision', revision.intent));
+      if (revision.sourceMessageId) row.append(sourceAction({ messageId: revision.sourceMessageId }, 'Open change request'));
+      revisions.append(row);
+    }
+    parts.push(revisions);
+  }
+  if (task.pendingInstructions.length) {
+    const pending = node('section', 'dialog-section');
+    pending.append(node('h3', null, 'Instructions pending delivery'));
+    for (const instruction of task.pendingInstructions) pending.append(node('p', 'prose', instruction.text));
+    parts.push(pending);
+  }
+  if (task.result) {
+    const result = node('section', 'dialog-section');
+    const data = task.result.data;
+    const label = task.result.kind === 'completed' ? 'Completion report' : 'Latest session report';
+    result.append(node('h3', null, label), node('p', 'prose', data.text ?? data.report));
+    const actions = node('div', 'event-actions');
+    actions.append(sourceAction({ messageId: task.result.id }, 'Open report in conversation'));
+    const link = linkToRun(data.run);
+    if (link) actions.append(link);
+    result.append(actions);
+    parts.push(result);
+  }
+  if (task.sourceResultRefs.length || task.sourceTaskId) {
+    const sources = node('section', 'dialog-section');
+    sources.append(node('h3', null, 'Original task'));
+    for (const source of task.sourceResultRefs) {
+      if (source.text) sources.append(node('p', 'prose', source.text));
+      sources.append(sourceAction(source, source.messageId ? 'Open original result' : 'Open original task'));
+    }
+    if (!task.sourceResultRefs.length)
+      sources.append(button('Open original task', 'text-button', () => void openTask(task.sourceTaskId)));
+    parts.push(sources);
+  }
+  if (task.runs.length) {
+    const runs = node('section', 'dialog-section');
+    runs.append(node('h3', null, 'Run history'));
+    for (const run of [...task.runs].reverse()) {
+      const row = node('div', 'schedule-row');
+      const revision = task.revisions.find((item) => item.id === run.revisionId);
+      const label = [run.runId, run.environmentId, revision ? `Revision ${revision.number}` : ''].filter(Boolean).join(' · ');
+      row.append(node('p', 'dialog-meta', label));
+      const link = linkToRun(run);
+      if (link) row.append(link);
+      runs.append(row);
+    }
+    parts.push(runs);
+  }
+  return parts;
+}
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open) return;
+  releaseDetailAvatar();
+  const origin = detailOrigin;
+  detailOrigin = null;
+  const active = document.activeElement;
+  if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
+});
+
+const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+function cronValues(field, min, max, names = {}) {
+  const value = (text) => {
+    const number = /^\d+$/.test(text) ? Number(text) : names[text.toLowerCase()];
+    return number >= min && number <= max ? number : null;
+  };
+  const values = new Set();
+  for (const part of field.split(',')) {
+    const [from, to, extra] = part.split('-').map(value);
+    if (extra !== undefined || from == null || (part.includes('-') && (to == null || to < from))) return null;
+    for (let item = from; item <= (to ?? from); item += 1) values.add(item);
+  }
+  return [...values].sort((a, b) => a - b);
+}
+function describeCron(expression) {
+  const fields = String(expression).trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minute, hour, day, month, weekday] = fields;
+  const interval = (field, cycle) => {
+    const step = Number(/^\*\/([1-9]\d?)$/.exec(field)?.[1]);
+    return cycle % step === 0 ? step : null;
+  };
+  const daily = day === '*' && month === '*' && weekday === '*';
+  if (daily && hour === '*' && minute === '*') return 'Every minute';
+  const minuteInterval = interval(minute, 60);
+  if (daily && hour === '*' && minuteInterval) return `Every ${minuteInterval} minutes`;
+  if (!/^\d+$/.test(minute) || Number(minute) > 59) return null;
+  const mm = minute.padStart(2, '0');
+  if (daily && hour === '*') return `Hourly at :${mm}`;
+  const hourInterval = interval(hour, 24);
+  if (daily && hourInterval) return `Every ${hourInterval} hours${minute === '0' ? '' : ` at :${mm}`}`;
+  const hours = cronValues(hour, 0, 23);
+  if (!hours || hours.length > 4) return null;
+  const times = hours.map((item) => `${item}:${mm}`).join(', ');
+  if (day === '*' && month === '*') {
+    if (weekday === '*') return `Daily at ${times}`;
+    const days = cronValues(weekday, 0, 7, cronNames);
+    if (!days) return null;
+    const unique = [...new Set(days.map((item) => item % 7))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
+    const key = unique.join(',');
+    if (unique.length === 7) return `Daily at ${times}`;
+    if (key === '1,2,3,4,5') return `Weekdays at ${times}`;
+    if (key === '6,0') return `Weekends at ${times}`;
+    return `Every ${unique.map((item) => weekdayNames[item]).join(', ')} at ${times}`;
+  }
+  if (weekday !== '*') return null;
+  const days = cronValues(day, 1, 31);
+  if (!days || days.length > 4) return null;
+  if (month === '*') return `Monthly on ${days.join(', ')} at ${times}`;
+  const months = cronValues(month, 1, 12);
+  if (!months || months.length !== 1 || days.length !== 1) return null;
+  return `Yearly on ${months[0]}/${days[0]} at ${times}`;
+}
+
+function sectionsFor(bot) {
+  return bot.cron.length ? ['general', 'cron'] : ['general'];
+}
+function selectSection(section, focus = false) {
+  if (detail?.kind !== 'settings' || detail.section === section) return;
+  detail.section = section;
+  renderDetail();
+  elements['detail-body'].scrollTop = 0;
+  if (focus) byId(`detail-tab-${section}`)?.focus();
+}
+function renderDetailNav(sections, current) {
+  const body = elements['detail-body'];
+  elements.detail.classList.toggle('has-nav', sections.length > 1);
+  detailNav.hidden = sections.length < 2;
+  if (detailNav.hidden) {
+    body.removeAttribute('role');
+    body.removeAttribute('aria-labelledby');
+    return;
+  }
+  if (changed('detail-nav', sections)) {
+    detailNav.replaceChildren(...sections.map((section) => {
+      const [label, icon] = settingsSections[section];
+      const tab = button(null, 'detail-tab', () => selectSection(section));
+      tab.id = `detail-tab-${section}`;
+      tab.dataset.section = section;
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', 'detail-body');
+      tab.innerHTML = icon;
+      tab.append(node('span', null, label));
+      return tab;
+    }));
+  }
+  detailNav.setAttribute('aria-orientation', narrow.matches ? 'horizontal' : 'vertical');
+  for (const tab of detailNav.children) {
+    const selected = tab.dataset.section === current;
+    tab.setAttribute('aria-selected', selected);
+    tab.tabIndex = selected ? 0 : -1;
+  }
+  body.setAttribute('role', 'tabpanel');
+  body.setAttribute('aria-labelledby', `detail-tab-${current}`);
+}
+detailNav.addEventListener('keydown', (event) => {
+  const tabs = [...detailNav.children];
+  const index = tabs.indexOf(document.activeElement);
+  if (index < 0) return;
+  const next = { ArrowDown: index + 1, ArrowRight: index + 1, ArrowUp: index - 1, ArrowLeft: index - 1,
+    Home: 0, End: tabs.length - 1 }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  selectSection(tabs[(next + tabs.length) % tabs.length].dataset.section, true);
+});
+
+function settingsRow(label, value, click) {
+  const row = click ? button(null, 'settings-row', click) : node('div', 'settings-row');
+  row.append(node('span', 'settings-row-label', label), node('span', 'settings-row-value', value));
+  if (click) row.insertAdjacentHTML('beforeend', chevron);
+  return row;
+}
+function generalContent(bot) {
+  const presence = view.data.presence ?? 'idle';
+  const hero = node('div', 'settings-hero');
+  const face = node('span', 'settings-avatar');
+  detailAvatar = { state: presence, mount: () => {
+    const handle = showAvatar(face, bot, { still: false, state: presence });
+    hero.style.setProperty('--hero-tint', accentColor(bot));
+    return handle;
+  } };
+  hero.append(face, node('p', 'settings-name', bot.name));
+  const role = node('section', 'settings-card');
+  role.setAttribute('aria-label', 'Role');
+  role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
+  const schedules = node('div', 'settings-card settings-rows');
+  schedules.append(bot.cron.length
+    ? settingsRow('Recurring requests', `${bot.cron.length} scheduled`, () => selectSection('cron', true))
+    : settingsRow('Recurring requests', 'None'));
+  return [hero, role, schedules];
+}
+function cronContent(bot) {
+  const list = node('div', 'settings-card cron-list');
+  for (const item of bot.cron) {
+    const expression = String(item.schedule ?? item.expression ?? item.cron ?? '');
+    const timezone = item.timezone ?? item.timeZone;
+    const readable = describeCron(expression);
+    const row = node('div', `cron-row${item.enabled === false ? ' disabled' : ''}`);
+    const when = node('p', 'cron-when');
+    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
+    if (timezone) when.append(node('span', 'cron-zone', timezone));
+    if (readable) when.append(node('code', 'cron-expression', expression));
+    row.append(when, node('span', 'cron-state', item.enabled === false ? 'Paused' : 'Enabled'),
+      node('p', 'cron-request', item.request));
+    list.append(row);
+  }
+  return [list];
+}
+function settingsContent(bot, section = 'general') {
+  elements['detail-title'].textContent = settingsSections[section][0];
+  return section === 'cron' ? cronContent(bot) : generalContent(bot);
+}
+function waitForm(label, fields, submit, id) {
   const form = node('form', 'wait-form');
+  if (id) form.id = id;
   for (const field of fields) {
     const wrapper = node('label', null, field.label);
     const input = node('input');
@@ -507,14 +1223,15 @@ function waitForm(label, fields, submit) {
     wrapper.append(input);
     form.append(wrapper);
   }
-  const action = button(label, 'button');
+  const action = button(label, 'dialog-button');
   action.type = 'submit';
-  form.append(action);
+  if (id) action.setAttribute('form', id);
+  else form.append(action);
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     submit(Object.fromEntries(new FormData(form)));
   });
-  return form;
+  return [form, action];
 }
 function localDateTime(timestamp) {
   const date = new Date(timestamp);
@@ -523,85 +1240,149 @@ function localDateTime(timestamp) {
 function waitContent(context, task) {
   const wait = task.wait;
   elements['detail-title'].textContent = waitLabel(wait.reason);
-  const request = node('section', 'dialog-section');
-  request.append(node('h3', null, `依頼 #${task.id}`), node('p', 'dialog-request', task.request));
-  const reason = node('section', 'dialog-section');
-  reason.append(node('h3', null, '待っている理由'), node('p', 'prose', waitText(wait)));
-  if (wait.decisionReason) reason.append(detailText('判断理由', wait.decisionReason));
-  const actions = node('section', 'dialog-section');
-  actions.append(node('h3', null, 'できる操作'));
-  const buttons = node('div', 'event-actions');
-  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'T3 で承認する' : 'T3 で開く');
-  if (runLink) buttons.append(runLink);
+  const request = node('blockquote', 'wait-request');
+  const marker = node('span', 'wait-task', `#${task.id}`);
+  marker.setAttribute('aria-label', `Task #${task.id}`);
+  request.append(node('p', 'wait-request-text', task.request), marker);
+  const reason = node('div', 'wait-reason');
+  reason.append(node('p', 'wait-text', waitText(wait)));
+  if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
+  const content = [request, reason];
+  const actions = node('div', 'wait-actions');
+  const primary = node('div', 'wait-primary');
   const perform = (operation, fields) => void operate(context, task, operation, fields);
-  if (wait.reason === 'user_question') actions.append(questionActions(task));
-  else if (wait.reason === 'budget') buttons.append(button('追加 1 回を許可', 'button', () => perform('approve')));
-  else if (wait.reason === 'model_failure') buttons.append(button('再判定', 'button', () => perform('retry')));
+  const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
+  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'Approve in T3' : 'Open in T3');
+  if (runLink) {
+    runLink.className = wait.reason === 't3_input' ? 'dialog-button primary' : 'dialog-button quiet';
+    primary.append(runLink);
+  }
+  if (wait.reason === 'user_question') {
+    primary.append(questionActions(context, task, { dialog: true }));
+  } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
+  else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
-    if (task.deadline) reason.append(node('p', 'dialog-meta', `現在の期限 ${fullTime.format(task.deadline * 1000)}`));
-    actions.append(waitForm('期限を延長', [{ name: 'deadline', label: '新しい期限（端末の時刻）',
+    if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
+    const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
       if (next > Date.now() / 1000) perform('extend', { deadline: next });
       else showDetailError(errors.invalid_deadline);
-    }));
+    }, 'wait-deadline-form');
+    submit.classList.add('primary');
+    content.push(form);
+    primary.append(submit);
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
-    buttons.append(button('再照合', 'button', () => perform('reconcile')));
+    primary.append(action('Reconcile', 'reconcile'));
     if (wait.reason === 'unknown_delivery') {
-      const advanced = node('details');
-      advanced.append(node('summary', 'dialog-meta', '担当する Run を指定'), waitForm('指定した Run と照合', [
+      const advanced = node('details', 'wait-advanced');
+      advanced.append(node('summary', null, 'Specify the assigned run'), waitForm('Reconcile with this run', [
         { name: 'threadId', label: 'Thread ID', required: true }, { name: 'runId', label: 'Run ID', required: true },
-        { name: 'questionId', label: '質問 ID（任意）' },
-      ], (fields) => perform('reconcile', Object.fromEntries(Object.entries(fields).filter(([, value]) => value.trim())))));
-      actions.append(advanced);
+        { name: 'questionId', label: 'Question ID (optional)' },
+      ], (fields) => perform('reconcile', Object.fromEntries(Object.entries(fields).filter(([, value]) => value.trim()))))[0]);
+      content.push(advanced);
     }
   }
-  buttons.append(button('タスクを中止', 'button danger', () => {
-    if (window.confirm(`タスク #${task.id} を中止しますか？`)) perform('cancel');
-  }));
-  actions.append(buttons);
+  actions.append(button('Cancel task', 'wait-cancel', () => {
+    if (window.confirm(`Cancel task #${task.id}?`)) perform('cancel');
+  }), primary);
   const feedback = node('p', 'dialog-feedback');
   feedback.id = 'detail-feedback';
   feedback.setAttribute('role', 'status');
-  return [request, reason, actions, feedback];
+  return [...content, actions, feedback];
 }
 function showDetailError(text) {
   const output = byId('detail-feedback');
   if (output) output.textContent = text;
 }
+function labelDetail(label) {
+  if (label) {
+    elements.detail.setAttribute('aria-label', label);
+    elements.detail.removeAttribute('aria-labelledby');
+  } else {
+    elements.detail.removeAttribute('aria-label');
+    elements.detail.setAttribute('aria-labelledby', 'detail-title');
+  }
+}
+function replaceDetail(render) {
+  releaseDetailAvatar();
+  elements['detail-body'].replaceChildren(...render());
+  if (detailAvatar?.mount) detailAvatar.handle = detailAvatar.mount();
+}
 function renderDetail() {
   if (!detail || !view?.data) return;
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
-    if (changed('detail', detail, bot)) elements['detail-body'].replaceChildren(...settingsContent(bot));
+    const sections = sectionsFor(bot);
+    if (!sections.includes(detail.section)) detail.section = 'general';
+    labelDetail(`${bot.name} settings`);
+    renderDetailNav(sections, detail.section);
+    if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
+    const presence = view.data.presence ?? 'idle';
+    if (detailAvatar && detailAvatar.state !== presence) {
+      detailAvatar.handle?.update({ state: presence });
+      detailAvatar.state = presence;
+    }
+    return;
+  }
+  labelDetail(null);
+  renderDetailNav([], null);
+  if (detail.kind === 'task') {
+    if (changed('detail', detail)) {
+      elements['detail-title'].textContent = 'Task details';
+      elements['detail-body'].replaceChildren(...(detail.task ? taskContent(detail.task) :
+        [node('p', 'prose', detail.failed ? 'Could not load task details.' : 'Loading…')]));
+    }
+    return;
+  }
+  if (detail.kind === 'source') {
+    if (changed('detail', detail)) {
+      elements['detail-title'].textContent = 'Source';
+      const source = detail.event;
+      const text = source?.kind === 'waiting' ? waitText(source.data) :
+        source?.data.report ?? source?.data.text ?? (detail.failed ? 'Could not load the source.' : 'Loading…');
+      const body = node('p', 'prose', text);
+      elements['detail-body'].replaceChildren(body);
+      if (detail.event?.taskId) elements['detail-body'].append(
+        button('Task details', 'text-button', () => void openTask(detail.event.taskId)));
+    }
+    return;
+  }
+  if (detail.kind === 'clarification') {
+    const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
+    if (changed('detail', detail, clarification)) {
+      elements['detail-title'].textContent = 'Clarification requested';
+      elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
+      if (clarification) elements['detail-body'].append(clarificationActions(clarification));
+    }
     return;
   }
   const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);
   if (!task) {
     if (changed('detail', detail, null)) {
-      elements['detail-title'].textContent = '確認待ちは終了しました';
-      elements['detail-body'].replaceChildren(node('p', 'prose', '最新の内容は会話で確認できます。'));
+      elements['detail-title'].textContent = 'Request closed';
+      replaceDetail(() => [node('p', 'wait-why', 'Check the conversation for the latest update.')]);
     }
     return;
   }
-  if (changed('detail', detail, task)) elements['detail-body'].replaceChildren(...waitContent(view, task));
+  if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
   for (const control of elements['detail-body'].querySelectorAll('button, input')) control.disabled = pendingWaits.has(task.wait.id);
 }
 function render(scroll) {
   renderBots();
   renderHeader();
   renderActivity();
-  renderTimeline(scroll);
+  const previousScroll = timelineScrollPosition();
   renderComposer();
+  renderTimeline(scroll, previousScroll);
   renderDetail();
 }
 
 function mergeLatest(context, latest) {
   const { events, olderBefore } = latest;
   const first = events[0]?.id;
-  // A long disconnection can leave a gap larger than the newest page.
-  // Re-anchor pagination at the newest page so the next older page fills it.
-  if (!context.events.size || (first && first > context.newestEvent)) {
+  const missedPage = first && first > context.newestEvent;
+  if (!context.events.size || missedPage) {
     context.events.clear();
     context.olderBefore = olderBefore;
   }
@@ -610,9 +1391,9 @@ function mergeLatest(context, latest) {
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
   const reply = replies.get(context.id);
-  if (reply && !latest.waits.some((task) => task.id === reply.taskId && task.wait.id === reply.waitId)) {
+  if (reply?.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
     replies.delete(context.id);
-    setNotice(context, '返信先の確認待ちは終了しました。');
+    setNotice(context, 'That question is no longer open.');
   }
 }
 async function refreshView(context, scroll) {
@@ -623,6 +1404,11 @@ async function refreshView(context, scroll) {
     mergeLatest(context, latest);
     setConnection('ready');
     render(scroll);
+    if (context.openSettingsOnLoad) {
+      const botId = context.openSettingsOnLoad;
+      context.openSettingsOnLoad = null;
+      openSettingsFromMenu(botId);
+    }
   } catch (error) {
     if (context !== view || generation !== context.generation) return;
     if (error.status === 404) void refreshBots();
@@ -658,7 +1444,7 @@ async function loadOlder() {
     context.olderBefore = page.olderBefore;
     for (const event of page.events) context.events.set(event.id, event);
     renderTimeline('older');
-  } catch { if (context === view) setNotice(context, '以前の会話を読み込めませんでした。', true); }
+  } catch { if (context === view) setNotice(context, 'Could not load earlier messages.', true); }
   finally {
     context.loadingOlder = false;
     if (context === view) renderTimeline();
@@ -675,7 +1461,7 @@ async function loadSessions() {
     if (context !== view) return;
     for (const task of page.sessionTasks) context.loadedSessions.set(task.id, task);
     context.sessionsBefore = page.sessionsBefore;
-  } catch { if (context === view) setNotice(context, '以前のセッションを読み込めませんでした。', true); }
+  } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
   finally {
     context.loadingSessions = false;
     if (context === view) renderActivity();
@@ -685,17 +1471,15 @@ async function loadSessions() {
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
   if (!context || pendingWaits.has(waitId)) return;
-  pendingWaits.add(waitId);
-  setNotice(context, '操作を送信中…');
+  pendingWaits.set(waitId, context.id);
+  setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   try {
     await api('operations', { botId: context.id, taskId: task.id, waitId, operation, ...fields });
-    if (replies.get(context.id)?.waitId === waitId) replies.delete(context.id);
-    setNotice(context, operation === 'answer' ? '回答を受け付けました。' : '操作を受け付けました。');
+    setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
     if (view?.id === context.id && detail?.waitId === waitId) closeDetail();
   } catch (error) {
-    if (error.status === 409 && replies.get(context.id)?.waitId === waitId) replies.delete(context.id);
-    const message = errors[error.message] ?? '操作の結果を確認できません。会話を確認してください。';
+    const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
     if (view?.id === context.id && detail?.waitId === waitId) showDetailError(message);
   } finally {
@@ -709,33 +1493,52 @@ async function submit(event) {
   const context = view;
   if (!context?.data || elements.send.disabled) return;
   const reply = replies.get(context.id);
-  if (reply) {
-    const task = context.data.waits.find((item) => item.id === reply.taskId && item.wait.id === reply.waitId);
-    if (task) await operate(context, task, 'answer', { text: reply.text });
-    return;
-  }
-  const request = drafts.get(context.id);
-  pendingRequests.add(context.id);
-  setNotice(context, '依頼を送信中…');
+  const text = reply ? reply.text : drafts.get(context.id);
+  const replyToMessageId = reply?.messageId;
+  const previous = pendingMessage(context.id)?.payload;
+  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
+    ? previous.clientMessageId : crypto.randomUUID();
+  const payload = { botId: context.id, clientMessageId, text };
+  if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
+  rememberMessage(context.id, { payload, reply });
+  sendingMessages.add(context.id);
+  setNotice(context, 'Sending message…');
   try {
-    const { taskId } = await api('requests', { botId: context.id, request });
-    drafts.delete(context.id);
-    setNotice(context, `依頼 #${taskId} を受け付けました。`);
+    await api('messages', payload);
+    rememberMessage(context.id, null);
+    if (reply) replies.delete(context.id);
+    else drafts.delete(context.id);
+    setNotice(context, 'Message received.');
     if (view?.id === context.id) await refreshView(view, 'bottom');
     void refreshBots();
-  } catch (error) { setNotice(context, errors[error.message] ?? '依頼の送信結果を確認できません。会話を確認してください。', true); }
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
+    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+  }
   finally {
-    pendingRequests.delete(context.id);
+    sendingMessages.delete(context.id);
     if (view?.id === context.id) renderComposer();
   }
 }
 
+const savedTheme = saved('flock-theme', 'system');
+renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
+elements['theme-switch'].addEventListener('click', (event) => {
+  const option = event.target.closest('button[data-theme-mode]');
+  if (option) setTheme(option.dataset.themeMode);
+});
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open || !settingsReturnFocus) return;
+  if (narrow.matches) openNavigation(true, false);
+  focusKey(`menu:${settingsReturnFocus}`);
+  settingsReturnFocus = null;
+});
 elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
@@ -749,22 +1552,53 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
+  fitMessage();
   notices.delete(view.id);
-  const limit = reply ? 8000 : 16000;
-  if (byteLength(elements.message.value) > limit) setNotice(view, `入力は ${limit.toLocaleString('ja-JP')} バイトまでです。`, true);
+  const limit = composerLimit(reply);
+  if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
 });
+// Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
+elements.composer.addEventListener('keydown', (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
+    event.preventDefault();
+    elements.send.click();
+  } else if (event.key === 'Escape' && !elements['reply-context'].hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+    elements['cancel-reply'].click();
+  }
+});
+byId('send-hint').textContent = `${sendKey} ↵`;
+let composerHeight = 0;
+function resizeComposerAndKeepTimelineAtBottom() {
+  const height = elements['composer-container'].offsetHeight;
+  const composerGrowth = height - composerHeight;
+  composerHeight = height;
+  const scroller = elements.conversation;
+  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
+  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
+  fitMessage();
+}
+new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
-  if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
+  if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });
 document.addEventListener('keydown', (event) => {
+  const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
+  if (digit && !event.isComposing && !elements.detail.open &&
+      !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
+    const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
+    if (bot) {
+      event.preventDefault();
+      selectBot(bot.id);
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
-  if (menu) {
-    const bot = menu;
-    menu = null;
-    renderBots();
-    [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot)?.focus();
-  } else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  if (menu) closeMenu();
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
 });
 
 function refresh() {

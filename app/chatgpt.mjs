@@ -1,5 +1,3 @@
-// Flock's private transport for the documented Sign in with ChatGPT flow.
-// Standard input/output carry JSON requests and results; credentials stay here.
 import { spawn } from "node:child_process";
 import { createHash, createPublicKey, randomBytes, randomUUID, timingSafeEqual, verify } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -11,12 +9,12 @@ const resource = "https://api.openai.com/v1";
 const directScope = "chatgpt.tokens.use.direct";
 const scopes = `openid profile email offline_access resource.invoke ${directScope}`;
 const callbackPath = "/auth/callback";
-const lockDescriptor = 9; // Acquired by the Flock executable across processes.
 const maxResponse = 4 * 1024 * 1024;
 const random = () => randomBytes(32).toString("base64url");
-const [operation, directory] = process.argv.slice(2);
+const [operation, directory, inheritedLock] = process.argv.slice(2);
+const lockDescriptor = Number(inheritedLock);
 const profilePath = join(directory ?? ".", "profile.json");
-let locked = true;
+let locked = Number.isSafeInteger(lockDescriptor) && lockDescriptor > 2;
 
 class Failure extends Error {
   constructor(message, transient = false, code = "") {
@@ -184,7 +182,6 @@ function credentials(tokens, previous) {
 async function listen(state, savedClient) {
   let done, fail;
   const result = new Promise((resolve, reject) => { done = resolve; fail = reject; });
-  result.catch(() => {}); // The browser may return before the opener reports success.
   let origin;
   const server = createServer({ requestTimeout: 15_000, headersTimeout: 10_000 }, (req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -242,6 +239,10 @@ function openBrowser(url) {
   });
 }
 
+async function showBrowserOrPrintUrl(url, printUrl, callbackSettled) {
+  if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
+}
+
 async function login({ printUrl = false, reconsent = false } = {}) {
   let profile = readProfile();
   if (!profile.hostId) {
@@ -268,8 +269,14 @@ async function login({ printUrl = false, reconsent = false } = {}) {
     if (!profile.clientId) url.searchParams.set("agent_name_hint", "Flock");
     if (reconsent && profile.clientId) url.searchParams.set("prompt", "consent");
     console.error("Continue with ChatGPT. Approve Flock's plan access in your browser.");
-    if (printUrl || !await openBrowser(url.toString())) console.error(url.toString());
-    const { code, clientId } = await listener.result;
+    let callbackSettled = false;
+    const callback = listener.result.then(
+      result => { callbackSettled = true; return result; },
+      error => { callbackSettled = true; throw error; },
+    );
+    const [{ code, clientId }] = await Promise.all([
+      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled),
+    ]);
     if (!profile.clientId) {
       profile.clientId = clientId;
       saveProfile(profile);
@@ -413,6 +420,7 @@ async function infer(payload) {
 }
 
 try {
+  if (!locked) throw new Failure("Flock's ChatGPT transport requires an inherited credential lock");
   let payload = "";
   for await (const chunk of process.stdin.setEncoding("utf8")) {
     payload += chunk;

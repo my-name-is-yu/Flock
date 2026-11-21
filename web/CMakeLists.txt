@@ -1,6 +1,5 @@
 find_package(Threads REQUIRED)
 
-# Header-only HTTP transport, with no TLS or compression dependencies.
 FetchContent_Declare(flock_httplib
   URL https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.67.0
   URL_HASH SHA256=be711ddaf7a3655d8f23aa5655709250b24d247aedd4b2629989d18b6164e5be
@@ -29,4 +28,8 @@ if(BUILD_TESTING)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web COMMAND flock_web_tests)
+  add_executable(flock_web_conversation_tests tests/conversation.cpp)
+  target_include_directories(flock_web_conversation_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
+  target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
+  add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
 endif()

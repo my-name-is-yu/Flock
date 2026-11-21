@@ -18,7 +18,7 @@ Recording load(Store& store, T3& t3, Id id, std::string_view commit, bool matche
     for (const auto& item : store.history(id)) {
         if (item["kind"] == "report") report = item["data"];
     }
-    if (report.is_null() || report.at("report") != "計測済み")
+    if (report.is_null() || report.at("report") != "Measurement complete")
         throw Conflict("Both fixtures must have exactly the same final report");
     const auto& run = report.at("run");
     ReadRequest request;

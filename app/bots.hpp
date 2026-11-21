@@ -52,4 +52,4 @@ private:
     Seconds next_;
     ErrorReporter report_;
 };
-} // namespace flockv0::app
+}

@@ -110,10 +110,8 @@ bool fromRun(const Json& item, const RunRef& run) {
     return local(item, run.threadId) && str(item, "runId") == run.runId;
 }
 
-// External 2025-06-18 callers page forward explicitly. An empty, non-advancing, or
-// inconsistent page cannot establish absence or uniqueness.
 template<typename Visit>
-void walk(Client& client, Scan& scan, const std::string& threadId, std::string_view view,
+void walkThreadHistoryForward(Client& client, Scan& scan, const std::string& threadId, std::string_view view,
           int maxChars, Position after, Visit visit) {
     for (;;) {
         scan.step();
@@ -157,9 +155,7 @@ Json readItem(Client& client, const std::string& threadId, std::string_view view
     return items.front();
 }
 
-// Recover exact text for ownership checks without loading unbounded item bodies.
-// nullopt means a matching prefix could not be read fully within the cap.
-std::optional<std::string> completeText(Client& client, Scan& scan, const Json& item,
+std::optional<std::string> readCompleteItemText(Client& client, Scan& scan, const Json& item,
         const std::string& threadId, std::string_view view, std::size_t maxBytes) {
     auto page = itemText(item);
     auto output = std::move(page.text);
@@ -234,7 +230,7 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     std::map<std::string, std::vector<Trigger>> triggers;
     std::set<std::string> ordinaryInputs;
     Scan scan;
-    walk(client, scan, requested.threadId, "activity", 700, -1, [&](const Json& item) {
+    walkThreadHistoryForward(client, scan, requested.threadId, "activity", 700, -1, [&](const Json& item) {
         if (!local(item, requested.threadId)) return true;
         const auto run = str(item, "runId");
         const auto type = str(item, "type");
@@ -369,9 +365,9 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
     bool exactOwner = false, unverified = false;
     Scan scan;
     try {
-        walk(client, scan, run.threadId, "activity", 800, -1, [&](const Json& item) {
+        walkThreadHistoryForward(client, scan, run.threadId, "activity", 800, -1, [&](const Json& item) {
             if (str(item, "type") != "user_input_request") return true;
-            const auto text = completeText(client, scan, item, run.threadId, "activity", 65536);
+            const auto text = readCompleteItemText(client, scan, item, run.threadId, "activity", 65536);
             if (!text) { unverified = true; return true; }
             const auto activityQuestions = Json::parse(*text, nullptr, false);
             if (!activityQuestions.is_array()) { unverified = true; return true; }
@@ -550,13 +546,13 @@ Delivery reconcileWork(Client& client, const Command& command) {
         const auto& thread = detail(head, threadId);
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
-        walk(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
+        walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
             if (str(item, "type") != "user_message" || !local(item, threadId)) return true;
             const auto text = itemText(item);
             const bool possible = text.more ? expected.starts_with(text.text) : expected == text.text;
             if (possible && str(item, "createdBy") == "agent" && str(item, "creationSource") == "mcp" &&
                 str(item, "senderThreadId").empty()) {
-                const auto full = completeText(client, scan, item, threadId, "messages", expected.size());
+                const auto full = readCompleteItemText(client, scan, item, threadId, "messages", expected.size());
                 const auto runId = str(item, "runId");
                 if (!full || (runId.empty() && *full == expected)) incomplete = true;
                 if (full && *full == expected && !runId.empty() && (launch || runId != command.target.runId))
@@ -848,7 +844,7 @@ public:
             return excerpt;
         }
         Scan scan;
-        walk(client, scan, request.threadId, request.view, ExcerptChars, readCursor(request.cursor), [&](const Json& item) {
+        walkThreadHistoryForward(client, scan, request.threadId, request.view, ExcerptChars, readCursor(request.cursor), [&](const Json& item) {
             if (!fromRun(item, run) || str(item, "text").empty()) return true;
             if (!excerpt.itemId.empty()) {
                 excerpt.more = true;
@@ -881,10 +877,10 @@ private:
     }
 };
 
-} // namespace
-} // namespace t3detail
+}
+}
 
 std::unique_ptr<T3> makeT3Mcp(const std::filesystem::path& credentialDirectory) {
     return std::make_unique<t3detail::Adapter>(credentialDirectory);
 }
-} // namespace flockv0
+}

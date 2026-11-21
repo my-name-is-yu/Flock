@@ -47,7 +47,7 @@ public:
             if (request.starts_with("measurement-")) {
                 const auto flags = request == "measurement-mismatch" ? "off" : "on";
                 instruction = std::string("Execute exactly the shell command `./measure_") + flags + ".sh`. Do not edit any project file. "
-                    "Leave the measurement output in the terminal activity. The entire final answer must be exactly 計測済み, with no punctuation or details.";
+                    "Leave the measurement output in the terminal activity. The entire final answer must be exactly Measurement complete, with no punctuation or details.";
             }
             if (request == "profile-short" || request == "profile-long") {
                 instruction = request == "profile-short"
@@ -118,8 +118,6 @@ public:
         }
         if (cmd.tool == tool && (result.kind == Delivery::Kind::Accepted || result.kind == Delivery::Kind::Unknown)) {
             std::cout << "Stopped after external send for " << cmd.tool << " " << cmd.actionId << std::endl;
-            // Exercise the durable send-start and reconciliation paths with no
-            // application response saved and no RAII cleanup.
             std::_Exit(86);
         }
         return result;

@@ -30,7 +30,9 @@ class Fixture(BaseHTTPRequestHandler):
 
     def do_GET(self):
         origin = self.server.origin
-        if self.path == "/.well-known/oauth-protected-resource/mcp":
+        if self.path == "/fixture/effects":
+            self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/.well-known/oauth-protected-resource/mcp":
             self.reply({"resource": origin + "/mcp", "authorization_servers": [origin]})
         elif self.path == "/.well-known/oauth-authorization-server":
             self.reply({"issuer": origin, "authorization_endpoint": origin + "/authorize",
@@ -122,6 +124,9 @@ class Fixture(BaseHTTPRequestHandler):
         questions = [{"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
                       "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
                                                               {"label": "blue", "description": ""}]}]
+        if (name in ("t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+                (name == "t3_pending_request" and args["action"] == "respond")):
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
@@ -150,10 +155,12 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["action"] == "list" and args["threadId"] == "thread"
             return {"items": [], "nextCursor": None}
         if name == "t3_thread_list":
-            assert args["projectId"] == "project" and args["cursor"] == 0
+            assert args["projectId"] == "project"
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
-            return {"projectId": "project", "threads": [self.summary(t) for t in ids],
-                    "total": len(ids), "nextCursor": None}
+            start = args.get("cursor", 0)
+            end = min(start + args.get("limit", len(ids)), len(ids))
+            return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
+                    "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
@@ -221,7 +228,13 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
         if "itemId" in args:
             if args["itemId"] == "unicode":
-                rows = [self.item(thread_id, 8, "root", "assistant_message", "猫" * 2800) | {"itemId": "unicode"}]
+                text = "界" + "🙂" * 3000 + "犬" + "🐦" * 3000 + "\n夕焼け"
+                rows = [self.item(thread_id, 8, "root", "assistant_message", text) | {"itemId": "unicode"}]
+            elif args["itemId"] == "dense-bmp":
+                rows = [self.item(thread_id, 8, "root", "assistant_message", "界" * 7000) |
+                        {"itemId": "dense-bmp"}]
+            elif args["itemId"] == "translation":
+                rows = [self.item(thread_id, 8, "root", "assistant_message", "—" * 2800) | {"itemId": "translation"}]
             else:
                 rows = [row for row in rows if row["itemId"] == args["itemId"]]
         elif args["view"] == "messages":
@@ -229,15 +242,23 @@ class Fixture(BaseHTTPRequestHandler):
         lower = args.get("afterPosition", -1)
         upper = args.get("beforePosition", float("inf"))
         matches = [row for row in rows if lower < row["position"] < upper]
-        # Force an explicit second cursor page on history scans.
-        limit = min(args.get("limit", 30), 2)
+        pagination_test_page_size = 2
+        limit = min(args.get("limit", 30), pagination_test_page_size)
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:
+            text = row["text"].encode("utf-16-le")
             offset = args.get("textOffset", 0)
-            stop = offset + args["maxCharsPerItem"]
-            row["textTruncated"] = stop < len(row["text"])
-            row["nextTextOffset"] = stop if row["textTruncated"] else None
-            row["text"] = row["text"][offset:stop]
+            limit_chars = args["maxCharsPerItem"]
+            start = 2 * offset
+            end = min(start + 2 * limit_chars, len(text))
+            if end < len(text) and 0xD800 <= int.from_bytes(text[end - 2:end], "little") <= 0xDBFF:
+                end -= 2
+                if row["itemId"] == "unicode":
+                    state.setdefault("effects", {}).setdefault("unicode_split_avoided", []).append({
+                        "offset": offset, "limit": limit_chars, "nextOffset": end // 2})
+            row["textTruncated"] = end < len(text)
+            row["nextTextOffset"] = end // 2 if row["textTruncated"] else None
+            row["text"] = text[start:end].decode("utf-16-le")
         return {"thread": summary, "recentRuns": recent, "items": page, "hasMore": len(matches) > limit,
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}

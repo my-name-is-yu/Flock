@@ -1,39 +1,41 @@
-# Flock のローカル Web UI
+# Flock's local Web UI
 
-最初の GUI は、標準の T3 Code と併用できるローカル Web UI とします。単独のブラウザでも T3 のブラウザタブでも同じ画面を開けます。画面を閉じても、起動中の C++ Runtime は定期依頼の受付と Session の監視を続けます。使ってみて、別の T3 Thread で作業中にも Bot の確認待ちに気づきたい場面が多ければ、この画面を T3 本体の専用タブに組み込むことを検討します。
+The first GUI is a local Web UI that works alongside standard T3 Code. Open it in a standalone browser or in a T3 browser tab. The running C++ runtime continues accepting scheduled requests and monitoring Sessions after you close the UI. If users frequently need to see when a Bot is waiting for input while they work in a different T3 Thread, consider integrating the UI into T3 as a dedicated tab.
 
-## ホームと Bot の切り替え
+## Home and Bot switching
 
-ホームには Bot 一覧と、選択中の Bot との会話を並べます。仕事が完了した翌日も、同じ Bot を選べば前回の結果を読んで次の仕事を頼めます。Grok Bot の一覧と、Devin Bots の会話・確認待ち・作業 Session の関係を参考にします。[Grok Bot の UI 設計](https://x.ai/news/designing-grok-bot) · [Devin Bots の操作ガイド](https://docs.devin.ai/work-with-devin/bots)
+Home shows the Bot list alongside the conversation with the selected Bot. The day after a task finishes, select the same Bot to read the result and request the next task. Grok Bot's list and the way Devin Bots connect conversations, items waiting for input, and work Sessions inform the design. [Grok Bot UI design](https://x.ai/news/designing-grok-bot) · [Devin Bots usage guide](https://docs.devin.ai/work-with-devin/bots)
 
-| 場所 | 表示と操作 |
+| Area | Display and controls |
 | --- | --- |
-| 左側の Bot 一覧 | 各行に顔、名前、直近の質問や報告を一行で表示します。行のメニューから、よく使う Bot を一覧の上部に小さなアバターとしてピン留めできます。解除すると通常の行に戻ります。 |
-| 一覧の下の「確認待ち」 | 選択中の Bot が人の操作を待つ項目と件数を表示します。項目を選ぶと、該当する依頼、待っている理由、今できる操作が分かります。 |
-| その下の「セッション」 | 選択中の Bot が各タスクで起動した T3 Session を、元の依頼と状態が分かる形で表示します。「T3 で開く」で該当する Thread の作業記録に移れます。 |
-| 中央の会話 | 手動・定期の依頼、Bot からの質問、ユーザーの回答、Bot 同士のやり取り、完了報告と判断理由を時系列で表示します。各項目からどのタスクの話か分かるようにします。上部の顔から、その Bot の役割と定期依頼を確認できる設定画面を開きます。 |
+| Bot list on the left | Each row shows an avatar, a name, and the latest question or report on one line. Use the row menu to pin frequently used Bots as small avatars above the list. Unpinning a Bot returns it to a regular row. |
+| “Waiting for input” below the list | Shows the items that need user action for the selected Bot and the total count. Select an item to see the related request, why it is waiting, and the available actions. |
+| “Sessions” below “Waiting for input” | Shows the T3 Sessions the selected Bot started for its tasks, along with each request and status. “Open in T3” opens the work history for the corresponding Thread. |
+| Conversation in the center | Shows manual and scheduled requests, Bot questions, user answers, completion reports, and decision rationales in chronological order. Each entry identifies the relevant task. Select the avatar at the top to open the Bot settings and see its role and scheduled requests. |
 
-Bot を切り替えると「確認待ち」「セッション」「会話」が一緒に切り替わります。T3 の細いパネルでは一覧を折りたたみ、会話画面から呼び出せます。画面で複数タスクの履歴を続けて読めても、Bot の推論には担当タスクの履歴だけを渡します。
+Switching Bots updates “Waiting for input,” “Sessions,” and the conversation together. In a narrow T3 panel, the Bot list collapses and can be opened from the conversation. The UI shows the history of multiple tasks in sequence, while the Bot receives only the history of the task it is currently evaluating.
 
-Bot 同士のメッセージは、送った側と受け取った側の両方の会話に表示します。同じ依頼のやり取りが続く部分は一つにまとめ、相手の名前と件数を表示します。開くと、送信元と宛先、本文、添えられた T3 の根拠を読めます。相手の Bot からの返事を待つ状態は、会話上部に表示します。「確認待ち」には人の操作が必要な項目を表示します。
+Bot-to-Bot exchanges appear in both participants' conversations, grouped by exchange with the sender, recipient, message type, text, and any T3 evidence links. The initiating Bot shows that it is waiting for the peer; items requiring human action remain in “Waiting for input.”
 
-## 新しい依頼と質問への返信
+T3 links in Sessions, reports, and waiting items use the saved local URL for the correct environment and Thread when available. Active Sessions remain visible independently of history pagination.
 
-通常、会話下部の入力欄から送った文章は、選択中の Bot への**新しい依頼**として受け付けます。すでに同じプロジェクトで別の仕事が進行中なら、何の完了を待っているかを表示します。
+## New requests and replies to questions
 
-Bot からの質問には、その場で選択肢を押すか、「返信を書く」を選んで答えます。返信中は入力欄に対象の質問を表示します。送信または返信の取り消しで、入力欄は新規依頼に戻ります。新規依頼の下書きと質問への返信は分けて扱い、Bot を切り替えても別の宛先に送られることを防ぎます。
+Use the composer to send a request, add to work in progress, or ask about a result. The Bot uses the conversation to decide how to handle the message and asks for clarification when the target is unclear. If another task is already running in the same project, the UI shows which task must finish first.
 
-たとえば Release が「下書きには利用者向けの変更だけを載せますか？」と尋ねた場合、「利用者向けのみ」はその質問への回答です。同じ画面で通常の入力欄から「次の版の変更点も調べて」と送れば、もう1件のタスクとして受け付けます。
+Answer a Bot's question in the composer, or select an option or choose “Write a reply” to target a specific question. The composer shows the question while you enter a direct reply. New request drafts and replies are kept separately so switching Bots preserves the intended recipient.
 
-回答は CLI と同じ待機 ID に結び付け、一度だけ受け付けます。CLI で先に回答した場合や、T3 側で待機が解消した場合は、元の質問の状態を更新して返信を閉じます。追加作業の許可や期限の延長には、それぞれ専用の操作を表示します。T3 の権限承認が必要なら「T3 で承認する」から対象の Thread を開きます。[待機理由と再開先](SPEC.md#タスクの状態と再開先)
+For example, if Release asks “Should the draft include only user-facing changes?”, “User-facing changes only” answers that question. Sending “Also check the changes in the next version” in the standard composer creates another task.
 
-## アバター
+Each answer is tied to the same wait ID used by the CLI and is accepted only once. If the CLI receives an answer first or T3 resolves the wait, the UI updates the original question and closes the reply composer. Approving extra work and extending a deadline each have a dedicated control. If T3 requires permission approval, “Approve in T3” opens the relevant Thread. [Task states and where work resumes](SPEC.md#task-states-and-where-work-resumes)
 
-各 Bot には Open Bot Avatar で固有の姿と色を割り当てます。一覧、ピン留め、会話、設定で同じ顔を使います。一覧は静止画とし、会話上部のアバターは「Bot が判断中」「担当 Session が作業中」などの状態に合わせて動かせます。状態は文字でも示し、動きを減らす端末設定に従います。[Open Bot Avatar のデモ](https://dominikscholz.github.io/open-bot-avatar/) · [描画と状態の仕様](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
+## Avatars
 
-## 合格条件
+Give each Bot a shape from the official Open Bot Avatar gallery and that shape's default color. Use the same avatar in the list, pinned shortcuts, conversation, and settings. The list uses static avatars. The conversation header avatar can animate to reflect states such as the Bot making a decision or its Session working. Show each state in text as well and respect the device's reduced-motion setting. [Open Bot Avatar demo](https://dominikscholz.github.io/open-bot-avatar/) · [Rendering and state specification](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
 
-- 2体の Bot に別々の依頼と Session を用意する。一覧行とピン留めの両方から切り替え、会話・確認待ち・Session・設定が選んだ Bot に揃うことを確かめる。ピン留めの解除と、狭い画面での切り替えも試す。
-- 1件の質問を残したまま同じ Bot に新しい依頼を送る。新規タスクが1件増え、元の質問は確認待ちを保つ。その質問に返信すると元のタスクだけが再開する。CLI から先に回答した場合は、Web UI に残っていた返信を送っても重複して処理されない。
-- UI を閉じている間に Runtime が取り込んだ Session の結果を、開き直した会話から読める。T3 での操作が必要な項目を選ぶと、担当する環境の該当 Thread が開く。
-- 2体の Bot が依頼・質問・回答・結果をやり取りする。両方の会話から同じ往復を展開して読める。以前の会話を読み込んで表示範囲が広がっても、メッセージを時系列で読める。
+## Acceptance criteria
+
+- Set up two Bots with separate requests and Sessions. Switch between them from both the list rows and the pinned avatars. Verify that the conversation, waiting items, Sessions, and settings all follow the selection. Also test unpinning and switching Bots in a narrow viewport.
+- Send a new request while the same Bot has an unanswered question. Verify that one task is created and the original question remains pending. Reply to that question and verify that only the original task resumes. If the CLI answers first, submitting the reply that was left open in the Web UI must leave the answer processed exactly once.
+- Close the UI while the runtime receives a Session result. Reopen the UI and confirm that the result appears in the conversation. Select an item that requires action in T3 and verify that the relevant Thread opens in the correct environment.
+- Have two Bots exchange a request, question, answer, and result. Verify that the exchange appears in both conversations, can be expanded, and includes evidence links.

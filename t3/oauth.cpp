@@ -293,7 +293,7 @@ bool validToken(std::string_view token) {
     return !token.empty() && token.size() <= 8192 &&
            token.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~+/=") == std::string_view::npos;
 }
-} // namespace
+}
 
 Credential loadCredential(const std::filesystem::path& path, const std::string& environmentId) {
     const auto name = credentialName(environmentId);
@@ -323,7 +323,7 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
     return credential;
 }
 
-} // namespace t3detail
+}
 
 void loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
              const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl) {
@@ -373,4 +373,4 @@ void loginT3(const std::filesystem::path& credentialDirectory, const std::string
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
     saveCredential(directory.get(), name, environmentId, credential);
 }
-} // namespace flockv0
+}

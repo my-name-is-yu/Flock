@@ -81,7 +81,7 @@ std::string validatedString(const Json& object, const char* key) {
         throw Conflict(std::string(key) + " must be a nonempty string");
     return value->get<std::string>();
 }
-} // namespace
+}
 
 Cron::Cron(std::string expression, std::string timezone) : timezone_(std::move(timezone)) {
     std::istringstream fields(expression);
@@ -152,6 +152,18 @@ Bot Bots::get(std::string_view id) const {
     if (!plainId(bot.environmentId) || !plainId(bot.projectId))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    if (config.contains("conversationEnvironments")) {
+        const auto& destinations = config["conversationEnvironments"];
+        if (!destinations.is_object() || destinations.size() > 16)
+            throw Conflict("conversationEnvironments must map up to 16 names to T3 environment IDs");
+        auto& saved = bot.settings["conversationEnvironments"] = Json::object();
+        for (auto alias = destinations.begin(); alias != destinations.end(); ++alias) {
+            const auto environment = validatedString(destinations,alias.key().c_str());
+            if (alias.key().empty() || alias.key().size() > 80 || !plainId(environment))
+                throw Conflict("Use short conversation environment names and canonical T3 environment IDs");
+            saved[alias.key()] = environment;
+        }
+    }
     const auto timeout = config.value("runTimeoutSeconds",Json(1800));
     if (!timeout.is_number_integer() || timeout.get<long double>() < 1 || timeout.get<long double>() > 2147483647)
         throw Conflict("runTimeoutSeconds must be a positive integer");
@@ -259,4 +271,4 @@ void Scheduler::tick(Seconds now) {
         }
     }
 }
-} // namespace flockv0::app
+}

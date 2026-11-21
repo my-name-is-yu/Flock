@@ -9,6 +9,7 @@
 #include "flock/web.hpp"
 #endif
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -225,7 +226,11 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
         if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
             (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
             const auto bot = bots.get(status["botId"].get<std::string>());
-            if (status["environmentId"] != Json(bot.environmentId) || status["projectId"] != Json(bot.projectId))
+            const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
+            const auto& environment = status.at("environmentId");
+            const bool allowed = environment == bot.environmentId ||
+                std::ranges::find(destinations,environment) != destinations.end();
+            if (!allowed || status["projectId"] != Json(bot.projectId))
                 throw Conflict("The project route changed. Cancel this task and submit a new request.");
             details["session"] = bot.settings.value("session",Json::object());
         }
@@ -249,7 +254,7 @@ void taskCommand(Store& store, const std::string& command, Arguments& args) {
         else throw Conflict("Unknown pagination option: " + flag);
     }
     if (command == "history") {
-        store.task(task);  // Unknown IDs are errors rather than empty pages.
+        if (!store.hasTask(task)) throw Conflict("Task does not exist");
         print(store.history(task,cursor,limit));
     } else print(store.tasks(bot,cursor,limit));
 }
@@ -292,8 +297,8 @@ int runCli(Arguments& args) {
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;
 }
-} // namespace
-} // namespace flockv0::app
+}
+}
 
 int main(int argc,char** argv) {
     try {
