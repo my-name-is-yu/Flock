@@ -1545,6 +1545,20 @@ void revisionOfProvablyUnsentAction() {
           task["revisions"][0]["doneWhen"] == "Report baseline latency" &&
           task["revisions"][1]["doneWhen"] == "レポートを出す",
           "a revision overwrote the prior immutable completion criteria");
+
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Verify the report"}},"The report needs verification"};
+    };
+    f.t3.finish("run-1","Preliminary report");
+    f.reach(id,"sending");
+    f.script("完了条件は p99 を報告",revision(id,"doneWhen","p99 を報告"));
+    f.receive("revise-follow-up","完了条件は p99 を報告");
+    f.restart();
+    f.reach(id,"running");
+    const auto revised = f.task(id);
+    check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("p99 を報告") != std::string::npos &&
+          revised["remaining"] == 2 && revised["additionalUsed"] == 1,
+          "replacing an unsent follow-up did not deliver the revision for a single unit of work");
 }
 
 void queuedCriteriaAreUsedForFirstDelegation() {

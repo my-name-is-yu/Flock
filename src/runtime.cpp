@@ -513,7 +513,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             change(task,[&](Json& current) {
                 db.exec("UPDATE outbox SET phase='superseded' WHERE id=? AND phase='ready'", {action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
-                if (action["tool"] != "answer_session_question" && action.value("chargesBudget",!current["lastRun"].is_null())) {
+                if (action.at("chargesBudget").get<bool>()) {
                     current["remaining"] = current["remaining"].get<int>() + 1;
                     current["additionalUsed"] = current["additionalUsed"].get<int>() - 1;
                 }
@@ -806,12 +806,9 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     void queueAction(Json& task, const std::string& action, std::string_view tool, std::string instruction,
-                     const Json& args, const Json& pending = Json::array(), bool charge = false) {
+                     const Json& args, const Json& pending, bool charge) {
         const bool work = tool == "delegate" || tool == "follow_up";
-        if (charge) {
-            task["remaining"] = task["remaining"].get<int>() - 1;
-            task["additionalUsed"] = task["additionalUsed"].get<int>() + 1;
-        }
+        if (charge) chargeAdditionalWork(task);
         Json resultReferences = Json::array();
         if (work) {
             if (task.contains("sourceTaskId") && task["lastRun"].is_null()) {
@@ -859,7 +856,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         task["state"] = "sending";
     }
 
-    bool needsBudget(Json& task, std::string_view tool, const std::string& reason, const Json& usage) {
+    static void chargeAdditionalWork(Json& task) {
+        task["remaining"] = task["remaining"].get<int>() - 1;
+        task["additionalUsed"] = task["additionalUsed"].get<int>() + 1;
+    }
+
+    bool pauseIfWorkBudgetExhausted(Json& task, std::string_view tool, const std::string& reason, const Json& usage) {
         if (task["remaining"] != 0) return false;
         db.wait(task,"budget",{{"text","The additional work allowance is exhausted"},{"attempted",tool},
                               {"decisionReason",reason},{"usage",usage}});
@@ -897,7 +899,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             const bool fresh = current.value("newSessionRequired",false);
             const std::string tool = fresh ? "delegate" : "follow_up";
             const std::string reason = "Apply the accepted user instructions at a settled Run boundary";
-            if (needsBudget(current,tool,reason,Json::object())) return true;
+            if (pauseIfWorkBudgetExhausted(current,tool,reason,Json::object())) return true;
             const auto action = actionId();
             auto instruction = "Continue this Flock task.\n\nTask intent:\n" + intent(current) +
                 "\n\nCompletion criteria:\n" + field(current,"doneWhen");
@@ -1001,14 +1003,9 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 db.addRevision(sender,intent(sender),sender.value("requestedDoneWhen",field(decision.args,"doneWhen")),source);
                 sender.erase("requestedDoneWhen");
                 sender.erase("criteriaSourceMessageId");
-            }
-            else if (sender["remaining"] == 0) {
-                db.wait(sender,"budget",{{"text","The additional work allowance is exhausted"},
-                    {"attempted",decision.tool},{"decisionReason",decision.reason},{"usage",decision.usage}});
-                return;
             } else {
-                sender["remaining"] = sender["remaining"].get<int>() - 1;
-                sender["additionalUsed"] = sender["additionalUsed"].get<int>() + 1;
+                if (pauseIfWorkBudgetExhausted(sender,decision.tool,decision.reason,decision.usage)) return;
+                chargeAdditionalWork(sender);
             }
             ensureNoRouteCycle(sender,peer.intake);
         }
@@ -1261,7 +1258,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 throw Conflict("Start a new Session in the current environment");
             const bool charge = work && (!current["lastRun"].is_null() || db.query(
                 "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
-            if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
+            if (charge && pauseIfWorkBudgetExhausted(current,tool,decision.reason,decision.usage)) return true;
             if (initial && work) {
                 const auto source = current.value("criteriaSourceMessageId",current.value("sourceMessageId",Id{0}));
                 db.addRevision(current,intent(current),doneWhen,source);
