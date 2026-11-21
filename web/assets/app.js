@@ -158,6 +158,10 @@ function pendingMessage(bot) {
   }
   return pendingMessages.get(bot);
 }
+// The composer keeps the ordinary draft underneath a reply, including its retry ID.
+function ordinarySubmission(pending) {
+  return pending?.reply ? pending.underlyingMessage : pending;
+}
 function rememberMessage(bot, pending) {
   if (pending) pendingMessages.set(bot, pending);
   else pendingMessages.delete(bot);
@@ -165,6 +169,12 @@ function rememberMessage(bot, pending) {
     if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
     else sessionStorage.removeItem(messageStorageKey(bot));
   } catch {}
+}
+
+function discardReply(bot) {
+  replies.delete(bot);
+  const pending = pendingMessage(bot);
+  if (pending?.reply) rememberMessage(bot, pending.underlyingMessage);
 }
 
 function setConnection(state) {
@@ -210,7 +220,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
-  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
+  const message = ordinarySubmission(pending);
+  if (message && !drafts.has(botId)) drafts.set(botId, message.payload.text);
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
     if (updateHistory) history.pushState(null, '', url);
@@ -1553,14 +1564,14 @@ function mergeLatest(context, latest) {
   if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
     if (reply.text.trim()) reply.closed = true;
     else {
-      replies.delete(context.id);
+      discardReply(context.id);
       setNotice(context, 'That question is no longer open, so your reply was not sent.');
     }
   } else if (reply.kind === 'clarification' &&
              !latest.clarifications.some((item) => item.messageId === reply.messageId)) {
     if (reply.text.trim()) reply.closed = true;
     else {
-      replies.delete(context.id);
+      discardReply(context.id);
       setNotice(context, 'That confirmation has closed, so your reply was not sent.');
     }
   }
@@ -1698,25 +1709,27 @@ async function submit(event) {
   const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
   const candidateTaskId = reply?.candidateTaskId;
-  const previous = pendingMessage(context.id)?.payload;
+  const pending = pendingMessage(context.id);
+  const previous = pending?.payload;
   const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId &&
     previous.candidateTaskId === candidateTaskId ? previous.clientMessageId : crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
   if (replyToMessageId && candidateTaskId) payload.candidateTaskId = candidateTaskId;
-  rememberMessage(context.id, { payload, reply });
+  const underlyingMessage = reply && ordinarySubmission(pending);
+  rememberMessage(context.id, { payload, reply, underlyingMessage });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
   try {
     await api('messages', payload);
-    rememberMessage(context.id, null);
+    rememberMessage(context.id, underlyingMessage);
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) await refreshView(view, 'bottom');
     void refreshBots();
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
+    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, underlyingMessage);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
@@ -1754,7 +1767,7 @@ elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
-  replies.delete(view.id);
+  discardReply(view.id);
   renderComposer();
   elements.message.focus();
 });
