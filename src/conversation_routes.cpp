@@ -74,6 +74,23 @@ const conversation::Task* candidate(const Context& context, Id taskId) {
     return found == context.tasks.end() ? nullptr : &*found;
 }
 
+bool routeContextChanged(Context previous, const Context& current, const Plan& plan) {
+    std::set<Id> dependencies;
+    for (const auto& route : plan.routes) {
+        if (const auto* target = targetOf(route.action)) dependencies.insert(target->taskId);
+        if (const auto* source = sourceOf(route.action)) dependencies.insert(source->taskId);
+        if (const auto* question = std::get_if<Clarify>(&route.action))
+            dependencies.insert(question->candidates.begin(),question->candidates.end());
+    }
+    if (previous.reply.revisionDraft) dependencies.insert(previous.reply.revisionDraft->target.taskId);
+    // The generation also tracks internal updates that don't change routing context.
+    for (auto& task : previous.tasks) {
+        const auto* refreshed = candidate(current,task.id);
+        if (refreshed && !dependencies.contains(task.id)) task.generation = refreshed->generation;
+    }
+    return previous != current;
+}
+
 bool sameSource(const Result& excerpt, const Result& result) {
     return std::tie(excerpt.taskId,excerpt.messageId,excerpt.revision,excerpt.provenance) ==
            std::tie(result.taskId,result.messageId,result.revision,result.provenance) &&
@@ -219,8 +236,7 @@ AND NOT EXISTS (
         const auto current = readMessage();
         if (!current) return true;
         const auto refreshed = routeContext(current->bot,id,current->text,current->replyTo,current->routing);
-        if (current->sequence != message->sequence || current->watermark != message->watermark ||
-            refreshed != context) {
+        if (routeContextChanged(std::move(context),refreshed,plan)) {
             waitExpired |= expiredWait(plan,refreshed);
             continue;
         }

@@ -59,6 +59,7 @@ struct Store::Impl {
                                        Id replyTo, const Json& routing);
     Json captureConversationWaits(std::string_view bot) const;
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
+    bool conversationPending(std::string_view bot) const;
     bool completionHeld(const Json&) const;
     void save(Json&);
     Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
