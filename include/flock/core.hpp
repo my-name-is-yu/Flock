@@ -69,6 +69,7 @@ struct Observation {
     std::string status, report, resultRunId, itemId;
     bool truncated = false;
     bool settled = false; // True on Finished only after delegated work has settled.
+    std::string detail;
 };
 struct Command {
     std::string actionId, tool, environmentId, projectId, instruction, authGeneration;

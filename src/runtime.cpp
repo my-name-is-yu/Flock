@@ -111,6 +111,10 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
     void cancelDone(Json& task) {
         db.clearWait(task,"cancelled");
         db.unlockQuestion(task,"cancelled");
+        if (!field(task,"actionId").empty()) {
+            db.exec("UPDATE outbox SET phase='closed' WHERE id=? AND phase='ready'", {task["actionId"]});
+            task["actionId"] = "";
+        }
         task["activeRun"] = nullptr;
         task["state"] = "cancelled";
         db.journal(task["id"],"cancelled",Json::object());
@@ -132,27 +136,38 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             if (observed.kind == Observation::Kind::Finished && observed.settled) {
                 db.clearWait(task,"run_finished");
                 db.unlockQuestion(task,"run_finished");
+                // An ended Run cannot accept an outstanding reply. Preserve the
+                // action in history while letting the definitive Run result take precedence.
+                if (!field(task,"actionId").empty()) {
+                    const auto action = db.outbox(task);
+                    if (!action.is_null() && action["tool"] == "answer_session_question") {
+                        db.exec("UPDATE outbox SET phase='closed' WHERE id=?", {task["actionId"]});
+                        task["actionId"] = "";
+                    }
+                }
                 task["activeRun"] = nullptr;
                 task["lastRun"] = runJson(run);
-                if (state == "cancelling") {
-                    cancelDone(task);
-                    return true;
-                }
                 db.consumeEvent(task);
                 const auto report = bounded(observed.report,8192);
                 const Json data = {{"kind","result"},{"run",runJson(run)},
                     {"resultRunId",observed.resultRunId.empty() ? run.runId : observed.resultRunId},
-                    {"status",observed.status},{"report",report},{"truncated",observed.truncated || report.size() < observed.report.size()},
+                    {"status",observed.status},{"detail",bounded(observed.detail,2048)},
+                    {"report",report},{"truncated",observed.truncated || report.size() < observed.report.size()},
                     {"environmentId",task["environmentId"]},{"itemId",observed.itemId}};
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});
                 if (sqlite3_changes(db.db)) {
-                    db.event(task,"result/" + run.threadId + "/" + run.runId,data);
+                    if (state != "cancelling") {
+                        task.erase("feedback");
+                        db.event(task,"result/" + run.threadId + "/" + run.runId,data);
+                    }
                     db.journal(task["id"],"report",data);
                 }
-                task["state"] = "deciding";
+                if (state == "cancelling") cancelDone(task);
+                else task["state"] = "deciding";
                 return true;
             }
             if (state == "cancelling") return false;
+            if (!field(task,"actionId").empty()) return false;
             if (observed.kind == Observation::Kind::Question) {
                 if (observed.question.requestId.empty()) return false;
                 if (field(task["question"],"requestId") == observed.question.requestId) return false;
@@ -162,6 +177,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
                 db.clearWait(task,"session_question");
                 db.unlockQuestion(task,"replaced");
                 db.consumeEvent(task);
+                task.erase("feedback");
                 const Json question = {{"requestId",observed.question.requestId},{"fields",observed.question.fields}};
                 task["question"] = question;
                 const Json data = {{"kind","question"},{"run",runJson(run)},{"question",question}};
@@ -178,11 +194,17 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
                 return true;
             }
             if (observed.kind == Observation::Kind::Unavailable) {
-                if (observed.status != "auth" || reason == "auth") return false;
-                db.wait(task,"auth",{{"text","T3 authentication is unavailable"}});
-                return true;
+                if (observed.status == "auth" && reason != "auth") {
+                    db.wait(task,"auth",{{"text","T3 authentication is unavailable"}});
+                    return true;
+                }
+                if (observed.status == "settings" && reason != "settings") {
+                    db.wait(task,"settings",{{"text","T3 connection settings need attention"}});
+                    return true;
+                }
             }
-            if (reason == "t3_input" || !task["question"].is_null()) {
+            const bool available = observed.kind != Observation::Kind::Unavailable;
+            if (available && (reason == "t3_input" || !task["question"].is_null())) {
                 db.clearWait(task,"session_question_resolved");
                 db.unlockQuestion(task,"resolved_in_t3");
                 db.consumeEvent(task);
@@ -215,13 +237,24 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             action = db.outbox(task);
         }
         if (!action.is_null() && action["phase"] == "started") {
+            const auto now = options.clock();
+            if (now < task.value("cancelReconcileAt",Seconds{0})) {
+                if (action["tool"] == "answer_session_question" && !task["activeRun"].is_null()) cancelRun(task);
+                return;
+            }
+            if (!change(task,[&](Json& current) { current["cancelReconcileAt"] = now + 3; return true; })) return;
             deliver(task,action);
-            return;
+            if (action["tool"] != "answer_session_question" || task["activeRun"].is_null()) return;
+            // A lost answer acknowledgement does not prevent stopping its known Run.
+            return cancelRun(snapshot(task["id"]));
         }
         if (task["activeRun"].is_null()) {
             change(task,[&](Json& current) { cancelDone(current); return true; });
             return;
         }
+        cancelRun(task);
+    }
+    void cancelRun(const Json& task) {
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
         if (observed.kind == Observation::Kind::Finished) {
@@ -268,16 +301,23 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
             const auto id = task["id"].get<Id>();
+            if (outcome.kind == Delivery::Kind::Accepted && !reply && hasRun(outcome.run)) {
+                const auto target = runRef(action["target"]);
+                auto owner = db.query("SELECT action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
+                    {task["environmentId"],outcome.run.threadId,outcome.run.runId});
+                if ((action["tool"] == "follow_up" &&
+                     (outcome.run.threadId != target.threadId || outcome.run.runId == target.runId)) ||
+                    (owner.next() && owner.string(0) != field(action,"id"))) {
+                    outcome.kind = Delivery::Kind::Unknown;
+                    outcome.detail = "The returned Run does not match the assigned work";
+                }
+            }
             if (outcome.kind == Delivery::Kind::Accepted && (reply || hasRun(outcome.run))) {
                 db.exec("UPDATE outbox SET phase='accepted' WHERE id=?", {action["id"]});
                 if (reply) db.unlockQuestion(task,"answered");
                 else {
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
-                    auto owner = db.query("SELECT task_id,action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
-                        {task["environmentId"],outcome.run.threadId,outcome.run.runId});
-                    if (!owner.next() || owner.number(0) != id || owner.string(1) != field(action,"id"))
-                        throw Conflict("T3 Run already belongs to another action");
                     task["activeRun"] = runJson(outcome.run);
                     db.journal(id,"run_started",{{"run",task["activeRun"]},{"actionId",action["id"]}});
                 }
@@ -399,6 +439,17 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
     void accept(const Json& snapshot, const Json& event, const Decision& decision) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
+        static const std::map<std::string_view,std::set<std::string_view>> arguments{
+            {"delegate",{"instruction","doneWhen"}},
+            {"answer_session_question",{"requestId","answers"}},
+            {"follow_up",{"instruction"}},
+            {"complete",{"report"}},
+            {"ask_user",{"question","choices"}},
+            {"session_read",{"threadId","runId","itemId","cursor","view","offset"}}
+        };
+        for (auto item = args.begin(); item != args.end(); ++item) {
+            if (!arguments.at(tool).contains(item.key())) throw Conflict("Unknown action argument");
+        }
         if (tool == "session_read") {
             readEvidence(snapshot,event,args);
             return;
@@ -410,7 +461,16 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         if (work && !present(instruction)) throw Conflict("A delegate/follow-up instruction is required");
         if (tool == "delegate" && initial && !present(doneWhen)) throw Conflict("Initial delegate requires doneWhen");
         if ((!initial || tool != "delegate") && args.contains("doneWhen")) throw Conflict("doneWhen is already fixed or unavailable");
-        if (tool == "ask_user" && !present(field(args,"question"))) throw Conflict("A user question is required");
+        if (tool == "ask_user") {
+            if (!present(field(args,"question"))) throw Conflict("A user question is required");
+            if (args.contains("choices")) {
+                const auto& choices = args["choices"];
+                if (!choices.is_array() || choices.size() > 12 ||
+                    std::any_of(choices.begin(),choices.end(),[](const Json& value) {
+                        return !value.is_string() || !present(value.get<std::string>(),200);
+                    })) throw Conflict("Expected up to twelve short textual choices");
+            }
+        }
         if (tool == "complete" && !present(field(args,"report"))) throw Conflict("A completion report is required");
         if (tool == "answer_session_question") {
             if (field(args,"requestId") != field(snapshot["question"],"requestId"))
@@ -457,27 +517,37 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
     void decide(const Json& task) {
         if (!task["activeRun"].is_null()) {
             const auto observed = observe(task);
-            if (ingest(task,observed) || observed.kind == Observation::Kind::Unavailable) return;
+            if (ingest(task,observed) || observed.kind != Observation::Kind::Question) return;
         }
         Json event, history = Json::array();
         {
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
-            if (event.is_null() || event["retryAt"].get<Seconds>() > options.clock()) return;
-            auto rows = db.query("SELECT id,kind,data FROM journal WHERE task_id=? AND kind IN"
-                " ('decision','report','user_answer','session_answered') ORDER BY id DESC LIMIT 6",{task["id"]});
+            if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
+            auto rows = db.query(R"SQL(
+SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
+       json_extract(data,'$.itemId') FROM journal WHERE task_id=?
+AND kind IN ('decision','report','user_answer','session_answered') ORDER BY id DESC LIMIT 6
+)SQL",{task["id"]});
             std::size_t remaining = 16000;
             while (rows.next() && remaining > 100) {
                 const auto data = rows.string(2);
                 const auto excerpt = bounded(data,std::min<std::size_t>(remaining,5000));
                 if (data.size() == excerpt.size()) history.push_back({{"id",rows.number(0)},{"kind",rows.string(1)},{"data",Json::parse(data)}});
-                else history.push_back({{"id",rows.number(0)},{"kind",rows.string(1)},{"excerpt",excerpt},{"truncated",true}});
+                else history.push_back({{"id",rows.number(0)},{"kind",rows.string(1)},{"excerpt",excerpt},{"truncated",true},
+                    {"source",{{"environmentId",task["environmentId"]},{"threadId",rows.string(3)},
+                        {"runId",rows.string(4)},{"itemId",rows.string(5)}}}});
                 remaining -= excerpt.size();
             }
             std::reverse(history.begin(),history.end());
         }
         const auto tools = available(task,event);
         try {
+            if (options.sessionRead == "prefill" && event["kind"] == "result" && event["evidence"].empty()) {
+                const auto run = runRef(event["run"]);
+                readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
+                return;
+            }
             auto bot = notes(field(task,"botId"));
             bot.soul = bounded(bot.soul,8192);
             bot.memory = bounded(bot.memory,8192);
@@ -490,7 +560,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             event["evidence"] = evidence;
             if (!task["activeRun"].is_null()) {
                 const auto observed = observe(task);
-                if (ingest(task,observed) || observed.kind == Observation::Kind::Unavailable) return;
+                if (ingest(task,observed) || observed.kind != Observation::Kind::Question) return;
             }
             if (!decision.args.is_object() || decision.args.dump().size() > 20000 || !present(decision.reason,4000) ||
                 std::find(tools.begin(),tools.end(),decision.tool) == tools.end())

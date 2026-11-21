@@ -238,8 +238,11 @@ void Store::operate(Id id, Id waitId, std::string_view operation, const Json& da
     if (operation == "cancel") {
         if (waitId && (wait.is_null() || wait["id"] != waitId)) throw Conflict("Waiting item is no longer current");
         p_->clearWait(task, "cancel");
-        task["state"] = "cancelling";
         p_->journal(id, "cancel_requested", Json::object());
+        if (task["state"] == "queued") {
+            task["state"] = "cancelled";
+            p_->journal(id, "cancelled", Json::object());
+        } else task["state"] = "cancelling";
         p_->save(task);
         transaction.commit();
         return;
@@ -264,6 +267,7 @@ void Store::operate(Id id, Id waitId, std::string_view operation, const Json& da
         p_->journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
     } else if (operation == "retry" && reason == "model_failure") {
         p_->exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
+        task.erase("feedback");
         p_->journal(id, "model_retry", {{"waitId",waitId}});
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
@@ -297,6 +301,9 @@ Json Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
     auto result = p_->load(id);
     result["blockedBy"] = nullptr;
+    auto pending = p_->outbox(result);
+    if (pending.is_object()) pending.erase("authGeneration");
+    result["pendingAction"] = pending;
     if (result["state"] == "queued") {
         auto row = p_->query("SELECT id,bot_id,json_extract(data,'$.request'),state FROM tasks"
                              " WHERE environment_id=? AND project_id=? AND id<?"
