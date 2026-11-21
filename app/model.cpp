@@ -246,6 +246,8 @@ Json toolSchema(const std::string& name, bool initial) {
             {"intent",textParameter("The user's explicitly revised scope, quoted verbatim from this segment.")},
             {"doneWhen",textParameter("The user's explicitly revised completion criteria, quoted verbatim from this segment.")},
             {"environment",textParameter("The chosen configured environment alias.")},
+            {"resume",{{"type","boolean"},
+                {"description","Set true only when the user explicitly asks to resume the same cancelled work."}}},
             {"text",textParameter("The conversational response or specific clarification question.")},
             {"candidates",{{"type","array"},{"items",{{"type","integer"},{"minimum",1}}}}}
         };
@@ -394,6 +396,9 @@ selects one excerpt, copy that entry's option as resultOption. Omit resultOption
 the whole result, including comparisons, counts, and exclusions. If the supplied evidence does not
 identify one result or the needed excerpt, clarify. A clarification about a known result or excerpt can
 include its resultMessageId and, if selected, resultOption. Keep that same excerpt when resolving it.
+Set resume=true on create_task only if the user explicitly asks to resume the same cancelled task.
+Include its resultMessageId. Omit resume for a new request that uses a cancelled task as a reference.
+If the restart needs a destination clarification, include resume=true and resultMessageId on that clarification.
 An explanation or status request creates no work. Status optionally takes a taskId and is rendered
 from saved state. Use respond and text only for ordinary chat.
 answer_wait requires a direct answer to a specifically grounded current user_question. Explicit replies

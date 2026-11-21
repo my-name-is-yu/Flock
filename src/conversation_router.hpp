@@ -40,6 +40,7 @@ struct CreateTask {
     std::string request;
     std::optional<Result> source;
     std::string environment;
+    bool resume = false;
     bool operator==(const CreateTask&) const = default;
 };
 struct AppendInstruction {
@@ -62,6 +63,7 @@ struct Clarify {
     std::optional<Result> source = std::nullopt;
     std::string operation{};
     std::optional<RevisionDraft> revisionDraft = std::nullopt;
+    bool resume = false;
     bool operator==(const Clarify&) const = default;
 };
 using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
@@ -83,6 +85,7 @@ struct Reply {
     std::vector<Route> destinationPlan;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
+    std::optional<bool> resume;
     bool operator==(const Reply&) const = default;
 };
 

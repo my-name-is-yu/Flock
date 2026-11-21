@@ -816,6 +816,36 @@ void explanationDoesNotHoldCompletion() {
           "a read-only clarification held task completion or sent another Run");
 }
 
+void cancelledReportCanBeReferencedWithoutRestarting() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing("Benchmark the reference dataset"));
+    f.script("Complete when you export raw latency samples",revision(old,"doneWhen","export raw latency samples"));
+    f.receive("benchmark-criteria","Complete when you export raw latency samples");
+    f.script("Use a pinned regression fixture",target("append_instruction",old));
+    f.receive("benchmark-direction","Use a pinned regression fixture");
+    f.reach(old,"running");
+    constexpr auto report = "Partial benchmark found a spike in the first sample";
+    f.t3.finish("run-1",report);
+    f.reach(old,"deciding");
+    const auto source = f.store->latestTaskResult(old).at("id");
+    f.store->operate(old,0,"cancel");
+    f.reach(old,"cancelled");
+
+    constexpr auto request = "Write release notes explaining these findings";
+    f.script(request,{{"kind","create_task"},{"resultMessageId",source}});
+    f.receive("release-notes",request,source.get<Id>());
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(next,"running");
+    const auto task = f.task(next);
+    const auto& instruction = f.t3.sent.back().instruction;
+    check(next != old && task["sourceTaskId"] == old && task["doneWhen"] == "Report baseline latency" &&
+          task["sourceResultRefs"][0]["messageId"] == source && task["sourceResultRefs"][0]["text"] == report &&
+          !task.contains("restartContext") && instruction.find(report) != instruction.npos &&
+          instruction.find("export raw latency samples") == instruction.npos &&
+          instruction.find("Use a pinned regression fixture") == instruction.npos,
+          "new work did not keep the cancelled report separate from the cancelled task's criteria and directions");
+}
+
 void restartRestoresCancelledTaskDirections() {
     Fixture f;
     const auto old = f.store->submit(f.routing("Measure the reference dataset"));
@@ -831,12 +861,36 @@ void restartRestoresCancelledTaskDirections() {
     for (const auto& row : f.store->history(old))
         if (row["kind"] == "cancelled") cancellation = row["id"];
     check(cancellation > 0,"the cancelled task had no resume anchor");
-    f.script("Restart this work",{{"kind","create_task"},{"resultMessageId",cancellation}});
-    f.receive("restart-work","Restart this work",cancellation);
+    constexpr auto request = "この作業をクラウドMacで再開して";
+    f.script(request,{{"kind","create_task"},{"resultMessageId",cancellation},{"resume",true}});
+    const auto oldReceipt = f.receive("old-restart-work",request,cancellation);
+    const auto oldQuestion = f.response(oldReceipt);
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr) == SQLITE_OK,
+          "could not open the saved clarification fixture");
+    {
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+        check(sqlite3_exec(db.get(),"UPDATE route_decisions SET data=json_remove(data,'$.segments[0].resume') "
+                                  "WHERE status='awaiting_resolution'",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "could not emulate a destination clarification saved by the previous version");
+    }
+    f.restart();
+    const auto oldChoice = f.receive("old-restart-destination","クラウドMac",oldQuestion.at("messageId"));
+    check(f.response(oldChoice).at("text").get<std::string>().find("もう一度") != std::string::npos &&
+          f.store->tasks("alpha").size() == 1 && f.store->clarifications("alpha").empty(),
+          "a destination clarification saved by the previous version guessed whether to resume");
+
+    const auto receipt = f.receive("restart-work",request,cancellation);
+    const auto clarification = f.response(receipt);
+    check(clarification.at("route") == "clarify" && f.store->tasks("alpha").size() == 1,
+          "restart chose an unconfirmed destination");
+    f.restart();
+    f.receive("restart-destination","クラウドMac",clarification.at("messageId"));
     const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(next,"running");
     const auto& instruction = f.t3.sent.back().instruction;
     check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
+          f.task(next)["environmentId"] == "cloud" &&
           instruction.find("Measure the reference dataset") != std::string::npos &&
           instruction.find("Report baseline latency") != std::string::npos &&
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
@@ -1422,6 +1476,7 @@ int main() {
         cancellationReleasesOnlyAfterStopConfirmation();
         durableInboxAndTargetedRevision();
         linkedResultStartsANewSession();
+        cancelledReportCanBeReferencedWithoutRestarting();
         omittedDestinationAndWrongNamedTaskAreBlocked();
         destinationClarificationPreservesAndValidatesRevisionDraft();
         deferredCompletionPreservesDestinationRevisionDraft();

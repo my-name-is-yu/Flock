@@ -267,6 +267,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             segment["source"] = sourceRef(*source);
             replySource = segment["source"];
         }
+        if (const auto creation = std::get_if<CreateTask>(&route.action); creation && creation->resume)
+            segment["resume"] = true;
         if (savingDestinationPlan) {
             std::visit([&](const auto& item) {
                 if constexpr (requires { item.request; }) segment["instruction"] = item.request;
@@ -292,6 +294,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             candidateIds.insert(question->candidates.begin(),question->candidates.end());
             clarificationOperation = question->operation;
             segment["candidates"] = question->candidates;
+            if (question->operation == "destination") segment["resume"] = question->resume;
             if (question->revisionDraft) {
                 const auto& draft = *question->revisionDraft;
                 segment["revisionDraft"] = {{"taskId",draft.target.taskId},
@@ -311,12 +314,16 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                                   std::holds_alternative<CreateTask>(action))) return false;
         if (const auto creation = std::get_if<CreateTask>(&action)) {
             if (!hasText(creation->request) || creation->request.size() > messageSize) return false;
+            if (creation->resume && !source) return false;
             if (field(routing,"environmentId").empty() || field(routing,"projectId").empty()) {
                 addLine(ja ? "Bot の実行環境とプロジェクトの設定が必要です。"
                            : "The Bot needs an execution environment and project before it can start work.");
                 return false;
             }
-            if (source && !terminal(load(source->taskId))) return false;
+            if (source) {
+                const auto original = load(source->taskId);
+                if (!terminal(original) || (creation->resume && original["state"] != "cancelled")) return false;
+            }
             if (!creation->environment.empty() && verifiedEnvironment(routing,routing,creation->environment).empty())
                 return false;
         }
@@ -449,7 +456,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                         : verifiedEnvironment(routing,routing,item.environment);
                     linkedTask = submit({bot,item.request,environment,field(routing,"projectId"),
                                          routing.at("config"),{},0},id,item.source ? sourceRef(*item.source) : Json(nullptr));
-                    if (item.source && item.source->state == "cancelled") {
+                    if (item.resume) {
                         const auto prior = load(item.source->taskId);
                         auto task = load(linkedTask);
                         if (const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen")); !criteria.empty())

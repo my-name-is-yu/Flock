@@ -217,7 +217,7 @@ void clarificationAndStatus() {
             return result.at("taskId") == b && result.at("state") == "cancelled";
         });
         check(source != results.end(),"The cancelled source was missing");
-        return route("create_task",{{"resultMessageId",source->at("messageId")}});
+        return route("create_task",{{"resultMessageId",source->at("messageId")},{"resume",true}});
     };
     const auto id = receive(store,"stop","それ止めて");
     execution.runtime.routeConversation();
