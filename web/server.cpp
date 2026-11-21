@@ -16,6 +16,7 @@
 
 namespace flockv0 {
 namespace {
+using web::ChangeFeed;
 using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
@@ -247,7 +248,9 @@ class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
         : store_(store), callbacks_(std::move(callbacks)),
-          changes_(store,[this](const web::ChangeFeed::Scope& scope) { return snapshot(scope); }) {
+          changes_(store,[this](const ChangeFeed::Scope& scope) {
+              return std::visit([this](const auto& target) { return snapshot(target); },scope);
+          }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
@@ -353,7 +356,10 @@ private:
             (req.has_param("bot") && bot.empty()) ||
             (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
             return error(res,400,"invalid_subscription");
-        auto subscription = changes_.subscribe({bot,peer});
+        ChangeFeed::Scope target = ChangeFeed::BotList{};
+        if (!peer.empty()) target = ChangeFeed::DirectMessage{bot,peer};
+        else if (!bot.empty()) target = ChangeFeed::BotView{bot};
+        auto subscription = changes_.subscribe(target);
         if (!subscription) return error(res,503,"event_stream_unavailable");
         auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
         res.set_chunked_content_provider("text/event-stream",
@@ -465,15 +471,18 @@ private:
         return std::ranges::find(partners,peer) != partners.end();
     }
 
-    Json snapshot(const web::ChangeFeed::Scope& scope) const {
-        const auto& [id,peer] = scope;
-        if (id.empty()) return botList();
+    Json snapshot(const ChangeFeed::BotList&) const { return botList(); }
+
+    Json snapshot(const ChangeFeed::BotView& view) const {
+        const auto bot = findBot(view.bot);
+        return bot.is_null() ? Json(nullptr) : web::botView(store_,bot);
+    }
+
+    Json snapshot(const ChangeFeed::DirectMessage& dm) const {
         const auto known = bots();
-        const auto* bot = botById(known,id);
-        if (!bot) return nullptr;
-        if (peer.empty()) return web::botView(store_,*bot);
-        if (!canReadPeer(id,peer,botById(known,peer) != nullptr)) return nullptr;
-        return web::peerConversation(store_,id,peer,0);
+        if (!botById(known,dm.bot) || !canReadPeer(dm.bot,dm.peer,botById(known,dm.peer) != nullptr))
+            return nullptr;
+        return web::peerConversation(store_,dm.bot,dm.peer,0);
     }
 
     Json botList() const {

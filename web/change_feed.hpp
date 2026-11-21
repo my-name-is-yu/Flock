@@ -2,18 +2,30 @@
 
 #include "flock/core.hpp"
 
+#include <compare>
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
+#include <variant>
 
 namespace flockv0::web {
 
-// Empty IDs address the Bot list. A Bot alone addresses its view, and a pair
-// addresses its DM. Snapshots stay server-side and use the same projections as GET.
 class ChangeFeed {
 public:
-    using Scope = std::pair<std::string,std::string>;
+    struct BotList {
+        auto operator<=>(const BotList&) const = default;
+    };
+    struct BotView {
+        std::string bot;
+        auto operator<=>(const BotView&) const = default;
+    };
+    struct DirectMessage {
+        std::string bot, peer;
+        auto operator<=>(const DirectMessage&) const = default;
+    };
+    using Scope = std::variant<BotList,BotView,DirectMessage>;
     using Cursor = std::map<Scope,std::uint64_t>;
     using Load = std::function<Json(const Scope&)>;
 
@@ -32,6 +44,7 @@ private:
         std::optional<Json> snapshot;
     };
     void monitor();
+    std::set<Scope> refresh(const std::vector<Scope>&);
 
     Store& store_;
     Load load_;
@@ -45,4 +58,4 @@ private:
     std::thread worker_;
 };
 
-} // namespace flockv0::web
+}

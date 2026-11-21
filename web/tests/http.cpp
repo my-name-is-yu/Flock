@@ -148,7 +148,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/app.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
+    for (const auto* path : {"/app.js","/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
@@ -659,6 +659,26 @@ void eventStream(const std::filesystem::path& path) {
     });
 }
 
+void retryEventProjection(const std::filesystem::path& path) {
+    Store store(path);
+    std::atomic<bool> peersAvailable = false;
+    auto web = callbacks();
+    web.peers = [&](std::string_view bot) {
+        if (!peersAvailable.load()) throw std::runtime_error("profiles unavailable");
+        return fixturePeers(bot);
+    };
+    const auto server = startWeb(store,0,web);
+    Browser stream(*server);
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        if (!peersAvailable.exchange(true)) {
+            check(change == Json{{"bot","release"}},"a failed list projection blocked a healthy Bot view");
+            return true;
+        }
+        check(change == Json{{"list",true}},"list projection did not recover independently");
+        return false;
+    });
+}
+
 void peerEventStream(const std::filesystem::path& path) {
     Store store(path);
     auto web = callbacks();
@@ -843,6 +863,7 @@ int main() {
         TestDirectory directory;
         exercise(directory.path / "state.db");
         eventStream(directory.path / "events.db");
+        retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");

@@ -5,6 +5,14 @@
 namespace flockv0::web {
 using namespace std::chrono_literals;
 
+namespace {
+void invalidate(Json& update, const ChangeFeed::BotList&) { update["list"] = true; }
+void invalidate(Json& update, const ChangeFeed::BotView& view) { update["bot"] = view.bot; }
+void invalidate(Json& update, const ChangeFeed::DirectMessage& dm) {
+    update["dm"] = {{"bot",dm.bot},{"peer",dm.peer}};
+}
+}
+
 ChangeFeed::ChangeFeed(Store& store, Load load)
     : store_(store), load_(std::move(load)), worker_([this] { monitor(); }) {}
 
@@ -15,9 +23,8 @@ std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
     // Each stream holds an HTTP worker. Leave capacity for ordinary requests.
     constexpr std::size_t maxSubscribers = 3;
     if (stopping_ || subscribers_ >= maxSubscribers) return std::nullopt;
-    Cursor cursor{{Scope{},0}};
-    if (!view.first.empty()) cursor[Scope{view.first,{}}] = 0;
-    if (!view.second.empty()) cursor[view] = 0;
+    Cursor cursor{{BotList{},0},{view,0}};
+    if (const auto* dm = std::get_if<DirectMessage>(&view)) cursor.emplace(BotView{dm->bot},0);
     for (auto& [scope,revision] : cursor) {
         auto& watched = watched_[scope];
         ++watched.subscribers;
@@ -52,9 +59,7 @@ std::optional<Json> ChangeFeed::next(Cursor& cursor) {
         const auto next = watched_.at(scope).revision;
         if (revision == next) continue;
         revision = next;
-        if (scope.first.empty()) update["list"] = true;
-        else if (scope.second.empty()) update["bot"] = scope.first;
-        else update["dm"] = {{"bot",scope.first},{"peer",scope.second}};
+        std::visit([&](const auto& target) { invalidate(update,target); },scope);
     }
     return update;
 }
@@ -74,9 +79,29 @@ void ChangeFeed::stop() {
     if (worker_.joinable()) worker_.join();
 }
 
+std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes) {
+    std::set<Scope> failed;
+    std::map<Scope,Json> snapshots;
+    for (const auto& scope : scopes) {
+        try { snapshots.emplace(scope,load_(scope)); }
+        catch (const std::exception&) { failed.insert(scope); }
+    }
+    std::lock_guard lock(mutex_);
+    const auto previousRevision = revision_;
+    for (auto& [scope,snapshot] : snapshots) {
+        const auto item = watched_.find(scope);
+        if (item == watched_.end() || item->second.snapshot == snapshot) continue;
+        item->second.snapshot = std::move(snapshot);
+        item->second.revision = ++revision_;
+    }
+    if (revision_ != previousRevision) changed_.notify_all();
+    return failed;
+}
+
 void ChangeFeed::monitor() {
     std::unique_lock lock(mutex_);
-    std::pair<std::int64_t,std::int64_t> lastStamp{};
+    std::optional<decltype(store_.changeStamp())> lastStamp;
+    std::set<Scope> retry;
     auto checkProfiles = std::chrono::steady_clock::now();
     while (!stopping_) {
         if (watched_.empty()) {
@@ -84,42 +109,23 @@ void ChangeFeed::monitor() {
             continue;
         }
         const bool requested = std::exchange(scanRequested_,false);
-        // Profiles may also be edited on disk. Check them on a slower shared cadence.
         const bool profileCheck = std::chrono::steady_clock::now() >= checkProfiles;
         std::vector<Scope> scopes;
         for (const auto& [scope,watched] : watched_) scopes.push_back(scope);
         lock.unlock();
         try {
             const auto stamp = store_.changeStamp();
-            if (requested || profileCheck || stamp != lastStamp) {
-                lastStamp = stamp;
-                if (profileCheck) checkProfiles = std::chrono::steady_clock::now() + 2500ms;
-                std::map<Scope,Json> snapshots;
-                for (const auto& scope : scopes) {
-                    try { snapshots.emplace(scope,load_(scope)); }
-                    catch (const std::exception&) {
-                        // An unavailable projection should not block updates for other subscribers.
-                        checkProfiles = std::chrono::steady_clock::now() + 150ms;
-                    }
-                }
-                std::lock_guard publish(mutex_);
-                bool updated = false;
-                for (auto& [scope,snapshot] : snapshots) {
-                    const auto item = watched_.find(scope);
-                    if (item == watched_.end() || item->second.snapshot == snapshot) continue;
-                    item->second.snapshot = std::move(snapshot);
-                    item->second.revision = ++revision_;
-                    updated = true;
-                }
-                if (updated) changed_.notify_all();
-            }
+            if (!requested && !profileCheck && stamp == lastStamp)
+                std::erase_if(scopes,[&](const Scope& scope) { return !retry.contains(scope); });
+            if (!scopes.empty()) retry = refresh(scopes);
+            lastStamp = stamp;
+            if (profileCheck) checkProfiles = std::chrono::steady_clock::now() + 2500ms;
         } catch (const std::exception&) {
-            // A transient read failure leaves the last snapshot intact. Retry on the next scan.
-            checkProfiles = std::chrono::steady_clock::now() + 150ms;
+            lastStamp.reset();
         }
         lock.lock();
         changed_.wait_for(lock,150ms,[&] { return stopping_ || scanRequested_; });
     }
 }
 
-} // namespace flockv0::web
+}

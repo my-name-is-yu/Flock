@@ -1,4 +1,5 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { collectEventPages, mergeEventPages } from '/event-history.mjs';
 import { createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 
@@ -71,7 +72,6 @@ const notices = new Map();
 const signatures = new Map();
 let bots = [];
 let listLoaded = false;
-let listGeneration = 0;
 let view = null;
 let menu = null;
 let detail = null;
@@ -207,8 +207,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0,
-    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
+    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
   else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
@@ -1537,25 +1537,6 @@ function render(scroll) {
   renderDetail();
 }
 
-async function syncEvents(context, events, olderBefore, isCurrent, loadPage) {
-  const incoming = [...events];
-  let cursor = olderBefore;
-  // Reconnect can leave more than one page between the visible history and the latest page.
-  while (context.events.size && cursor && cursor > context.newestEvent) {
-    const page = await loadPage(cursor);
-    if (!isCurrent()) return false;
-    incoming.push(...page.events);
-    if (page.olderBefore >= cursor) throw new Error('Invalid conversation cursor');
-    cursor = page.olderBefore;
-  }
-  if (!isCurrent()) return false;
-  if (!context.events.size) context.olderBefore = olderBefore;
-  else if (olderBefore > context.newestEvent) context.olderBefore = Math.min(context.olderBefore, cursor);
-  for (const event of incoming) context.events.set(event.id, event);
-  context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
-  return true;
-}
-
 function mergeLatest(context, latest) {
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
@@ -1576,17 +1557,20 @@ function mergeLatest(context, latest) {
     }
   }
 }
+async function conversationPage(timeline, before) {
+  if (!timeline.peerId) return api(botQuery('conversation', timeline.id, before));
+  const { messages, hasOlder } = await api(peerQuery(timeline, before));
+  return { events: messages, olderBefore: hasOlder ? messages[0].id : 0 };
+}
 async function refreshPeerConversation(context) {
   const dm = context.dm;
-  const generation = ++dm.generation;
-  const isCurrent = () => context === view && generation === dm.generation;
-  const readPage = async (before) => {
-    const { messages, hasOlder } = await api(peerQuery(dm, before));
-    return { events: messages, olderBefore: hasOlder ? messages[0]?.id ?? 0 : 0 };
-  };
+  const isCurrent = () => context === view;
+  const readPage = before => conversationPage(dm, before);
   try {
-    const page = await readPage();
-    if (!await syncEvents(dm, page.events, page.olderBefore, isCurrent, readPage)) return true;
+    const latest = await readPage();
+    const pages = await collectEventPages(latest, dm.newestEvent, readPage, isCurrent);
+    if (!pages || !isCurrent()) return true;
+    mergeEventPages(dm, pages);
     dm.loaded = true;
     dm.error = null;
   } catch (error) {
@@ -1597,12 +1581,12 @@ async function refreshPeerConversation(context) {
   return true;
 }
 async function refreshView(context) {
-  const generation = ++context.generation;
-  const isCurrent = () => context === view && generation === context.generation;
+  const isCurrent = () => context === view;
   try {
     const latest = await api(botQuery('view', context.id));
-    const readPage = (before) => api(botQuery('conversation', context.id, before));
-    if (!await syncEvents(context, latest.events, latest.olderBefore, isCurrent, readPage)) return true;
+    const pages = await collectEventPages(latest, context.newestEvent, before => conversationPage(context, before), isCurrent);
+    if (!pages || !isCurrent()) return true;
+    mergeEventPages(context, pages);
     mergeLatest(context, latest);
     setConnection('ready');
     return true;
@@ -1617,17 +1601,15 @@ async function refreshView(context) {
   }
 }
 async function refreshBots() {
-  const generation = ++listGeneration;
   try {
     const latest = await api('bots');
-    if (generation !== listGeneration) return true;
     bots = latest;
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
     return true;
   } catch {
-    if (generation === listGeneration) setConnection('offline');
+    setConnection('offline');
     return false;
   }
 }
@@ -1639,10 +1621,9 @@ async function loadOlder() {
   if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
-    const page = await api(context.peerId ? peerQuery(context, cursor) : botQuery('conversation', context.id, cursor));
+    const { events, olderBefore } = await conversationPage(context, cursor);
     if (context !== timelineContext() || context.olderBefore !== cursor) return;
-    const events = context.peerId ? page.messages : page.events;
-    context.olderBefore = context.peerId ? (page.hasOlder ? events[0]?.id : 0) : page.olderBefore;
+    context.olderBefore = olderBefore;
     for (const event of events) context.events.set(event.id, event);
     renderTimeline('older');
   } catch {
@@ -1685,6 +1666,7 @@ async function submitOperation(context, key, payload) {
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
+  let failed = false;
   try {
     await api('operations', { botId: context.id, ...payload });
     setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
@@ -1693,9 +1675,9 @@ async function submitOperation(context, key, payload) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
     if (isOpen()) showDetailError(message);
-    if (view === context) await requestSync({ bot: true, list: true });
+    failed = true;
   } finally {
-    if (!liveUpdates.live && view?.id === context.id) await requestSync({ bot: true, list: true });
+    if ((failed || !liveUpdates.live) && view?.id === context.id) await requestSync({ bot: true, list: true });
     pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
@@ -1843,24 +1825,7 @@ function requestSync({ list = false, bot = false, dm = false, scroll } = {}) {
       while (pendingSync) {
         const next = pendingSync;
         pendingSync = null;
-        const { context } = next;
-        const results = await Promise.all([
-          !next.list || refreshBots(),
-          !next.bot || context !== view || !context || refreshView(context),
-          !next.dm || context !== view || !context?.dm || refreshPeerConversation(context),
-        ]);
-        render(view === context ? next.scroll : undefined);
-        if (next.bot && view === context && context?.data && context.openSettingsOnLoad) {
-          const botId = context.openSettingsOnLoad;
-          context.openSettingsOnLoad = null;
-          openSettingsFromMenu(botId);
-        }
-        if (results.includes(false) && !document.hidden) {
-          syncRetry ??= setTimeout(() => {
-            syncRetry = null;
-            syncAll();
-          }, 2500);
-        }
+        await syncView(next);
       }
     } finally {
       syncInFlight = null;
@@ -1869,7 +1834,27 @@ function requestSync({ list = false, bot = false, dm = false, scroll } = {}) {
   return syncInFlight;
 }
 
+async function syncView({ context, list, bot, dm, scroll }) {
+  const selected = context && context === view;
+  const results = await Promise.all([
+    !list || refreshBots(),
+    !bot || !selected || refreshView(context),
+    !dm || !selected || !context.dm || refreshPeerConversation(context),
+  ]);
+  render(view === context ? scroll : undefined);
+  if (bot && view === context && context?.data && context.openSettingsOnLoad) {
+    const botId = context.openSettingsOnLoad;
+    context.openSettingsOnLoad = null;
+    openSettingsFromMenu(botId);
+  }
+  if (results.includes(false) && !document.hidden) {
+    syncRetry ??= setTimeout(syncAll, 2500);
+  }
+}
+
 function syncAll() {
+  clearTimeout(syncRetry);
+  syncRetry = null;
   if (!document.hidden) void requestSync({ list: true, bot: !!view, dm: !!view?.dm });
 }
 
