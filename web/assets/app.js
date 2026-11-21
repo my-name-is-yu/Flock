@@ -1,4 +1,4 @@
-import { showAvatar } from '/avatars.js';
+import { accentColor, showAvatar } from '/avatars.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -425,6 +425,7 @@ const settingsSections = {
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
+let detailOrigin = null;
 
 function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
@@ -441,10 +442,18 @@ function openDetail(selection) {
   signatures.delete('detail');
   renderDetail();
   if (elements.detail.open) return;
+  detailOrigin = document.activeElement;
   elements.detail.showModal();
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
-elements.detail.addEventListener('close', releaseDetailAvatar);
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open) return;
+  releaseDetailAvatar();
+  const origin = detailOrigin;
+  detailOrigin = null;
+  const active = document.activeElement;
+  if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
+});
 
 const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
 const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
@@ -566,7 +575,7 @@ function generalContent(bot) {
   // The live avatar sizes itself from its host, so it mounts once the host is in the document.
   detailAvatar = { state: presence, mount: () => {
     const handle = showAvatar(face, bot, { still: false, state: presence });
-    hero.style.setProperty('--hero-tint', face.style.getPropertyValue('--avatar-bg'));
+    hero.style.setProperty('--hero-tint', accentColor(bot));
     return handle;
   } };
   hero.append(face, node('p', 'settings-name', bot.name));
@@ -589,7 +598,7 @@ function cronContent(bot) {
     const when = node('p', 'cron-when');
     when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
     if (timezone) when.append(node('span', 'cron-zone', timezone));
-    when.title = [expression, item.id].filter(Boolean).join(' · ');
+    if (readable) when.append(node('code', 'cron-expression', expression));
     row.append(when, node('span', 'cron-state', item.enabled === false ? '停止中' : '有効'),
       node('p', 'cron-request', item.request));
     list.append(row);
