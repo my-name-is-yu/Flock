@@ -29,6 +29,8 @@ struct PeerExchange {
     Id sender = 0, recipient = 0;
 };
 
+struct TaskChange { std::string intent, doneWhen, environment; };
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
@@ -58,6 +60,10 @@ struct Store::Impl {
     conversation::Context routeContext(std::string_view bot, Id message, std::string_view text,
                                        Id replyTo, const Json& routing);
     Json captureConversationWaits(std::string_view bot) const;
+    Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
+                             std::string_view environment, Id messageId, const Json& source, bool resume);
+    bool acceptInstruction(Id taskId, Id revision, Id messageId, std::string_view instruction,
+                           const Json& source, const Json& routing, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     bool completionHeld(const Json&) const;

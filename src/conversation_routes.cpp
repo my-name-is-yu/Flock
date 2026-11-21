@@ -411,48 +411,10 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
 
     const auto saveInstruction = [&](const Target& target, std::string_view instruction,
                                      const std::optional<Result>& source, const ReviseTask* change) {
-        auto task = load(target.taskId);
-        auto revision = target.revision;
-        bool conflicting = change != nullptr;
-        std::string environment;
-        if (change) {
-            const auto oldIntent = field(task,"intent").empty() ? field(task,"request") : field(task,"intent");
-            const auto oldDone = field(task,"doneWhen");
-            const auto intent = change->intent.empty() ? oldIntent : change->intent;
-            const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
-            if (!oldDone.empty() && (intent != oldIntent || done != oldDone)) revision = addRevision(task,intent,done,id);
-            else if (oldDone.empty()) {
-                task["intent"] = intent;
-                if (!change->doneWhen.empty()) {
-                    task["requestedDoneWhen"] = change->doneWhen;
-                    task["criteriaSourceMessageId"] = id;
-                }
-            }
-            environment = verifiedEnvironment(task,routing,change->environment);
-            conflicting = !change->doneWhen.empty() || !change->intent.empty() || environment.empty() ||
-                          environment != field(task,"environmentId") || task.value("replanning",false);
-        }
-        Json pending = {{"messageId",id},{"text",instruction},{"revisionId",revision},{"conflicting",conflicting}};
-        if (source) {
-            pending["source"] = sourceRef(*source);
-            auto& references = task["sourceResultRefs"];
-            if (references.is_null()) references = Json::array();
-            if (std::ranges::find(references,pending["source"]) == references.end())
-                references.push_back(pending["source"]);
-        }
-        if (!environment.empty()) {
-            pending["environmentId"] = environment;
-            if (conflicting) task["pendingEnvironmentId"] = environment;
-        }
-        if (conflicting) {
-            pending["replaceKey"] = !environment.empty() ? "environment" : !change->doneWhen.empty() ? "criteria"
-                                    : !change->intent.empty() ? "intent" : "target";
-            task["replanning"] = true;
-        }
-        if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
-        task["pendingInstructions"].push_back(pending);
-        journal(target.taskId,"instruction_accepted",pending);
-        save(task);
+        std::optional<TaskChange> details;
+        if (change) details = TaskChange{change->intent,change->doneWhen,change->environment};
+        const bool conflicting = acceptInstruction(target.taskId,target.revision,id,instruction,
+            source ? sourceRef(*source) : Json(nullptr),routing,details ? &*details : nullptr);
         linkedTask = target.taskId;
         status = conflicting ? "stopping" : "working";
         addLine(conflicting
@@ -468,36 +430,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                 [&](const Respond& item) { addLine(item.text); },
                 [&](const Status& item) { addLine(item.text); },
                 [&](const CreateTask& item) {
-                    const auto environment = item.environment.empty() ? field(routing,"environmentId")
-                        : verifiedEnvironment(routing,routing,item.environment);
-                    linkedTask = submit({bot,item.request,environment,field(routing,"projectId"),
-                                         routing.at("config"),{},0},id,item.source ? sourceRef(*item.source) : Json(nullptr));
-                    if (item.resume) {
-                        const auto prior = load(item.source->taskId);
-                        auto task = load(linkedTask);
-                        if (const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen")); !criteria.empty())
-                            task["requestedDoneWhen"] = criteria;
-                        task["restartContext"] = {{"intent",prior.value("intent",prior.at("request"))},
-                                                  {"taskId",item.source->taskId},
-                                                  {"pendingInstructions",prior.value("cancelledInstructions",Json::array())}};
-                        auto rows = query(R"SQL(
-SELECT entry.value FROM outbox, json_each(outbox.data,'$.instructions') entry
-WHERE outbox.task_id=? AND outbox.phase='accepted'
-ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
-)SQL",{item.source->taskId});
-                        auto earlier = Json::array();
-                        std::size_t remaining = 8000;
-                        while (remaining && rows.next()) {
-                            auto instruction = rows.json(0);
-                            instruction["text"] = bounded(field(instruction,"text"),remaining);
-                            remaining -= field(instruction,"text").size();
-                            earlier.push_back(std::move(instruction));
-                        }
-                        std::reverse(earlier.begin(),earlier.end());
-                        auto& instructions = task["restartContext"]["pendingInstructions"];
-                        instructions.insert(instructions.begin(),earlier.begin(),earlier.end());
-                        save(task);
-                    }
+                    linkedTask = startConversationTask(routing,bot,item.request,item.environment,id,
+                        item.source ? sourceRef(*item.source) : Json(nullptr),item.resume);
                     segments[index]["effectTaskId"] = linkedTask;
                     status = "working";
                     addLine(item.source ? (ja ? "元の結果をもとに、新しい依頼として受け付けました。"
