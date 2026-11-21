@@ -98,7 +98,8 @@ customElements.define('flock-avatar', class extends HTMLElement {
   #handle;
 
   connectedCallback() {
-    this.#handle = showAvatar(this, this.bot, { still: false, state: this.avatarState });
+    const state = this.reflectPresence ? presenceMotion(this.bot.presence) : 'idle';
+    this.#handle = showAvatar(this, this.bot, { still: false, state });
   }
 
   disconnectedCallback() {
@@ -106,10 +107,10 @@ customElements.define('flock-avatar', class extends HTMLElement {
   }
 });
 
-function avatar(bot, className = '', state = 'idle') {
+function avatar(bot, className = '', { reflectPresence = false } = {}) {
   const host = node('flock-avatar', `avatar ${className}`.trim());
   host.bot = bot;
-  host.avatarState = state;
+  host.reflectPresence = reflectPresence;
   return host;
 }
 function runHref(run) {
@@ -361,7 +362,7 @@ function menuPopover(bot) {
 function presenceText(bot) {
   return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
 }
-function sidebarAvatarState(presence) {
+function presenceMotion(presence) {
   switch (presence) {
     case 'queued':
     case 'peer_waiting':
@@ -393,7 +394,7 @@ function botRow(bot) {
   preview.append(bot.preview || 'No conversation yet');
   const text = node('span', 'bot-text');
   text.append(name, preview);
-  select.append(avatar(bot, 'bot-avatar', sidebarAvatarState(bot.presence)), text);
+  select.append(avatar(bot, 'bot-avatar', { reflectPresence: true }), text);
   const status = presenceText(bot);
   if (status) select.append(status);
   row.append(select, menuButton(bot));
@@ -411,7 +412,7 @@ function pinTile(bot, index) {
   const shortcut = index < 9 ? index + 1 : null;
   if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
   const face = node('span', 'pin-face');
-  face.append(avatar(bot, 'pin-avatar', sidebarAvatarState(bot.presence)));
+  face.append(avatar(bot, 'pin-avatar', { reflectPresence: true }));
   if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
   select.append(face, node('span', 'pin-name', bot.name));
   const status = presenceText(bot);
