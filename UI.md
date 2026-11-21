@@ -27,7 +27,7 @@ Bot からの質問には、その場で選択肢を押すか、「返信を書�
 
 ## アバター
 
-各 Bot には Open Bot Avatar で固有の姿と色を割り当てます。一覧、ピン留め、会話、設定で同じ顔を使います。一覧は静止画とし、会話上部のアバターは「Bot が判断中」「担当 Session が作業中」などの状態に合わせて動かせます。状態は文字でも示し、動きを減らす端末設定に従います。[Open Bot Avatar のデモ](https://dominikscholz.github.io/open-bot-avatar/) · [描画と状態の仕様](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
+各 Bot には標準で Open Bot Avatar の公式ギャラリーの形と、その形の既定色を割り当てます。一覧、ピン留め、会話、設定で同じ顔を使います。一覧は静止画とし、会話上部のアバターは「Bot が判断中」「担当 Session が作業中」などの状態に合わせて動かせます。状態は文字でも示し、動きを減らす端末設定に従います。[Open Bot Avatar のデモ](https://dominikscholz.github.io/open-bot-avatar/) · [描画と状態の仕様](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
 
 ## 合格条件
 

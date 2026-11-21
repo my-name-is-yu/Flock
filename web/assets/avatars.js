@@ -1,15 +1,18 @@
-import { getExample, renderAvatarSvg, validateAvatar } from '/vendor/open-bot-avatar/index.js';
+import { DEFAULT_COLOR, getExample, renderAvatarSvg, validateAvatar } from '/vendor/open-bot-avatar/index.js';
 import { mountAvatar } from '/vendor/open-bot-avatar/dom/index.js';
 
-const shapes = ['mug', 'sprout', 'controller', 'lightbulb', 'chat', 'watering-can', 'barbell'];
-// Saturated mid-tones that read on both the light and the dark canvas. A bot's color is also its
-// accent (avatarOptions(bot).color), and the conversation fills that Bot's user bubbles with it:
-// every color below keeps at least 4.5:1 with dark text (`ink`, or anything darker); white text
-// does not reach 4.5:1 on them. A color set in the bot's config carries no such guarantee.
-const palette = [
-  '#ff2e30', '#e06e00', '#da9f00', '#00ac2e', '#00a790',
-  '#00a2c7', '#0083fd', '#7773ff', '#b852ff', '#fe00a9',
-];
+// Open Bot Avatar 0.3.0 editor defaults, in Flock's existing shape assignment order.
+// https://github.com/DominikScholz/open-bot-avatar/blob/5e64c081971eb296f562544641bad37d40fb36b6/gallery/colors.json
+const galleryColors = {
+  mug: '#f4f4f4',
+  sprout: '#1fbf68',
+  controller: '#ff6a1a',
+  lightbulb: '#f8a01c',
+  chat: '#8b5cf6',
+  'watering-can': '#14b3a5',
+  barbell: '#f2384b',
+};
+const shapes = Object.keys(galleryColors);
 const ink = '#14121c';
 const lightInk = '#fafaff';
 const hex = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -43,11 +46,12 @@ function avatarOptions(bot) {
     const result = validateAvatar(definition);
     if (result.ok) validated = result.value;
   }
-  const color = hex.test(avatar?.color) ? avatar.color : palette[Math.floor(hash / shapes.length) % palette.length];
+  const customColor = hex.test(avatar?.color) ? avatar.color : undefined;
+  const customEyeColor = hex.test(avatar?.eyeColor) ? avatar.eyeColor : undefined;
   const options = {
     definition: validated ?? example,
-    color,
-    eyeColor: hex.test(avatar?.eyeColor) ? avatar.eyeColor : hex.test(avatar?.color) ? eyesFor(color) : ink,
+    color: customColor ?? (validated ? DEFAULT_COLOR : galleryColors[example.id]),
+    eyeColor: customEyeColor ?? (customColor ? eyesFor(customColor) : undefined),
     reducedMotion: 'system',
     label: '',
   };
