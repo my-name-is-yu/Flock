@@ -239,9 +239,10 @@ Json toolSchema(const std::string& name, bool initial) {
             {"operation",{{"type","string"},{"enum",Json::array({"cancel_task","revise_task","destination"})}}},
             {"segment",textParameter("Verbatim contiguous segment. Required for each route in a compound message.")},
             {"taskId",{{"type","integer"},{"minimum",1}}},
-            {"resultMessageId",{{"type","integer"},{"minimum",1}}},
+            {"resultMessageId",{{"type","integer"},{"minimum",1},
+                {"description","The exact messageId of a supplied result."}}},
             {"resultOption",{{"type","integer"},{"minimum",1},{"maximum",99},
-                {"description","The option number the user selects from the referenced result."}}},
+                {"description","The option number supplied for the selected excerpt in that result."}}},
             {"intent",textParameter("The user's explicitly revised scope, quoted verbatim from this segment.")},
             {"doneWhen",textParameter("The user's explicitly revised completion criteria, quoted verbatim from this segment.")},
             {"environment",textParameter("The chosen configured environment alias.")},
@@ -359,13 +360,15 @@ Set operation=destination on a clarification asking which destination to use. It
 identified task, or no task for new work. Use the exact name written by the user. Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
-For a question about an existing result, use answer_result with its exact resultMessageId. Think
-about the real request and selected result, including numbered choices, names, reply anchors, and recent
-context. Supply resultOption only when the user clearly selects one numbered option from the result.
-A count, an excluded option, or a comparison between options is not a selection. Answering a question
-or showing progress creates no work. When resolving a clarification with a result, use answer_result
-and omit resultOption because the clarification already identifies the excerpt. Status optionally takes a taskId and
-is rendered from saved state. Use respond and text only for ordinary chat.
+For a question about an existing result, use answer_result with its exact messageId as resultMessageId.
+Respect an explicit reply's result. Use the bodies of results and their options, recentSource, and
+conversation history to resolve paraphrases and references such as "the latter". When the question
+selects one excerpt, copy that entry's option as resultOption. Omit resultOption for a question about
+the whole result, including comparisons, counts, and exclusions. If the supplied evidence does not
+identify one result or the needed excerpt, clarify. A clarification about a known result or excerpt can
+include its resultMessageId and, if selected, resultOption. Keep that same excerpt when resolving it.
+An explanation or status request creates no work. Status optionally takes a taskId and is rendered
+from saved state. Use respond and text only for ordinary chat.
 answer_wait requires a direct answer to a specifically grounded current user_question. Explicit replies
 are scoped to that wait. Without an explicit reply, find the question that was current when this message
 arrived. Use the question and answer meaning together (a proposed name can answer a naming question).
