@@ -95,7 +95,8 @@ function mockResponses() {
       assert.equal(request.stream, true);
       const namespace = request.tools[0];
       assert.equal(namespace.name, "flock");
-      const result = output(JSON.parse(request.input[0].content));
+      const context = JSON.parse(request.input[0].content);
+      const result = output(context);
       const tool = namespace.tools.find(tool => tool.name === result.name);
       assert.ok(tool, `Response tool ${result.name} was missing from the production request`);
       const args = JSON.parse(result.arguments);
@@ -106,7 +107,11 @@ function mockResponses() {
         assert.ok(segment.kind.enum.includes(args.routes[0].kind));
         assert.ok(Object.keys(args.routes[0]).every(key => key in segment));
         assert.match(request.instructions, /omit environment to use the Bot's configured default/);
+        if (context.event.text === consultation)
+          assert.match(request.instructions, /to consult another Bot as create_task/);
       }
+      if (context.event.kind === "bot_request")
+        assert.match(tool.parameters.properties.kind.description, /Use result to return work or consultation advice/);
       const response = { type: "response.completed", response: { output: [result] } };
       return new Response(`data: ${JSON.stringify(response)}\n\n`, { headers: { "content-type": "text/event-stream" } });
     } catch (error) {
