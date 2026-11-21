@@ -44,9 +44,9 @@ function saved(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
   catch { return fallback; }
 }
-function save(key, value) {
+function trySavePreference(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); }
-  catch { /* The session can continue with in-memory preferences. */ }
+  catch {}
 }
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
@@ -137,7 +137,7 @@ function selectBot(botId) {
   closeDetail();
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, loadingOlder: false, loadingSessions: false, generation: 0 } : null;
-  save('flock-selected-bot', botId);
+  trySavePreference('flock-selected-bot', botId);
   render();
   elements.conversation.scrollTop = 0;
   if (view) void refreshView(view);
@@ -179,7 +179,7 @@ function renderBots() {
       popover.append(button(isPinned ? 'ピン留めを解除' : 'ピン留めする', null, () => {
         if (isPinned) pins.delete(bot.id);
         else pins.add(bot.id);
-        save('flock-pins', [...pins]);
+        trySavePreference('flock-pins', [...pins]);
         menu = null;
         renderBots();
         [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id)?.focus();
@@ -540,10 +540,8 @@ function render(scroll) {
 
 function mergeLatest(context, latest) {
   const { events, olderBefore } = latest;
-  const first = events[0]?.id;
-  // A long disconnection can leave a gap larger than the newest page.
-  // Re-anchor pagination at the newest page so the next older page fills it.
-  if (!context.events.size || (first && first > context.newestEvent)) {
+  const latestPageStartsAfterCache = events.length > 0 && events[0].id > context.newestEvent;
+  if (!context.events.size || latestPageStartsAfterCache) {
     context.events.clear();
     context.olderBefore = olderBefore;
   }

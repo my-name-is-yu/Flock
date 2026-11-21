@@ -72,14 +72,20 @@ struct Runtime::Impl {
         close(lockFd);
     }
 
-    template<class F> bool change(const Json& snapshot, F fn) {
+    template<class F> bool changeTask(Id id, F fn) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
-        auto task = db.load(snapshot["id"]);
-        if (task["generation"] != snapshot["generation"] || !fn(task)) return false;
+        auto task = db.load(id);
+        if (!fn(task)) return false;
         db.save(task);
         transaction.commit();
         return true;
+    }
+
+    template<class F> bool change(const Json& snapshot, F fn) {
+        return changeTask(snapshot["id"],[&](Json& task) {
+            return task["generation"] == snapshot["generation"] && fn(task);
+        });
     }
 
     std::vector<Id> eligible() {
@@ -128,6 +134,14 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             return true;
         });
     }
+
+    void closePendingSessionAnswer(Json& task) {
+        const auto action = db.outbox(task);
+        if (field(action,"tool") != "answer_session_question") return;
+        db.exec("UPDATE outbox SET phase='closed' WHERE id=?", {task["actionId"]});
+        task["actionId"] = "";
+    }
+
     bool ingest(const Json& snapshot, const Observation& observed) {
         return change(snapshot,[&](Json& task) {
             const auto run = runRef(task["activeRun"]);
@@ -136,15 +150,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             if (observed.kind == Observation::Kind::Finished && observed.settled) {
                 db.clearWait(task,"run_finished");
                 db.unlockQuestion(task,"run_finished");
-                // An ended Run cannot accept an outstanding reply. Preserve the
-                // action in history while letting the definitive Run result take precedence.
-                if (!field(task,"actionId").empty()) {
-                    const auto action = db.outbox(task);
-                    if (!action.is_null() && action["tool"] == "answer_session_question") {
-                        db.exec("UPDATE outbox SET phase='closed' WHERE id=?", {task["actionId"]});
-                        task["actionId"] = "";
-                    }
-                }
+                closePendingSessionAnswer(task);
                 task["activeRun"] = nullptr;
                 task["lastRun"] = runJson(run);
                 db.consumeEvent(task);
@@ -237,16 +243,16 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             action = db.outbox(task);
         }
         if (!action.is_null() && action["phase"] == "started") {
+            const bool answerHasKnownRun = action["tool"] == "answer_session_question" && !task["activeRun"].is_null();
             const auto now = options.clock();
             if (now < task.value("cancelReconcileAt",Seconds{0})) {
-                if (action["tool"] == "answer_session_question" && !task["activeRun"].is_null()) cancelRun(task);
+                if (answerHasKnownRun) cancelRun(task);
                 return;
             }
             if (!change(task,[&](Json& current) { current["cancelReconcileAt"] = now + 3; return true; })) return;
             deliver(task,action);
-            if (action["tool"] != "answer_session_question" || task["activeRun"].is_null()) return;
-            // A lost answer acknowledgement does not prevent stopping its known Run.
-            return cancelRun(snapshot(task["id"]));
+            if (answerHasKnownRun) cancelRun(snapshot(task["id"]));
+            return;
         }
         if (task["activeRun"].is_null()) {
             change(task,[&](Json& current) { cancelDone(current); return true; });
@@ -293,14 +299,11 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         return c;
     }
 
-    void applyDelivery(const Json& snapshotTask, const Json& action, Delivery outcome) {
-        // A concurrent cancel invalidates a decision, but an accepted side effect still belongs to its task.
-        const auto current = snapshot(snapshotTask["id"]);
-        if (current["actionId"] != action["id"] || terminal(current)) return;
-        change(current,[&](Json& task) {
+    void applyDelivery(Id id, const Json& action, Delivery outcome) {
+        changeTask(id,[&](Json& task) {
+            if (task["actionId"] != action["id"] || terminal(task)) return false;
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
-            const auto id = task["id"].get<Id>();
             if (outcome.kind == Delivery::Kind::Accepted && !reply && hasRun(outcome.run)) {
                 const auto target = runRef(action["target"]);
                 auto owner = db.query("SELECT action_id FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
@@ -364,13 +367,14 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
 
     void deliver(const Json& task, const Json& action) {
         auto cmd = command(task,action);
+        const auto id = task["id"].get<Id>();
         Delivery outcome;
         try {
             if (action["phase"] == "started") {
                 outcome = t3.reconcile(cmd);
             } else {
                 if (const auto stop = t3.preflight(cmd)) {
-                    applyDelivery(task,action,*stop);
+                    applyDelivery(id,action,*stop);
                     return;
                 }
                 cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
@@ -386,7 +390,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
-        applyDelivery(task,action,std::move(outcome));
+        applyDelivery(id,action,std::move(outcome));
     }
 
     std::vector<std::string> available(const Json& task, const Json& event) {
@@ -623,4 +627,4 @@ void Runtime::tickConcurrent() {
             p_->workers.emplace(id,std::async(std::launch::async,[this,id] { p_->step(id); }));
     }
 }
-} // namespace flockv0
+}

@@ -80,7 +80,7 @@ std::string validatedString(const Json& object, const char* key) {
         throw Conflict(std::string(key) + " must be a nonempty string");
     return value->get<std::string>();
 }
-} // namespace
+}
 
 Cron::Cron(std::string expression, std::string timezone) : timezone_(std::move(timezone)) {
     std::istringstream fields(expression);
@@ -229,4 +229,4 @@ void Scheduler::tick(Seconds now) {
         }
     }
 }
-} // namespace flockv0::app
+}

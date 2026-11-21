@@ -118,8 +118,6 @@ public:
         }
         if (cmd.tool == tool && (result.kind == Delivery::Kind::Accepted || result.kind == Delivery::Kind::Unknown)) {
             std::cout << "Stopped after external send for " << cmd.tool << " " << cmd.actionId << std::endl;
-            // Exercise the durable send-start and reconciliation paths with no
-            // application response saved and no RAII cleanup.
             std::_Exit(86);
         }
         return result;

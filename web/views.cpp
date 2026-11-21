@@ -106,8 +106,7 @@ Json settingsView(const Json& bot) {
     return view;
 }
 
-// Adapter errors are useful in the CLI but can include connection settings. Publish the reason code.
-Json waitView(const Json& wait) {
+Json browserWaitView(const Json& wait) {
     if (wait.is_null()) return nullptr;
     Json view = Json::object();
     copyFields(view,wait,{"id","reason","decisionReason"});
@@ -127,7 +126,7 @@ Json eventView(const Json& event) {
     const auto kind = field(event,"kind");
     const auto& data = event.at("data");
     Json details = Json::object();
-    if (kind == "waiting") details = waitView(data);
+    if (kind == "waiting") details = browserWaitView(data);
     else if (kind == "request") copyFields(details,data,{"text","source","scheduleId","scheduledAt"});
     else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId"});
@@ -165,7 +164,7 @@ Json currentWait(const Json& task) {
     auto result = taskSummary(task);
     const auto& wait = task.at("wait");
     const auto env = field(task,"environmentId");
-    auto& view = result["wait"] = waitView(wait);
+    auto& view = result["wait"] = browserWaitView(wait);
     view["run"] = runView(wait.at("run"),env);
     if (view["run"].is_null()) view["run"] = runView(task.at("lastRun"),env);
     return result;
@@ -190,60 +189,39 @@ Json taskSessions(const Json& task) {
     return sessions;
 }
 
-// Store exposes a task cursor rather than separate queries for waits or Sessions.
-// Scan bounded batches to keep older, still-open waits visible behind newer requests.
-Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
-    Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
-    if (overview) {
-        result["waits"] = Json::array();
-        result["queued"] = Json::array();
-        result["activeSessions"] = Json::array();
-        result["presence"] = "idle";
-    }
-    auto& sessionTasks = result["sessionTasks"];
-    bool moreSessions = false;
+Json openActivity(Store& store, std::string_view bot) {
+    Json result = {{"waits",Json::array()},{"queued",Json::array()},
+                   {"activeSessions",Json::array()},{"presence","idle"}};
+    auto& presence = result["presence"];
+    Id cursor = 0;
     for (;;) {
-        const auto tasks = store.tasks(bot,cursor,taskBatch);
+        const auto tasks = store.openTasks(bot,cursor,taskBatch);
         for (const auto& task : tasks) {
             const auto id = task.at("id").get<Id>();
             const auto state = field(task,"state");
-            if (overview) {
-                auto& presence = result["presence"];
-                if (state == "waiting") {
-                    result["waits"].push_back(currentWait(task));
-                    if (presence != "working" && presence != "thinking") presence = "waiting";
-                } else if (state == "running" || state == "cancelling") presence = "working";
-                else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
-                if (state == "queued" && !task.at("blockedBy").is_null()) {
-                    auto queued = taskSummary(task);
-                    queued["blockedBy"] = taskSummary(task.at("blockedBy"));
-                    copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
-                    result["queued"].push_back(std::move(queued));
-                }
-                const auto& active = task.at("activeRun");
-                if (!active.is_null()) {
-                    result["activeSessions"].push_back({{"taskId",id},{"threadId",field(active,"threadId")},
-                        {"runId",field(active,"runId")},{"state",state}});
-                }
+            if (state == "waiting") {
+                result["waits"].push_back(currentWait(task));
+                if (presence != "working" && presence != "thinking") presence = "waiting";
+            } else if (state == "running" || state == "cancelling") presence = "working";
+            else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
+            if (state == "queued" && !task.at("blockedBy").is_null()) {
+                auto queued = taskSummary(task);
+                queued["blockedBy"] = taskSummary(task.at("blockedBy"));
+                copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
+                result["queued"].push_back(std::move(queued));
             }
-            if (task.at("runs").empty()) continue;
-            if (sessionTasks.size() < sessionsSize) {
-                auto group = taskSummary(task);
-                group["sessions"] = taskSessions(task);
-                sessionTasks.push_back(std::move(group));
-                result["sessionsBefore"] = id;
-            } else {
-                moreSessions = true;
-                if (!overview) return result;
+            const auto& active = task.at("activeRun");
+            if (!active.is_null()) {
+                result["activeSessions"].push_back({{"taskId",id},{"threadId",field(active,"threadId")},
+                    {"runId",field(active,"runId")},{"state",state}});
             }
         }
         if (tasks.size() < taskBatch) break;
         cursor = tasks.back().at("id").get<Id>();
     }
-    if (!moreSessions) result["sessionsBefore"] = 0;
     return result;
 }
-} // namespace
+}
 
 Json botList(Store& store, const Json& bots) {
     auto result = Json::array();
@@ -269,14 +247,27 @@ Json conversation(Store& store, std::string_view bot, Id before) {
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
-    return activity(store,bot,before,false);
+    auto tasks = store.tasksWithRuns(bot,before,sessionsSize + 1);
+    Id next = 0;
+    if (tasks.size() > sessionsSize) {
+        tasks.erase(tasks.end() - 1);
+        next = tasks.back().at("id").get<Id>();
+    }
+    auto groups = Json::array();
+    for (const auto& task : tasks) {
+        auto group = taskSummary(task);
+        group["sessions"] = taskSessions(task);
+        groups.push_back(std::move(group));
+    }
+    return {{"sessionTasks",std::move(groups)},{"sessionsBefore",next}};
 }
 
 Json botView(Store& store, const Json& bot) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0);
-    result.update(activity(store,id,0,true));
+    result.update(openActivity(store,id));
+    result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
     return result;
 }
-} // namespace flockv0::web
+}

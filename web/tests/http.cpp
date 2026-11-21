@@ -264,7 +264,7 @@ void exercise(const std::filesystem::path& path) {
     check(!olderSessions["sessionTasks"].empty() && olderSessions["sessionTasks"].front()["id"].get<Id>() < sessionCursor,
           "session page duplicated newer tasks");
 }
-} // namespace
+}
 
 int main() {
     try { TestDirectory directory; exercise(directory.path / "state.db"); }

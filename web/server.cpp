@@ -205,7 +205,6 @@ private:
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
                 catch (const std::exception&) { return error(res,422,"intake_settings"); }
-                // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
                 intake.scheduleId.clear();
@@ -229,9 +228,9 @@ private:
     std::thread worker_;
     unsigned port_ = 0;
 };
-} // namespace
+}
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
     return std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
 }
-} // namespace flockv0
+}

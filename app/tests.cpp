@@ -286,7 +286,7 @@ void acceptanceRunner() {
     }
     check(count == 6,"six trial rows were not recorded");
 }
-} // namespace
+}
 
 int main() {
     try {

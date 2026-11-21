@@ -100,7 +100,6 @@ class T3 {
 public:
     virtual ~T3() = default;
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
-    // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
     virtual Delivery send(const Command&) = 0;
     virtual Delivery reconcile(const Command&) = 0;
@@ -122,14 +121,18 @@ public:
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
     Json task(Id taskId) const;
+    bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
+    Json openTasks(std::string_view botId, Id before, unsigned limit) const;
+    Json tasksWithRuns(std::string_view botId, Id before, unsigned limit) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
     const std::filesystem::path& path() const;
 
 private:
+    Json taskPage(const char* query, const Json& parameters) const;
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;
@@ -155,4 +158,4 @@ private:
     struct Impl;
     std::unique_ptr<Impl> p_;
 };
-} // namespace flockv0
+}

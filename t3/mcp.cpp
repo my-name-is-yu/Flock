@@ -81,7 +81,7 @@ Json rpcResponse(const HttpResponse& response, unsigned id) {
         invalidResponse();
     return std::move(message["result"]);
 }
-} // namespace
+}
 
 std::string trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -251,4 +251,4 @@ Json Client::call(std::string_view tool, Json arguments) {
     if (!data.is_object()) invalidResponse();
     return data;
 }
-} // namespace flockv0::t3detail
+}

@@ -339,13 +339,33 @@ Json Store::task(Id id) const {
     return result;
 }
 
-Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
+bool Store::hasTask(Id id) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query("SELECT id FROM tasks WHERE (?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
-                          {bot,bot,before,before,std::clamp(limit,1u,200u)});
+    return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
+}
+
+Json Store::taskPage(const char* query, const Json& parameters) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(query,parameters);
     Json result = Json::array();
     while (rows.next()) result.push_back(task(rows.number(0)));
     return result;
+}
+
+Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
+    return taskPage("SELECT id FROM tasks WHERE (?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
+                    {bot,bot,before,before,std::clamp(limit,1u,200u)});
+}
+
+Json Store::openTasks(std::string_view bot, Id before, unsigned limit) const {
+    return taskPage("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?) AND state NOT IN ('completed','cancelled')"
+                    " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
+}
+
+Json Store::tasksWithRuns(std::string_view bot, Id before, unsigned limit) const {
+    return taskPage("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
+                    " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
+                    " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
 }
 
 namespace {
@@ -374,4 +394,4 @@ ORDER BY journal.id DESC LIMIT ?)SQL", {bot,before,before,std::clamp(limit,1u,20
     std::reverse(result.begin(),result.end());
     return result;
 }
-} // namespace flockv0
+}

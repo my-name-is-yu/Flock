@@ -19,7 +19,7 @@ extern char** environ;
 
 namespace flockv0::app {
 namespace {
-constexpr int credentialLock = 9;
+constexpr int childCredentialLock = 9;
 constexpr std::size_t maxTransport = 8 * 1024 * 1024;
 
 class Descriptor {
@@ -135,16 +135,18 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
 #endif
     // Use source descriptors outside the child targets so the order of dup2
     // calls cannot replace one source with another.
-    Descriptor transport(fcntl(childSocket.get(), F_DUPFD_CLOEXEC, 10));
-    Descriptor childLock(fcntl(lock.get(), F_DUPFD_CLOEXEC, 10));
+    const int firstSourceDescriptor = childCredentialLock + 1;
+    Descriptor transport(fcntl(childSocket.get(), F_DUPFD_CLOEXEC, firstSourceDescriptor));
+    Descriptor childLock(fcntl(lock.get(), F_DUPFD_CLOEXEC, firstSourceDescriptor));
     if (transport.get() < 0 || childLock.get() < 0)
         throw ModelError("Unable to configure the local ChatGPT channel", true);
     SpawnActions actions;
     actions.duplicate(transport.get(), STDIN_FILENO);
     actions.duplicate(transport.get(), STDOUT_FILENO);
-    actions.duplicate(childLock.get(), credentialLock);
+    actions.duplicate(childLock.get(), childCredentialLock);
     std::string node = "node", script = FLOCK_CHATGPT_BRIDGE, action(operation), path = directory.string();
-    char* args[] = {node.data(), script.data(), action.data(), path.data(), nullptr};
+    auto lockArgument = std::to_string(childCredentialLock);
+    char* args[] = {node.data(), script.data(), action.data(), path.data(), lockArgument.data(), nullptr};
     SpawnAttributes attributes;
     std::vector<char*> environment;
     for (auto entry = environ; *entry; ++entry) {
@@ -244,7 +246,7 @@ Json toolSchema(const std::string& name, bool initial) {
 bool nonblank(const std::string& value) {
     return value.find_first_not_of(" \t\r\n") != std::string::npos;
 }
-} // namespace
+}
 
 ChatGPTModel::ChatGPTModel(std::filesystem::path directory) : directory_(std::move(directory)) {}
 
@@ -378,4 +380,4 @@ bool runModelAcceptance(Model& model, const std::string& slug, std::ostream& out
     }
     return passed;
 }
-} // namespace flockv0::app
+}

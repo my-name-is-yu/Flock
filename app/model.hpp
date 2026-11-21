@@ -20,4 +20,4 @@ private:
 Json responseRequest(const ModelInput&);
 Decision responseDecision(const Json& output, const std::vector<std::string>& allowed);
 bool runModelAcceptance(Model&, const std::string& slug, std::ostream&);
-} // namespace flockv0::app
+}

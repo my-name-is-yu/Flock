@@ -28,18 +28,16 @@ class DemoModel final : public Model {
 class DemoT3 final : public T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "fixed-demo"; }
 
-    RunRef run(const Command& command) {
+    RunRef runForAction(const Command& command) {
         return {"demo-thread-" + command.actionId,"demo-run-" + command.actionId,""};
     }
 
     Delivery send(const Command& command) override {
-        return {Delivery::Kind::Accepted,run(command),""};
+        return {Delivery::Kind::Accepted,runForAction(command),""};
     }
 
     Delivery reconcile(const Command& command) override {
-        const auto reference = run(command);
-        // The demo Run is a pure function of the previously persisted action.
-        return {Delivery::Kind::Accepted,reference,""};
+        return {Delivery::Kind::Accepted,runForAction(command),""};
     }
 
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
@@ -54,8 +52,8 @@ class DemoT3 final : public T3 {
 
     void interrupt(const std::string&, const Json&, const RunRef&) override {}
 };
-} // namespace
+}
 
 std::unique_ptr<Model> makeDemoModel() { return std::make_unique<DemoModel>(); }
 std::unique_ptr<T3> makeDemoT3() { return std::make_unique<DemoT3>(); }
-} // namespace flockv0::app
+}
