@@ -79,6 +79,9 @@ struct Observation {
     bool settled = false; // True on Finished only after delegated work has settled.
     std::string detail;
 };
+inline constexpr std::size_t maxSessionPromptBytes = 120000;
+std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
+
 struct Command {
     std::string actionId, tool, environmentId, projectId, instruction, authGeneration;
     Json config = Json::object(), answers = Json::object();

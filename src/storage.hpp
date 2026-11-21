@@ -79,7 +79,8 @@ struct Store::Impl {
     void clearWait(Json&, std::string_view resolution);
     void consumeEvent(const Json&);
     Json outbox(const Json&) const;
-    Json sessionInstructions(const Json& task, std::string_view intent, const Json& pending) const;
+    Json sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
+                             std::size_t availableBytes = maxSessionPromptBytes) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
 

@@ -1440,6 +1440,39 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
           "the queued Task did not retain its route through restart");
 }
 
+void resumedBacklogFitsOneT3Command() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing("Measure the reference dataset"));
+    f.reach(old,"running");
+    const auto add = [&](Id task, const std::string& prefix, int number) {
+        const auto tag = prefix + std::to_string(number);
+        const auto text = tag + " " + std::string(11900,'x');
+        f.script(text,target("append_instruction",task));
+        f.receive(tag,text);
+        return text;
+    };
+    for (int i = 0; i < 6; ++i) add(old,"old supplement ",i);
+    f.store->operate(old,0,"cancel");
+    f.t3.finish("run-1","Stopped");
+    f.reach(old,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(old))
+        if (row.at("kind") == "cancelled") anchor = row.at("id");
+    constexpr auto request = "Resume measuring the reference dataset";
+    f.script(request,{{"kind","create_task"},{"resultMessageId",anchor},{"resume",true}});
+    f.receive("resume",request,anchor);
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    std::vector<std::string> accepted;
+    for (int i = 0; i < 5; ++i) accepted.push_back(add(next,"new supplement ",i));
+    f.reach(next,"running");
+    const auto& command = f.t3.sent.back();
+    check(sessionPrompt(command.actionId,command.instruction).size() <= 120000 &&
+          command.instruction.find("old supplement 5") != std::string::npos,
+          "the resumed command exceeded T3's limit or dropped the most recent inherited direction");
+    for (const auto& text : accepted)
+        check(command.instruction.find(text) != std::string::npos,"the resumed command dropped an accepted direction");
+}
+
 void latestTargetPrecedesABatchedBacklog() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1652,6 +1685,7 @@ int main() {
         questionAnswerReachesTheBotBeforeContinuingWork();
         cloudDestinationWaitsForItsProject();
         queuedMoveWaitsForTheNewerDestinationOwner();
+        resumedBacklogFitsOneT3Command();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();
         unanchoredClarificationInheritsOriginatingBudget();

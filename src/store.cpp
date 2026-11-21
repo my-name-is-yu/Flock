@@ -47,6 +47,10 @@ std::string bounded(std::string_view text, std::size_t bytes) {
     while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0) == 0x80) --bytes;
     return std::string(text.substr(0, bytes));
 }
+std::string sessionPrompt(const std::string& actionId, const std::string& instruction) {
+    return "[Flock action " + actionId + "]\n\n" + instruction + "\n\n[/Flock action]";
+}
+
 std::string field(const Json& j, std::string_view key) {
     const auto found = j.find(key);
     return found != j.end() && found->is_string() ? found->get<std::string>() : std::string{};
@@ -297,7 +301,8 @@ std::string taskIntent(const Json& task) {
     return intent.empty() ? field(task,"request") : intent;
 }
 
-Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending) const {
+Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
+                                      std::size_t availableBytes) const {
     std::lock_guard lock(mutex);
     std::map<std::pair<Id,int>,Json> byMessage;
     std::size_t sourceBytes = 8192;
@@ -322,10 +327,11 @@ WHERE t.id=?
                 ((key == "criteria" || contract.number(3)) && contract.string(1) != criteria)) return;
         }
         const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
-        if (byMessage.contains(id) || bytes <= separatorBytes) return;
-        const auto text = bounded(field(item,"text"),bytes-separatorBytes);
+        if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
+        const auto text = bounded(field(item,"text"),std::min(bytes-separatorBytes,availableBytes-2));
         if (text.empty()) return;
         bytes -= text.size() + separatorBytes;
+        availableBytes -= text.size() + 2;
         item["text"] = text;
         if (auto source = item.find("source"); source != item.end()) {
             const auto excerpt = bounded(field(*source,"text"),sourceBytes);
@@ -358,7 +364,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
     const auto restart = task.find("restartContext");
     Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
     Id child = task.at("id");
-    while (parent) {
+    while (parent && availableBytes > 2) {
         auto row = query("SELECT json_extract(data,'$.restartContext.taskId'),"
                          "coalesce(json_extract(data,'$.cancelledInstructions'),'[]') FROM tasks WHERE id=? AND id<?",
                          {parent,child});
