@@ -6,6 +6,7 @@
 #include <array>
 #include <charconv>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -198,20 +199,20 @@ BotNotes Bots::notes(std::string_view id) const {
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {
-    std::vector<std::string> allowed;
-    try {
-        allowed = get(id).allowedBots;
-    } catch (const std::exception&) {
-        return {};
-    }
-    std::vector<PeerBot> result;
-    for (const auto& peerId : allowed) {
+    const auto tryGetConfiguredBot = [this](std::string_view botId) -> std::optional<Bot> {
         try {
-            const auto peer = get(peerId);
-            result.push_back({peer.name,peer.intake("")});
-        } catch (const std::exception&) {
-            // The peer can become unavailable while the sender is working.
+            return get(botId);
+        } catch (const Conflict&) {
+            return std::nullopt;
+        } catch (const std::filesystem::filesystem_error&) {
+            return std::nullopt;
         }
+    };
+    const auto sender = tryGetConfiguredBot(id);
+    if (!sender) return {};
+    std::vector<PeerBot> result;
+    for (const auto& peerId : sender->allowedBots) {
+        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake("")});
     }
     return result;
 }
