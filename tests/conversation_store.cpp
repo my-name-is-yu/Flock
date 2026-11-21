@@ -468,6 +468,7 @@ void implicitClarificationRequiresAnEligibleReply() {
     constexpr auto another = "Prepare the deployment";
     constexpr auto question = "Which hosting service should I use?";
     Id clarificationId = 0;
+    bool sawCompetingClarifications = false;
     const auto resolve = [](Id anchor) {
         auto decision = routing(Json::array({{{"kind","create_task"}}}),"resolved");
         if (anchor) decision.args["clarificationMessageId"] = anchor;
@@ -478,8 +479,11 @@ void implicitClarificationRequiresAnEligibleReply() {
         if (event.at("text") == original || event.at("text") == another)
             return route("clarify",{{"text",question}});
         if (event.at("text") == independent) return route("create_task");
+        if (event.at("text") == "Thanks for the update") return route("respond",{{"text","You're welcome."}});
         check(event.at("text") == answer,"Unexpected clarification fixture input");
         if (event.at("reply").at("kind") == "clarification") return resolve(0);
+        sawCompetingClarifications = event.at("multiplePendingClarifications") == true &&
+                                      event.at("pendingClarification").is_null();
         return resolve(clarificationId);
     };
     const auto send = [&](std::string_view key, std::string_view text, Id anchor = 0) {
@@ -498,10 +502,12 @@ void implicitClarificationRequiresAnEligibleReply() {
           tasks.front().at("runs").empty(),"Implicit resolution lost the original request or answer");
 
     const auto second = send("second",original).at("messageId").get<Id>();
+    for (int i = 0; i < 25; ++i) send("thanks-" + std::to_string(i),"Thanks for the update");
     const auto third = send("third",another).at("messageId").get<Id>();
-    clarificationId = second;
-    check(send("ambiguous",answer).at("route") == "clarify" && store.tasks("alpha") == tasks,
-          "An unanchored answer chose between competing clarifications");
+    clarificationId = third;
+    check(send("ambiguous",answer).at("route") == "clarify" && store.tasks("alpha") == tasks &&
+          sawCompetingClarifications,
+          "An unanchored answer chose the newer clarification while an older question was still open");
     if (store.clarifications("alpha").size() > 2) {
         const auto extra = store.clarifications("alpha").front().at("messageId").get<Id>();
         send("dismiss-ambiguous","dismiss this clarification",extra);

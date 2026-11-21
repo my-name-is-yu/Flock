@@ -310,6 +310,11 @@ std::optional<std::string_view> cancellationSubject(std::string_view text) {
     return std::nullopt;
 }
 
+bool taskReference(std::string_view subject) {
+    return oneOf(subject,{"the task","this task","that task","the current task",
+                          "この作業を","その作業を","今の作業を","作業を"});
+}
+
 bool wholeTaskSubject(std::string_view subject) {
     return oneOf(subject,{"","it","that","this","the task","this task","that task","the current task",
             "それ","それを","これ","これを","この作業を","その作業を","今の作業を","作業を","一旦","いったん"});
@@ -326,19 +331,45 @@ std::string_view cancellationName(std::string_view subject) {
     return name;
 }
 
+bool namesCancellationTarget(std::string_view subject, const Task& task) {
+    const auto name = cancellationName(subject);
+    return !name.empty() && name == normalize(trim(task.fullName));
+}
+
 bool groundedCancellation(std::string_view text, const Task& task, const Context& context,
                           Id selected) {
     const auto normal = normalize(text);
     const auto subject = cancellationSubject(normal);
     if (!subject) return false;
     const bool wholeTask = wholeTaskSubject(*subject);
-    const auto name = cancellationName(*subject);
     const auto matches = [&](const Task& candidate) {
-        return active(candidate) && name == normalize(trim(candidate.fullName));
+        return active(candidate) && namesCancellationTarget(*subject,candidate);
     };
     if (selected) return task.id == selected && (wholeTask || matches(task));
     if (matches(task) && std::ranges::count_if(context.tasks,matches) == 1) return true;
     return wholeTask && !context.moreTasks && std::ranges::count_if(context.tasks,active) == 1;
+}
+
+bool currentReplyTask(const Reply& reply, const Task& task) {
+    if (!active(task)) return false;
+    if (reply.kind == Reply::Kind::wait)
+        return reply.taskId == task.id && reply.waitId && reply.waitId == task.waitId;
+    return reply.kind == Reply::Kind::result && reply.result &&
+           reply.result->taskId == task.id && reply.result->revision == task.revision;
+}
+
+std::optional<Plan> replyCancellation(std::string_view text, const Context& context, const Task& task) {
+    const auto normal = normalize(text);
+    const auto subject = cancellationSubject(normal);
+    if (!subject) return std::nullopt;
+    if (currentReplyTask(context.reply,task) && (taskReference(*subject) || namesCancellationTarget(*subject,task)))
+        return single(text,CancelTask{target(task)});
+    if (taskReference(*subject) || std::ranges::any_of(context.tasks,[&](const Task& candidate) {
+            return namesCancellationTarget(*subject,candidate);
+        }))
+        return single(text,Respond{translate(japanese(text),"Open the active task to request its cancellation.",
+                                              "停止する作業を開いて、停止をリクエストしてください。"),std::nullopt});
+    return std::nullopt;
 }
 
 bool dismissesClarification(std::string_view text) {
@@ -756,7 +787,12 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     }
     if (kind == "cancel_task") {
         checkFields(route, {"kind","segment","taskId"});
-        require(anchor.kind != Reply::Kind::result && groundedCancellation(segment,*task,context,selected));
+        if (anchor.kind == Reply::Kind::result) {
+            const auto normal = normalize(segment);
+            const auto subject = cancellationSubject(normal);
+            require(currentReplyTask(anchor,*task) && subject &&
+                    (taskReference(*subject) || namesCancellationTarget(*subject,*task)));
+        } else require(groundedCancellation(segment,*task,context,selected));
         return CancelTask{target(*task)};
     }
 
@@ -942,9 +978,13 @@ bool explicitCancellation(std::string_view text) {
 
 bool namedTargetMatches(std::string_view text, const Context& context, Id targetId) {
     const auto normal = normalize(text);
+    const auto* selected = taskById(context,targetId);
+    const auto selectedName = selected ? normalize(selected->fullName) : std::string{};
     Id named = 0;
     for (const auto& task : context.tasks) {
-        if (!refersTo(normal,normalize(trim(task.fullName.substr(0,task.fullName.find('\n')))))) continue;
+        const auto name = normalize(task.fullName);
+        const auto firstLine = trim(std::string_view(name).substr(0,name.find('\n')));
+        if (!refersTo(normal,firstLine) || (!active(task) && trim(name) == trim(selectedName))) continue;
         if (named && named != task.id) return false;
         named = task.id;
     }
@@ -956,7 +996,14 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     const auto* task = taskById(context, reply.taskId);
     const bool ja = japanese(text);
     if (reply.kind == Reply::Kind::wait) {
-        if (task && active(*task) && reply.waitId && task->waitId == reply.waitId) {
+        if (task && currentReplyTask(reply,*task)) {
+            const auto answer = sentence(normalize(text));
+            const bool offered = std::ranges::any_of(task->waitChoices,[&](const auto& choice) {
+                return answer == normalize(trim(choice));
+            });
+            if (!offered) {
+                if (auto stop = replyCancellation(text,context,*task)) return stop;
+            }
             if (task->waitReason == "user_question" && text.size() <= 8000)
                 return single(text,AnswerWait{target(*task),std::string(text)});
             return single(text,Respond{translate(ja,"Use the available action on this waiting item.",
@@ -966,6 +1013,11 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
                                                      "Check the latest messages.",
                                                  "その質問の受付は終了しているため、どの依頼にも適用していません。"
                                                  "最新のメッセージを確認してください。"), std::nullopt});
+    }
+    if (reply.kind == Reply::Kind::result && reply.result) {
+        if (const auto* reported = taskById(context,reply.result->taskId)) {
+            if (auto stop = replyCancellation(text,context,*reported)) return stop;
+        }
     }
     if (reply.kind == Reply::Kind::invalid || (reply.kind == Reply::Kind::result && !reply.result)) {
         return single(text, Respond{translate(ja, "What you replied to has closed or isn't in this conversation, "

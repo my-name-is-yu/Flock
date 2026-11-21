@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS route_decisions(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   reply_id INTEGER NOT NULL UNIQUE REFERENCES journal(id),
   status TEXT NOT NULL, data TEXT NOT NULL, resolution_id INTEGER REFERENCES messages(id));
+CREATE INDEX IF NOT EXISTS route_decisions_awaiting ON route_decisions(message_id)
+  WHERE status='awaiting_resolution';
 CREATE TABLE IF NOT EXISTS route_candidates(
   message_id INTEGER NOT NULL REFERENCES route_decisions(message_id),
   task_id INTEGER NOT NULL REFERENCES tasks(id),
