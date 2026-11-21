@@ -520,6 +520,99 @@ void implicitClarificationRequiresAnEligibleReply() {
     check(execution.t3.launches == 0,"Clarification routing started a Run");
 }
 
+void explicitFactsReplaceResultClarificationAtomically() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto taskId = task(writer,"Compare results");
+    execution.finish(store,taskId,"1. Skip verification\n2. Verify the March build");
+    const auto result = store.latestTaskResult(taskId).at("id").get<Id>();
+    int interpreted = 0;
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (input.tools.front() == "route_conversation") {
+            if (event.at("text") != "yes" && event.at("text") != "no")
+                return route("answer_result",{{"resultMessageId",result},{"resultOption",2}});
+            auto plan = route("answer_result");
+            plan.args["resolution"] = "resolved";
+            return plan;
+        }
+        check(event.at("source").at("messageId") == result &&
+              event.at("source").at("text") == "2. Verify the March build","the answer lost its exact source");
+        const auto inputText = event.at("text").get<std::string>();
+        ++interpreted;
+        if (interpreted == 1)
+            return Decision{"clarify_conversation_result",{{"text","Do you have a March test run?"}},{}};
+        if (interpreted == 2) {
+            check(inputText.find("Do you have a March test run?") != std::string::npos && inputText.ends_with("yes"),
+                  "the explicit affirmative fact never reached the answer model");
+            return Decision{"clarify_conversation_result",{{"text","Did it use a different workload?"}},{}};
+        }
+        check(inputText.find("Did it use a different workload?") != std::string::npos && inputText.ends_with("no"),
+              "the explicit negative fact did not reach the newest clarification");
+        return Decision{"answer_conversation_result",{{"text","The March run can serve as evidence for the same workload."}},{}};
+    };
+    const auto send = [&](std::string_view key,std::string_view body,Id anchor) {
+        const auto message = receive(writer,key,body,anchor);
+        execution.runtime.routeConversation();
+        return reply(store,message);
+    };
+    const auto question = send("first","Explain option 2",result);
+    check(question["route"] == "clarify" && store.clarifications("alpha").size() == 1,
+          "the initial result clarification was not saved");
+    const auto next = send("affirmative","yes",question.at("messageId"));
+    const auto pending = store.clarifications("alpha");
+    check(next["route"] == "clarify" && pending.size() == 1 && pending.front()["messageId"] == next["messageId"] &&
+          pending.front()["source"]["messageId"] == result,"a follow-up left the previous clarification open");
+    const auto resolved = send("negative","no",next.at("messageId"));
+    check(resolved["route"] == "respond" && store.clarifications("alpha").empty() &&
+          interpreted == 3 && store.tasks("alpha").size() == 1,"the result clarification applied a work action or retained a hold");
+}
+
+void followUpsKeepThePriorResult() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto original = task(writer,"Original report");
+    execution.finish(store,original,"1. Ignore samples\n" + std::string(3800,'x') + "\n2. Use paired observations");
+    const auto sourceId = store.latestTaskResult(original).at("id").get<Id>();
+    const auto unrelated = task(writer,"Unrelated report");
+    execution.finish(store,unrelated,"1. Compare earlier dates\n2. Discard the baseline");
+    const auto unrelatedId = store.latestTaskResult(unrelated).at("id").get<Id>();
+    execution.model.conversation = [&](const ModelInput& input) {
+        if (input.tools.front() == "answer_conversation_result") {
+            check(input.event.at("source").at("text") == "2. Use paired observations","the selected old report was truncated");
+            return Decision{"answer_conversation_result",{{"text","Pair the observations from the two runs."}},{}};
+        }
+        const auto& text = input.event.at("text");
+        if (text == "Explain option 2") return route("answer_result",{{"resultMessageId",sourceId}});
+        if (text == "案2以外を実装") return route("create_task",{{"resultMessageId",sourceId},{"resultOption",2}});
+        if (text == "案2を適用して") return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",2}});
+        return route("create_task");
+    };
+    const auto send = [&](std::string_view key,std::string_view body,Id anchor = 0) {
+        const auto message = receive(writer,key,body,anchor);
+        execution.runtime.routeConversation();
+        return reply(store,message);
+    };
+    const auto answer = send("explain","Explain option 2",sourceId);
+    check(answer["route"] == "respond" && answer["source"]["option"] == 2,"the Bot answer dropped its selection");
+    const auto selected = send("selected","案2を実装");
+    check(selected["route"] == "create_task" && selected["source"]["messageId"] == sourceId &&
+          store.tasks("alpha").front()["sourceResultRefs"][0]["text"] == "2. Use paired observations",
+          "the follow-up ignored the previous answer's report");
+    send("explain-again","Explain option 2",sourceId);
+    const auto deictic = send("deictic","それを実装して");
+    check(deictic["route"] == "create_task" && deictic["source"]["messageId"] == sourceId,
+          "the deictic follow-up lost the cited result");
+    const auto count = store.tasks("alpha").size();
+    check(send("exclude","案2以外を実装",sourceId)["route"] == "clarify" &&
+          send("ambiguous","案2を適用して")["route"] == "clarify" && store.tasks("alpha").size() == count,
+          "an excluded or unrelated option created work");
+    check(send("count","改善提案2件をまとめて")["route"] == "create_task" && store.tasks("alpha").size() == count + 1,
+          "a proposal count was treated as a selected option");
+}
+
 void longResultOptionsStayAvailable() {
     for (const auto paddingSize : {3000, 3500}) {
         Fixture fixture;
@@ -712,6 +805,19 @@ INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","so
     const auto queued = store.task(2);
     check(queued.at("revisions").empty() && queued.at("state") == "queued",
           "Migration changed queued legacy work before its criteria were set");
+    {
+        sqlite3* oldReader = nullptr;
+        check(sqlite3_open_v2(fixture.database().c_str(),&oldReader,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
+              "Could not open migrated data with the legacy reader");
+        unsigned rows = 0;
+        const int oldQuery = sqlite3_exec(oldReader,
+            "SELECT journal.id FROM journal JOIN tasks ON tasks.id=task_id WHERE bot_id='alpha' "
+            "AND kind IN ('request','report','completed') ORDER BY journal.id DESC",
+            [](void* count,int,char**,char**) { ++*static_cast<unsigned*>(count); return 0; },
+            &rows,nullptr);
+        sqlite3_close(oldReader);
+        check(oldQuery == SQLITE_OK && rows == 3,"Migration broke the old unqualified Bot conversation query");
+    }
     const auto latest = store.latestTaskResult(1);
     check(latest.at("id") == 9 && latest.at("data").at("text") == "Proposed two approaches",
           "The original completion disappeared from the migrated task");
@@ -754,6 +860,8 @@ int main() {
         clarificationKeepsTheUserInstruction();
         implicitClarificationRequiresAnEligibleReply();
         longResultOptionsStayAvailable();
+        explicitFactsReplaceResultClarificationAtomically();
+        followUpsKeepThePriorResult();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
         legacyHistory();

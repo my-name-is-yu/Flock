@@ -44,30 +44,34 @@ bool japanese(std::string_view text) {
 
 void Store::Impl::migrateConversation() {
     Transaction transaction(db);
-    bool journalHasBot = false;
+    bool journalHasBot = false, unshippedColumn = false;
     {
         auto columns = query("PRAGMA table_info(journal)");
-        while (columns.next()) journalHasBot |= columns.string(1) == "bot_id";
+        while (columns.next()) {
+            journalHasBot |= columns.string(1) == "conversation_bot_id";
+            unshippedColumn |= columns.string(1) == "bot_id";
+        }
     }
     const auto schema = [&](const char* sql) {
         if (sqlite3_exec(db,sql,nullptr,nullptr,nullptr) != SQLITE_OK)
             throw std::runtime_error(sqlite3_errmsg(db));
     };
-    if (!journalHasBot) {
+    if (unshippedColumn) schema("ALTER TABLE journal RENAME COLUMN bot_id TO conversation_bot_id");
+    else if (!journalHasBot) {
         schema(R"SQL(
 ALTER TABLE journal RENAME TO legacy_journal;
 CREATE TABLE journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
-  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, bot_id TEXT,
-  CHECK(task_id IS NOT NULL OR bot_id IS NOT NULL));
+  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 INSERT INTO journal(id,task_id,time,kind,data) SELECT id,task_id,time,kind,data FROM legacy_journal;
 DROP TABLE legacy_journal;
 CREATE INDEX journal_task ON journal(task_id,id);
 )SQL");
     }
     schema(R"SQL(
-CREATE INDEX IF NOT EXISTS journal_bot ON journal(bot_id,id) WHERE bot_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS journal_pending_route ON journal(bot_id,id)
+CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS journal_pending_route ON journal(conversation_bot_id,id)
 WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
@@ -161,13 +165,10 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 
 bool Store::Impl::completionHeld(const Json& task) const {
     auto row = query(R"SQL(
-SELECT 1 WHERE EXISTS(
-  SELECT 1 FROM journal j WHERE j.bot_id=? AND j.kind='conversation_message'
-    AND json_extract(j.data,'$.status') IS NULL)
-OR EXISTS(
-  SELECT 1 FROM route_candidates c JOIN route_decisions r ON r.message_id=c.message_id
-  WHERE c.task_id=? AND r.status='awaiting_resolution')
-)SQL",{task["botId"],task["id"]});
+SELECT 1 FROM route_candidates c JOIN route_decisions r ON r.message_id=c.message_id
+WHERE c.task_id=? AND r.status='awaiting_resolution'
+AND json_extract(r.data,'$.operation') IN ('cancel_task','revise_task','destination')
+)SQL",{task["id"]});
     return row.next();
 }
 
@@ -192,7 +193,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
         if (existing) receipt = *existing;
         else {
             const auto now = unixTime();
-            p_->exec("INSERT INTO journal(time,kind,data,bot_id) VALUES(?,'conversation_message','{}',?)",
+            p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {now,routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
@@ -212,9 +213,9 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit) const {
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
-SELECT j.bot_id,min(j.id) FROM journal j
+SELECT j.conversation_bot_id,min(j.id) FROM journal j
 WHERE j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
-GROUP BY j.bot_id ORDER BY min(j.id) LIMIT ?
+GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
 )SQL",{limit});
     std::vector<std::pair<std::string,Id>> result;
     while (next.next()) result.emplace_back(next.string(0),next.number(1));
@@ -230,7 +231,7 @@ Result resultRow(const Statement& row) {
     result.revision = integer(data,"revisionId");
     result.taskName = bounded(row.string(2),800);
     result.state = row.string(3);
-    result.text = bounded(field(data,row.string(5) == "report" ? "report" : "text"),resultSize);
+    result.text = field(data,row.string(5) == "report" ? "report" : "text");
     if (row.string(5) == "report") {
         result.provenance = {{"environmentId",field(data,"environmentId")},
             {"threadId",data.contains("run") ? field(data["run"],"threadId") : ""},
@@ -275,19 +276,22 @@ std::set<std::string> explicitNames(std::string_view text) {
 
 Json sourceRef(const Result& result) {
     Json source = {{"taskId",result.taskId},{"messageId",result.messageId},
-                   {"revisionId",result.revision},{"text",result.text}};
+                   {"revisionId",result.revision},{"text",bounded(result.text,resultSize)},{"option",result.option}};
     if (!result.provenance.is_null()) source["run"] = result.provenance;
     return source;
 }
 
 std::string verifiedEnvironment(const Json& task, const Json& routing, std::string_view environment) {
     if (environment.empty()) return {};
-    if (environment == field(task,"environmentId")) return std::string(environment);
+    if (environment == field(task,"environmentId") || environment == field(routing,"environmentId"))
+        return std::string(environment);
     const auto& config = task["projectId"] == routing["projectId"] ? routing.at("config") : task.at("config");
     if (!config.is_object()) return {};
     const auto aliases = config.find("conversationEnvironments");
     if (aliases == config.end() || !aliases->is_object()) return {};
-    const auto id = field(*aliases,environment);
+    auto id = field(*aliases,environment);
+    if (id.empty() && std::ranges::any_of(*aliases,[&](const Json& value) { return value == environment; }))
+        id = environment;
     constexpr auto valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.";
     if (id.empty() || id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
     return id;
@@ -311,10 +315,24 @@ ORDER BY id DESC LIMIT ?
 Context Store::Impl::routeContext(std::string_view bot, Id id, std::string_view text,
                                   Id replyTo, const Json& routing) {
     Context context;
+    const auto addDestination = [&](const std::string& label, const std::string& id) {
+        if (label.empty() || id.empty() || context.destinationIds.contains(label)) return;
+        context.destinationIds[label] = id;
+        context.environments.push_back(label);
+    };
+    const auto initial = field(routing,"environmentId");
+    addDestination(initial,initial);
     const auto& config = routing.at("config");
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
-        for (auto alias = aliases->begin(); alias != aliases->end() && context.environments.size() < 12; ++alias)
-            if (alias->is_string() && alias.key().size() <= 120) context.environments.push_back(alias.key());
+        for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
+            const auto canonical = verifiedEnvironment(routing,routing,alias.key());
+            addDestination(alias.key(),canonical);
+        }
+        for (const auto& alias : *aliases)
+            if (alias.is_string()) {
+                const auto id = alias.get<std::string>();
+                addDestination(id,verifiedEnvironment(routing,routing,id));
+            }
     }
 
     constexpr auto taskQuery = R"SQL(
@@ -331,7 +349,8 @@ FROM tasks WHERE bot_id=?
         const auto wait = row.string(8).empty() ? Json(nullptr) : row.json(8);
         conversation::Task task;
         task.id = taskId;
-        task.name = bounded(row.string(3),800);
+        task.fullName = row.string(3);
+        task.name = bounded(task.fullName,800);
         task.intent = bounded(row.string(4),1000);
         if (task.intent.empty()) task.intent = task.name;
         task.state = row.string(1);
@@ -400,18 +419,28 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
         auto row = query(sql.c_str(),{bot,sourceId,id});
         if (!row.next()) return std::nullopt;
         auto result = resultRow(row);
-        if (!field(excerpt,"text").empty()) result.text = bounded(field(excerpt,"text"),resultSize);
+        if (!excerpt.is_null()) {
+            if (integer(excerpt,"taskId") != result.taskId || integer(excerpt,"revisionId") != result.revision)
+                return std::nullopt;
+            const auto selected = field(excerpt,"text");
+            if (!selected.empty()) {
+                if (result.text.find(selected) == std::string::npos) return std::nullopt;
+                result.text = selected;
+                result.option = static_cast<int>(integer(excerpt,"option"));
+            }
+        }
         rememberTaskId(result.taskId);
         return result;
     };
     constexpr auto clarificationCandidates = R"SQL(
-SELECT json_extract(candidate.value,'$.taskId'),json_extract(candidate.value,'$.request')
-FROM route_decisions r, json_each(r.data,'$.candidates') candidate WHERE r.message_id=? LIMIT ?
+SELECT t.id,json_extract(t.data,'$.request')
+FROM route_decisions r, json_each(r.data,'$.candidates') candidate
+JOIN tasks t ON t.id=json_extract(candidate.value,'$.taskId') WHERE r.message_id=? LIMIT ?
 )SQL";
     const auto readClarification = [&](Id reply) -> std::optional<Reply> {
         auto row = query(R"SQL(
 SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
-       json_extract(r.data,'$.segments[0].text')
+       json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation')
 FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
 WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
 )SQL",{reply,bot,id});
@@ -420,6 +449,7 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         pending.kind = Reply::Kind::clarification;
         pending.id = reply;
         pending.originalText = row.string(1);
+        pending.operation = row.string(5);
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
         if (const auto source = data.find("source"); source != data.end()) {
@@ -459,7 +489,7 @@ WHERE t.bot_id=? AND j.id=? AND j.kind='waiting'
                 rememberTaskId(context.reply.taskId);
             } else {
                 Id sourceId = replyTo;
-                auto prior = query("SELECT data FROM journal WHERE bot_id=? AND id=? AND kind='conversation_reply'",
+                auto prior = query("SELECT data FROM journal WHERE conversation_bot_id=? AND id=? AND kind='conversation_reply'",
                                    {bot,replyTo});
                 Json priorSource = nullptr;
                 if (prior.next()) {
@@ -595,7 +625,6 @@ std::string_view routeName(const Action& action) {
         [](const AppendInstruction&) { return "append_instruction"; },
         [](const ReviseTask&) { return "revise_task"; },
         [](const AnswerWait&) { return "answer_wait"; },
-        [](const GrantOne&) { return "resolve_wait"; },
         [](const CancelTask&) { return "cancel_task"; },
         [](const Clarify&) { return "clarify"; }
     },action);
@@ -637,7 +666,7 @@ bool knownSource(const Context& context, const Result& result) {
 
 bool expiredWait(const Plan& plan, const Context& context) {
     return std::ranges::any_of(plan.routes,[&](const Route& route) {
-        if (!std::holds_alternative<AnswerWait>(route.action) && !std::holds_alternative<GrantOne>(route.action))
+        if (!std::holds_alternative<AnswerWait>(route.action))
             return false;
         const auto& target = *targetOf(route.action);
         const auto task = candidate(context,target.taskId);
@@ -658,7 +687,7 @@ SELECT m.reply_to,m.sequence,m.bot_id,m.text,m.routing,
 FROM messages m JOIN journal j ON j.id=m.id
 WHERE m.id=? AND j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
 AND NOT EXISTS (
-  SELECT 1 FROM journal prior WHERE prior.bot_id=m.bot_id AND prior.id<m.id
+  SELECT 1 FROM journal prior WHERE prior.conversation_bot_id=m.bot_id AND prior.id<m.id
   AND prior.kind='conversation_message' AND json_extract(prior.data,'$.status') IS NULL)
 )SQL",{id});
         if (!row.next()) return std::nullopt;
@@ -714,7 +743,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     const auto& routes = plan.routes;
     Json segments = Json::array(), candidates = Json::array();
     std::set<Id> candidateIds, modificationTargets;
-    std::string response;
+    std::string response, clarificationOperation;
     Json replySource = nullptr;
     std::string status = "done";
     Id linkedTask = 0;
@@ -740,6 +769,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             clarify = true;
             addLine(question->question);
             candidateIds.insert(question->candidates.begin(),question->candidates.end());
+            clarificationOperation = question->operation;
             segment["candidates"] = question->candidates;
         }
         segments.push_back(std::move(segment));
@@ -758,6 +788,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                 return false;
             }
             if (source && !terminal(load(source->taskId))) return false;
+            if (!creation->environment.empty() && verifiedEnvironment(routing,routing,creation->environment).empty())
+                return false;
         }
         const auto target = targetOf(action);
         if (!target) return true;
@@ -769,17 +801,20 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             integer(task,"currentRevision") != target->revision || integer(wait,"id") != target->waitId)
             return false;
         if (std::holds_alternative<Status>(action)) return true;
+        if ((std::holds_alternative<AppendInstruction>(action) || std::holds_alternative<ReviseTask>(action)) &&
+            !namedTargetMatches(route.segment,context,target->taskId)) return false;
         if (terminal(task) || task["state"] == "cancelling" || !modificationTargets.insert(target->taskId).second)
             return false;
         if (std::holds_alternative<CancelTask>(action) && !explicitCancellation(route.segment)) return false;
         if (source && (source->taskId != target->taskId || source->revision != target->revision))
             return false;
         if (const auto answer = std::get_if<AnswerWait>(&action)) {
+            if (wait.value("run",Json(nullptr)) != task.value("activeRun",Json(nullptr)) ||
+                integer(wait,"eventId") != integer(task,"eventId")) return false;
             if (!hasText(answer->answer) || answer->answer.size() > 8000 || field(wait,"reason") != "user_question")
                 return false;
         }
-        if (std::holds_alternative<GrantOne>(action) && field(wait,"reason") != "budget") return false;
-        if (std::holds_alternative<AnswerWait>(action) || std::holds_alternative<GrantOne>(action)) {
+        if (std::holds_alternative<AnswerWait>(action)) {
             const bool anchored = replyTo && context.reply.kind == Reply::Kind::wait &&
                                   context.reply.taskId == target->taskId && context.reply.waitId == target->waitId;
             if (task["state"] != "waiting" || !target->waitId ||
@@ -788,8 +823,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             if (resolving && (clarification->incompleteWaitsAtIntake ||
                 std::ranges::find(clarification->waitsAtIntake,originalWait) == clarification->waitsAtIntake.end()))
                 return false;
-            if (std::holds_alternative<GrantOne>(action) && !explicitBudgetGrant(route.segment) &&
-                !(anchored && budgetConfirmation(route.segment))) return false;
+
         }
         if (const auto revision = std::get_if<ReviseTask>(&action)) {
             if (!revision->environment.empty() && verifiedEnvironment(task,routing,revision->environment).empty()) {
@@ -839,7 +873,13 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                           environment != field(task,"environmentId") || task.value("replanning",false);
         }
         Json pending = {{"messageId",id},{"text",instruction},{"revisionId",revision},{"conflicting",conflicting}};
-        if (source) pending["source"] = sourceRef(*source);
+        if (source) {
+            pending["source"] = sourceRef(*source);
+            auto& references = task["sourceResultRefs"];
+            if (references.is_null()) references = Json::array();
+            if (std::ranges::find(references,pending["source"]) == references.end())
+                references.push_back(pending["source"]);
+        }
         if (!environment.empty()) {
             pending["environmentId"] = environment;
             if (conflicting) task["pendingEnvironmentId"] = environment;
@@ -868,8 +908,36 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                 [&](const Respond& item) { addLine(item.text); },
                 [&](const Status& item) { addLine(item.text); },
                 [&](const CreateTask& item) {
-                    linkedTask = submit({bot,item.request,field(routing,"environmentId"),field(routing,"projectId"),
+                    const auto environment = item.environment.empty() ? field(routing,"environmentId")
+                        : verifiedEnvironment(routing,routing,item.environment);
+                    linkedTask = submit({bot,item.request,environment,field(routing,"projectId"),
                                          routing.at("config"),{},0},id,item.source ? sourceRef(*item.source) : Json(nullptr));
+                    if (item.source && item.source->state == "cancelled") {
+                        const auto prior = load(item.source->taskId);
+                        auto task = load(linkedTask);
+                        if (const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen")); !criteria.empty())
+                            task["requestedDoneWhen"] = criteria;
+                        task["restartContext"] = {{"intent",prior.value("intent",prior.at("request"))},
+                                                  {"taskId",item.source->taskId},
+                                                  {"pendingInstructions",prior.value("cancelledInstructions",Json::array())}};
+                        auto rows = query(R"SQL(
+SELECT entry.value FROM outbox, json_each(outbox.data,'$.instructions') entry
+WHERE outbox.task_id=? AND outbox.phase='accepted'
+ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
+)SQL",{item.source->taskId});
+                        auto earlier = Json::array();
+                        std::size_t remaining = 8000;
+                        while (remaining && rows.next()) {
+                            auto instruction = rows.json(0);
+                            instruction["text"] = bounded(field(instruction,"text"),remaining);
+                            remaining -= field(instruction,"text").size();
+                            earlier.push_back(std::move(instruction));
+                        }
+                        std::reverse(earlier.begin(),earlier.end());
+                        auto& instructions = task["restartContext"]["pendingInstructions"];
+                        instructions.insert(instructions.begin(),earlier.begin(),earlier.end());
+                        save(task);
+                    }
                     segments[index]["effectTaskId"] = linkedTask;
                     status = "working";
                     addLine(item.source ? (ja ? "元の作業を参照して、新しい作業として受け付けました。"
@@ -883,13 +951,6 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                     linkedTask = item.target.taskId;
                     status = "working";
                     addLine(ja ? "質問への回答を受け付けました。" : "I saved your answer to the question.");
-                },
-                [&](const GrantOne& item) {
-                    operate(item.target.taskId,item.target.waitId,"approve",Json::object(),true);
-                    linkedTask = item.target.taskId;
-                    status = "working";
-                    segments[index]["amount"] = 1;
-                    addLine(ja ? "追加作業を1回分受け付けました。" : "I added one additional run for this task.");
                 },
                 [&](const CancelTask& item) {
                     operate(item.target.taskId,0,"cancel",Json::object(),true);
@@ -918,7 +979,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     }
     const auto* question = routes.size() == 1 ? std::get_if<Clarify>(&routes.front().action) : nullptr;
     const bool resultQuestion = question && question->source && knownSource(context,*question->source);
-    if (clarification && (!clarify || (resultQuestion && clarification->result))) {
+    if (clarification && (!clarify || (resultQuestion && clarification->result &&
+                                        sameSource(*question->source,*clarification->result)))) {
         exec("UPDATE route_decisions SET status=?,resolution_id=? WHERE reply_id=? AND status='awaiting_resolution'",
              {clarify || plan.resolution->kind == Resolution::Kind::superseded ? "superseded" : "resolved",
               id,plan.resolution->replyId});
@@ -927,18 +989,19 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
 
     const std::string_view route = clarify ? "clarify" : routes.size() == 1 ? routeName(routes.front().action) : "compound";
     const auto replyStatus = clarify ? "awaiting_resolution" : "applied";
-    exec("INSERT INTO journal(task_id,time,kind,data,bot_id) VALUES(?,?,'conversation_reply','{}',?)",
+    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linkedTask ? Json(linkedTask) : Json(nullptr),unixTime(),bot});
     const auto reply = last();
     Json answer = {{"messageId",reply},{"replyToMessageId",id},{"text",response},{"route",route},{"status",status}};
     if (!candidates.empty()) answer["candidates"] = candidates;
+    if (clarificationOperation == "destination") answer["destinations"] = context.environments;
     if (!replySource.is_null() && (!clarify || resultQuestion)) answer["source"] = replySource;
     exec("UPDATE journal SET data=? WHERE id=?", {answer,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?", {linkedTask ? Json(linkedTask) : Json(nullptr),
         Json{{"status",status}},id});
     exec("INSERT INTO route_decisions(message_id,reply_id,status,data) VALUES(?,?,?,?)",
          {id,reply,replyStatus,Json{{"sequence",sequence},{"inboxWatermark",watermark},
-                                    {"segments",segments},{"candidates",candidates}}});
+                                    {"segments",segments},{"candidates",candidates},{"operation",clarificationOperation}}});
     for (const auto& candidate : candidates)
         exec("INSERT INTO route_candidates(message_id,task_id) VALUES(?,?)",{id,candidate.at("taskId")});
 }
@@ -947,7 +1010,7 @@ Json Store::clarifications(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT j.data FROM route_decisions r JOIN journal j ON j.id=r.reply_id
-WHERE j.bot_id=? AND r.status='awaiting_resolution' ORDER BY j.id DESC
+WHERE j.conversation_bot_id=? AND r.status='awaiting_resolution' ORDER BY j.id DESC
 )SQL",{bot});
     auto result = Json::array();
     while (rows.next()) result.push_back(rows.json(0));

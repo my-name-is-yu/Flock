@@ -35,17 +35,6 @@ std::string replacementKey(const Json& item) {
     return field(item,"environmentId").empty() ? "target" : "environment";
 }
 
-void includeSource(std::string& instruction, const Json& source) {
-    const auto excerpt = field(source,"text");
-    if (!excerpt.empty()) instruction += "\n\nReferenced work excerpt:\n" + excerpt;
-}
-
-std::string instructionText(const Json& item) {
-    auto text = field(item,"text");
-    if (const auto source = item.find("source"); source != item.end()) includeSource(text,*source);
-    return text;
-}
-
 struct InstructionBatch {
     Json instructions = Json::array(), superseded = Json::array();
 };
@@ -59,7 +48,7 @@ InstructionBatch pendingBatch(const Json& task) {
         if (auto key = replacementKey(pending[i]); !key.empty()) latestOverrideIndices[std::move(key)] = i;
     }
     std::size_t reservedOverrideBytes = 0;
-    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += instructionText(pending[i]).size() + 4;
+    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += field(pending[i],"text").size() + 4;
     auto batchBytes = reservedOverrideBytes;
     bool acceptsIndependentInstructions = true;
     for (std::size_t i = 0; i < pending.size(); ++i) {
@@ -68,7 +57,7 @@ InstructionBatch pendingBatch(const Json& task) {
             if (latestOverrideIndices.at(key) == i) batch.instructions.push_back(item);
             else batch.superseded.push_back(item);
         } else if (acceptsIndependentInstructions) {
-            const auto size = instructionText(item).size() + 4;
+            const auto size = field(item,"text").size() + 4;
             if (batchBytes + size <= 64000) {
                 batch.instructions.push_back(item);
                 batchBytes += size;
@@ -81,7 +70,7 @@ InstructionBatch pendingBatch(const Json& task) {
 void includeInstructions(std::string& instruction, const Json& pending) {
     if (pending.empty()) return;
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
-    for (const auto& item : pending) instruction += "\n\n" + instructionText(item);
+    for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
 }
 
 void validateAnswers(const Json& fields, const Json& answers) {
@@ -157,7 +146,9 @@ struct Runtime::Impl {
         auto rows = db.query(R"SQL(
 SELECT id FROM tasks AS ready
 WHERE state NOT IN ('completed','cancelled')
-AND (ready.state<>'queued' OR json_extract(ready.data,'$.environmentReleased') OR NOT EXISTS (
+AND (ready.state<>'queued' OR json_extract(ready.data,'$.environmentReleased') OR
+  (json_extract(ready.data,'$.replanning') AND json_extract(ready.data,'$.pendingEnvironmentId')<>ready.environment_id)
+  OR NOT EXISTS (
   SELECT 1 FROM tasks AS prior WHERE prior.project_id=ready.project_id AND prior.id<ready.id
   AND prior.state NOT IN ('completed','cancelled')
   AND COALESCE(json_extract(prior.data,'$.environmentReleased'),0)=0
@@ -176,7 +167,7 @@ AND (ready.state<>'queued' OR json_extract(ready.data,'$.environmentReleased') O
     void activate(const Json& task) {
         change(task,[&](Json& current) {
             if (!db.queueBlocker(current,field(current,"environmentId")).is_null()) return false;
-            db.event(current,"intake",{{"kind","intake"}});
+            if (current["eventId"] == 0) db.event(current,"intake",{{"kind","intake"}});
             current["state"] = "deciding";
             return true;
         });
@@ -566,7 +557,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     task["activeRun"]["environmentId"] = task["environmentId"];
                     task["activeRun"]["revisionId"] = action.value("revisionId",Json(nullptr));
                     db.journal(id,"run_started",{{"run",task["activeRun"]},{"actionId",action["id"]},
-                        {"revisionId",task["activeRun"]["revisionId"]}});
+                        {"revisionId",task["activeRun"]["revisionId"]},
+                        {"sourceResultRefs",action.value("sourceResultRefs",Json::array())}});
                     instructionDelivery(task,action);
                     if (action["tool"] == "delegate") task.erase("newSessionRequired");
                 }
@@ -715,10 +707,40 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             task["remaining"] = task["remaining"].get<int>() - 1;
             task["additionalUsed"] = task["additionalUsed"].get<int>() + 1;
         }
+        Json resultReferences = Json::array();
         if (work) {
-            if (const auto sources = task.find("sourceResultRefs"); tool == "delegate" && sources != task.end())
-                for (const auto& source : *sources) includeSource(instruction,source);
+            if (task.contains("sourceTaskId") && task["lastRun"].is_null()) {
+                const auto request = field(task,"request");
+                if (instruction.find(request) == std::string::npos) instruction += "\n\nUser request:\n" + request;
+            }
             includeInstructions(instruction,pending);
+            if (const auto restart = task.find("restartContext"); restart != task.end() && task["lastRun"].is_null()) {
+                instruction += "\n\nOriginal task being resumed:\n" + field(*restart,"intent") +
+                    "\n\nCompletion criteria:\n" + field(task,"doneWhen");
+                includeInstructions(instruction,restart->value("pendingInstructions",Json::array()));
+            }
+            std::size_t excerptBudget = 8192;
+            std::set<std::pair<Id,int>> included;
+            const auto quoteSource = [&](const Json& source) {
+                const auto id = source.value("messageId",Id{0});
+                if (!id || !included.emplace(id,source.value("option",0)).second) return;
+                auto reference = source;
+                reference.erase("text");
+                resultReferences.push_back(std::move(reference));
+                instruction += "\n\nReferenced result " + std::to_string(id) + " from task " +
+                    std::to_string(source.at("taskId").get<Id>()) +
+                    (source.value("option",0) ? ", option " + std::to_string(source.at("option").get<int>()) : "") +
+                    " (reference only):";
+                const auto excerpt = bounded(field(source,"text"),excerptBudget);
+                if (!excerpt.empty()) instruction += "\n" + excerpt;
+                excerptBudget -= excerpt.size();
+            };
+            for (const auto& item : pending)
+                if (item.contains("source")) quoteSource(item.at("source"));
+            if (task["lastRun"].is_null()) {
+                for (const auto& source : task.value("sourceResultRefs",Json::array()))
+                    if (source["taskId"] == task.value("sourceTaskId",Id{0})) quoteSource(source);
+            }
             instruction += "\n\n[Flock action ID: " + action + "]";
             task["deadline"] = 0;
         }
@@ -726,7 +748,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             {"target",tool == "follow_up" ? task["lastRun"] : task["activeRun"]},
             {"instruction",std::move(instruction)},{"questionId",field(args,"requestId")},
             {"answers",args.value("answers",Json::object())},{"revisionId",revision(task)},
-            {"instructions",pending},{"chargesBudget",charge}};
+            {"instructions",pending},{"sourceResultRefs",resultReferences},{"chargesBudget",charge}};
         db.exec("INSERT INTO outbox(id,task_id,phase,data) VALUES(?,?,'ready',?)", {action,task["id"],out});
         task["actionId"] = action;
         task["state"] = "sending";
@@ -753,7 +775,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             const auto key = replacementKey(item);
             if (key == "target" && std::exchange(sawTarget,true)) continue;
             if (!key.empty() && key != "target") continue;
-            auto text = bounded(instructionText(item),remaining);
+            auto text = bounded(field(item,"text"),remaining);
             remaining -= text.size();
             excerpts.push_back(std::move(text));
         }
@@ -857,7 +879,11 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             } else {
                 const auto pending = work ? pendingBatch(current) : InstructionBatch{};
                 supersedeInstructions(current,pending.superseded);
-                queueAction(current,action,tool,work ? instruction : "",args,pending.instructions,charge);
+                auto workInstruction = work ? instruction : "";
+                const auto answer = field(event,"userAnswer");
+                if (work && !answer.empty() && workInstruction.find(answer) == std::string::npos)
+                    workInstruction += "\n\nUser answer:\n" + answer;
+                queueAction(current,action,tool,std::move(workInstruction),args,pending.instructions,charge);
             }
             return true;
         });
@@ -879,7 +905,6 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
                 return;
             }
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
-            if (event["kind"] == "result" && db.completionHeld(task)) return;
             auto rows = db.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
        json_extract(data,'$.itemId') FROM journal WHERE task_id=?
@@ -897,7 +922,8 @@ AND kind IN ('decision','report','user_answer','session_answered') ORDER BY id D
             }
             std::reverse(history.begin(),history.end());
         }
-        const auto tools = available(task,event);
+        auto tools = available(task,event);
+        if (hasPending(task)) std::erase(tools,"complete");
         try {
             if (options.sessionRead == "prefill" && event["kind"] == "result" && event["evidence"].empty()) {
                 const auto run = runRef(event["run"]);
@@ -908,8 +934,10 @@ AND kind IN ('decision','report','user_answer','session_answered') ORDER BY id D
             bot.soul = bounded(bot.soul,8192);
             bot.memory = bounded(bot.memory,8192);
             Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",intent(task)},
-                {"doneWhen",task.value("requestedDoneWhen",field(task,"doneWhen"))},
+                {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
+            if (task.contains("requestedDoneWhen")) summary["requestedDoneWhen"] = task.at("requestedDoneWhen");
+            if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
             if (hasPending(task)) {
                 const auto pending = pendingBatch(task);
                 summary["userInstructions"] = bounded(pending.instructions.dump(),16000);

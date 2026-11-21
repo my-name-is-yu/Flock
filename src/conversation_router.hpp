@@ -8,7 +8,7 @@
 namespace flockv0::conversation {
 struct Task {
     Id id = 0, generation = 0, revision = 0, waitId = 0;
-    std::string name, intent, state, doneWhen, waitReason, waitText;
+    std::string name, intent, state, doneWhen, waitReason, waitText, fullName;
     std::vector<std::string> waitChoices;
     bool waitAtIntake = false;
     std::string environmentId, projectId;
@@ -18,6 +18,7 @@ struct Task {
 struct Result {
     Id taskId = 0, messageId = 0, revision = 0;
     std::string taskName, text, state;
+    int option = 0;
     Json provenance = nullptr;
     bool operator==(const Result&) const = default;
 };
@@ -25,7 +26,7 @@ struct Result {
 struct Reply {
     enum class Kind { none, invalid, wait, result, clarification } kind = Kind::none;
     Id id = 0, taskId = 0, waitId = 0;
-    std::string originalText, question;
+    std::string originalText, question, operation;
     std::vector<Id> candidates;
     std::optional<Result> result;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
@@ -40,6 +41,7 @@ struct Context {
     std::optional<Reply> pendingClarification;
     std::optional<Result> recentSource;
     std::vector<std::string> environments;
+    Json destinationIds = Json::object();
     Json history = Json::array(), expiredWaits = Json::array();
     bool moreTasks = false, moreWaits = false, staleWaits = false, multiplePendingClarifications = false;
     const Reply* clarification(Id replyId) const;
@@ -51,7 +53,7 @@ struct Target {
 };
 struct Respond { std::string text; std::optional<Result> source; };
 struct Status { std::string text; std::optional<Target> target; };
-struct CreateTask { std::string request; std::optional<Result> source; };
+struct CreateTask { std::string request; std::optional<Result> source; std::string environment; };
 struct AppendInstruction { Target target; std::string instruction; std::optional<Result> source; };
 struct ReviseTask {
     Target target;
@@ -59,15 +61,15 @@ struct ReviseTask {
     std::optional<Result> source;
 };
 struct AnswerWait { Target target; std::string answer; };
-struct GrantOne { Target target; };
 struct CancelTask { Target target; };
 struct Clarify {
     std::string question;
     std::vector<Id> candidates;
     std::optional<Result> source = std::nullopt;
+    std::string operation{};
 };
 using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
-                            AnswerWait, GrantOne, CancelTask, Clarify>;
+                            AnswerWait, CancelTask, Clarify>;
 
 struct Route {
     std::string segment;
@@ -88,6 +90,6 @@ std::optional<Plan> shortcut(std::string_view text, const Context&);
 Plan decide(std::string_view text, const Context&, Model&, const Json& config);
 bool explicitBudgetGrant(std::string_view text);
 bool explicitCancellation(std::string_view text);
-bool budgetConfirmation(std::string_view text);
+bool namedTargetMatches(std::string_view text, const Context&, Id target);
 bool namesCandidate(std::string_view reply, std::string_view taskName);
 }

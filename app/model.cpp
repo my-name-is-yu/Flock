@@ -230,7 +230,8 @@ Json toolSchema(const std::string& name, bool initial) {
         description = "Route this conversation message. Each segment receives exactly one route.";
         const Json segment = {
             {"kind",{{"type","string"},{"enum",Json::array({"status","respond","answer_result",
-                "create_task","append_instruction","revise_task","answer_wait","resolve_wait","cancel_task","clarify"})}}},
+                "create_task","append_instruction","revise_task","answer_wait","cancel_task","clarify"})}}},
+            {"operation",{{"type","string"},{"enum",Json::array({"cancel_task","revise_task","destination"})}}},
             {"segment",textParameter("Verbatim contiguous segment. Required for each route in a compound message.")},
             {"taskId",{{"type","integer"},{"minimum",1}}},
             {"resultMessageId",{{"type","integer"},{"minimum",1}}},
@@ -329,7 +330,9 @@ with a clearly intended active task is append_instruction. It never relaxes comp
 Never create a second Task for the same active work to reset or circumvent its Run budget.
 A user explicitly changing the existing task's scope, acceptance criteria, or execution environment is
 revise_task. Supply only the changed fields, with intent or doneWhen quoted exactly from that segment.
-Use only a configured environment alias. Never interpret Session results as the user revising criteria.
+Use a configured alias or canonical ID for environment, including on create_task.
+Set operation=destination on a clarification asking which destination to use. It may include one already
+identified task, or no task for new work. Use the exact name written by the user. Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact resultMessageId. Think
@@ -343,8 +346,7 @@ answer_wait requires a direct answer to a specifically grounded current user_que
 are scoped to that wait. Without an explicit reply, find the question that was current when this message
 arrived. Use the question and answer meaning together (a proposed name can answer a naming question).
 With competing waits or a match only to expiredWaits, clarify and never redirect the answer. Unrelated
-independent instructions are their own Task. resolve_wait is only for an express grant of one extra Run
-to the current budget wait. A positive confirmation applies only as a direct reply to that budget wait.
+independent instructions are their own Task. Budget and T3 approvals use their dedicated controls.
 Do not grant permissions or handle secrets.
 cancel_task requires a clear user request to stop an identified active task. If the user is quoting or
 asking about cancellation, that is not a stop request. Use only the supplied task IDs and result IDs.
@@ -361,6 +363,8 @@ Use each route's kind and only its applicable fields. For one route omit segment
 use the actual contiguous original segments in order, accounting for every word including connective
 words. Separate independent effects, and clarify the entire message if any segment is ambiguous.
 A clarification carries a short specific question in text and only its plausible candidate task IDs.
+Set operation only for a cancellation, a revision, or a destination selection. Follow-up facts
+answering an explicit result clarification, including yes or no, continue the same source by ID.
 When recent context is incomplete and target identity cannot be grounded, clarify.
 )PROMPT";
     constexpr auto answerInstructions = R"PROMPT(
