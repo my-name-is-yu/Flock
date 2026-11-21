@@ -1,16 +1,11 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/bot_profile.hpp"
 
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace flockv0 {
-struct AvatarImage {
-    std::string contentType;
-    std::string bytes;
-};
-
 struct WebCallbacks {
     // Array of objects with id, name, soul, cron, and optional avatar/role.
     std::function<Json()> bots;

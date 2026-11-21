@@ -616,9 +616,9 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         const auto id = "bot-" + std::to_string(++counter);
         Json avatar = profile.at("avatar");
         if (image) {
-            images[id] = *image;
+            images.insert_or_assign(id,*image);
             avatar["version"] = "v" + std::to_string(counter);
-            avatar["file"] = "avatar.png";
+            avatar["file"] = image->format().filename;
         }
         Json card = {{"id",id},{"name",profile.at("name")},{"role",profile.value("role","custom")},
                      {"soul",""},{"cron",Json::array()},{"avatar",avatar},{"secret",privateValue}};
@@ -634,9 +634,9 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         Json avatar = profile.at("avatar");
         if (avatar.at("kind") == "upload") {
             if (image) {
-                images[std::string(botId)] = *image;
+                images.insert_or_assign(std::string(botId),*image);
                 avatar["version"] = "v" + std::to_string(++counter);
-                avatar["file"] = "avatar.gif";
+                avatar["file"] = image->format().filename;
             } else {
                 const auto& existing = card.at("avatar");
                 if (existing.value("kind","") != "upload") throw Conflict("Uploaded image is required");
@@ -731,11 +731,12 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/bot-avatar?bot=bot-1"),404);
 
     // Reject invalid inputs cleanly.
-    browser.post("/api/bots",{
+    const auto rejected = browser.post("/api/bots",{
         {"name","Bad SVG"},
         {"role","custom"},
         {"avatar",{{"kind","upload"},{"imageData",svgBase64}}},
     },400);
+    check(rejected.at("error") == "invalid_image","unsupported image lost its HTTP error code");
     browser.post("/api/bots",{
         {"name",""},
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
