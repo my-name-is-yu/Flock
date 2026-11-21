@@ -186,13 +186,12 @@ function togglePin(bot) {
   save('flock-pins', [...pins]);
   setMenu(null, `menu:${bot.id}`);
 }
-async function openBotSettings(bot) {
+function openBotSettings(bot) {
   menu = null;
   if (view?.id !== bot.id) selectBot(bot.id);
   else renderBots();
-  const context = view;
-  if (context && !context.data) await refreshView(context);
-  if (context && context === view && context.data) openDetail({ kind: 'settings' });
+  if (view?.data) openDetail({ kind: 'settings' });
+  else if (view) view.openSettingsOnLoad = true;
 }
 function menuButton(bot) {
   const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
@@ -216,7 +215,7 @@ function menuPopover(bot) {
   list.setAttribute('aria-label', `${bot.name} のメニュー`);
   const actions = [
     [pins.has(bot.id) ? 'ピン留めを解除' : 'ピン留め', sidebarIcons.pin, () => togglePin(bot)],
-    ['設定を開く', sidebarIcons.settings, () => void openBotSettings(bot)],
+    ['設定を開く', sidebarIcons.settings, () => openBotSettings(bot)],
   ];
   actions.forEach(([label, icon, run], index) => {
     const item = button(null, null, run);
@@ -727,6 +726,10 @@ async function refreshView(context, scroll) {
     mergeLatest(context, latest);
     setConnection('ready');
     render(scroll);
+    if (context.openSettingsOnLoad) {
+      context.openSettingsOnLoad = false;
+      openDetail({ kind: 'settings' });
+    }
   } catch (error) {
     if (context !== view || generation !== context.generation) return;
     if (error.status === 404) void refreshBots();
