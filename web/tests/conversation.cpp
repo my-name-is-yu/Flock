@@ -595,8 +595,10 @@ void chatGPTConversation(const std::filesystem::path& home) {
     tick(runtime,5);
     const auto firstTask = task(linkedTask(first));
     const auto secondTask = task(linkedTask(second));
-    check(firstTask.at("runs").back().at("environmentId") == "local-env" &&
-          secondTask.at("runs").back().at("environmentId") == "backup-env",
+    const auto& firstRuns = firstTask.at("runs");
+    const auto& secondRuns = secondTask.at("runs");
+    check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
+    check(firstRuns.back().at("environmentId") == "local-env" && secondRuns.back().at("environmentId") == "backup-env",
           "the composer Runs did not keep each request on its own destination");
     const auto active = view().at("activeSessions");
     check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&
