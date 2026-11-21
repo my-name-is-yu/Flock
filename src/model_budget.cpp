@@ -78,7 +78,6 @@ void Store::Impl::inheritModelBudget(Id messageId, Id clarificationReplyId) {
 }
 
 std::string Store::Impl::taskModelBudget(const Json& task) {
-    // Exchanges are retained after closing. Follow them back to the original task.
     auto ancestor = query(R"SQL(
 WITH RECURSIVE ancestry(id) AS (
   SELECT ? UNION ALL
@@ -93,7 +92,6 @@ SELECT t.id,t.data FROM ancestry a JOIN tasks t USING(id) ORDER BY t.id LIMIT 1
     return ensureModelBudget("task/" + std::to_string(ancestor.number(0)),root.at("config"));
 }
 
-// Called in the same write transaction as the caller's state check or wait creation.
 Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpose,
                                 Id messageId, Id taskId, Id eventId) {
     exec("UPDATE model_budgets SET attempts=attempts+1 WHERE id=? AND attempts<call_limit",{budget});

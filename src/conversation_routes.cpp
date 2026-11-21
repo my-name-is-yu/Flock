@@ -139,7 +139,6 @@ AND NOT EXISTS (
             unsigned routeStep = 0;
             const auto decideModel = [&](const ModelInput& input) -> Decision {
                 ++routeStep;
-                // The message fixes adapter config. Reuse successful calls only for the same prompt.
                 Json checkpoint = {{"event",input.event},{"history",input.history},{"tools",input.tools}};
                 if (input.event["kind"] == "route_conversation") {
                     auto& generations = checkpoint["taskGenerations"] = Json::array();

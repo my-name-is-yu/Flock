@@ -1127,7 +1127,6 @@ void modelBudgetCountsFailedAttempts() {
     f.runtime->tick();
     check(f.model.calls == 2 && f.task(id)["wait"]["id"] == wait,"the third failed retry reached the model");
 
-    // Read the persisted ledger through an independent connection.
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);
     std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);

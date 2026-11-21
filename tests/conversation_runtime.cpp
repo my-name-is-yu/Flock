@@ -1019,7 +1019,6 @@ void unanchoredClarificationInheritsOriginatingBudget() {
     check(question.at("route") == "clarify" && f.store->clarifications("alpha").size() == 1,
           "the estimate clarification was not saved");
 
-    // An unanchored answer resolves the pending clarification but keeps the originating budget.
     f.model.routes.insert_or_assign("More detail",Json{
         {"routes",Json::array({{{"kind","answer_result"},{"resultMessageId",resultId}}})},
         {"resolution","resolved"},{"clarificationMessageId",question.at("messageId")}});
@@ -1036,7 +1035,6 @@ void unanchoredClarificationInheritsOriginatingBudget() {
     check(paused.at("route") == "model_budget" && explained == 0,
           "the unanchored resolution did not inherit the exhausted allowance");
 
-    // The fresh allowance's routing call was reconciled onto the originating budget.
     sqlite3* raw = nullptr;
     check(sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
           "could not read the attempt ledger");
