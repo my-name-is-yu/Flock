@@ -43,7 +43,6 @@ constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int waitLimit = 12;
 constexpr int recentTurnLimit = 8;
-constexpr int clarificationLookback = 24;
 constexpr int namePageSize = 4;
 constexpr int resultLimit = 8;
 
@@ -284,11 +283,9 @@ WHERE t.bot_id=? AND j.id=? AND j.kind='waiting'
         }
     } else {
         auto rows = query(R"SQL(
-SELECT r.reply_id,r.message_id FROM (
-  SELECT id FROM messages WHERE bot_id=? AND sequence<(SELECT sequence FROM messages WHERE id=?)
-  ORDER BY sequence DESC LIMIT ?
-) recent JOIN route_decisions r ON r.message_id=recent.id WHERE r.status='awaiting_resolution'
-)SQL",{bot,id,clarificationLookback});
+SELECT r.reply_id,r.message_id FROM route_decisions r JOIN messages m ON m.id=r.message_id
+WHERE r.status='awaiting_resolution' AND m.bot_id=? AND m.id<? ORDER BY r.message_id DESC
+)SQL",{bot,id});
         Id match = 0, latest = 0;
         while (rows.next()) {
             if (latest) context.multiplePendingClarifications = true;
@@ -308,6 +305,18 @@ SELECT r.reply_id,r.message_id FROM (
             if (auto pending = readClarification(match)) context.reply = std::move(*pending);
         } else if (latest && !context.multiplePendingClarifications)
             context.pendingClarification = readClarification(latest);
+    }
+
+    if (const auto candidate = integer(routing,"candidateTaskId")) {
+        const bool offered = context.reply.kind == Reply::Kind::clarification &&
+            std::ranges::find(context.reply.candidates,candidate) != context.reply.candidates.end();
+        if (offered) context.selection = candidate;
+        else {
+            const auto anchor = context.reply.id ? context.reply.id : replyTo;
+            context.reply = Reply{};
+            context.reply.kind = Reply::Kind::invalid;
+            context.reply.id = anchor;
+        }
     }
 
     auto turns = query(R"SQL(

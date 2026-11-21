@@ -136,13 +136,22 @@ struct Option {
     int number = 0;
     std::size_t indent = 0;
     std::size_t offset = 0;
+    std::size_t end = std::string_view::npos;
+    bool labelled = false;
 };
-Option numberedLine(std::string_view line) {
+std::size_t headingLevel(std::string_view line) {
+    const auto indent = line.find_first_not_of(' ');
+    if (indent == line.npos || indent >= 4) return 0;
+    line.remove_prefix(indent);
+    const auto level = line.find_first_not_of('#');
+    return level != line.npos && level > 0 && level <= 6 && (line[level] == ' ' || line[level] == '\t') ? level : 0;
+}
+
+Option numberedLine(std::string_view line, std::size_t heading) {
     const auto indent = line.find_first_not_of(' ');
     if (indent == line.npos || indent >= 4 || line.find('\t') == 0) return {};
     auto cleaned = trim(line);
-    const auto headings = cleaned.find_first_not_of('#');
-    if (headings != cleaned.npos && headings > 0 && cleaned[headings] == ' ') cleaned = trim(cleaned.substr(headings));
+    if (heading) cleaned = trim(cleaned.substr(heading));
     for (auto prefix : {"- "sv, "* "sv, "+ "sv, "**"sv, "__"sv}) {
         if (cleaned.starts_with(prefix)) cleaned = trim(cleaned.substr(prefix.size()));
     }
@@ -153,29 +162,39 @@ Option numberedLine(std::string_view line) {
     }
     const auto normal = normalize(cleaned);
     static const std::regex label(
-        R"(^(?:(?:option|proposal|alternative|choice|案)[ #]*([1-9][0-9]?)(?![0-9])|(?:\(|（)?([1-9][0-9]?)(?:案目|案[：: ]|\.|\)|）|、|:|：|．|　|\s+-)))");
+        R"(^(?:(?:option|proposal|alternative|choice|案)[ #]*([1-9][0-9]?)(?![0-9])|(?:\(|（)?([1-9][0-9]?)(?:(案目|案[：: ])|\.|\)|）|、|:|：|．|　|\s+-)))");
     std::smatch match;
     if (std::regex_search(normal, match, label))
-        return {positiveInt(match[1].matched ? match[1].str() : match[2].str()), indent};
+        return {.number = positiveInt(match[1].matched ? match[1].str() : match[2].str()),
+                .indent = indent, .labelled = match[1].matched || match[3].matched};
     constexpr std::array circled{"①"sv, "②"sv, "③"sv, "④"sv, "⑤"sv, "⑥"sv, "⑦"sv, "⑧"sv, "⑨"sv, "⑩"sv};
     const auto mark = std::ranges::find_if(circled, [&](auto glyph) { return normal.starts_with(glyph); });
     if (mark != circled.end()) return {static_cast<int>(mark - circled.begin()) + 1, indent};
-    if (any(std::string_view(normal).substr(0, 9), {"案目", "番目", "つ目"})) return {ordinal(normal), indent};
+    if (any(std::string_view(normal).substr(0, 9), {"案目", "番目", "つ目"}))
+        return {.number = ordinal(normal), .indent = indent, .labelled = true};
     return {};
 }
 std::vector<Option> numberedLines(std::string_view fullText) {
     std::vector<Option> options;
     bool code = false;
+    std::size_t optionHeading = 0;
     for (std::size_t pos = 0; pos < fullText.size();) {
         const auto newline = fullText.find('\n', pos);
         const auto line = fullText.substr(pos, newline - pos);
         if (starts(trim(line), {"```", "~~~"})) {
             code = !code;
         } else if (!code) {
-            auto option = numberedLine(line);
-            if (option.number > 0) {
+            const auto heading = headingLevel(line);
+            if (heading && heading <= optionHeading) {
+                options.back().end = pos;
+                optionHeading = 0;
+            }
+            auto option = numberedLine(line,heading);
+            if (option.number > 0 && (!optionHeading || heading || option.labelled)) {
+                if (optionHeading) options.back().end = pos;
                 option.offset = pos;
                 options.push_back(option);
+                if (heading) optionHeading = heading;
             }
         }
         if (newline == fullText.npos) break;
@@ -187,7 +206,7 @@ std::vector<Option> numberedLines(std::string_view fullText) {
 std::string_view optionExcerpt(std::string_view fullText, const std::vector<Option>& lines, int wanted) {
     const auto first = std::ranges::find(lines,wanted,&Option::number);
     if (first == lines.end()) return {};
-    auto end = fullText.size();
+    auto end = std::min(fullText.size(),first->end);
     for (auto next = first + 1; next != lines.end(); ++next) {
         if (next->indent > first->indent) continue;
         if (next->number == wanted) return {};
@@ -235,9 +254,10 @@ Status status(std::string_view text, const Context& context, const Task* selecte
         return {statusLine(task, ja), target(task)};
     }
     if (response.empty())
-        response = translate(ja, "There are no tasks for this Bot yet.", "この Bot にはまだ作業がありません。");
+        response = translate(ja, "I don't have any requests yet.", "まだ依頼はありません。");
     else if (count == 10 || context.moreTasks)
-        response += translate(ja, "\nOpen the task list for the full status.", "\nすべての進捗は作業一覧で確認できます。");
+        response += translate(ja, "\nThese are the most recent requests. Ask about one by name for details.",
+                                  "\n最近の依頼のみ表示しています。依頼名を添えて聞いていただければ詳しくお答えします。");
     return {std::move(response), std::nullopt};
 }
 
@@ -248,8 +268,8 @@ Plan single(std::string_view segment, T action) {
 
 Plan unclear(std::string_view text, const std::set<Id>& candidates) {
     return single(text, Clarify{
-        translate(japanese(text), "Please clarify which task, result, or question you mean and what you want me to do.",
-                                  "対象の作業・結果・質問と、希望する対応を教えてください。"),
+        translate(japanese(text), "Please tell me which request, result, or question you mean and what you'd like me to do.",
+                                  "対象の依頼・結果・質問と、希望する対応を教えてください。"),
         {candidates.begin(), candidates.end()}
     });
 }
@@ -290,26 +310,66 @@ std::optional<std::string_view> cancellationSubject(std::string_view text) {
     return std::nullopt;
 }
 
-bool groundedCancellation(std::string_view text, const Task& task, const Context& context,
-                          Id selected) {
-    const auto normal = normalize(text);
-    const auto subject = cancellationSubject(normal);
-    if (!subject) return false;
-    const bool wholeTask = oneOf(*subject,{"","it","that","this","the task","this task","that task","the current task",
+bool taskReference(std::string_view subject) {
+    return oneOf(subject,{"the task","this task","that task","the current task",
+                          "この作業を","その作業を","今の作業を","作業を"});
+}
+
+bool wholeTaskSubject(std::string_view subject) {
+    return oneOf(subject,{"","it","that","this","the task","this task","that task","the current task",
             "それ","それを","これ","これを","この作業を","その作業を","今の作業を","作業を","一旦","いったん"});
-    auto name = *subject;
+}
+
+std::string_view cancellationName(std::string_view subject) {
+    auto name = subject;
     if (name.starts_with("the task ")) name.remove_prefix(9);
     if (name.ends_with("を")) name.remove_suffix("を"sv.size());
     for (const auto& [left,right] : {std::pair{"「"sv,"」"sv},std::pair{"\""sv,"\""sv}}) {
         if (name.size() >= left.size() + right.size() && name.starts_with(left) && name.ends_with(right))
             name = name.substr(left.size(),name.size()-left.size()-right.size());
     }
+    return name;
+}
+
+bool namesCancellationTarget(std::string_view subject, const Task& task) {
+    const auto name = cancellationName(subject);
+    return !name.empty() && name == normalize(trim(task.fullName));
+}
+
+bool groundedCancellation(std::string_view text, const Task& task, const Context& context,
+                          Id selected) {
+    const auto normal = normalize(text);
+    const auto subject = cancellationSubject(normal);
+    if (!subject) return false;
+    const bool wholeTask = wholeTaskSubject(*subject);
     const auto matches = [&](const Task& candidate) {
-        return active(candidate) && name == normalize(trim(candidate.fullName));
+        return active(candidate) && namesCancellationTarget(*subject,candidate);
     };
     if (selected) return task.id == selected && (wholeTask || matches(task));
     if (matches(task) && std::ranges::count_if(context.tasks,matches) == 1) return true;
     return wholeTask && !context.moreTasks && std::ranges::count_if(context.tasks,active) == 1;
+}
+
+bool currentReplyTask(const Reply& reply, const Task& task) {
+    if (!active(task)) return false;
+    if (reply.kind == Reply::Kind::wait)
+        return reply.taskId == task.id && reply.waitId && reply.waitId == task.waitId;
+    return reply.kind == Reply::Kind::result && reply.result &&
+           reply.result->taskId == task.id && reply.result->revision == task.revision;
+}
+
+std::optional<Plan> replyCancellation(std::string_view text, const Context& context, const Task& task) {
+    const auto normal = normalize(text);
+    const auto subject = cancellationSubject(normal);
+    if (!subject) return std::nullopt;
+    if (currentReplyTask(context.reply,task) && (taskReference(*subject) || namesCancellationTarget(*subject,task)))
+        return single(text,CancelTask{target(task)});
+    if (taskReference(*subject) || std::ranges::any_of(context.tasks,[&](const Task& candidate) {
+            return namesCancellationTarget(*subject,candidate);
+        }))
+        return single(text,Respond{translate(japanese(text),"Open the active task to request its cancellation.",
+                                              "停止する作業を開いて、停止をリクエストしてください。"),std::nullopt});
+    return std::nullopt;
 }
 
 bool dismissesClarification(std::string_view text) {
@@ -331,14 +391,6 @@ Id namedClarificationCandidate(std::string_view text, const Context& context, co
     auto number = positiveInt(label);
     for (auto suffix : {"件目"sv, "番目"sv}) {
         if (!number && label.ends_with(suffix)) number = positiveInt(label.substr(0, label.size() - suffix.size()));
-    }
-    if (label.starts_with('#')) {
-        const auto remainder = label.substr(1);
-        Id id = 0;
-        const auto parsed = std::from_chars(remainder.data(),remainder.data() + remainder.size(),id);
-        if (parsed.ec == std::errc{} && parsed.ptr == remainder.data() + remainder.size() &&
-            std::ranges::find(candidates,id) != candidates.end()) return id;
-        return 0;
     }
     if (number > 0 && static_cast<std::size_t>(number) <= candidates.size()) return candidates[number - 1];
     Id selected = 0;
@@ -372,12 +424,12 @@ std::string readText(const Json& object, std::string_view key, std::size_t limit
     return text;
 }
 
-Id readId(const Json& value) {
+Id readId(const Json& value, Id minimum = 1) {
     require(value.is_number_integer());
     if (value.is_number_unsigned())
         require(value.get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<Id>::max()));
     const auto id = value.get<Id>();
-    require(id > 0);
+    require(id >= minimum);
     return id;
 }
 
@@ -504,6 +556,7 @@ Json decisionContext(std::string_view text, const Context& context) {
     Json anchor = {{"kind",kind},{"messageId",reply.id},{"taskId",reply.taskId},{"waitId",reply.waitId},
                    {"originalText",reply.originalText},{"candidates",reply.candidates}};
     if (reply.kind == Reply::Kind::clarification) anchor.update(clarificationData(reply));
+    if (context.selection) anchor["selectedTaskId"] = context.selection;
     if (reply.result) {
         anchor["resultMessageId"] = reply.result->messageId;
         anchor["result"] = resultData(*reply.result, 1024);
@@ -554,7 +607,7 @@ std::optional<Result> selectReadOnlyResult(Id id, int numbered, const Context& c
     return selectOption(*match,numbered,context);
 }
 
-std::optional<Result> selectWorkResult(Id id, int numbered, const Context& context, const Reply& anchor,
+std::optional<Result> selectWorkResult(Id id, std::optional<int> numbered, const Context& context, const Reply& anchor,
                                        std::string_view segment) {
     const auto normal = normalize(segment);
     if (anchor.result && anchor.kind == Reply::Kind::clarification) {
@@ -562,12 +615,12 @@ std::optional<Result> selectWorkResult(Id id, int numbered, const Context& conte
         require(!numbered || numbered == anchor.result->option || anchor.result->option == 0);
         return anchor.result;
     }
-    const bool needsSource = numbered || refersToResult(normal);
+    const bool needsDisambiguation = numbered.value_or(0) || refersToResult(normal);
     const Result* source = nullptr;
     if (anchor.result) {
         require(!id || anchor.result->messageId == id);
         source = &*anchor.result;
-    } else if (context.recentSource && needsSource &&
+    } else if (context.recentSource && (needsDisambiguation || (numbered && !id)) &&
                !std::ranges::any_of(context.tasks,[&](const Task& t) { return refersTo(normal,normalize(t.fullName)); })) {
         require(!id || context.recentSource->messageId == id);
         source = &*context.recentSource;
@@ -575,18 +628,19 @@ std::optional<Result> selectWorkResult(Id id, int numbered, const Context& conte
         const auto match = std::ranges::find(context.rankedResults,id,&Result::messageId);
         require(match != context.rankedResults.end());
         source = &*match;
-        if (needsSource) {
-            std::set<Id> named, available;
-            for (const auto& entry : context.rankedResults) {
-                available.insert(entry.taskId);
-                if (refersTo(normal,normalize(entry.taskName))) named.insert(entry.taskId);
-            }
+        std::set<Id> named, available;
+        for (const auto& entry : context.rankedResults) {
+            available.insert(entry.taskId);
+            if (refersTo(normal,normalize(entry.taskName))) named.insert(entry.taskId);
+        }
+        if (needsDisambiguation || !named.empty()) {
             const auto& plausible = named.empty() ? available : named;
             require(plausible.size() == 1 && plausible.contains(source->taskId));
         }
     }
-    require(source || !needsSource);
-    return source ? std::optional{selectOption(*source,numbered,context)} : std::nullopt;
+    require(source || (!needsDisambiguation && !numbered));
+    if (!source) return std::nullopt;
+    return numbered ? selectOption(*source,*numbered,context) : *source;
 }
 
 std::set<std::string> mentionedDestinations(const Context& context, std::string_view text) {
@@ -634,7 +688,9 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto id = readId(route, "taskId");
     const auto* task = taskById(context, id);
     const auto resultId = readId(route, "resultMessageId");
-    const auto proposedOption = readId(route, "resultOption");
+    const bool hasResultOption = route.contains("resultOption");
+    const auto proposedOption = hasResultOption ? readId(route.at("resultOption"),0) : 0;
+    const bool wholeResult = hasResultOption && proposedOption == 0;
     require(proposedOption <= 99 && (!id || task));
     if (kind == "answer_result") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption"});
@@ -660,17 +716,18 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         }
         auto operation = readText(route,"operation",32);
         require(operation.empty() || oneOf(operation,{"cancel_task","revise_task","destination"}));
-        require(operation.empty() || !proposedOption);
+        require(operation.empty() || !hasResultOption || (operation == "destination" && wholeResult));
         if (operation == "destination") require(choices.size() <= 1);
         if (operation == "cancel_task" && !explicitCancellation(segment)) operation.clear();
         std::optional<Result> source;
         if (operation.empty()) {
             source = selectReadOnlyResult(resultId,static_cast<int>(proposedOption),context,anchor);
-            require(!proposedOption || source);
-        } else if (resultId || anchor.result) {
+            require(!hasResultOption || source);
+        } else if (resultId || anchor.result || wholeResult) {
             const auto option = ordinal(normalize(segment));
             require(option >= 0);
-            source = selectWorkResult(resultId,option,context,anchor,segment);
+            const auto selection = wholeResult || option ? std::optional{wholeResult ? 0 : option} : std::nullopt;
+            source = selectWorkResult(resultId,selection,context,anchor,segment);
         }
         std::optional<RevisionDraft> draft;
         if (operation == "destination" && choices.size() == 1)
@@ -681,7 +738,9 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto mentionedOption = (resultId || anchor.result || proposedOption ||
         kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
     require(mentionedOption >= 0 && (!mentionedOption || !proposedOption || mentionedOption == proposedOption));
-    const auto option = static_cast<int>(proposedOption ? proposedOption : mentionedOption);
+    std::optional<int> option;
+    if (hasResultOption || mentionedOption)
+        option = static_cast<int>(hasResultOption ? proposedOption : mentionedOption);
     if (kind == "status") {
         checkFields(route, {"kind","segment","taskId"});
         return status(segment, context, task);
@@ -728,7 +787,12 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     }
     if (kind == "cancel_task") {
         checkFields(route, {"kind","segment","taskId"});
-        require(anchor.kind != Reply::Kind::result && groundedCancellation(segment,*task,context,selected));
+        if (anchor.kind == Reply::Kind::result) {
+            const auto normal = normalize(segment);
+            const auto subject = cancellationSubject(normal);
+            require(currentReplyTask(anchor,*task) && subject &&
+                    (taskReference(*subject) || namesCancellationTarget(*subject,*task)));
+        } else require(groundedCancellation(segment,*task,context,selected));
         return CancelTask{target(*task)};
     }
 
@@ -791,12 +855,16 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
             require(resolution == "resolved" && !trim(pending->originalText).empty());
             resolved = pending;
             plan.resolution = Resolution{pending->id, Resolution::Kind::resolved};
-            selected = namedClarificationCandidate(text, context, pending->candidates);
+            if (context.selection) {
+                require(context.reply.kind == Reply::Kind::clarification && pending->id == context.reply.id);
+                selected = context.selection;
+            } else selected = namedClarificationCandidate(text, context, pending->candidates);
             require(selected || !genericAnswer(text) || (pending->result && context.reply.id == pending->id));
             clarificationReply = text;
             text = pending->originalText;
         }
     }
+    require(!context.selection || resolved);
     const auto parts = segments(args.at("routes"), text);
     require(!resolved || parts.size() == 1);
     bool selectedCandidate = !resolved || resolved->candidates.empty();
@@ -910,9 +978,13 @@ bool explicitCancellation(std::string_view text) {
 
 bool namedTargetMatches(std::string_view text, const Context& context, Id targetId) {
     const auto normal = normalize(text);
+    const auto* selected = taskById(context,targetId);
+    const auto selectedName = selected ? normalize(selected->fullName) : std::string{};
     Id named = 0;
     for (const auto& task : context.tasks) {
-        if (!refersTo(normal,normalize(trim(task.fullName.substr(0,task.fullName.find('\n')))))) continue;
+        const auto name = normalize(task.fullName);
+        const auto firstLine = trim(std::string_view(name).substr(0,name.find('\n')));
+        if (!refersTo(normal,firstLine) || (!active(task) && trim(name) == trim(selectedName))) continue;
         if (named && named != task.id) return false;
         named = task.id;
     }
@@ -924,18 +996,34 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     const auto* task = taskById(context, reply.taskId);
     const bool ja = japanese(text);
     if (reply.kind == Reply::Kind::wait) {
-        if (task && active(*task) && reply.waitId && task->waitId == reply.waitId) {
+        if (task && currentReplyTask(reply,*task)) {
+            const auto answer = sentence(normalize(text));
+            const bool offered = std::ranges::any_of(task->waitChoices,[&](const auto& choice) {
+                return answer == normalize(trim(choice));
+            });
+            if (!offered) {
+                if (auto stop = replyCancellation(text,context,*task)) return stop;
+            }
             if (task->waitReason == "user_question" && text.size() <= 8000)
                 return single(text,AnswerWait{target(*task),std::string(text)});
             return single(text,Respond{translate(ja,"Use the available action on this waiting item.",
                                                    "確認待ちの項目から対応する操作を選んでください。"),std::nullopt});
         }
-        return single(text, Respond{translate(ja, "That question is no longer current. Check the task for its latest status.",
-                                                 "その質問の受付は終了しました。作業の最新状況を確認してください。"), std::nullopt});
+        return single(text, Respond{translate(ja, "That question has already closed, so I didn't apply your reply to any request. "
+                                                     "Check the latest messages.",
+                                                 "その質問の受付は終了しているため、どの依頼にも適用していません。"
+                                                 "最新のメッセージを確認してください。"), std::nullopt});
+    }
+    if (reply.kind == Reply::Kind::result && reply.result) {
+        if (const auto* reported = taskById(context,reply.result->taskId)) {
+            if (auto stop = replyCancellation(text,context,*reported)) return stop;
+        }
     }
     if (reply.kind == Reply::Kind::invalid || (reply.kind == Reply::Kind::result && !reply.result)) {
-        return single(text, Respond{translate(ja, "That reply target is unavailable in this Bot’s conversation.",
-                                                 "この Bot の会話では返信先を確認できません。"), std::nullopt});
+        return single(text, Respond{translate(ja, "What you replied to has closed or isn't in this conversation, "
+                                                     "so I didn't apply your message to any request.",
+                                                 "返信先の確認はすでに終了しているか、この会話にないため、"
+                                                 "どの依頼にも適用していません。"), std::nullopt});
     }
     if (reply.kind == Reply::Kind::clarification && dismissesClarification(text)) {
         auto plan = single(text, Respond{translate(ja, "I closed that clarification.", "この確認を閉じました。"), std::nullopt});
@@ -962,24 +1050,58 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         else {
             const auto* selected = taskById(context,reply.candidates.front());
             if (reply.candidates.size() != 1 || !selected || !active(*selected)) {
-                return supersede("The task for this destination is no longer active.",
-                                 "実行先を変更する作業は終了しました。");
+                return supersede("The request for this destination is no longer active.",
+                                 "実行先を変更する依頼は終了しました。");
             }
             if (!reply.revisionDraft)
-                return supersede("The task revision details are no longer available. Submit the revision again.",
-                                 "変更内容を復元できません。作業の変更をもう一度送ってください。");
+                return supersede("The change details are no longer available. Please send the change again.",
+                                 "変更内容を復元できません。変更をもう一度送ってください。");
             const auto& draft = *reply.revisionDraft;
             if (draft.target.taskId != selected->id || draft.target.generation != selected->generation ||
                 draft.target.revision != selected->revision || draft.target.waitId != selected->waitId)
-                return supersede("The task changed while its destination was pending. Submit the revision again.",
-                                 "実行先の確認中に作業が更新されました。変更をもう一度送ってください。");
+                return supersede("The request changed while its destination was pending. Please send the change again.",
+                                 "実行先の確認中に依頼が更新されました。変更をもう一度送ってください。");
             plan = single(reply.originalText,ReviseTask{draft.target,std::move(instruction),draft.intent,draft.doneWhen,
                                                         std::string(destination),reply.result});
         }
         plan.resolution = Resolution{reply.id,Resolution::Kind::resolved};
         return plan;
     }
+    if (reply.kind == Reply::Kind::clarification && context.selection && reply.operation == "cancel_task") {
+        const auto* chosen = taskById(context, context.selection);
+        if (!chosen || !active(*chosen)) {
+            auto plan = single(text, Respond{translate(ja, "That request has already ended, so there was nothing to stop.",
+                                                           "その依頼はすでに終了しているため、停止するものはありませんでした。"),
+                                             std::nullopt});
+            plan.resolution = Resolution{reply.id, Resolution::Kind::superseded};
+            return plan;
+        }
+        if (groundedCancellation(reply.originalText, *chosen, context, chosen->id)) {
+            auto plan = single(reply.originalText, CancelTask{target(*chosen)});
+            plan.resolution = Resolution{reply.id, Resolution::Kind::resolved};
+            return plan;
+        }
+    }
     const auto normal = normalize(text);
+    if (reply.kind == Reply::Kind::none) {
+        if (const auto subject = cancellationSubject(normal); subject && !wholeTaskSubject(*subject)) {
+            const auto name = cancellationName(*subject);
+            std::vector<Id> named;
+            const Task* first = nullptr;
+            for (const auto& task : context.tasks) {
+                if (!active(task) || name.empty() || name != normalize(trim(task.fullName))) continue;
+                if (!first) first = &task;
+                named.push_back(task.id);
+            }
+            if (named.size() > 1) {
+                const auto label = shortName(*first);
+                return single(text, Clarify{
+                    translate(ja, "There is more than one “" + label + "”. Which one should I stop?",
+                                  "「" + label + "」は複数あります。どれを中止しますか？"),
+                    std::move(named), std::nullopt, "cancel_task"});
+            }
+        }
+    }
     if (reply.kind == Reply::Kind::none &&
         oneOf(sentence(normal), {"進捗", "進捗は", "進捗はどう", "進捗状況", "進捗どうなってる",
                                  "status", "progress", "status update", "how is it going", "what's the status"}))
@@ -1005,8 +1127,12 @@ Plan decide(std::string_view text, const Context& context, const DecideModel& mo
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
             auto answer = answerResult(model, route.segment, std::move(*response->source), notes, config);
-            if (std::holds_alternative<Clarify>(answer) && plan.routes.size() != 1)
-                return unclear(text,targets);
+            if (auto* clarification = std::get_if<Clarify>(&answer); clarification && plan.routes.size() != 1) {
+                clarification->question += translate(japanese(route.segment),
+                    "\nPlease send the other requests in separate messages.",
+                    "\nほかの依頼は別のメッセージで送ってください。");
+                return single(route.segment,std::move(*clarification));
+            }
             route.action = std::move(answer);
         }
         return plan;
