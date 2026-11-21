@@ -18,7 +18,7 @@ using namespace flockv0;
 
 namespace {
 void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
-void createSessionReadJournalFailure(const std::filesystem::path& databaseFile) {
+void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool enabled) {
     sqlite3* database = nullptr;
     const auto opened = sqlite3_open(databaseFile.c_str(),&database);
     if (opened != SQLITE_OK) {
@@ -27,10 +27,10 @@ void createSessionReadJournalFailure(const std::filesystem::path& databaseFile) 
         throw std::runtime_error(message);
     }
     char* error = nullptr;
-    const auto result = sqlite3_exec(database,
-        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
-        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END",
-        nullptr,nullptr,&error);
+    const auto* statement = enabled ? "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
+        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END"
+        : "DROP TRIGGER fail_session_read_journal";
+    const auto result = sqlite3_exec(database,statement,nullptr,nullptr,&error);
     const std::string message = error ? error : sqlite3_errmsg(database);
     sqlite3_free(error);
     sqlite3_close(database);
@@ -1294,6 +1294,7 @@ void prefillPersistenceFailureDoesNotProceed() {
             if (input.event["kind"] == "intake") return work();
             if (input.event["kind"] == "result") return botRequest("beta","consult","Confirm policy");
             check(input.event["kind"] == "bot_result","unexpected source event before persistence failure");
+            check(input.evidence.size() == 1,"the retried decision did not receive the persisted excerpt");
             return complete();
         }
         check(input.event["kind"] == "bot_request","unexpected recipient event before persistence failure");
@@ -1317,12 +1318,17 @@ void prefillPersistenceFailureDoesNotProceed() {
     check(messages.size() == 2 && messages.back()["messageType"] == "result" &&
           f.t3.reads == 1 && f.logs(source,"report") == 1,
           "test did not reach a settled report with an incoming peer result");
-    createSessionReadJournalFailure(f.directory/"state.db");
+    setSessionReadJournalFailure(f.directory/"state.db",true);
     f.runtime->tick();
     check(f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
           f.logs(source,"model_failure") == 1 && f.logs(source,"completed") == 0 &&
           f.task(source)["state"] == "deciding",
           "the model proceeded with a prefill excerpt that SQLite did not durably save");
+    setSessionReadJournalFailure(f.directory/"state.db",false);
+    f.reach(source,"completed");
+    check(f.t3.reads == 3 && f.model.calls == 4 && f.logs(source,"session_read") == 2 &&
+          f.logs(source,"completed") == 1 && f.logs(source,"model_failure") == 1,
+          "retry must reread the missing excerpt, persist it once, and finish once");
 }
 
 void peerCancelWithLateSessionResult() {

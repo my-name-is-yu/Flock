@@ -180,10 +180,12 @@ AND NOT EXISTS (
                     try {
                         botNotes = notes(message->bot);
                     } catch (const std::exception& error) {
+                        const auto diagnostic = Json::parse(Json(error.what()).dump(
+                            -1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
                         plan = routingQuestion(message->text,
-                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                            ja ? "このBotのノートを読み込めませんでした (" + diagnostic +
                                  ")。ファイルを修正してから返信してください。"
-                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                               : "I couldn't read this Bot's notes (" + diagnostic +
                                  "). Fix the file and reply to try again.");
                     }
                     if (plan.routes.empty())
