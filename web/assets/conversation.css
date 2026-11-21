@@ -175,10 +175,14 @@
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
 .peer-dm-message .msg-time { opacity: 1; }
-.peer-forward-content { display: grid; justify-items: start; gap: .35rem; min-width: 0; max-width: min(100%, 36rem); }
+.peer-dm-message.peer-forward { justify-items: end; }
+.peer-forward .msg-meta { justify-content: flex-end; padding-inline: 0 var(--avatar-col); text-align: right; }
+.peer-forward .msg-line { flex-direction: row-reverse; }
+.peer-forward-content { display: grid; justify-items: end; gap: .35rem; min-width: 0; max-width: min(100%, 36rem); }
 .peer-forward-content .bubble { max-width: 100%; }
 .peer-forward-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; padding-inline: .6rem;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .35rem; padding-inline: .6rem;
+  text-align: right;
   color: var(--text-2); font-size: var(--text-xs); overflow-wrap: anywhere;
 }
 .peer-forward-meta .glyph svg { width: .85rem; height: .85rem; }

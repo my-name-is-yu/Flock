@@ -878,6 +878,7 @@ function peerThread(events, dm) {
     line.append(avatar(from, 'msg-avatar'));
     let content = line;
     if (forwardedMessage) {
+      row.classList.add('peer-forward');
       content = node('div', 'peer-forward-content');
       const label = node('div', 'peer-forward-meta');
       label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
