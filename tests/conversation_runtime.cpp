@@ -1426,6 +1426,9 @@ void latestTargetPrecedesABatchedBacklog() {
     }
 }
 
+enum class UnsentAction { FirstDelegation, FollowUp };
+void checkUnsentRevision(UnsentAction action);
+
 void continuationUsesTheCurrentBudget() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1531,34 +1534,34 @@ void unanchoredClarificationInheritsOriginatingBudget() {
 }
 
 void revisionOfProvablyUnsentAction() {
+    checkUnsentRevision(UnsentAction::FirstDelegation);
+    checkUnsentRevision(UnsentAction::FollowUp);
+}
+
+void checkUnsentRevision(UnsentAction action) {
     Fixture f;
     const auto id = f.store->submit(f.routing());
+    if (action == UnsentAction::FollowUp) {
+        f.model.onResult = [](const ModelInput&) {
+            return Decision{"follow_up",{{"instruction","Verify the report"}},"The report needs verification"};
+        };
+        f.reach(id,"running");
+        f.t3.finish("run-1","Preliminary report");
+    }
     f.reach(id,"sending");
     f.script("完了条件はレポートを出す",revision(id,"doneWhen","レポートを出す"));
     f.receive("ready-revision","完了条件はレポートを出す");
+    f.restart();
     f.reach(id,"running");
     const auto task = f.task(id);
-    check(f.t3.sent.size() == 1 && task["remaining"] == 3 &&
-          f.t3.sent.front().instruction.find("レポートを出す") != std::string::npos,
-          "replacing unsent work delivered the wrong criteria or used an additional Run");
-    check(task["runs"][0]["revisionId"] == task["currentRevision"] &&
+    const unsigned charged = action == UnsentAction::FollowUp ? 1 : 0;
+    check(f.t3.sent.size() == 1 + charged && task["remaining"] == 3 - charged && task["additionalUsed"] == charged &&
+          f.t3.sent.back().instruction.find("レポートを出す") != std::string::npos,
+          "replacing unsent work delivered the wrong criteria or charged the wrong budget");
+    check(task["runs"].back()["revisionId"] == task["currentRevision"] &&
           task["revisions"][0]["doneWhen"] == "Report baseline latency" &&
           task["revisions"][1]["doneWhen"] == "レポートを出す",
           "a revision overwrote the prior immutable completion criteria");
-
-    f.model.onResult = [](const ModelInput&) {
-        return Decision{"follow_up",{{"instruction","Verify the report"}},"The report needs verification"};
-    };
-    f.t3.finish("run-1","Preliminary report");
-    f.reach(id,"sending");
-    f.script("完了条件は p99 を報告",revision(id,"doneWhen","p99 を報告"));
-    f.receive("revise-follow-up","完了条件は p99 を報告");
-    f.restart();
-    f.reach(id,"running");
-    const auto revised = f.task(id);
-    check(f.t3.sent.size() == 2 && f.t3.sent.back().instruction.find("p99 を報告") != std::string::npos &&
-          revised["remaining"] == 2 && revised["additionalUsed"] == 1,
-          "replacing an unsent follow-up did not deliver the revision for a single unit of work");
 }
 
 void queuedCriteriaAreUsedForFirstDelegation() {
