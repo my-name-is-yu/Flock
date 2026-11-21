@@ -447,7 +447,6 @@ function openDetail(selection) {
 }
 elements.detail.addEventListener('close', releaseDetailAvatar);
 
-// Common five-field cron expressions in words; anything else stays as the raw expression.
 const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
 const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 function cronValues(field, min, max, names = {}) {

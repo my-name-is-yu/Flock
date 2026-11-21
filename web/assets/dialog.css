@@ -1,4 +1,3 @@
-/* Detail dialog: Bot settings (left nav + pane) and wait operations (single pane). */
 .detail {
   --detail-pad: 1.6rem;
   --detail-gap: 1rem;
@@ -31,7 +30,6 @@
 }
 .detail::backdrop { background: var(--backdrop); }
 
-/* Open/close: a short fade and lift. Closing is quicker than opening. */
 .detail, .detail::backdrop {
   transition: opacity .18s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1),
     overlay .22s allow-discrete, display .22s allow-discrete;
@@ -62,7 +60,6 @@
 }
 .dialog-body > * { flex-shrink: 0; min-width: 0; }
 
-/* Settings: General */
 .settings-hero {
   --hero-glow: light-dark(color-mix(in srgb, var(--hero-tint, transparent) 70%, transparent), rgb(255 255 255 / .045));
   display: grid; justify-items: center; gap: .85rem; padding: 2.1rem 1rem 1.7rem; border-radius: var(--radius-lg);
@@ -83,7 +80,6 @@ button.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--r
 .settings-row-value { margin-left: auto; color: var(--text-2); }
 .settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; }
 
-/* Settings: schedules */
 .cron-list { padding: 0; }
 .cron-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: .35rem .9rem; padding: .95rem 1.1rem; }
 .cron-row + .cron-row { box-shadow: inset 0 1px var(--hairline); }
@@ -96,7 +92,6 @@ button.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--r
 .cron-row.disabled .cron-when, .cron-row.disabled .cron-request { color: var(--text-3); }
 .cron-row.disabled .cron-state::before { background: none; box-shadow: inset 0 0 0 1.5px var(--text-3); }
 
-/* Wait operations */
 .wait-request {
   position: relative; display: grid; gap: .3rem; margin: 0; padding: .75rem 3.2rem .75rem 1rem;
   border-radius: var(--radius-md); background: var(--detail-card); box-shadow: inset 3px 0 var(--hairline);
@@ -133,7 +128,6 @@ button.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--r
 .dialog-button.quiet { background: none; color: var(--text-2); }
 .dialog-button.quiet:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 
-/* Narrow screens: a sheet from the bottom; settings take the full height with a segmented control. */
 @media (max-width: 700px) {
   .detail, .detail.has-nav {
     --detail-pad: 1.1rem;
