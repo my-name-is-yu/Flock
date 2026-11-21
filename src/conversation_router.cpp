@@ -464,7 +464,7 @@ Json clarificationData(const Reply& reply) {
                  {"candidates",reply.candidates},{"operation",reply.operation},{"waitsAtIntake",std::move(waits)},
                  {"incompleteWaitsAtIntake",reply.incompleteWaitsAtIntake}};
     if (reply.result) data["result"] = resultData(*reply.result,1024);
-    if (reply.resume) data["resume"] = true;
+    if (reply.resume) data["resume"] = *reply.resume;
     if (reply.revisionDraft) {
         const auto& draft = *reply.revisionDraft;
         data["revisionDraft"] = {{"taskId",draft.target.taskId},{"generation",draft.target.generation},
@@ -963,9 +963,13 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
                          "元の確認から設定済みの実行先を選んでください。");
         auto instruction = reply.originalText + "\n\nExecution destination: " + std::string(destination);
         Plan plan;
-        if (reply.candidates.empty())
-            plan = single(reply.originalText,CreateTask{std::move(instruction),reply.result,std::string(destination),reply.resume});
-        else {
+        if (reply.candidates.empty()) {
+            if (!reply.resume && reply.result && reply.result->state == "cancelled")
+                return supersede("Please resend your request with the destination and say whether to resume the cancelled work.",
+                                 "実行先と、中止した作業を再開するかを明記して、依頼をもう一度送ってください。");
+            plan = single(reply.originalText,CreateTask{std::move(instruction),reply.result,std::string(destination),
+                                                        reply.resume.value_or(false)});
+        } else {
             const auto* selected = taskById(context,reply.candidates.front());
             if (reply.candidates.size() != 1 || !selected || !active(*selected)) {
                 return supersede("The task for this destination is no longer active.",

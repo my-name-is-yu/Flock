@@ -43,7 +43,7 @@ struct Reply {
     std::optional<RevisionDraft> revisionDraft;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
-    bool resume = false;
+    std::optional<bool> resume;
     bool operator==(const Reply&) const = default;
 };
 

@@ -260,7 +260,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             candidateIds.insert(question->candidates.begin(),question->candidates.end());
             clarificationOperation = question->operation;
             segment["candidates"] = question->candidates;
-            if (question->resume) segment["resume"] = true;
+            if (question->operation == "destination") segment["resume"] = question->resume;
             if (question->revisionDraft) {
                 const auto& draft = *question->revisionDraft;
                 segment["revisionDraft"] = {{"taskId",draft.target.taskId},

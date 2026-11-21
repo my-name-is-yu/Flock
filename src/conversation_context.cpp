@@ -222,7 +222,7 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         pending.id = reply;
         pending.originalText = row.string(1);
         pending.operation = row.string(5);
-        pending.resume = row.number(7) != 0;
+        if (!row.string(7).empty()) pending.resume = row.number(7) != 0;
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
         const auto draft = row.json(6);
