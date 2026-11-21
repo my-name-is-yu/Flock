@@ -539,6 +539,10 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     };
     cb.updateBot = [&](std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image) {
         auto& card = profiles.at(std::string(botId));
+        if (!profile.contains("avatar")) {
+            card["name"] = profile.at("name");
+            return card;
+        }
         Json avatar = profile.at("avatar");
         if (avatar.at("kind") == "upload") {
             if (image) {
@@ -609,6 +613,11 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"}}},
     },200);
     check(renamed.at("avatar").at("imageUrl") == imageUrl,"rename did not preserve uploaded avatar URL");
+
+    // A name-only update may omit the avatar entirely.
+    const auto nameOnly = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout Name"}},200);
+    check(nameOnly.at("name") == "Scout Name" && nameOnly.at("avatar").at("imageUrl") == imageUrl,
+          "name-only update changed the avatar");
 
     // Replace with GIF updates version and content-type.
     const auto replaced = browser.post("/api/bots/profile",{

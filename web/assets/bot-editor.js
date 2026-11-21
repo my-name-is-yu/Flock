@@ -235,6 +235,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   }
 
   function currentDraftAvatar() {
+    // Until the user touches the look, show (and keep) the stored avatar exactly, custom shapes included.
+    if (state.originalAvatar && !state.lookChanged) return state.originalAvatar;
     if (state.kind === 'upload') {
       const imageUrl = currentPreviewImageUrl();
       if (imageUrl) {
@@ -424,6 +426,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       state.uploadFile = file;
       state.uploadPreviewUrl = candidateUrl;
       state.filename = file.name;
+      state.lookChanged = true;
       setUploadError('');
       setSubmitError('');
       renderAppearance();
@@ -440,28 +443,35 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.save.disabled = true;
     els.save.textContent = saveLabel();
 
+    // Snapshot the request before any await so it always targets the Bot this editor opened.
+    const target = { mode, botId: state.botId, role: state.role, look: { ...state } };
     try {
-      const avatar = { kind: state.kind, color: state.color };
-      if (state.kind === 'shape') {
-        avatar.example = state.shape;
-      } else if (state.kind === 'icon') {
-        avatar.icon = state.icon;
-      } else if (state.kind === 'upload') {
-        if (state.filename) avatar.filename = state.filename;
-        if (state.uploadFile) {
-          avatar.imageData = await readFileAsBase64(state.uploadFile);
-        } else if (!state.existingImageUrl) {
-          throw new Error('Choose an image before saving.');
+      let avatar;
+      const { look } = target;
+      if (target.mode === 'create' || look.lookChanged) {
+        avatar = { kind: look.kind, color: look.color };
+        if (look.kind === 'shape') {
+          avatar.example = look.shape;
+        } else if (look.kind === 'icon') {
+          avatar.icon = look.icon;
+        } else if (look.kind === 'upload') {
+          if (look.filename) avatar.filename = look.filename;
+          if (look.uploadFile) {
+            avatar.imageData = await readFileAsBase64(look.uploadFile);
+          } else if (!look.existingImageUrl) {
+            throw new Error('Choose an image before saving.');
+          }
         }
       }
 
-      const savedBot = mode === 'edit'
-        ? await api('bots/profile', { botId: state.botId, name: trimmedName, avatar })
-        : await api('bots', { name: trimmedName, role: state.role, avatar });
+      const savedBot = target.mode === 'edit'
+        ? await api('bots/profile', { botId: target.botId, name: trimmedName, ...(avatar && { avatar }) })
+        : await api('bots', { name: trimmedName, role: target.role, avatar });
 
       closeReason = 'saved';
+      saving = false;
       dialog.close();
-      await onSaved?.(savedBot, mode);
+      await onSaved?.(savedBot, target.mode);
     } catch (error) {
       const messages = {
         invalid_name: 'Enter a name between 1 and 32 characters.',
@@ -503,10 +513,12 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   });
   els.start.addEventListener('keydown', (event) => arrowNavigate(els.start, 'button[data-preset]', event));
   els.cancel.addEventListener('click', () => {
+    if (saving) return;
     if (mode === 'create') setStep('start');
     else dialog.close();
   });
-  for (const btn of dialog.querySelectorAll('[data-close]')) btn.addEventListener('click', () => dialog.close());
+  for (const btn of dialog.querySelectorAll('[data-close]')) btn.addEventListener('click', () => { if (!saving) dialog.close(); });
+  dialog.addEventListener('cancel', (event) => { if (saving) event.preventDefault(); });
 
   els.nameInput.addEventListener('input', () => {
     state.name = els.nameInput.value;
@@ -525,6 +537,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     const kind = event.target.closest('button[data-kind]')?.dataset.kind;
     if (!kind || kind === state.kind) return;
     state.kind = kind;
+    state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
   });
@@ -535,6 +548,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     if (!btn) return;
     if (state.kind === 'shape') state.shape = btn.dataset.value;
     else if (state.kind === 'icon') state.icon = btn.dataset.value;
+    state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
   });
@@ -544,6 +558,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     const swatch = event.target.closest('button[data-color]');
     if (!swatch) return;
     state.color = swatch.dataset.color;
+    state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
   });
@@ -558,6 +573,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       return;
     }
     state.color = pickDifferent(AVATAR_COLORS.map(([, hex]) => hex), state.color);
+    state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
   });
@@ -586,6 +602,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     state.uploadPreviewUrl = '';
     state.existingImageUrl = '';
     state.filename = '';
+    // Without an image the avatar falls back to the shape, so show and save that.
+    state.kind = 'shape';
+    state.lookChanged = true;
     els.photo.value = '';
     setUploadError('');
     setSubmitError('');
@@ -666,6 +685,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       uploadPreviewUrl: '',
       uploadFile: null,
       filename: resolved.kind === 'upload' ? resolved.filename : '',
+      originalAvatar: bot.avatar ?? null,
+      lookChanged: false,
     };
     if (!dialog.open) dialog.showModal();
     setStep('editor');

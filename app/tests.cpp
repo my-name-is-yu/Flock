@@ -560,6 +560,32 @@ void botProfilesAndAvatars() {
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
           loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
           "editing profile altered existing Bot execution configuration");
+
+    // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
+    const auto customDir = temp.path / "bots" / "custom";
+    std::filesystem::create_directories(customDir);
+    const Json customAvatar = {{"definition",{{"body","M0 0h10v10z"}}},{"color","#123456"},{"eyeColor","#0000ff"}};
+    { std::ofstream(customDir / "config.json") << Json{{"name","Custom"},{"avatar",customAvatar}}.dump(); }
+    { std::ofstream(customDir / "avatar.png") << pngBytes; }
+    const auto customRenamed = bots.updateProfile("custom",{{"name","Custom Two"}});
+    check(customRenamed.at("name") == "Custom Two" && customRenamed.at("avatar") == customAvatar,
+          "name-only update replaced a custom avatar");
+    bots.updateProfile("custom",{
+        {"name","Custom Two"},
+        {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
+    });
+    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+
+    // A save that would exceed the config read limit fails before the file changes.
+    const auto bigDir = temp.path / "bots" / "big";
+    std::filesystem::create_directories(bigDir);
+    const auto bigText = Json{{"name","Big"},{"notes",std::string(128 * 1024 - 40,'x')}}.dump();
+    { std::ofstream(bigDir / "config.json") << bigText; }
+    rejects<Conflict>([&] {
+        bots.updateProfile("big",{{"name","Big"},{"avatar",{{"kind","icon"},{"icon","compass"},{"color","#eec767"}}}});
+    },"oversized config save accepted");
+    std::ifstream bigFile(bigDir / "config.json");
+    check(std::string(std::istreambuf_iterator<char>(bigFile),{}) == bigText,"rejected save changed config.json");
 }
 }
 

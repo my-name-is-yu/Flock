@@ -16,6 +16,7 @@
 namespace flockv0::app {
 namespace {
 constexpr std::size_t maxAvatarBytes = 5 * 1024 * 1024;
+constexpr std::size_t maxConfigBytes = 128 * 1024;
 constexpr std::array<std::string_view,4> allowedAvatarFiles = {
     "avatar.png", "avatar.jpg", "avatar.webp", "avatar.gif"
 };
@@ -197,12 +198,15 @@ std::string roleStarterSoul(std::string_view role) {
     return {};
 }
 
-void removeOtherAvatarFiles(const std::filesystem::path& directory, std::string_view keep) {
-    for (const auto file : allowedAvatarFiles) {
-        if (file == keep) continue;
-        std::error_code ignore;
-        std::filesystem::remove(directory / file,ignore);
-    }
+// Removes only the image the previous avatar referenced, so files the editor never wrote survive.
+void removeReplacedAvatarFile(const std::filesystem::path& directory, const Json& previous, std::string_view keep) {
+    if (!previous.is_object() || previous.value("kind","") != "upload") return;
+    const auto file = previous.find("file");
+    if (file == previous.end() || !file->is_string()) return;
+    const auto& name = file->get_ref<const std::string&>();
+    if (name == keep || !inList(allowedAvatarFiles,name)) return;
+    std::error_code ignore;
+    std::filesystem::remove(directory / name,ignore);
 }
 
 Json prepareAvatar(const Json& profile, const std::filesystem::path& botDir, const Json& existingAvatar,
@@ -369,7 +373,7 @@ std::vector<std::string> Bots::ids() const {
 
 Bot Bots::get(std::string_view id) const {
     const auto file = path(id) / "config.json";
-    const auto config = Json::parse(readText(file,128*1024),nullptr,false);
+    const auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
     Bot bot;
     bot.id = id;
@@ -458,7 +462,7 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
 
 Json Bots::cardLocked(std::string_view id) const {
     const auto botDir = path(id);
-    const auto config = Json::parse(readText(botDir / "config.json",128*1024),nullptr,false);
+    const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
     if (!config.is_object())
         return {{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}};
 
@@ -555,19 +559,25 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
-    auto config = Json::parse(readText(file,128*1024),nullptr,false);
+    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
 
     std::string keepFile, writeFile;
     std::string_view writeBytes;
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
-    const auto avatar = prepareAvatar(profile,botDir,existingAvatar,image,keepFile,writeFile,writeBytes);
+    const bool changeAvatar = profile.contains("avatar");
+    config["name"] = name;
+    if (changeAvatar)
+        config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image,keepFile,writeFile,writeBytes);
+
+    // Check the size the readers accept before anything on disk changes.
+    auto text = config.dump(2,' ',false,Json::error_handler_t::replace) + "\n";
+    if (text.size() > maxConfigBytes) text = config.dump(-1,' ',false,Json::error_handler_t::replace) + "\n";
+    if (text.size() > maxConfigBytes) throw Conflict("Bot config.json would exceed its size limit");
 
     if (!writeFile.empty()) writeAtomic(botDir / writeFile,writeBytes);
-    config["name"] = name;
-    config["avatar"] = avatar;
-    writeAtomic(file,config.dump(2,' ',false,Json::error_handler_t::replace) + "\n");
-    removeOtherAvatarFiles(botDir,keepFile);
+    writeAtomic(file,text);
+    if (changeAvatar) removeReplacedAvatarFile(botDir,existingAvatar,keepFile);
     return cardLocked(id);
 }
 
@@ -575,7 +585,7 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     std::lock_guard lock(mutex_);
     try {
         const auto botDir = path(id);
-        const auto config = Json::parse(readText(botDir / "config.json",128*1024),nullptr,false);
+        const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
         if (!config.is_object() || !config.contains("avatar") || !config["avatar"].is_object())
             return std::nullopt;
         const auto& avatar = config["avatar"];
@@ -597,7 +607,7 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
 
 bool Bots::hasCron(std::string_view id) const {
     try {
-        const auto config = Json::parse(readText(path(id) / "config.json",128*1024),nullptr,false);
+        const auto config = Json::parse(readText(path(id) / "config.json",maxConfigBytes),nullptr,false);
         if (!config.is_object()) return true;
         return config.contains("cron") && (!config["cron"].is_array() || !config["cron"].empty());
     } catch (const std::exception&) {

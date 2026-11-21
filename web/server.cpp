@@ -171,6 +171,8 @@ ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImag
         profile["role"] = body["role"];
     }
     const auto avatarIt = body.find("avatar");
+    // Updates may omit the avatar to rename without touching the stored appearance.
+    if (avatarIt == body.end() && !allowRole) return {std::move(profile),std::nullopt};
     if (avatarIt == body.end() || !avatarIt->is_object()) throw InputError("invalid_avatar");
     const auto& source = *avatarIt;
     const auto kind = web::field(source,"kind");
