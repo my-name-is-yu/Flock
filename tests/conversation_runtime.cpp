@@ -893,11 +893,12 @@ void restartRestoresCancelledTaskDirections() {
     f.receive("restart-destination","クラウドMac",clarification.at("messageId"));
     const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(next,"running");
-    const auto checkSession = [&](Id task, std::string_view destination, const char* criteria) {
+    const auto checkSession = [&](Id task, std::string_view destination, const char* goal, const char* criteria) {
         const auto& command = f.t3.sent.back();
         check(command.tool == "delegate" && command.target.threadId.empty() && command.environmentId == destination &&
-              f.task(task)["doneWhen"] == criteria,"the fresh Session started with the wrong route or criteria");
-        for (const auto* expected : {"Measure the reference dataset",criteria,"Use a pinned regression fixture",
+              f.task(task)["intent"] == goal && f.task(task)["doneWhen"] == criteria,
+              "the fresh Session started with the wrong destination or work contract");
+        for (const auto* expected : {goal,criteria,"Use a pinned regression fixture",
                                      "Keep the raw timing file"}) {
             const auto pos = command.instruction.find(expected);
             if (pos == std::string::npos || pos != command.instruction.rfind(expected))
@@ -905,15 +906,27 @@ void restartRestoresCancelledTaskDirections() {
         }
     };
     check(next != old && f.task(next)["sourceTaskId"] == old,"resume did not start a new linked task");
-    checkSession(next,"cloud","Report baseline latency");
+    checkSession(next,"cloud","Measure the reference dataset","Report baseline latency");
 
-    constexpr auto abandonedMove = "Move this run to ローカルMac";
+    constexpr auto abandonedGoal = "Count calibration events";
+    f.script(abandonedGoal,revision(next,"intent",abandonedGoal));
+    f.receive("old-scope",abandonedGoal);
+    constexpr auto goal = "Measure the release dataset";
+    constexpr auto criteria = "Report median throughput";
+    constexpr auto trace = "attach the raw trace";
+    constexpr auto revisionRequest = "Move this run to ローカルMac, Measure the release dataset, "
+                                     "Report median throughput, and attach the raw trace";
+    auto mixed = revision(next,"doneWhen",criteria);
+    mixed["intent"] = goal;
+    mixed["environment"] = "ローカルMac";
+    f.script(revisionRequest,mixed);
+    const auto revisionReceipt = f.receive("revise-criteria",revisionRequest);
+    check(f.response(revisionReceipt)["route"] == "revise_task" && f.task(next)["pendingEnvironmentId"] == "desktop" &&
+          f.task(next)["intent"] == goal && f.task(next)["doneWhen"] == criteria,
+          "the combined move and work revision was not accepted");
+    constexpr auto abandonedMove = "Use ローカルMac for the next run";
     f.script(abandonedMove,revision(next,"environment","ローカルMac"));
     f.receive("old-destination",abandonedMove);
-    constexpr auto criteria = "Report median throughput";
-    constexpr auto revisionRequest = "Report median throughput and include the kernel trace";
-    f.script(revisionRequest,revision(next,"doneWhen",criteria));
-    f.receive("revise-criteria",revisionRequest);
     f.store->operate(next,0,"cancel");
     f.t3.finish(f.task(next)["activeRun"]["runId"].get<std::string>(),"Resumed work settled");
     f.reach(next,"cancelled");
@@ -926,9 +939,11 @@ void restartRestoresCancelledTaskDirections() {
     const auto last = f.store->tasks("alpha").front().at("id").get<Id>();
     check(last != next && f.task(last)["sourceTaskId"] == next,"the second resume did not create fresh work");
     f.reach(last,"running");
-    checkSession(last,"cloud",criteria);
+    checkSession(last,"cloud",goal,criteria);
     const auto& resumed = f.t3.sent.back().instruction;
-    check(resumed.find("include the kernel trace") != resumed.npos && resumed.find(abandonedMove) == resumed.npos &&
+    check(resumed.find(trace) != resumed.npos && resumed.find(trace) == resumed.rfind(trace) &&
+          resumed.find(abandonedMove) == resumed.npos && resumed.find(abandonedGoal) == resumed.npos &&
+          resumed.find("cloud") != resumed.npos &&
           resumed.find("Report baseline latency") == resumed.npos && f.task(last)["remaining"] == 3,
           "the second resume lost a supplement, replayed a superseded change or charged for old work");
 
@@ -946,10 +961,10 @@ void restartRestoresCancelledTaskDirections() {
     f.receive("move-resumed",move);
     f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(),"Cloud work settled");
     f.advanceUntil([&] { return f.t3.sent.back().environmentId == "desktop"; },"the resumed task did not move");
-    checkSession(last,"desktop",criteria);
+    checkSession(last,"desktop",goal,criteria);
     const auto& moved = f.t3.sent.back().instruction;
     check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) &&
-          moved.find("include the kernel trace") != moved.npos && f.task(last)["remaining"] == 1,
+          moved.find(trace) != moved.npos && moved.find(trace) == moved.rfind(trace) && f.task(last)["remaining"] == 1,
           "the moved Session lost an applicable direction or spent extra allowance");
 }
 

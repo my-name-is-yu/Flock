@@ -445,6 +445,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             if (conflicting) task["pendingEnvironmentId"] = environment;
         }
         if (conflicting) {
+            if (!change->intent.empty()) pending["intent"] = change->intent;
+            if (!change->doneWhen.empty()) pending["doneWhen"] = change->doneWhen;
             pending["replaceKey"] = !environment.empty() ? "environment" : !change->doneWhen.empty() ? "criteria"
                                     : !change->intent.empty() ? "intent" : "target";
             task["replanning"] = true;

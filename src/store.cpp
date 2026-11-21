@@ -306,33 +306,40 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     std::lock_guard lock(mutex);
     std::map<std::pair<Id,int>,Json> byMessage;
     std::size_t sourceBytes = 8192;
+    // A live move overrides another destination. On replay, only its work revision can still apply.
+    const auto workKey = [](const Json& item) -> std::string {
+        if (item.contains("doneWhen")) return "criteria";
+        if (item.contains("intent")) return "intent";
+        // Repeating the current destination creates a non-conflicting direction without a replacement key.
+        if (item.contains("environmentId") && !item.at("conflicting").get<bool>()) return "environment";
+        return field(item,"replaceKey");
+    };
     std::set<std::string> replaced{"environment"};
-    for (const auto& item : pending) replaced.insert(field(item,"replaceKey"));
+    for (const auto& item : pending) replaced.insert(workKey(item));
     const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
 
     // Newest first, so a later change supersedes earlier directions with the same replacement key.
-    const auto remember = [&](Id owner, Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
-        const auto key = field(item,"replaceKey");
+    const auto remember = [&](Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
+        const auto key = workKey(item);
         if (!key.empty() && !replaced.insert(key).second) return;
-        if (key == "intent" || key == "criteria") {
-            auto contract = query(R"SQL(
-SELECT coalesce(r.intent,json_extract(t.data,'$.intent'),json_extract(t.data,'$.request')),
-       coalesce(r.done_when,json_extract(t.data,'$.requestedDoneWhen'),json_extract(t.data,'$.doneWhen')),
-       p.intent<>r.intent,p.done_when<>r.done_when
-FROM tasks t LEFT JOIN task_revisions r ON r.task_id=t.id AND r.id=?
-LEFT JOIN task_revisions p ON p.task_id=r.task_id AND p.number=r.number-1
-WHERE t.id=?
-)SQL",{item.value("revisionId",Json(nullptr)),owner});
-            if (!contract.next() || ((key == "intent" || contract.number(2)) && contract.string(0) != intent) ||
-                ((key == "criteria" || contract.number(3)) && contract.string(1) != criteria)) return;
-        }
+        if ((item.contains("intent") && item.at("intent") != intent) ||
+            (item.contains("doneWhen") && item.at("doneWhen") != criteria)) return;
         const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
         if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
-        const auto text = bounded(field(item,"text"),std::min(bytes-separatorBytes,availableBytes-2));
+        auto text = field(item,"text");
+        if (item.contains("environmentId")) {
+            text = "Apply the work directions in this earlier message. The current execution destination is " +
+                   field(task,"environmentId") + " and supersedes any destination in the quote.\n" + text;
+            item["replaceKey"] = key;
+            item.erase("environmentId");
+        }
+        text = bounded(text,std::min(bytes-separatorBytes,availableBytes-2));
         if (text.empty()) return;
         bytes -= text.size() + separatorBytes;
         availableBytes -= text.size() + 2;
-        item["text"] = text;
+        item["text"] = std::move(text);
+        item.erase("intent");
+        item.erase("doneWhen");
         if (auto source = item.find("source"); source != item.end()) {
             const auto excerpt = bounded(field(*source,"text"),sourceBytes);
             sourceBytes -= excerpt.size();
@@ -349,7 +356,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
 )SQL",{owner,count});
         while (bytes && rows.next()) {
             --count;
-            remember(owner,rows.json(0),bytes);
+            remember(rows.json(0),bytes);
         }
     };
 
@@ -371,7 +378,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
         if (!row.next()) throw Conflict("Invalid cancelled task reference");
         const auto cancelled = row.json(1);
         for (auto item = cancelled.rbegin(); item != cancelled.rend() && pendingBytes > 4; ++item)
-            remember(parent,*item,pendingBytes,4);
+            remember(*item,pendingBytes,4);
         delivered(parent,deliveredCount,deliveredBytes);
         child = parent;
         parent = row.number(0);
