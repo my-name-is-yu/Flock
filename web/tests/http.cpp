@@ -114,7 +114,8 @@ void boundary(Browser& browser) {
     check(landing->get_header_value("X-Frame-Options") == "DENY" &&
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
-    for (const auto* path : {"/app.js","/avatars.js","/style.css","/flock.svg",
+    for (const auto* path : {"/app.js","/avatars.js","/theme.js","/style.css","/sidebar.css","/conversation.css",
+                            "/composer.css","/dialog.css","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
