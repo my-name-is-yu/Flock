@@ -925,7 +925,7 @@ function peerThread(events, dm) {
     const bubble = node('div', 'bubble');
     bubble.append(node('p', 'event-text', data.text));
     const actions = node('div', 'peer-dm-sources');
-    if (event.taskId) {
+    if (event.taskId && bots.some((bot) => bot.id === event.taskBotId)) {
       const link = button(`Task #${event.taskId}`, 'text-button',
         () => void openTask(event.taskId, event.taskBotId));
       link.dataset.peerFocus = `task:${event.id}`;

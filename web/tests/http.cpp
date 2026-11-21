@@ -396,7 +396,7 @@ void peerConversation(const std::filesystem::path& path) {
     auto changed = message;
     changed["text"] = "Different question with the same receipt key";
 
-    std::atomic_bool allowed = true;
+    std::atomic_bool allowed = true, configured = true;
     RuntimeOptions options;
     options.peers = [&](std::string_view sender) -> std::vector<PeerBot> {
         if (sender != "release") return {};
@@ -405,6 +405,14 @@ void peerConversation(const std::filesystem::path& path) {
         return peers;
     };
     auto web = callbacks();
+    web.bots = [all = web.bots,&configured] {
+        auto bots = all();
+        if (!configured) {
+            const auto archived = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
+            bots.erase(archived);
+        }
+        return bots;
+    };
     web.peers = options.peers;
     const auto notes = [](std::string_view) { return BotNotes{}; };
     PeerModel model;
@@ -492,6 +500,17 @@ void peerConversation(const std::filesystem::path& path) {
               "removing a grant lost existing history or left sending enabled");
         changed["clientMessageId"] = "revoked-message";
         browser.post(endpoint,changed,403);
+        allowed = true;
+        configured = false;
+        const auto archived = browser.get(primary);
+        check(archived.at("messages") == completed && archived.at("canSend") == false,
+              "removing a peer's configuration lost history or allowed sending");
+        const auto list = browser.get("/api/bots");
+        const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
+        check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
+            return peer.at("id") == "triage" && peer.at("canSend") == false;
+        }),"the picker lost the archived conversation");
+        browser.post(endpoint,changed,404);
     }
 }
 

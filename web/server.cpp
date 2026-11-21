@@ -232,7 +232,7 @@ private:
                 connections[peer].try_emplace(id,false);
             }
             for (const auto& peer : store_.peerPartners(id))
-                if (id != peer && known.contains(peer)) connections[id].try_emplace(peer,false);
+                if (id != peer) connections[id].try_emplace(peer,false);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
@@ -247,11 +247,12 @@ private:
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
-        if (!botById(known,peer)) return error(res,404,"peer_not_found");
-        const bool canSend = peerIntake(bot,peer).has_value();
-        if (!canSend && !peerIntake(peer,bot)) {
+        const bool configured = botById(known,peer) != nullptr;
+        const bool canSend = configured && peerIntake(bot,peer).has_value();
+        if (!canSend && (!configured || !peerIntake(peer,bot))) {
             const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end()) return error(res,403,"peer_not_allowed");
+            if (std::ranges::find(partners,peer) == partners.end())
+                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         }
         json(res,200,web::peerConversation(store_,bot,peer,before,canSend));
     }
