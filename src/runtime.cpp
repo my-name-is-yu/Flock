@@ -976,8 +976,27 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             {"revisionId",revision(task)}});
     }
 
+    Json forwardableUserMessage(const Json& task) const {
+        const auto sourceId = task.value("sourceMessageId",Id{0});
+        if (!sourceId) return nullptr;
+        // A compound or clarified request may not represent one complete user message.
+        auto row = db.query(R"SQL(
+SELECT m.text,j.time FROM messages m JOIN journal j ON j.id=m.id
+WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
+)SQL",{sourceId,task.at("botId"),task.at("request")});
+        if (!row.next()) return nullptr;
+        return {{"text",row.string(0)},{"time",row.number(1)}};
+    }
+
     void sendPeer(Json& sender, const Json& event, const Decision& decision, PeerBot peer, const std::string& action) {
         if (db.peerExchange(sender["id"])) throw Conflict("Finish the current Bot exchange first");
+        const auto& args = decision.args;
+        const auto note = field(args,"text");
+        Json forwarded;
+        if (args.value("forwardUserMessage",false)) {
+            forwarded = forwardableUserMessage(sender);
+            if (forwarded.is_null()) throw Conflict("This task has no complete user message to forward");
+        }
         const auto kind = field(decision.args,"kind");
         const bool work = kind == "work";
         const bool initial = field(sender,"doneWhen").empty();
@@ -1000,7 +1019,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             }
             ensureNoRouteCycle(sender,peer.intake);
         }
-        peer.intake.request = field(decision.args,"text");
+        peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         peer.intake.scheduleId.clear();
         peer.intake.scheduledAt = 0;
         const auto id = db.submit(peer.intake,0,nullptr,true);
@@ -1008,7 +1027,8 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
         db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task)"
                 " VALUES(?,?,'working',?,?,?)",{action,kind,action,sender["id"],id});
-        auto message = peerMessage(exchange,sender,recipient,"request",peer.intake.request,action);
+        auto message = peerMessage(exchange,sender,recipient,"request",note,action);
+        if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
         db.peerMessage(exchange,message);
         peerEvent(recipient,std::move(message),"bot_request");
         db.save(recipient);
@@ -1137,7 +1157,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             {"complete",{"report"}},
             {"ask_user",{"question","choices"}},
             {"session_read",{"threadId","runId","itemId","cursor","view","offset"}},
-            {"send_bot_message",{"botId","kind","text","doneWhen"}},
+            {"send_bot_message",{"botId","kind","text","doneWhen","forwardUserMessage"}},
             {"reply_to_bot",{"kind","text"}},
             {"read_bot_evidence",{"messageId","itemId","cursor","offset"}}
         };
@@ -1150,7 +1170,12 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         }
         if (tool == "read_bot_evidence") return readPeerEvidence(snapshot,event,decision);
         if (tool == "send_bot_message" || tool == "reply_to_bot") {
-            if (!present(field(args,"text"))) throw Conflict("A Bot message requires text");
+            if (args.contains("forwardUserMessage") && !args.at("forwardUserMessage").is_boolean())
+                throw Conflict("forwardUserMessage must be a boolean");
+            const auto text = field(args,"text");
+            if ((args.contains("text") && !args.at("text").is_string()) ||
+                (!present(text) && !(text.empty() && args.value("forwardUserMessage",false))))
+                throw Conflict("A Bot message requires text or a forwarded user message");
             if (tool == "reply_to_bot") {
                 change(snapshot,[&](Json& current) {
                     if (field(args,"kind") == "result" &&
@@ -1306,6 +1331,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             }
             if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
             if (!choices.empty()) summary["peers"] = std::move(choices);
+            if (std::ranges::find(tools,"send_bot_message") != tools.end()) {
+                std::lock_guard lock(db.mutex);
+                auto forwarded = forwardableUserMessage(task);
+                if (!forwarded.is_null()) summary["forwardableUserMessage"] = std::move(forwarded);
+            }
             if (peer) summary["peer"] = {{"exchangeId",peer->id},{"requestKind",peer->kind},
                 {"role",peer->sender == task["id"] ? "sender" : "recipient"}};
             const auto evidence = event["evidence"];

@@ -175,4 +175,13 @@
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
 .peer-dm-message .msg-time { opacity: 1; }
+.peer-forward-content { display: grid; justify-items: start; gap: .35rem; min-width: 0; max-width: min(100%, 36rem); }
+.peer-forward-content .bubble { max-width: 100%; }
+.peer-forward-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; padding-inline: .6rem;
+  color: var(--text-2); font-size: var(--text-xs); overflow-wrap: anywhere;
+}
+.peer-forward-meta .glyph svg { width: .85rem; height: .85rem; }
+.peer-forward-meta .msg-time { color: var(--text-3); }
+.peer-forwarded-message { border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--canvas); }
 .peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }

@@ -570,6 +570,7 @@ const icons = {
   copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
+  forward: '<path d="m14.5 7 5 5-5 5"/><path d="M19 12h-9a5.5 5.5 0 0 0-5.5 5.5V19"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
@@ -867,16 +868,29 @@ function peerThread(events, dm) {
       fragment.append(node('p', 'day', nextDay));
       day = nextDay;
     }
-    const { fromBotId, toBotId, text } = event.data;
+    const { fromBotId, toBotId, text, forwardedMessage } = event.data;
     const from = participant(fromBotId);
     const to = participant(toBotId);
     const row = node('article', 'msg group-start peer-dm-message');
     const metadata = node('div', 'msg-meta');
     metadata.append(node('span', 'msg-name', `${from.name} → ${to.name}`), eventTime({ time: event.time }));
     const line = node('div', 'msg-line');
-    const bubble = node('div', 'bubble');
-    bubble.append(node('p', 'event-text', text));
-    line.append(avatar(from, 'msg-avatar'), bubble);
+    line.append(avatar(from, 'msg-avatar'));
+    let content = line;
+    if (forwardedMessage) {
+      content = node('div', 'peer-forward-content');
+      const label = node('div', 'peer-forward-meta');
+      label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
+      const card = node('div', 'bubble peer-forwarded-message');
+      card.append(node('p', 'event-text', forwardedMessage.text));
+      content.append(label, card);
+      line.append(content);
+    }
+    if (text || !forwardedMessage) {
+      const bubble = node('div', 'bubble');
+      bubble.append(node('p', 'event-text', text));
+      content.append(bubble);
+    }
     row.append(metadata, line);
     fragment.append(row);
   }

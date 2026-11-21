@@ -163,6 +163,12 @@ Json eventView(const Json& event) {
         }
     } else if (kind == "bot_message") {
         copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind","text","replyTo"});
+        if (const auto forwarded = data.find("forwardedMessage"); forwarded != data.end() && forwarded->is_object()) {
+            const auto text = field(*forwarded,"text");
+            const auto time = forwarded->find("time");
+            if (!text.empty() && time != forwarded->end() && time->is_number_integer())
+                details["forwardedMessage"] = {{"text",text},{"time",*time}};
+        }
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
@@ -181,7 +187,9 @@ std::string preview(Store& store, std::string_view bot) {
     for (auto event = events.rbegin(); event != events.rend(); ++event) {
         const auto kind = field(*event,"kind");
         const auto& data = event->at("data");
-        const auto text = kind == "report" ? field(data,"report") : field(data,"text");
+        auto text = kind == "report" ? field(data,"report") : field(data,"text");
+        if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage"))
+            text = field(data.at("forwardedMessage"),"text");
         if ((kind == "report" || kind == "completed" || kind == "conversation_reply" ||
              (kind == "waiting" && field(data,"reason") == "user_question")) && !text.empty())
             return bounded(text,240);

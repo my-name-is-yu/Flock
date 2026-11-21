@@ -327,6 +327,7 @@ void responseContract() {
     const auto& send = parameters(peerRequest,"send_bot_message");
     check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
         send["properties"]["doneWhen"]["type"] == "string" &&
+        !send["properties"].contains("forwardUserMessage") &&
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
     const auto& reply = parameters(peerRequest,"reply_to_bot");
@@ -341,6 +342,12 @@ void responseContract() {
     const auto nextPeerRequest = responseRequest(input);
     check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
+    input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
+    const auto forwardRequest = responseRequest(input);
+    const auto& forward = parameters(forwardRequest,"send_bot_message");
+    check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" &&
+          forward["required"].get<Names>() == Names{"reason","botId","kind"},
+          "forwarding a saved user message must support an optional Bot note");
 
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
