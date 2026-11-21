@@ -7,6 +7,7 @@ const elements = Object.fromEntries([
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'theme-switch',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -145,8 +146,18 @@ function setConnection(state) {
   if (connection === state) return;
   connection = state;
   elements.connection.dataset.state = state;
-  elements['connection-text'].textContent = state === 'ready' ? 'Connected to the local runtime' : 'Could not connect to the runtime';
+  elements['connection-text'].textContent = state === 'offline' ? 'Could not connect to the runtime' : '';
   renderHeader();
+}
+function renderTheme(mode) {
+  for (const option of elements['theme-switch'].querySelectorAll('button')) {
+    option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
+  }
+}
+function setTheme(mode) {
+  save('flock-theme', mode);
+  document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
+  renderTheme(mode);
 }
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
@@ -956,6 +967,12 @@ async function submit(event) {
   }
 }
 
+const savedTheme = saved('flock-theme', 'system');
+renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
+elements['theme-switch'].addEventListener('click', (event) => {
+  const option = event.target.closest('button[data-theme-mode]');
+  if (option) setTheme(option.dataset.themeMode);
+});
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));

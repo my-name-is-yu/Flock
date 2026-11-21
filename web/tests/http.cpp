@@ -7,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <regex>
 
 using namespace flockv0;
 namespace {
@@ -110,6 +111,32 @@ public:
     std::string origin;
 };
 
+void pageAssets(Browser& browser, const std::string& html) {
+    const std::regex tags(R"(<(script|link)\b[^>]*>)");
+    const std::regex source(R"(\ssrc\s*=\s*["']([^"']+)["'])");
+    const std::regex href(R"(\shref\s*=\s*["']([^"']+)["'])");
+    const std::regex stylesheet(R"(\srel\s*=\s*["']stylesheet["'])");
+    bool hasScript = false, hasStylesheet = false;
+    for (auto tag = std::sregex_iterator(html.begin(),html.end(),tags); tag != std::sregex_iterator(); ++tag) {
+        const auto markup = tag->str();
+        const bool script = (*tag)[1] == "script";
+        if (!script && !std::regex_search(markup,stylesheet)) continue;
+        std::smatch reference;
+        if (!std::regex_search(markup,reference,script ? source : href)) continue;
+        auto path = reference[1].str();
+        if (!path.starts_with('/')) path.insert(0,"/");
+        const auto asset = browser.client.Get(path);
+        check(asset && asset->status == 200 && !asset->body.empty(),"missing page asset: " + path);
+        const auto contentType = asset->get_header_value("Content-Type");
+        const auto mediaType = contentType.substr(0,contentType.find(';'));
+        check(script ? mediaType == "text/javascript" || mediaType == "application/javascript" : mediaType == "text/css",
+              "incorrect media type for page asset: " + path);
+        if (script) hasScript = true;
+        else hasStylesheet = true;
+    }
+    check(hasScript && hasStylesheet,"landing page does not load its script and stylesheet");
+}
+
 void boundary(Browser& browser) {
     auto landing = browser.client.Get("/");
     check(landing && landing->status == 200 && !landing->body.empty() &&
@@ -117,6 +144,12 @@ void boundary(Browser& browser) {
     check(landing->get_header_value("X-Frame-Options") == "DENY" &&
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
+    pageAssets(browser,landing->body);
+    for (const auto* path : {"/app.js","/avatars.js","/style.css","/flock.svg",
+                            "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
+        auto asset = browser.client.Get(path);
+        check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
+    }
     const auto draft = R"({"botId":"release","request":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);

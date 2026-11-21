@@ -3,10 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f5f4ef">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff">
   <title>Flock</title>
   <link rel="icon" type="image/svg+xml" href="/flock.svg">
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/sidebar.css">
+  <link rel="stylesheet" href="/conversation.css">
+  <link rel="stylesheet" href="/composer.css">
+  <link rel="stylesheet" href="/dialog.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -33,7 +39,20 @@
           <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier sessions</button>
         </section>
       </div>
-      <div id="connection" class="connection" role="status"><span class="status-dot"></span><span id="connection-text">Connecting…</span></div>
+      <div class="sidebar-foot">
+        <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">接続中…</span></div>
+        <div id="theme-switch" class="theme-switch" role="group" aria-label="テーマ">
+          <button type="button" data-theme-mode="system" aria-pressed="true" aria-label="システムに合わせる" title="システムに合わせる">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/></svg>
+          </button>
+          <button type="button" data-theme-mode="light" aria-pressed="false" aria-label="ライト" title="ライト">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 3v1.8M12 19.2V21M3 12h1.8M19.2 12H21M5.6 5.6l1.3 1.3M17.1 17.1l1.3 1.3M5.6 18.4l1.3-1.3M17.1 6.9l1.3-1.3"/></svg>
+          </button>
+          <button type="button" data-theme-mode="dark" aria-pressed="false" aria-label="ダーク" title="ダーク">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.5 14.6A7.6 7.6 0 0 1 9.4 4.5a7.6 7.6 0 1 0 10.1 10.1Z"/></svg>
+          </button>
+        </div>
+      </div>
     </aside>
     <main id="main" class="main">
       <header class="conversation-header">
