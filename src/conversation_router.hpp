@@ -23,12 +23,24 @@ struct Result {
     bool operator==(const Result&) const = default;
 };
 
+struct Target {
+    Id taskId, generation, revision, waitId;
+    bool operator==(const Target&) const = default;
+};
+
+struct RevisionDraft {
+    Target target;
+    std::string intent, doneWhen;
+    bool operator==(const RevisionDraft&) const = default;
+};
+
 struct Reply {
     enum class Kind { none, invalid, wait, result, clarification } kind = Kind::none;
     Id id = 0, taskId = 0, waitId = 0;
     std::string originalText, question, operation;
     std::vector<Id> candidates;
     std::optional<Result> result;
+    std::optional<RevisionDraft> revisionDraft;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
     bool operator==(const Reply&) const = default;
@@ -48,9 +60,6 @@ struct Context {
     bool operator==(const Context&) const = default;
 };
 
-struct Target {
-    Id taskId, generation, revision, waitId;
-};
 struct Respond { std::string text; std::optional<Result> source; };
 struct Status { std::string text; std::optional<Target> target; };
 struct CreateTask { std::string request; std::optional<Result> source; std::string environment; };
@@ -67,6 +76,7 @@ struct Clarify {
     std::vector<Id> candidates;
     std::optional<Result> source = std::nullopt;
     std::string operation{};
+    std::optional<RevisionDraft> revisionDraft = std::nullopt;
 };
 using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
                             AnswerWait, CancelTask, Clarify>;

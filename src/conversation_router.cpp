@@ -435,6 +435,12 @@ Json clarificationData(const Reply& reply) {
                  {"candidates",reply.candidates},{"operation",reply.operation},{"waitsAtIntake",std::move(waits)},
                  {"incompleteWaitsAtIntake",reply.incompleteWaitsAtIntake}};
     if (reply.result) data["result"] = resultData(*reply.result,1024);
+    if (reply.revisionDraft) {
+        const auto& draft = *reply.revisionDraft;
+        data["revisionDraft"] = {{"taskId",draft.target.taskId},{"generation",draft.target.generation},
+                                 {"revisionId",draft.target.revision},{"waitId",draft.target.waitId},
+                                 {"intent",draft.intent},{"doneWhen",draft.doneWhen}};
+    }
     return data;
 }
 
@@ -577,9 +583,11 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto proposedOption = readId(route, "resultOption");
     const auto mentionedOption = (resultId || anchor.result || proposedOption ||
         kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
-    require(proposedOption <= 99 && mentionedOption >= 0 &&
-            (!mentionedOption || !proposedOption || mentionedOption == proposedOption));
-    const auto option = static_cast<int>(proposedOption ? proposedOption : mentionedOption);
+    const auto selectedOption = kind == "answer_result" && !proposedOption && mentionedOption < 0
+        ? 0 : mentionedOption;
+    require(proposedOption <= 99 && selectedOption >= 0 &&
+            (!selectedOption || !proposedOption || selectedOption == proposedOption));
+    const auto option = static_cast<int>(proposedOption ? proposedOption : selectedOption);
     require(!id || task);
     if (kind == "clarify") {
         checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId"});
@@ -680,7 +688,8 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     if (!replyDestinations.empty()) destinations = replyDestinations;
     if (!destinations.empty() && (environment.empty() || !destinationMatches(context,environment,destinations)))
         return Clarify{translate(japanese(segment),"Which configured execution destination should I use?",
-                                  "設定済みの実行先を選んでください。"),{task->id},std::move(source),"destination"};
+                                  "設定済みの実行先を選んでください。"),{task->id},std::move(source),"destination",
+                       RevisionDraft{target(*task),std::move(intent),std::move(done)}};
     require(environment.empty() || (destinationMatches(context,environment,destinations) ||
         (environment == task->environmentId && verbatim(environment))));
     return ReviseTask{target(*task), std::string(segment), std::move(intent), std::move(done),
@@ -871,6 +880,11 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         const auto defer = [&](std::string_view en,std::string_view jp) {
             return single(text,Respond{translate(ja,en,jp),std::nullopt});
         };
+        const auto supersede = [&](std::string_view en,std::string_view jp) {
+            auto plan = defer(en,jp);
+            plan.resolution = Resolution{reply.id,Resolution::Kind::superseded};
+            return plan;
+        };
         if (std::ranges::find(context.environments,destination) == context.environments.end())
             return defer("Choose a configured destination in the original confirmation.",
                          "元の確認から設定済みの実行先を選んでください。");
@@ -881,11 +895,18 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         else {
             const auto* selected = taskById(context,reply.candidates.front());
             if (reply.candidates.size() != 1 || !selected || !active(*selected)) {
-                plan = defer("The task for this destination is no longer active.","実行先を変更する作業は終了しました。");
-                plan.resolution = Resolution{reply.id,Resolution::Kind::superseded};
-                return plan;
+                return supersede("The task for this destination is no longer active.",
+                                 "実行先を変更する作業は終了しました。");
             }
-            plan = single(reply.originalText,ReviseTask{target(*selected),std::move(instruction),{}, {},
+            if (!reply.revisionDraft)
+                return supersede("The task revision details are no longer available. Submit the revision again.",
+                                 "変更内容を復元できません。作業の変更をもう一度送ってください。");
+            const auto& draft = *reply.revisionDraft;
+            if (draft.target.taskId != selected->id || draft.target.generation != selected->generation ||
+                draft.target.revision != selected->revision || draft.target.waitId != selected->waitId)
+                return supersede("The task changed while its destination was pending. Submit the revision again.",
+                                 "実行先の確認中に作業が更新されました。変更をもう一度送ってください。");
+            plan = single(reply.originalText,ReviseTask{draft.target,std::move(instruction),draft.intent,draft.doneWhen,
                                                         std::string(destination),reply.result});
         }
         plan.resolution = Resolution{reply.id,Resolution::Kind::resolved};

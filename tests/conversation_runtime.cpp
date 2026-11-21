@@ -330,6 +330,71 @@ void omittedDestinationAndWrongNamedTaskAreBlocked() {
           "the model's different Task ID changed the wrong acceptance criteria");
 }
 
+void destinationClarificationPreservesAndValidatesRevisionDraft() {
+    Fixture f;
+    auto routing = f.routing("Release notes");
+    routing.config["conversationEnvironments"]["mock"] = "mock-executor";
+    const auto id = f.store->submit(routing);
+    f.reach(id,"running");
+
+    auto staleRouting = f.routing("Old dependency audit","alpha","desktop","stale-project");
+    staleRouting.config["conversationEnvironments"]["mock"] = "mock-executor";
+    const auto staleId = f.store->submit(staleRouting);
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"ask_user",{{"question","Which release should be checked?"}},"The release must be confirmed"};
+    };
+    f.reach(staleId,"running");
+    f.t3.finish(f.task(staleId)["activeRun"]["runId"].get<std::string>(),"Stale task evidence");
+    f.reach(staleId,"waiting");
+    const auto staleBefore = f.task(staleId);
+    const auto staleRequest = "Revise Old dependency audit completion criteria to all tests pass and move to mock";
+    f.script(staleRequest,revision(staleId,"doneWhen","all tests pass"));
+    const auto staleMessage = f.store->receive(staleRouting,"stale-revision",staleRequest);
+    f.runtime->routeConversation();
+    const auto staleClarification = f.response(staleMessage);
+    check(staleClarification["route"] == "clarify" && staleBefore["wait"].is_object() &&
+          staleBefore["doneWhen"] == "Report baseline latency" && f.store->clarifications("alpha").size() == 1,
+          "the stale-target fixture did not retain its destination clarification");
+    f.store->operate(staleId,staleBefore["wait"]["id"],"answer",{{"text","Use the current release"}});
+    const auto changed = f.task(staleId);
+    check(changed["generation"] != staleBefore["generation"] && changed["wait"].is_null(),
+          "the stale-target fixture did not advance its original task target");
+
+    constexpr auto intent = "Measure acceptance on the release branch";
+    constexpr auto doneWhen = "all tests pass";
+    constexpr auto request = "Revise Release notes intent to Measure acceptance on the release branch, "
+                             "completion criteria to all tests pass, and move to mock";
+    f.script(request,{{"kind","revise_task"},{"taskId",id},{"intent",intent},{"doneWhen",doneWhen}});
+    const auto before = f.task(id);
+    const auto message = f.store->receive(routing,"release-revision",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+          before["doneWhen"] == "Report baseline latency" && f.task(id) == before &&
+          f.t3.sent.size() == 2,
+          "the omitted destination changed the task or dispatched work before confirmation");
+    f.restart();
+    const auto destination = f.store->receive(routing,"release-destination","mock",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto response = f.response(destination);
+    const auto revised = f.task(id);
+    check(response["route"] == "revise_task" && revised["intent"] == intent && revised["doneWhen"] == doneWhen &&
+          revised["pendingEnvironmentId"] == "mock-executor" && revised["environmentId"] == "desktop" &&
+          revised["revisions"].back()["intent"] == intent && revised["revisions"].back()["doneWhen"] == doneWhen &&
+          f.store->clarifications("alpha").size() == 1 && f.t3.sent.size() == 2,
+          "the restarted destination answer did not apply both pending revision fields without dispatching work");
+    const auto staleChoice = f.store->receive(staleRouting,"stale-destination","mock",
+                                               staleClarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto staleResponse = f.response(staleChoice);
+    const auto staleAfter = f.task(staleId);
+    check(staleResponse["route"] == "respond" && staleAfter["doneWhen"] == staleBefore["doneWhen"] &&
+          staleAfter["environmentId"] == staleBefore["environmentId"] &&
+          !staleAfter.contains("pendingEnvironmentId") && f.store->clarifications("alpha").empty() &&
+          f.t3.sent.size() == 2,
+          "a destination reply rebound a stale revision draft to the changed task");
+}
+
 void lastConfiguredDestinationIsAvailable() {
     Fixture f;
     auto routing = f.routing();
@@ -843,6 +908,7 @@ int main() {
         durableInboxAndTargetedRevision();
         linkedResultStartsANewSession();
         omittedDestinationAndWrongNamedTaskAreBlocked();
+        destinationClarificationPreservesAndValidatesRevisionDraft();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
         restartRestoresCancelledTaskDirections();
