@@ -392,31 +392,62 @@ function renderTimeline(scroll = 'auto') {
   else scroller.scrollTop = previousTop;
 }
 
+const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (view?.id === context.id) renderComposer();
+}
+// Info and success notices fade once nothing is in flight and the Bot is on screen.
+// Errors stay until the next edit replaces them.
+function fadeNotice(context, notice) {
+  if (notice.timer) return;
+  notice.timer = setTimeout(() => {
+    notice.timer = null;
+    if (notices.get(context.id) !== notice || view?.id !== context.id) return;
+    notice.fading = true;
+    renderComposer();
+    setTimeout(() => {
+      if (notices.get(context.id) !== notice) return;
+      notices.delete(context.id);
+      if (view?.id === context.id) renderComposer();
+    }, 400);
+  }, 3600);
+}
+// Grow the input with its content up to the CSS max-height.
+function fitMessage() {
+  const field = elements.message;
+  if (!field.offsetParent) return;
+  field.style.height = 'auto';
+  field.style.height = `${field.scrollHeight}px`;
 }
 function renderComposer() {
   const context = view;
   elements['composer-container'].hidden = !context?.data;
   if (!context?.data) return;
   const reply = replies.get(context.id);
-  const { text, isError } = notices.get(context.id) ?? {};
-  const target = reply ? '質問への返信' : '新しい依頼';
+  const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = pendingRequests.has(context.id) || (!!reply && pendingWaits.has(reply.waitId));
   elements['reply-context'].hidden = !reply;
-  elements['reply-question'].textContent = reply ? `#${reply.taskId} ${reply.question}` : '';
-  elements['compose-label'].textContent = target;
-  elements['composer-mode'].textContent = target;
+  elements['reply-question'].textContent = reply?.question ?? '';
+  elements['reply-context'].title = reply ? `#${reply.taskId} ${reply.question}` : '';
+  elements['compose-label'].textContent = reply ? '質問への返信' : '新しい依頼';
   elements['cancel-reply'].disabled = busy;
-  elements.message.placeholder = reply ? '質問への回答を入力' : `${context.data.bot.name} に依頼する`;
-  if (elements.message.value !== body) elements.message.value = body;
+  elements.message.placeholder = reply ? '回答を入力' : `${context.data.bot.name} に依頼`;
+  if (elements.message.value !== body) {
+    elements.message.value = body;
+    fitMessage();
+  }
   elements.message.readOnly = busy;
+  elements.composer.setAttribute('aria-busy', String(busy));
   elements.send.disabled = busy || !body.trim() || byteLength(body) > (reply ? 8000 : 16000);
+  elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? '質問に返信する' : '新しい依頼を送る');
-  elements.notice.textContent = text ?? '';
-  elements.notice.classList.toggle('error', !!isError);
+  elements.send.title = `${reply ? '返信する' : '送信'} (${sendKey}+Enter)`;
+  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.classList.toggle('error', !!notice?.isError);
+  elements.notice.classList.toggle('fading', !!notice?.fading);
+  if (notice && !notice.isError && !pendingRequests.has(context.id) && !pendingWaits.size) fadeNotice(context, notice);
 }
 
 function closeDetail() {
@@ -705,11 +736,37 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
+  fitMessage();
   notices.delete(view.id);
   const limit = reply ? 8000 : 16000;
   if (byteLength(elements.message.value) > limit) setNotice(view, `入力は ${limit.toLocaleString('ja-JP')} バイトまでです。`, true);
   else renderComposer();
 });
+// Enter inserts a newline; ⌘/Ctrl+Enter sends; Escape leaves reply mode. Never act mid IME composition
+// (Safari reports the composition-committing Enter with keyCode 229 and isComposing false).
+elements.composer.addEventListener('keydown', (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
+    event.preventDefault();
+    elements.send.click();
+  } else if (event.key === 'Escape' && !elements['reply-context'].hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+    elements['cancel-reply'].click();
+  }
+});
+byId('send-hint').textContent = `${sendKey} ↵`;
+// Refit when the composer reappears (bot switch, narrow navigation closing) or its width changes.
+// When it grows (longer draft, reply bar), keep the timeline pinned if it was at the bottom.
+let composerHeight = 0;
+new ResizeObserver(() => {
+  const height = elements['composer-container'].offsetHeight;
+  const grew = height - composerHeight;
+  composerHeight = height;
+  const scroller = elements.conversation;
+  if (grew > 0 && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= grew + 4) scroller.scrollTop = scroller.scrollHeight;
+  fitMessage();
+}).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
 });

@@ -80,19 +80,22 @@
       <div class="composer-container" id="composer-container" hidden>
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
-            <span class="reply-mark" aria-hidden="true">↳</span>
-            <div class="reply-target"><strong>質問への返信</strong><span id="reply-question"></span></div>
-            <button id="cancel-reply" type="button" class="icon-button" aria-label="返信を取り消す">×</button>
+            <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+            <p class="reply-target"><span class="sr-only">返信先の質問: </span><span id="reply-question"></span></p>
+            <button id="cancel-reply" type="button" class="reply-cancel" aria-label="返信を取り消す" title="返信を取り消す (Esc)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
+            </button>
           </div>
-          <div class="compose-input">
-            <label class="sr-only" id="compose-label" for="message">新しい依頼</label>
-            <textarea rows="2" id="message" required></textarea>
+          <label class="sr-only" id="compose-label" for="message">新しい依頼</label>
+          <textarea rows="1" id="message" required aria-describedby="notice"></textarea>
+          <div class="composer-toolbar">
+            <span id="notice" class="notice" role="status"></span>
+            <kbd id="send-hint" class="send-hint" aria-hidden="true"></kbd>
             <button id="send" class="send" type="submit" aria-label="新しい依頼を送る">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
             </button>
           </div>
         </form>
-        <div class="composer-foot"><span id="composer-mode">新しい依頼</span><span id="notice" role="status"></span></div>
       </div>
     </main>
   </div>
