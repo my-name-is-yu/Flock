@@ -513,7 +513,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             change(task,[&](Json& current) {
                 db.exec("UPDATE outbox SET phase='superseded' WHERE id=? AND phase='ready'", {action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
-                if (action.at("chargesBudget").get<bool>()) {
+                if (action.value("chargesBudget", false)) {
                     current["remaining"] = current["remaining"].get<int>() + 1;
                     current["additionalUsed"] = current["additionalUsed"].get<int>() - 1;
                 }
