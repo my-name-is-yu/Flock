@@ -86,7 +86,7 @@ svg { display: block; }
 .profile-name { font-size: 1.12rem; font-weight: 710; letter-spacing: -.025em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-status { font-size: .72rem; color: var(--muted); }
 .profile-status[data-state="working"], .profile-status[data-state="thinking"] { color: var(--green); }
-.profile-status[data-state="waiting"] { color: var(--amber); }
+.profile-status[data-state="waiting"], .profile-status[data-state="stopping"] { color: var(--amber); }
 .profile-arrow { color: #877d91; opacity: .75; width: 1rem; height: 1rem; flex: none; }
 .avatar-profile { width: 2.7rem; height: 2.7rem; border-radius: 13px; }
 .settings-button { margin-left: auto; }
@@ -109,9 +109,11 @@ svg { display: block; }
 .day { display: flex; align-items: center; gap: .75rem; color: var(--muted); font-size: .72rem; margin-block: .1rem; }
 .day::before, .day::after { content: ""; height: 1px; flex: 1; background: var(--line); }
 .event { display: grid; justify-items: start; gap: .35rem; min-width: 0; }
+.event:focus-visible { outline: 2px solid #7453bb; outline-offset: 4px; }
 .event.outbound { justify-items: end; }
 .event-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem .56rem; font-size: .73rem; color: var(--muted); overflow-wrap: anywhere; }
 .event-meta strong { font-size: .82rem; color: var(--ink); }
+.event-task { padding: .1rem .2rem; font-size: inherit; }
 .event-card { padding: .78rem 1rem; background: var(--white); border: 1px solid var(--line); border-radius: 4px 13px 13px 13px; max-width: min(100%, 42rem); min-width: 0; }
 .outbound .event-card { background: var(--lavender); border-color: #e3d9f3; border-radius: 13px 4px 13px 13px; }
 .event-card.question-card { background: #fffdf9; border-color: #e5d8c6; }
@@ -122,7 +124,7 @@ svg { display: block; }
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .event-note { color: var(--muted); font-size: .76rem; margin-top: .48rem; overflow-wrap: anywhere; }
 .badge { display: inline-block; border-radius: 1rem; padding: .14rem .45rem; font-size: .7rem; font-weight: 640; color: var(--muted); background: #eeeae4; }
-.badge.waiting { color: var(--amber); background: var(--amber-bg); }
+.badge.waiting, .badge.stopping { color: var(--amber); background: var(--amber-bg); }
 .badge.running, .badge.completed, .badge.working { color: var(--green); background: var(--green-bg); }
 .composer-container { background: var(--paper); padding: .7rem clamp(1rem,4vw,2rem) .85rem; width: 100%; max-width: var(--content-width); margin: 0 auto; }
 .composer { background: var(--white); border: 1px solid #dcd3e4; border-radius: 15px; overflow: hidden; }
@@ -134,7 +136,7 @@ textarea:focus-visible { outline: none; }
 .send { background: #5c4292; color: white; border: 0; border-radius: 9px; width: 2.3rem; height: 2.3rem; display: grid; place-items: center; flex: none; }
 .send:hover:not(:disabled) { background: #453172; }
 .send svg { width: 1.09rem; height: 1.09rem; }
-.composer-foot { display: flex; justify-content: space-between; gap: .65rem; padding: .45rem .23rem 0; min-height: 1.33rem; color: var(--muted); font-size: .71rem; }
+.composer-foot { display: flex; justify-content: flex-end; padding: .45rem .23rem 0; min-height: 1.33rem; color: var(--muted); font-size: .71rem; }
 #notice { text-align: right; overflow-wrap: anywhere; }
 #notice.error { color: var(--danger); }
 .reply-context { display: flex; gap: .65rem; align-items: center; background: #f2ebfb; border-bottom: 1px solid #e7dcf4; padding: .25rem .55rem .25rem .85rem; }
@@ -147,6 +149,7 @@ dialog::backdrop { background: #23202e66; }
 .dialog-head h2 { font-size: 1.05rem; overflow-wrap: anywhere; }
 .dialog-body { display: grid; gap: 1rem; padding: 1rem 1.2rem 1.25rem; }
 .dialog-section { min-width: 0; display: grid; gap: .45rem; }
+.dialog-section > .badge { justify-self: start; }
 .dialog-section h3 { font-size: .8rem; font-weight: 700; color: var(--muted); }
 .dialog-profile { display: flex; align-items: center; gap: .6rem; font-weight: 680; overflow-wrap: anywhere; }
 .dialog-request { line-height: 1.5; overflow-wrap: anywhere; font-size: .9rem; }

@@ -4,6 +4,7 @@
 #include <sqlite3.h>
 
 namespace flockv0 {
+namespace conversation { struct Context; }
 class Statement {
 public:
     Statement(sqlite3*, const char*, const Json& values);
@@ -33,7 +34,16 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     void save(Json&);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr);
+    void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     Id journal(Id, std::string_view kind, const Json&);
+    void migrateConversation();
+    void routePending();
+    void routeMessage(Id);
+    conversation::Context routeContext(std::string_view bot, Id message, std::string_view text,
+                                       Id replyTo, const Json& routing);
+    Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
+    bool completionHeld(const Json&) const;
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;
     void wait(Json&, std::string_view reason, Json data = Json::object());

@@ -87,8 +87,9 @@ CREATE INDEX IF NOT EXISTS tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS tasks_bot ON tasks(bot_id,id DESC);
 CREATE TABLE IF NOT EXISTS journal(
-  id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
+  id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
+  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, bot_id TEXT,
+  CHECK(task_id IS NOT NULL OR bot_id IS NOT NULL));
 CREATE INDEX IF NOT EXISTS journal_task ON journal(task_id,id);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS runs(
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        migrateConversation();
     } catch (...) { sqlite3_close(db); throw; }
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
@@ -170,9 +172,10 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     if (task.contains("actionId")) data["actionId"] = task["actionId"];
     exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task["id"], data});
     data["id"] = last();
+    const auto message = journal(task["id"], "waiting", data);
+    data["messageId"] = message;
     task["wait"] = data;
     task["state"] = "waiting";
-    journal(task["id"], "waiting", data);
 }
 void Store::Impl::clearWait(Json& task, std::string_view resolution) {
     const auto wait = task.find("wait");
@@ -203,53 +206,68 @@ Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
 Id Store::submit(const Intake& item) {
-    if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
-        item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
-        !item.config.is_object())
-        throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    const Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
-        {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
-        {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
-        {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
-        {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
-    p_->exec("INSERT OR IGNORE INTO tasks(bot_id,environment_id,project_id,schedule_id,scheduled_at,state,generation,data)"
-             " VALUES(?,?,?,?,?,'queued',0,?)",
-             {item.botId,item.environmentId,item.projectId,item.scheduleId.empty() ? Json(nullptr) : Json(item.scheduleId),
-              item.scheduledAt,data});
-    if (!sqlite3_changes(p_->db)) {
-        auto row = p_->query("SELECT id FROM tasks WHERE bot_id=? AND schedule_id=? AND scheduled_at=?",
-                             {item.botId,item.scheduleId,item.scheduledAt});
-        if (!row.next()) throw Conflict("Scheduled task could not be saved");
-        const auto id = row.number(0);
-        transaction.commit();
-        return id;
-    }
-    const auto id = p_->last();
-    p_->journal(id, "request", {{"text",item.request},{"source",item.scheduleId.empty() ? "manual" : "cron"},
-                                {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt}});
+    const auto id = p_->submit(item);
     transaction.commit();
     return id;
 }
 
+Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source) {
+    if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
+        item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
+        !item.config.is_object())
+        throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
+        {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
+        {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
+        {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
+        {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
+    if (sourceMessageId) data["sourceMessageId"] = sourceMessageId;
+    if (!source.is_null()) {
+        data["sourceTaskId"] = source.at("taskId");
+        data["sourceResultRefs"] = Json::array({source});
+    }
+    exec("INSERT OR IGNORE INTO tasks(bot_id,environment_id,project_id,schedule_id,scheduled_at,state,generation,data)"
+             " VALUES(?,?,?,?,?,'queued',0,?)",
+             {item.botId,item.environmentId,item.projectId,item.scheduleId.empty() ? Json(nullptr) : Json(item.scheduleId),
+              item.scheduledAt,data});
+    if (!sqlite3_changes(db)) {
+        auto row = query("SELECT id FROM tasks WHERE bot_id=? AND schedule_id=? AND scheduled_at=?",
+                             {item.botId,item.scheduleId,item.scheduledAt});
+        if (!row.next()) throw Conflict("Scheduled task could not be saved");
+        return row.number(0);
+    }
+    const auto id = last();
+    journal(id, "request", {{"text",item.request},
+        {"source",sourceMessageId ? "conversation" : (item.scheduleId.empty() ? "manual" : "cron")},
+        {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt},{"messageId",sourceMessageId}});
+    return id;
+}
+
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {
-    if (!data.is_object()) throw Conflict("Operation data must be an object");
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    auto task = p_->load(id);
+    p_->operate(id,waitId,operation,data);
+    transaction.commit();
+}
+
+void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Json& data, bool fromConversation) {
+    if (!data.is_object()) throw Conflict("Operation data must be an object");
+    auto task = load(id);
     if (terminal(task) || task["state"] == "cancelling") throw Conflict("Task is closed or cancelling");
     const auto wait = task["wait"];
     if (operation == "cancel") {
         if (waitId && (wait.is_null() || wait["id"] != waitId)) throw Conflict("Waiting item is no longer current");
-        p_->clearWait(task, "cancel");
-        p_->journal(id, "cancel_requested", Json::object());
+        clearWait(task, "cancel");
+        journal(id, "cancel_requested", Json::object());
         if (task["state"] == "queued") {
+            for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
+                task.erase(key);
             task["state"] = "cancelled";
-            p_->journal(id, "cancelled", Json::object());
+            journal(id, "cancelled", Json::object());
         } else task["state"] = "cancelling";
-        p_->save(task);
-        transaction.commit();
+        save(task);
         return;
     }
     if (task["state"] != "waiting" || wait.is_null() || wait["id"] != waitId)
@@ -260,29 +278,29 @@ void Store::operate(Id id, Id waitId, std::string_view operation, const Json& da
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
             throw Conflict("A nonempty answer (up to 8,000 bytes) is required");
-        auto event = p_->currentEvent(task);
-        event["userAnswer"] = answer;
-        event["userQuestion"] = field(wait,"text");
-        for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) event.erase(metadata);
-        p_->consumeEvent(task);
-        p_->event(task, "answer/" + std::to_string(waitId), event);
-        p_->journal(id, "user_answer", {{"text",answer},{"waitId",waitId}});
+        auto updated = currentEvent(task);
+        updated["userAnswer"] = answer;
+        updated["userQuestion"] = field(wait,"text");
+        for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
+        consumeEvent(task);
+        event(task, "answer/" + std::to_string(waitId), updated);
+        journal(id, "user_answer", {{"text",answer},{"waitId",waitId},{"conversation",fromConversation}});
     } else if (operation == "approve" && reason == "budget") {
         task["remaining"] = task["remaining"].get<int>() + 1;
-        p_->journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
+        journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
     } else if (operation == "retry" && reason == "model_failure") {
-        p_->exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
+        exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
-        p_->journal(id, "model_retry", {{"waitId",waitId}});
+        journal(id, "model_retry", {{"waitId",waitId}});
     } else if (operation == "extend" && reason == "deadline") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
         task["deadline"] = data["deadline"];
         next = "running";
-        p_->journal(id, "deadline_extended", {{"deadline",task["deadline"]},{"waitId",waitId}});
+        journal(id, "deadline_extended", {{"deadline",task["deadline"]},{"waitId",waitId}});
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
-            const auto action = p_->outbox(task);
+            const auto action = outbox(task);
             const auto& session = data["session"];
             if (reason != "settings" || (!action.is_null() && action["phase"] != "ready") || !session.is_object())
                 throw Conflict("Session settings can only be corrected before an unsent action");
@@ -296,28 +314,40 @@ void Store::operate(Id id, Id waitId, std::string_view operation, const Json& da
         }
         if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
         else {
-            const auto action = p_->outbox(task);
+            const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
             auto updated = action;
             updated.erase("phase"); updated.erase("authGeneration");
             updated["candidate"] = {{"threadId",field(data,"threadId")},{"runId",field(data,"runId")}};
             updated["candidateQuestionId"] = field(data,"questionId");
-            p_->exec("UPDATE outbox SET data=? WHERE id=?", {updated, task["actionId"]});
+            exec("UPDATE outbox SET data=? WHERE id=?", {updated, task["actionId"]});
             next = "sending";
         }
-        p_->journal(id, "reconcile_requested", {{"waitId",waitId}});
+        journal(id, "reconcile_requested", {{"waitId",waitId}});
     } else {
         throw Conflict("Operation is unavailable for this waiting item");
     }
-    p_->clearWait(task,operation);
+    clearWait(task,operation);
     task["state"] = next;
-    p_->save(task);
-    transaction.commit();
+    save(task);
 }
 
 Json Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
     auto result = p_->load(id);
+    auto& wait = result["wait"];
+    if (!wait.is_null() && !wait.contains("messageId")) {
+        auto row = p_->query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
+                             " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {id,wait["id"]});
+        if (row.next()) wait["messageId"] = row.number(0);
+    }
+    result["revisions"] = Json::array();
+    auto revisions = p_->query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
+                               " WHERE task_id=? ORDER BY number", {id});
+    while (revisions.next()) {
+        result["revisions"].push_back({{"id",revisions.number(0)},{"number",revisions.number(1)},
+            {"intent",revisions.string(2)},{"doneWhen",revisions.string(3)},{"sourceMessageId",revisions.number(4)}});
+    }
     result["blockedBy"] = nullptr;
     auto pending = p_->outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
@@ -330,12 +360,14 @@ Json Store::task(Id id) const {
         if (row.next()) result["blockedBy"] = {{"id",row.number(0)},{"botId",row.string(1)},
                                               {"request",row.string(2)},{"state",row.string(3)}};
     }
-    auto runs = p_->query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id FROM runs"
+    auto runs = p_->query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
+                          "json_extract(outbox.data,'$.revisionId') FROM runs"
                           " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid", {id});
     result["runs"] = Json::array();
     while (runs.next())
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
-                                  {"link",runs.string(2)},{"actionId",runs.string(3)}});
+                                  {"link",runs.string(2)},{"actionId",runs.string(3)},
+                                  {"environmentId",runs.string(4)},{"revisionId",runs.number(5)}});
     return result;
 }
 
@@ -362,13 +394,41 @@ Json Store::history(Id taskId, Id after, unsigned limit) const {
     while (rows.next()) result.push_back(journalRow(rows));
     return result;
 }
+
+Json Store::latestTaskResult(Id taskId) const {
+    std::lock_guard lock(p_->mutex);
+    auto row = p_->query(R"SQL(
+SELECT j.id,j.task_id,j.time,j.kind,j.data FROM journal j JOIN tasks t ON t.id=j.task_id
+WHERE j.task_id=? AND j.kind IN ('completed','report')
+AND coalesce(json_extract(j.data,'$.revisionId'),0)=coalesce(json_extract(t.data,'$.currentRevision'),0)
+ORDER BY j.id DESC LIMIT 1
+)SQL",{taskId});
+    return row.next() ? journalRow(row) : Json(nullptr);
+}
+
 Json Store::conversation(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT journal.id,task_id,time,kind,journal.data FROM journal
-JOIN tasks ON tasks.id=task_id WHERE bot_id=? AND (?=0 OR journal.id<?)
-AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
-ORDER BY journal.id DESC LIMIT ?)SQL", {bot,before,before,std::clamp(limit,1u,200u)});
+SELECT page.id,page.task_id,page.time,page.kind,
+  CASE WHEN m.id IS NULL THEN page.data
+  ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
+            'replyToMessageId',coalesce(m.reply_to,0),'status',
+            coalesce(json_extract(page.data,'$.status'),'received'),
+            'deliveredToT3',json(CASE WHEN EXISTS (
+              SELECT 1 FROM journal delivery WHERE delivery.task_id=page.task_id
+              AND delivery.kind='instruction_delivered' AND json_extract(delivery.data,'$.messageId')=m.id
+              AND json_array_length(json_extract(decision.data,'$.segments'))=1
+            ) THEN 'true' ELSE 'false' END))) END
+FROM (
+  SELECT j.* FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
+    AND j.bot_id IS NULL
+    AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
+    AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
+    AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
+  UNION ALL SELECT * FROM journal WHERE bot_id=?
+) AS page LEFT JOIN messages m ON m.id=page.id
+LEFT JOIN route_decisions decision ON decision.message_id=m.id
+WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL", {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
     std::reverse(result.begin(),result.end());

@@ -62,18 +62,18 @@
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
             <span class="reply-mark" aria-hidden="true">↳</span>
-            <div class="reply-target"><strong>質問への返信</strong><span id="reply-question"></span></div>
+            <div class="reply-target"><strong id="reply-label"></strong><span id="reply-question"></span></div>
             <button id="cancel-reply" type="button" class="icon-button" aria-label="返信を取り消す">×</button>
           </div>
           <div class="compose-input">
-            <label class="sr-only" id="compose-label" for="message">新しい依頼</label>
+            <label class="sr-only" id="compose-label" for="message">メッセージ</label>
             <textarea rows="2" id="message" required></textarea>
-            <button id="send" class="send" type="submit" aria-label="新しい依頼を送る">
+            <button id="send" class="send" type="submit" aria-label="メッセージを送る">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
             </button>
           </div>
         </form>
-        <div class="composer-foot"><span id="composer-mode">新しい依頼</span><span id="notice" role="status"></span></div>
+        <div class="composer-foot"><span id="notice" role="status"></span></div>
       </div>
     </main>
   </div>

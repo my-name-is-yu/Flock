@@ -14,6 +14,7 @@ using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
+enum class Mutation { Message, Request, Operation };
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -26,15 +27,16 @@ void error(Response& res, int status, std::string_view code) {
 
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
 
-Id cursor(const Request& req) {
-    const auto count = req.get_param_value_count("before");
-    if (count == 0) return 0;
-    if (count != 1) throw InputError("invalid_cursor");
-    const auto value = req.get_param_value("before");
+Id queryId(const Request& req, const char* key, bool optional) {
+    const auto error = optional ? "invalid_cursor" : "invalid_id";
+    const auto count = req.get_param_value_count(key);
+    if (count == 0 && optional) return 0;
+    if (count != 1) throw InputError(error);
+    const auto value = req.get_param_value(key);
     Id id = 0;
     const auto parsed = std::from_chars(value.data(),value.data() + value.size(),id);
-    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || id < 0)
-        throw InputError("invalid_cursor");
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || id < (optional ? 0 : 1))
+        throw InputError(error);
     return id;
 }
 
@@ -114,22 +116,30 @@ public:
         server_.Get("/api/bots",[this](const Request&, Response& res) {
             json(res,200,web::botList(store_,bots()));
         });
-        for (const auto path : {"/api/view","/api/conversation","/api/sessions"}) {
+        for (const auto path : {"/api/view","/api/conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
                 const auto bot = findBot(id);
                 if (bot.is_null()) return error(res,404,"bot_not_found");
                 try {
-                    const auto before = cursor(req);
+                    if (req.path == "/api/task") {
+                        const auto taskId = queryId(req,"taskId",false);
+                        const auto task = store_.task(taskId);
+                        if (web::field(task,"botId") != id) return error(res,404,"task_not_found");
+                        return json(res,200,web::taskDetail(task,store_.latestTaskResult(taskId)));
+                    }
+                    const auto before = queryId(req,"before",true);
                     if (req.path == "/api/view") json(res,200,web::botView(store_,bot));
                     else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));
                 } catch (const InputError& e) { error(res,400,e.what()); }
+                catch (const Conflict&) { error(res,404,"task_not_found"); }
             });
         }
-        server_.Post("/api/requests",[this](const Request& req, Response& res) { mutate(req,res,true); });
-        server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,false); });
+        server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
+        server_.Post("/api/requests",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Request); });
+        server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
@@ -194,22 +204,32 @@ private:
         return nullptr;
     }
 
-    void mutate(const Request& req, Response& res, bool submit) {
+    void mutate(const Request& req, Response& res, Mutation mutation) {
         const auto body = Json::parse(req.body,nullptr,false);
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
             const auto bot = requiredText(body,"botId",1024);
             if (findBot(bot).is_null()) return error(res,404,"bot_not_found");
-            if (submit) {
-                const auto request = requiredText(body,"request",16000);
+            if (mutation != Mutation::Operation) {
+                const auto message = mutation == Mutation::Message;
+                const auto request = requiredText(body,message ? "text" : "request",16000);
+                const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
+                const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
+                if (message) {
+                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
+                    if (previous) return json(res,201,*previous);
+                }
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
-                catch (const std::exception&) { return error(res,422,"intake_settings"); }
+                catch (const std::exception&) {
+                    if (!message) return error(res,422,"intake_settings");
+                }
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
                 intake.scheduleId.clear();
                 intake.scheduledAt = 0;
+                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto id = bodyId(body,"taskId");
@@ -220,7 +240,11 @@ private:
             store_.operate(id,wait,operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
-        catch (const Conflict&) { error(res,409,submit ? "request_conflict" : "operation_conflict"); }
+        catch (const Conflict&) {
+            const auto code = mutation == Mutation::Message ? "message_conflict" :
+                mutation == Mutation::Request ? "request_conflict" : "operation_conflict";
+            error(res,409,code);
+        }
     }
 
     Store& store_;

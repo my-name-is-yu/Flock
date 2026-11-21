@@ -118,6 +118,12 @@ public:
     Store& operator=(const Store&) = delete;
 
     Id submit(const Intake&);
+    // Acknowledges a durable Bot message. Retrying the same key and text returns the same receipt.
+    Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
+                 Id replyToMessageId = 0);
+    std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
+                                std::string_view text, Id replyToMessageId = 0) const;
+    Json clarifications(std::string_view botId) const;
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
@@ -125,6 +131,8 @@ public:
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
+    // Latest completion or Session report for the Task's current revision.
+    Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
     const std::filesystem::path& path() const;

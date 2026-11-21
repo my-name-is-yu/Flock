@@ -6,7 +6,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'compose-label', 'message', 'send', 'composer-mode', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -16,7 +16,7 @@ const fullTime = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeSty
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
   queued: '受付済み', deciding: '判定中', sending: '送信中', running: '作業中', waiting: '確認待ち',
-  cancelling: '中止処理中', completed: '完了', cancelled: '中止', ended: '実行終了',
+  cancelling: '中止処理中', stopping: '停止を確認中', completed: '完了', cancelled: '中止', ended: '実行終了',
   idle: '待機中', thinking: '判断中', working: 'セッション作業中',
 };
 const waitLabels = {
@@ -36,6 +36,7 @@ const closedLabels = {
 const errors = {
   invalid_text: '入力内容と文字数を確認してください。', invalid_deadline: '現在より後の期限を指定してください。',
   intake_settings: '依頼を受け付けられません。Bot の実行設定を確認してください。',
+  message_conflict: '送信内容がすでに登録されています。会話を確認してください。',
   operation_conflict: 'この操作はすでに処理されたか、確認内容が変わりました。',
   bot_not_found: 'Bot が見つかりません。',
 };
@@ -52,7 +53,8 @@ const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const drafts = new Map();
 const replies = new Map();
-const pendingRequests = new Set();
+const sendingMessages = new Set();
+const pendingMessages = new Map();
 const pendingWaits = new Set();
 const notices = new Map();
 const signatures = new Map();
@@ -116,6 +118,25 @@ async function api(path, body) {
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
+const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
+
+function pendingMessage(bot) {
+  if (!pendingMessages.has(bot)) {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
+      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
+    } catch { /* Keep session retries available in memory. */ }
+  }
+  return pendingMessages.get(bot);
+}
+function rememberMessage(bot, pending) {
+  if (pending) pendingMessages.set(bot, pending);
+  else pendingMessages.delete(bot);
+  try {
+    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
+    else sessionStorage.removeItem(messageStorageKey(bot));
+  } catch { /* Keep session retries available in memory. */ }
+}
 
 function setConnection(state) {
   if (connection === state) return;
@@ -137,6 +158,9 @@ function selectBot(botId) {
   closeDetail();
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, loadingOlder: false, loadingSessions: false, generation: 0 } : null;
+  const pending = botId && pendingMessage(botId);
+  if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
+  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   save('flock-selected-bot', botId);
   render();
   elements.conversation.scrollTop = 0;
@@ -207,11 +231,12 @@ function renderHeader() {
   }
   const presence = view?.data?.presence ?? 'idle';
   const key = JSON.stringify([bot.id, bot.avatar]);
+  const avatarState = presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: presence });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
-  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: presence });
+  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: avatarState });
   elements['profile-name'].textContent = bot.name;
   elements.profile.setAttribute('aria-label', `${bot.name} の設定を開く`);
   elements['profile-status'].dataset.state = presence;
@@ -226,9 +251,10 @@ function activityTitle(request, className) {
 function renderActivity() {
   const data = view?.data;
   const waits = data?.waits ?? [];
-  if (changed('waits', view?.id, waits)) {
-    elements['wait-count'].textContent = waits.length;
-    elements['wait-count'].classList.toggle('has-waits', waits.length > 0);
+  const clarifications = data?.clarifications ?? [];
+  if (changed('waits', view?.id, waits, clarifications)) {
+    elements['wait-count'].textContent = waits.length + clarifications.length;
+    elements['wait-count'].classList.toggle('has-waits', waits.length + clarifications.length > 0);
     const rows = waits.map((task) => {
       const row = button(null, 'activity wait-select', () => {
         openNavigation(false);
@@ -239,6 +265,16 @@ function renderActivity() {
       row.append(line, activityTitle(task.request, 'activity-subtitle'));
       return row;
     });
+    for (const clarification of clarifications) {
+      const row = button(null, 'activity wait-select', () => {
+        openNavigation(false);
+        openDetail({ kind: 'clarification', messageId: clarification.messageId });
+      });
+      const line = node('span', 'activity-line');
+      line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Bot からの確認'));
+      row.append(line, activityTitle(clarification.text, 'activity-subtitle'));
+      rows.push(row);
+    }
     elements['wait-list'].replaceChildren(...rows);
     if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', '確認待ちはありません'));
   }
@@ -253,9 +289,13 @@ function renderActivity() {
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
       const row = node('article', 'activity session-entry');
-      const status = active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
+      const status = active.find((run) => run.taskId === task.id && run.threadId === session.threadId &&
+        run.environmentId === session.environmentId)?.state ?? 'ended';
       const line = node('span', 'activity-line');
-      line.append(badge(status), node('span', 'activity-subtitle', `#${task.id}`));
+      line.append(badge(status), button('作業の詳細', 'text-button', () => {
+        openNavigation(false);
+        void openTask(task.id);
+      }));
       row.append(activityTitle(task.request, 'activity-title'), line);
       const link = linkToRun(session);
       if (link) row.append(link);
@@ -266,25 +306,35 @@ function renderActivity() {
   if (!rows.length) elements['session-list'].append(node('p', 'activity-empty', 'セッションはまだありません'));
 }
 
-function beginReply(task) {
+function beginReply(target, text = '') {
+  if (!target.messageId || sendingMessages.has(view.id)) return;
   const current = replies.get(view.id);
-  if (current?.waitId !== task.wait.id) replies.set(view.id, {
-    taskId: task.id, waitId: task.wait.id, question: waitText(task.wait), text: '',
-  });
+  if (current?.messageId !== target.messageId || text)
+    replies.set(view.id, { ...target, text });
   closeDetail();
   renderComposer();
   elements.message.focus();
 }
 function questionActions(task) {
+  const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', 'event-actions');
   for (const choice of task.wait.choices ?? []) {
-    const option = button(choice, 'button', () => void operate(view, task, 'answer', { text: choice }));
+    const option = button(choice, 'button', () => beginReply(target, choice));
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);
   }
-  const reply = button('返信を書く', 'text-button', () => beginReply(task));
+  const reply = button('返信を書く', 'text-button', () => beginReply(target));
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
+  return actions;
+}
+function clarificationActions(clarification) {
+  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
+  const actions = node('div', 'event-actions');
+  for (const candidate of clarification.candidates ?? []) {
+    actions.append(button(candidate.request, 'button', () => beginReply(target, candidate.request)));
+  }
+  actions.append(button('返信を書く', 'text-button', () => beginReply(target)));
   return actions;
 }
 function detailText(label, value) {
@@ -292,19 +342,62 @@ function detailText(label, value) {
   row.append(node('strong', null, label), document.createTextNode(value));
   return row;
 }
-function eventCard(event, waits, closed, queued) {
+function sourceAction(source, label = '参照元を開く') {
+  return button(label, 'text-button', async () => {
+    if (!source.messageId && source.taskId) {
+      await openTask(source.taskId);
+      return;
+    }
+    const target = byId(`event-${source.messageId}`);
+    if (target) {
+      closeDetail();
+      target.focus();
+      target.scrollIntoView({ block: 'center' });
+      return;
+    }
+    const context = view;
+    const selection = { kind: 'source' };
+    openDetail(selection);
+    try {
+      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
+      if (detail !== selection) return;
+      selection.event = page.events.find((event) => event.id === source.messageId);
+      selection.failed = !selection.event;
+    } catch {
+      if (detail !== selection) return;
+      selection.failed = true;
+    }
+    renderDetail();
+  });
+}
+function resultActions(event, text, run) {
+  const actions = node('div', 'event-actions');
+  const link = linkToRun(run);
+  if (link) actions.append(link);
+  if (text) actions.append(button('この結果に返信', 'text-button', () =>
+    beginReply({ kind: 'result', messageId: event.id, summary: text })));
+  return actions;
+}
+function eventCard(event, waits, closed, queued, clarifications) {
   const data = event.data;
-  const outbound = event.kind === 'user_answer' || (event.kind === 'request' && data.source !== 'cron');
+  const outbound = ['conversation_message', 'user_answer'].includes(event.kind) ||
+    (event.kind === 'request' && data.source !== 'cron');
   const row = node('article', `event${outbound ? ' outbound' : ''}`);
+  row.id = `event-${event.id}`;
+  row.tabIndex = -1;
   const card = node('div', 'event-card');
   const metadata = node('div', 'event-meta');
   const timestamp = new Date(event.time * 1000);
   const time = node('time', null, clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
   const labels = { request: data.source === 'cron' ? '定期依頼' : 'あなた', user_answer: 'あなたの回答',
+    conversation_message: 'あなた', conversation_reply: view.data.bot.name,
     report: 'セッション報告', completed: '完了報告', cancelled: 'タスクを中止' };
   const label = event.kind === 'waiting' ? waitLabel(data.reason) : labels[event.kind];
-  metadata.append(node('strong', null, label), node('span', null, `#${event.taskId}`), time);
+  metadata.append(node('strong', null, label), time);
+  if (event.taskId && ['request', 'completed', 'report', 'conversation_message'].includes(event.kind)) {
+    metadata.append(button('作業の詳細', 'text-button event-task', () => void openTask(event.taskId)));
+  }
   row.append(metadata, card);
   if (event.kind === 'waiting') {
     card.classList.add('question-card');
@@ -321,25 +414,39 @@ function eventCard(event, waits, closed, queued) {
     card.append(node('p', 'event-text', data.report || 'セッションから報告がありました'));
     if (data.status) card.append(detailText('Run の状態', stateLabels[data.status] ?? data.status));
     if (data.truncated) card.append(node('p', 'event-note', '報告の続きは T3 で確認できます。'));
-    const link = linkToRun(data.run);
-    if (link) {
-      const actions = node('div', 'event-actions');
-      actions.append(link);
-      card.append(actions);
-    }
+    card.append(resultActions(event, data.report, data.run));
   } else if (event.kind === 'completed') {
     card.classList.add('finished-card');
     card.append(node('p', 'event-text', data.text));
     if (data.reason) card.append(detailText('判断理由', data.reason));
+    card.append(resultActions(event, data.text, data.run));
+  } else if (event.kind === 'conversation_reply') {
+    card.append(node('p', 'event-text', data.text));
+    const clarification = clarifications.get(data.messageId);
+    if (clarification) {
+      card.classList.add('question-card');
+      card.append(clarificationActions(clarification));
+    }
+    if (data.source?.messageId) {
+      const actions = node('div', 'event-actions');
+      actions.append(sourceAction(data.source));
+      if (data.route === 'respond') actions.append(button('この回答に返信', 'text-button', () =>
+        beginReply({ kind: 'result', messageId: event.id, summary: data.text })));
+      card.append(actions);
+    }
   } else if (event.kind === 'cancelled') card.append(node('p', 'event-text', 'タスクを中止しました。'));
   else {
     card.append(node('p', 'event-text', data.text));
+    if (event.kind === 'conversation_message' && data.replyToMessageId) {
+      card.append(sourceAction({ messageId: data.replyToMessageId }, '返信先を開く'));
+    }
+    if (data.status === 'received') card.append(node('p', 'event-note', '受付済み'));
+    if (data.deliveredToT3) card.append(node('p', 'event-note', 'T3 に引き継ぎ済み'));
     if (data.source === 'cron' && data.scheduledAt) card.append(node('p', 'event-note', `予定時刻 ${fullTime.format(data.scheduledAt * 1000)}`));
     const blocker = queued.get(event.taskId)?.blockedBy;
-    if (event.kind === 'request' && blocker) {
-      const name = bots.find((bot) => bot.id === blocker.botId)?.name ?? blocker.botId;
-      card.append(node('p', 'event-note', `先行タスク #${blocker.id}（${name}）の完了を待っています。`));
-      card.append(node('p', 'event-note', blocker.request));
+    if (['request', 'conversation_message'].includes(event.kind) && blocker) {
+      card.append(node('p', 'event-note', '同じプロジェクトの先行作業を待っています。'));
+      if (blocker.request) card.append(node('p', 'event-note', blocker.request));
     }
   }
   return row;
@@ -351,12 +458,13 @@ function renderTimeline(scroll = 'auto') {
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !view?.olderBefore;
   older.disabled = !!view?.loadingOlder;
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded)) return;
+  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, data?.clarifications, [...pendingWaits], listLoaded)) return;
   const scroller = elements.conversation;
   const previousHeight = scroller.scrollHeight;
   const previousTop = scroller.scrollTop;
   const atBottom = previousHeight - previousTop - scroller.clientHeight < 65;
   const waits = new Map((data?.waits ?? []).map((task) => [task.wait.id, task]));
+  const clarifications = new Map((data?.clarifications ?? []).map((item) => [item.messageId, item]));
   const queued = new Map((data?.queued ?? []).map((task) => [task.id, task]));
   const closed = new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution]));
   const fragment = document.createDocumentFragment();
@@ -368,14 +476,13 @@ function renderTimeline(scroll = 'auto') {
       fragment.append(node('p', 'day', eventDay));
       day = eventDay;
     }
-    fragment.append(eventCard(event, waits, closed, queued));
+    fragment.append(eventCard(event, waits, closed, queued, clarifications));
   }
   if (!fragment.childElementCount) {
     const empty = node('div', 'empty-state');
     if (data?.bot) empty.append(avatar(data.bot));
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? `${data.bot.name} との会話` : 'Bot がありません') : '読み込み中…'));
-    if (data) empty.append(node('p', null, '新しい依頼を送ると、ここに履歴が表示されます。'));
     fragment.append(empty);
   }
   elements.timeline.replaceChildren(fragment);
@@ -388,25 +495,26 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (view?.id === context.id) renderComposer();
 }
+const replyLabels = { wait: '質問への返信', clarification: '確認への返信', result: '結果への返信' };
+const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 function renderComposer() {
   const context = view;
   elements['composer-container'].hidden = !context?.data;
   if (!context?.data) return;
   const reply = replies.get(context.id);
   const { text, isError } = notices.get(context.id) ?? {};
-  const target = reply ? '質問への返信' : '新しい依頼';
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
-  const busy = pendingRequests.has(context.id) || (!!reply && pendingWaits.has(reply.waitId));
+  const busy = sendingMessages.has(context.id);
   elements['reply-context'].hidden = !reply;
-  elements['reply-question'].textContent = reply ? `#${reply.taskId} ${reply.question}` : '';
-  elements['compose-label'].textContent = target;
-  elements['composer-mode'].textContent = target;
+  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
+  elements['reply-question'].textContent = reply?.summary ?? '';
+  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'メッセージ';
   elements['cancel-reply'].disabled = busy;
-  elements.message.placeholder = reply ? '質問への回答を入力' : `${context.data.bot.name} に依頼する`;
+  elements.message.placeholder = reply ? '返信を入力' : `${context.data.bot.name} にメッセージを送る`;
   if (elements.message.value !== body) elements.message.value = body;
   elements.message.readOnly = busy;
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > (reply ? 8000 : 16000);
-  elements.send.setAttribute('aria-label', reply ? '質問に返信する' : '新しい依頼を送る');
+  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.setAttribute('aria-label', reply ? '返信を送る' : 'メッセージを送る');
   elements.notice.textContent = text ?? '';
   elements.notice.classList.toggle('error', !!isError);
 }
@@ -421,6 +529,84 @@ function openDetail(selection) {
   signatures.delete('detail');
   renderDetail();
   if (!elements.detail.open) elements.detail.showModal();
+}
+async function openTask(taskId) {
+  const context = view;
+  if (!context?.data) return;
+  const selection = { kind: 'task', taskId };
+  openDetail(selection);
+  try {
+    const task = await api(`task?${new URLSearchParams({ bot: context.id, taskId })}`);
+    if (detail !== selection) return;
+    selection.task = task;
+  } catch {
+    if (detail !== selection) return;
+    selection.failed = true;
+  }
+  renderDetail();
+}
+function taskContent(task) {
+  const purpose = node('section', 'dialog-section');
+  purpose.append(badge(task.state), node('h3', null, '目的'), node('p', 'prose', task.intent || task.request));
+  const parts = [purpose];
+  if (task.revisions.length || task.doneWhen) {
+    const revisions = node('section', 'dialog-section');
+    revisions.append(node('h3', null, '完了条件'));
+    if (!task.revisions.length) revisions.append(node('p', 'prose', task.doneWhen));
+    for (const revision of [...task.revisions].reverse()) {
+      const row = node('div', 'schedule-row');
+      const label = revision.id === task.currentRevision ? `第 ${revision.number} 版（現在）` : `第 ${revision.number} 版`;
+      row.append(node('p', 'dialog-meta', label), node('p', 'prose', revision.doneWhen));
+      if (revision.intent && revision.intent !== (task.intent || task.request)) row.append(detailText('当時の目的', revision.intent));
+      if (revision.sourceMessageId) row.append(sourceAction({ messageId: revision.sourceMessageId }, '変更を依頼したメッセージ'));
+      revisions.append(row);
+    }
+    parts.push(revisions);
+  }
+  if (task.pendingInstructions.length) {
+    const pending = node('section', 'dialog-section');
+    pending.append(node('h3', null, '引き継ぎ待ちの指示'));
+    for (const instruction of task.pendingInstructions) pending.append(node('p', 'prose', instruction.text));
+    parts.push(pending);
+  }
+  if (task.result) {
+    const result = node('section', 'dialog-section');
+    const data = task.result.data;
+    const label = task.result.kind === 'completed' ? '完了報告' : '最新のセッション報告';
+    result.append(node('h3', null, label), node('p', 'prose', data.text ?? data.report));
+    const actions = node('div', 'event-actions');
+    actions.append(sourceAction({ messageId: task.result.id }, '会話の報告を開く'));
+    const link = linkToRun(data.run);
+    if (link) actions.append(link);
+    result.append(actions);
+    parts.push(result);
+  }
+  if (task.sourceResultRefs.length || task.sourceTaskId) {
+    const sources = node('section', 'dialog-section');
+    sources.append(node('h3', null, '元の作業'));
+    for (const source of task.sourceResultRefs) {
+      if (source.text) sources.append(node('p', 'prose', source.text));
+      sources.append(sourceAction(source, source.messageId ? '元の結果を開く' : '元の作業を開く'));
+    }
+    if (!task.sourceResultRefs.length)
+      sources.append(button('元の作業を開く', 'text-button', () => void openTask(task.sourceTaskId)));
+    parts.push(sources);
+  }
+  if (task.runs.length) {
+    const runs = node('section', 'dialog-section');
+    runs.append(node('h3', null, '実行履歴'));
+    for (const run of [...task.runs].reverse()) {
+      const row = node('div', 'schedule-row');
+      const revision = task.revisions.find((item) => item.id === run.revisionId);
+      const label = [run.runId, run.environmentId, revision ? `第 ${revision.number} 版` : ''].filter(Boolean).join(' · ');
+      row.append(node('p', 'dialog-meta', label));
+      const link = linkToRun(run);
+      if (link) row.append(link);
+      runs.append(row);
+    }
+    parts.push(runs);
+  }
+  return parts;
 }
 function settingsContent(bot) {
   elements['detail-title'].textContent = 'Bot 設定';
@@ -466,7 +652,7 @@ function waitContent(context, task) {
   const wait = task.wait;
   elements['detail-title'].textContent = waitLabel(wait.reason);
   const request = node('section', 'dialog-section');
-  request.append(node('h3', null, `依頼 #${task.id}`), node('p', 'dialog-request', task.request));
+  request.append(node('h3', null, '作業'), node('p', 'dialog-request', task.request));
   const reason = node('section', 'dialog-section');
   reason.append(node('h3', null, '待っている理由'), node('p', 'prose', waitText(wait)));
   if (wait.decisionReason) reason.append(detailText('判断理由', wait.decisionReason));
@@ -499,7 +685,7 @@ function waitContent(context, task) {
     }
   }
   buttons.append(button('タスクを中止', 'button danger', () => {
-    if (window.confirm(`タスク #${task.id} を中止しますか？`)) perform('cancel');
+    if (window.confirm(`「${task.request}」を中止しますか？`)) perform('cancel');
   }));
   actions.append(buttons);
   const feedback = node('p', 'dialog-feedback');
@@ -516,6 +702,36 @@ function renderDetail() {
   if (detail.kind === 'settings') {
     const bot = view.data.bot;
     if (changed('detail', detail, bot)) elements['detail-body'].replaceChildren(...settingsContent(bot));
+    return;
+  }
+  if (detail.kind === 'task') {
+    if (changed('detail', detail)) {
+      elements['detail-title'].textContent = '作業の詳細';
+      elements['detail-body'].replaceChildren(...(detail.task ? taskContent(detail.task) :
+        [node('p', 'prose', detail.failed ? '作業の詳細を読み込めませんでした。' : '読み込み中…')]));
+    }
+    return;
+  }
+  if (detail.kind === 'source') {
+    if (changed('detail', detail)) {
+      elements['detail-title'].textContent = '参照元';
+      const source = detail.event;
+      const text = source?.kind === 'waiting' ? waitText(source.data) :
+        source?.data.report ?? source?.data.text ?? (detail.failed ? '参照元を読み込めませんでした。' : '読み込み中…');
+      const body = node('p', 'prose', text);
+      elements['detail-body'].replaceChildren(body);
+      if (detail.event?.taskId) elements['detail-body'].append(
+        button('作業の詳細', 'text-button', () => void openTask(detail.event.taskId)));
+    }
+    return;
+  }
+  if (detail.kind === 'clarification') {
+    const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
+    if (changed('detail', detail, clarification)) {
+      elements['detail-title'].textContent = 'Bot からの確認';
+      elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? '確認待ちは終了しました。'));
+      if (clarification) elements['detail-body'].append(clarificationActions(clarification));
+    }
     return;
   }
   const task = view.data.waits.find((item) => item.id === detail.taskId && item.wait.id === detail.waitId);
@@ -551,11 +767,6 @@ function mergeLatest(context, latest) {
   context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
-  const reply = replies.get(context.id);
-  if (reply && !latest.waits.some((task) => task.id === reply.taskId && task.wait.id === reply.waitId)) {
-    replies.delete(context.id);
-    setNotice(context, '返信先の確認待ちは終了しました。');
-  }
 }
 async function refreshView(context, scroll) {
   const generation = ++context.generation;
@@ -632,11 +843,9 @@ async function operate(context, task, operation, fields = {}) {
   if (view?.id === context.id) render();
   try {
     await api('operations', { botId: context.id, taskId: task.id, waitId, operation, ...fields });
-    if (replies.get(context.id)?.waitId === waitId) replies.delete(context.id);
     setNotice(context, operation === 'answer' ? '回答を受け付けました。' : '操作を受け付けました。');
     if (view?.id === context.id && detail?.waitId === waitId) closeDetail();
   } catch (error) {
-    if (error.status === 409 && replies.get(context.id)?.waitId === waitId) replies.delete(context.id);
     const message = errors[error.message] ?? '操作の結果を確認できません。会話を確認してください。';
     setNotice(context, message, true);
     if (view?.id === context.id && detail?.waitId === waitId) showDetailError(message);
@@ -651,23 +860,30 @@ async function submit(event) {
   const context = view;
   if (!context?.data || elements.send.disabled) return;
   const reply = replies.get(context.id);
-  if (reply) {
-    const task = context.data.waits.find((item) => item.id === reply.taskId && item.wait.id === reply.waitId);
-    if (task) await operate(context, task, 'answer', { text: reply.text });
-    return;
-  }
-  const request = drafts.get(context.id);
-  pendingRequests.add(context.id);
-  setNotice(context, '依頼を送信中…');
+  const text = reply ? reply.text : drafts.get(context.id);
+  const replyToMessageId = reply?.messageId;
+  const previous = pendingMessage(context.id)?.payload;
+  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
+    ? previous.clientMessageId : crypto.randomUUID();
+  const payload = { botId: context.id, clientMessageId, text };
+  if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
+  rememberMessage(context.id, { payload, reply });
+  sendingMessages.add(context.id);
+  setNotice(context, 'メッセージを送信中…');
   try {
-    const { taskId } = await api('requests', { botId: context.id, request });
-    drafts.delete(context.id);
-    setNotice(context, `依頼 #${taskId} を受け付けました。`);
+    await api('messages', payload);
+    rememberMessage(context.id, null);
+    if (reply) replies.delete(context.id);
+    else drafts.delete(context.id);
+    setNotice(context, 'メッセージを受け付けました。');
     if (view?.id === context.id) await refreshView(view, 'bottom');
     void refreshBots();
-  } catch (error) { setNotice(context, errors[error.message] ?? '依頼の送信結果を確認できません。会話を確認してください。', true); }
+  } catch (error) {
+    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
+    setNotice(context, errors[error.message] ?? '受付を確認できませんでした。同じ内容で再送できます。', true);
+  }
   finally {
-    pendingRequests.delete(context.id);
+    sendingMessages.delete(context.id);
     if (view?.id === context.id) renderComposer();
   }
 }
@@ -692,7 +908,7 @@ elements.message.addEventListener('input', () => {
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
   notices.delete(view.id);
-  const limit = reply ? 8000 : 16000;
+  const limit = composerLimit(reply);
   if (byteLength(elements.message.value) > limit) setNotice(view, `入力は ${limit.toLocaleString('ja-JP')} バイトまでです。`, true);
   else renderComposer();
 });
