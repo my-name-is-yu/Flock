@@ -84,10 +84,21 @@ function avatar(bot, className = '') {
   showAvatar(host, bot);
   return host;
 }
+function runHref(run) {
+  if (!run?.link) return null;
+  let url;
+  try { url = new URL(run.link); }
+  catch { return null; }
+  const hosted = url.origin === 'https://app.t3.codes' && url.pathname.startsWith('/threads/');
+  const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if ((!hosted && !local) || url.username || url.password) return null;
+  return url.href;
+}
 function linkToRun(run, label = 'T3 で開く') {
-  if (!run?.link?.startsWith('https://app.t3.codes/threads/')) return null;
+  const href = runHref(run);
+  if (!href) return null;
   const link = node('a', 'link', `${label} ↗`);
-  link.href = run.link;
+  link.href = href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   return link;
@@ -357,7 +368,7 @@ function activityRow(tag, className, title, status, statusClass) {
   return row;
 }
 function sessionRow(task, session, status, live) {
-  const link = session.link?.startsWith('https://app.t3.codes/threads/') ? session.link : null;
+  const link = runHref(session);
   const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
   row.title = `#${task.id} ${task.request}`;
   if (link) {
@@ -404,8 +415,7 @@ function renderActivity() {
   const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      const state = session.state
-        ?? active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
+      const state = active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
       if (state !== 'ended') live.push(sessionRow(task, session, stateLabels[state] ?? state, true));
       else {
         const result = { completed: '完了', cancelled: '中止' }[task.state] ?? '終了';
