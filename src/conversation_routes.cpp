@@ -273,7 +273,6 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (context.reply.kind == Reply::Kind::invalid && !readOnly) return false;
         const auto source = sourceOf(action);
         if (source && !knownSource(context,*source)) return false;
-        // A chosen candidate must resolve the clarification it answers and can only reach that request.
         if (context.selection && !readOnly && (!resolving || clarification->id != context.reply.id ||
                                   std::holds_alternative<CreateTask>(action))) return false;
         if (const auto creation = std::get_if<CreateTask>(&action)) {

@@ -311,7 +311,6 @@ SELECT r.reply_id,r.message_id FROM (
     }
 
     if (const auto candidate = integer(routing,"candidateTaskId")) {
-        // A hidden choice is valid only against the clarification it answers, while that clarification is open.
         const bool offered = context.reply.kind == Reply::Kind::clarification &&
             std::ranges::find(context.reply.candidates,candidate) != context.reply.candidates.end();
         if (offered) context.selection = candidate;

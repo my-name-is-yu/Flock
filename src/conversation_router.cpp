@@ -506,7 +506,6 @@ Json decisionContext(std::string_view text, const Context& context) {
     Json anchor = {{"kind",kind},{"messageId",reply.id},{"taskId",reply.taskId},{"waitId",reply.waitId},
                    {"originalText",reply.originalText},{"candidates",reply.candidates}};
     if (reply.kind == Reply::Kind::clarification) anchor.update(clarificationData(reply));
-    // The user picked this candidate with a verified hidden reference, not by typing its name.
     if (context.selection) anchor["selectedTaskId"] = context.selection;
     if (reply.result) {
         anchor["resultMessageId"] = reply.result->messageId;
@@ -992,7 +991,6 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         return plan;
     }
     if (reply.kind == Reply::Kind::clarification && context.selection && reply.operation == "cancel_task") {
-        // The user chose one request from a stop confirmation. Act on that request only, without a model guess.
         const auto* chosen = taskById(context, context.selection);
         if (!chosen || !active(*chosen)) {
             auto plan = single(text, Respond{translate(ja, "That request has already ended, so there was nothing to stop.",
@@ -1009,7 +1007,6 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     }
     const auto normal = normalize(text);
     if (reply.kind == Reply::Kind::none) {
-        // Requests that share a name cannot be told apart from the text, so confirm instead of guessing.
         if (const auto subject = cancellationSubject(normal); subject && !wholeTaskSubject(*subject)) {
             const auto name = cancellationName(*subject);
             std::vector<Id> named;

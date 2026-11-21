@@ -396,7 +396,6 @@ struct StopModel : FixedModel {
                     {"taskId",reply.at("selectedTaskId")}}})},{"resolution","resolved"}},{}};
         }
         if (reply.at("kind") == "clarification") {
-            // Deliberately route the resolved clarification to a request the user did not choose.
             return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},{"taskId",other}}})},
                     {"resolution","resolved"}},{}};
         }

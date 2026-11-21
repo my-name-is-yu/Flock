@@ -596,7 +596,6 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
-// Same-named requests are told apart by start time (to the second) and by which was requested first.
 function candidateButton(target, candidate, order) {
   const started = startedText(candidate.createdAt, !!order);
   const state = candidate.state ? stateLabels[candidate.state] ?? '' : '';
@@ -1600,7 +1599,6 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
-  // A hidden choice only stands for the label it filled in. Once the user rewrites it, send plain text.
   if (reply?.candidateTaskId && reply.text !== reply.choice) {
     delete reply.candidateTaskId;
     delete reply.choice;

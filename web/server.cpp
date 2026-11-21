@@ -416,7 +416,6 @@ private:
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
-                // A clarification choice travels as a hidden reference, never as text in the message.
                 const auto candidate = message && body.contains("candidateTaskId") ? bodyId(body,"candidateTaskId") : Id{};
                 if (candidate && !replyTo) throw InputError("invalid_candidate");
                 if (message) {
