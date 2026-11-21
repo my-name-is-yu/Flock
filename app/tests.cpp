@@ -273,24 +273,19 @@ void notesAcrossConversationAndWork() {
     createBot(folder / "first",botConfig("first-model"),first.soul + "界tail",first.memory + "tail");
     createBot(folder / "second",botConfig("second-model"),second.soul,second.memory);
     const Bots bots(folder);
+    const auto fromFiles = bots.notes("first");
+    check(fromFiles.soul == first.soul && fromFiles.memory == first.memory,
+          "Bot files must keep the full 8 KiB prefix ending on a UTF-8 boundary");
     Store store(temp.path / "tasks.db");
     NotesT3 t3;
     t3.finished = true;
     std::optional<std::string> noteReadError;
+    std::string loaderSuffix = "界";
     Runtime runtime(store,model,t3,[&](std::string_view botId) {
         if (noteReadError) throw Conflict(*noteReadError);
-        auto notes = bots.notes(botId);
-        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
-        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
-        return notes;
+        const auto notes = bots.notes(botId);
+        return BotNotes{notes.soul + loaderSuffix,notes.memory + loaderSuffix};
     });
-    const auto expectedNotes = [](BotNotes notes) {
-        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
-        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
-        notes.soul = bounded(notes.soul,8192);
-        notes.memory = bounded(notes.memory,8192);
-        return notes;
-    };
 
     const auto checkRequest = [](const Json& request, const Intake& bot, const BotNotes& notes, std::string_view kind) {
         const auto context = requestContext(request);
@@ -340,18 +335,19 @@ void notesAcrossConversationAndWork() {
     };
 
     const auto firstIntake = bots.get("first").intake("");
-    const auto firstTask = completeTask(firstIntake,expectedNotes(first),std::string(conclusion) + " The Session returned the required evidence.");
+    const auto firstTask = completeTask(firstIntake,first,std::string(conclusion) + " The Session returned the required evidence.");
     checkResultAnswer(firstIntake,firstTask,askAboutResult(firstIntake,firstTask,"original-notes"),
-                      expectedNotes(first),std::string(conclusion) + " " + explanation);
+                      first,std::string(conclusion) + " " + explanation);
+    loaderSuffix.clear();
     const auto secondIntake = bots.get("second").intake("");
-    const auto secondTask = completeTask(secondIntake,expectedNotes(second),"The Session returned the required evidence.");
-    checkResultAnswer(secondIntake,secondTask,askAboutResult(secondIntake,secondTask,"second-bot"),expectedNotes(second),explanation);
+    const auto secondTask = completeTask(secondIntake,second,"The Session returned the required evidence.");
+    checkResultAnswer(secondIntake,secondTask,askAboutResult(secondIntake,secondTask,"second-bot"),second,explanation);
 
     const auto edited = askAboutResult(firstIntake,firstTask,"edited-notes");
     first = {"Use the verified report.","Lead with the evidence."};
     write(folder / "first" / "SOUL.md",first.soul);
     write(folder / "first" / "MEMORY.md",first.memory);
-    checkResultAnswer(firstIntake,firstTask,edited,expectedNotes(first),std::string(explanation) + " " + conclusion);
+    checkResultAnswer(firstIntake,firstTask,edited,first,std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake,firstTask,"deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
     std::filesystem::remove(folder / "first" / "MEMORY.md");
