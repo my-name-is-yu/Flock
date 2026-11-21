@@ -137,12 +137,19 @@ struct Option {
     std::size_t indent = 0;
     std::size_t offset = 0;
 };
-Option numberedLine(std::string_view line) {
+std::size_t headingLevel(std::string_view line) {
+    const auto indent = line.find_first_not_of(' ');
+    if (indent == line.npos || indent >= 4) return 0;
+    line.remove_prefix(indent);
+    const auto level = line.find_first_not_of('#');
+    return level != line.npos && level > 0 && line[level] == ' ' ? level : 0;
+}
+
+Option numberedLine(std::string_view line, std::size_t heading) {
     const auto indent = line.find_first_not_of(' ');
     if (indent == line.npos || indent >= 4 || line.find('\t') == 0) return {};
     auto cleaned = trim(line);
-    const auto headings = cleaned.find_first_not_of('#');
-    if (headings != cleaned.npos && headings > 0 && cleaned[headings] == ' ') cleaned = trim(cleaned.substr(headings));
+    if (heading) cleaned = trim(cleaned.substr(heading));
     for (auto prefix : {"- "sv, "* "sv, "+ "sv, "**"sv, "__"sv}) {
         if (cleaned.starts_with(prefix)) cleaned = trim(cleaned.substr(prefix.size()));
     }
@@ -166,16 +173,22 @@ Option numberedLine(std::string_view line) {
 std::vector<Option> numberedLines(std::string_view fullText) {
     std::vector<Option> options;
     bool code = false;
+    std::size_t optionHeading = 0;
     for (std::size_t pos = 0; pos < fullText.size();) {
         const auto newline = fullText.find('\n', pos);
         const auto line = fullText.substr(pos, newline - pos);
         if (starts(trim(line), {"```", "~~~"})) {
             code = !code;
         } else if (!code) {
-            auto option = numberedLine(line);
-            if (option.number > 0) {
-                option.offset = pos;
-                options.push_back(option);
+            const auto heading = headingLevel(line);
+            if (heading && heading <= optionHeading) optionHeading = 0;
+            if (!optionHeading) {
+                auto option = numberedLine(line,heading);
+                if (option.number > 0) {
+                    option.offset = pos;
+                    options.push_back(option);
+                    optionHeading = heading;
+                }
             }
         }
         if (newline == fullText.npos) break;
@@ -586,7 +599,8 @@ std::optional<Result> selectWorkResult(Id id, int numbered, const Context& conte
         }
     }
     require(source || !needsSource);
-    return source ? std::optional{selectOption(*source,numbered,context)} : std::nullopt;
+    if (!source) return std::nullopt;
+    return numbered ? selectOption(*source,numbered,context) : *source;
 }
 
 std::set<std::string> mentionedDestinations(const Context& context, std::string_view text) {
@@ -1005,8 +1019,12 @@ Plan decide(std::string_view text, const Context& context, const DecideModel& mo
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
             auto answer = answerResult(model, route.segment, std::move(*response->source), notes, config);
-            if (std::holds_alternative<Clarify>(answer) && plan.routes.size() != 1)
-                return unclear(text,targets);
+            if (auto* clarification = std::get_if<Clarify>(&answer); clarification && plan.routes.size() != 1) {
+                clarification->question += translate(japanese(route.segment),
+                    "\nPlease send the other requests in separate messages.",
+                    "\nほかの依頼は別のメッセージで送ってください。");
+                return single(route.segment,std::move(*clarification));
+            }
             route.action = std::move(answer);
         }
         return plan;

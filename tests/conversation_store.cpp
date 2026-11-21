@@ -576,6 +576,51 @@ void explicitFactsReplaceResultClarificationAtomically() {
           "the routing clarification lost the selected excerpt or called the answer model");
 }
 
+void compoundResultClarifiesOnlyTheQuestion() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto original = task(store,"Estimate the migration");
+    execution.finish(store,original,"1. Migrate all records at once\n2. Migrate by batch");
+    const auto source = store.latestTaskResult(original).at("id");
+    const auto tasksBefore = store.tasks("alpha");
+    const auto launches = execution.t3.launches;
+    constexpr auto question = "2案目の費用は？";
+    constexpr auto compound = "2案目の費用は？\n別件、リリースノートを作って";
+    constexpr auto missingFact = "対象のレコード数は何件ですか？";
+    constexpr auto correction = "1万件です";
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto text = input.event.at("text").get<std::string>();
+        if (input.tools.front() == "route_conversation") {
+            if (text == compound) return routing(Json::array({
+                {{"kind","answer_result"},{"segment",question},{"resultMessageId",source},{"resultOption",2}},
+                {{"kind","create_task"},{"segment","リリースノートを作って"}}
+            }));
+            check(text == correction && input.event.at("reply").at("originalText") == question,
+                  "the clarification retained the unrelated request");
+            return routing(Json::array({{{"kind","answer_result"}}}),"resolved");
+        }
+        check(input.event.at("source").at("messageId") == source && input.event.at("source").at("option") == 2,
+              "the result clarification lost its selected source");
+        if (text == question) return Decision{"clarify_conversation_result",{{"text",missingFact}}, {}};
+        check(text.starts_with(question) && text.ends_with(correction),"the answer model did not receive the missing fact");
+        return Decision{"answer_conversation_result",{{"text","1万件を処理する場合はバッチごとに費用を見積もります。"}}, {}};
+    };
+    const auto first = receive(store,"compound-result",compound);
+    execution.runtime.routeConversation();
+    const auto clarification = reply(store,first);
+    const auto body = clarification.at("text").get<std::string>();
+    check(clarification.at("route") == "clarify" && body.starts_with(missingFact) && body.find("別のメッセージ") != body.npos &&
+          clarification.at("source").at("messageId") == source && store.tasks("alpha") == tasksBefore &&
+          execution.t3.launches == launches,"the compound reply hid the missing fact or started work");
+
+    const auto response = receive(store,"compound-result-fact",correction,clarification.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,response).at("route") == "respond" && store.clarifications("alpha").empty() &&
+          store.tasks("alpha") == tasksBefore && execution.t3.launches == launches,
+          "answering the result clarification applied the unrelated work");
+}
+
 void followUpsKeepThePriorResult() {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
@@ -610,8 +655,9 @@ void followUpsKeepThePriorResult() {
           "the follow-up ignored the previous answer's report");
     send("explain-again","Explain option 2",sourceId);
     const auto deictic = send("deictic","それを実装して");
-    check(deictic["route"] == "create_task" && deictic["source"]["messageId"] == sourceId,
-          "the deictic follow-up lost the cited result");
+    check(deictic["route"] == "create_task" && deictic["source"] == answer["source"] &&
+          store.tasks("alpha").front()["sourceResultRefs"] == Json::array({answer["source"]}),
+          "the deictic follow-up lost the cited result or selected option");
     const auto count = store.tasks("alpha").size();
     check(send("exclude","案2以外を実装",sourceId)["route"] == "clarify" &&
           send("ambiguous","案2を適用して")["route"] == "clarify" && store.tasks("alpha").size() == count,
@@ -700,19 +746,23 @@ void excerptRepliesExpandToWholeResult() {
     const auto first = reply(store,firstId);
     check(first.at("route") == "respond" && first.at("source").at("option") == 1,
           "the first answer did not select option 1");
+    const auto unanchored = receive(writer,"unanchored-compare","Compare option 2 with the rest.");
+    execution.runtime.routeConversation();
+    check(reply(store,unanchored).at("route") == "respond" && answered == 2,
+          "the comparison after an excerpt did not reach the answer model");
     const auto secondId = receive(writer,"second","Explain option 2",first.at("messageId"));
     execution.runtime.routeConversation();
     const auto second = reply(store,secondId);
     check(second.at("route") == "respond" && second.at("source").at("option") == 0 &&
-          second.at("source").at("text") == report && answered == 2,
+          second.at("source").at("text") == report && answered == 3,
           "the omitted option kept the replied excerpt");
     const auto compareId = receive(writer,"compare","Compare option 2 with the rest.",first.at("messageId"));
     execution.runtime.routeConversation();
-    check(reply(store,compareId).at("route") == "respond" && answered == 3,
+    check(reply(store,compareId).at("route") == "respond" && answered == 4,
           "the comparison to an excerpt did not reach the answer model");
     const auto conflictId = receive(writer,"conflict","Tell me about option 2",first.at("messageId"));
     execution.runtime.routeConversation();
-    check(reply(store,conflictId).at("route") == "clarify" && answered == 3,
+    check(reply(store,conflictId).at("route") == "clarify" && answered == 4,
           "a conflicting option was answered instead of rejected");
 }
 
@@ -722,9 +772,9 @@ void longResultOptionsStayAvailable() {
         Store store(fixture.database()), writer(fixture.database());
         RuntimeFixture execution(store);
         const auto id = task(writer,"Compare the proposals");
-        const std::string option = "## 2. Pair measurements\n"
-            "Compare both builds using exactly the same workload.\n"
-            "Repeat the paired run to separate variance from regressions.";
+        const std::string option = "## Option 2: Pair measurements\n\n"
+            "1. Compare both builds using exactly the same workload.\n"
+            "2. Repeat the paired run to separate variance from regressions.";
         execution.finish(store,id,"## 1. Compare one build\n" + std::string(paddingSize,'A') +
             "\n\n" + option + "\n\n## 3. Defer comparison\n\n## 3. Drop the comparison");
         const auto history = store.history(id,0,100);
@@ -1061,9 +1111,10 @@ int main() {
         naturalWaitAnswer();
         clarificationKeepsTheUserInstruction();
         implicitClarificationRequiresAnEligibleReply();
-        longResultOptionsStayAvailable();
         explicitFactsReplaceResultClarificationAtomically();
+        compoundResultClarifiesOnlyTheQuestion();
         followUpsKeepThePriorResult();
+        longResultOptionsStayAvailable();
         comparisonsDoNotSelectOneOfSeveralOptions();
         excerptRepliesExpandToWholeResult();
         resultTargetMustComeFromTheCandidatesOrReply();
