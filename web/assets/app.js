@@ -539,6 +539,7 @@ function renderActivity() {
 function beginReply(target, text = '', choice = null) {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   const current = replies.get(view.id);
+  if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
   if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
     replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
   closeDetail();
@@ -1010,8 +1011,9 @@ function renderComposer() {
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '';
-  elements.notice.classList.toggle('error', !closedReply && !!notice?.isError);
+  elements.notice.textContent = notice?.isError ? notice.text :
+    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
+  elements.notice.classList.toggle('error', !!notice?.isError);
   elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
