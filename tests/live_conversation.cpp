@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <regex>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -30,8 +31,8 @@ struct Mixed : Model {
     explicit Mixed(Model& model) : live(model) {}
     Decision decide(const ModelInput& input) override {
         if (input.event.value("kind","") == "conversation_turn") {
-            auto decision = live.decide(input);
             trace = input.event.at("turn");
+            auto decision = live.decide(input);
             trace.push_back({{"tool",decision.tool},{"args",decision.args}});
             return decision;
         }
@@ -72,12 +73,12 @@ struct Runs : T3 {
 struct Scene {
     Directory directory;
     Store store;
-    Mixed model;
+    Mixed& model;
     Runs t3;
     Runtime runtime;
     Json config;
-    Scene(Model& live, const std::string& slug)
-        : store(directory.path / "state.db"), model(live),
+    Scene(Mixed& mixed, const std::string& slug)
+        : store(directory.path / "state.db"), model(mixed),
           runtime(store,model,t3,[](std::string_view) { return BotNotes{}; }),
           config({{"modelProvider","chatgpt"},{"model",slug},{"conversationEnvironments",{{"cloud Mac","cloud"}}}}) {}
 
@@ -94,9 +95,14 @@ struct Scene {
         const auto receipt = store.receive(intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
                                            text,replyTo);
         runtime.runConversations();
-        for (const auto& row : store.conversation("release",0,200))
-            if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == receipt["messageId"])
-                return row["data"];
+        for (const auto& row : store.conversation("release",0,200)) {
+            const auto& data = row.at("data");
+            if (row.at("kind") != "conversation_reply" || data.at("replyToMessageId") != receipt.at("messageId")) continue;
+            const auto route = data.at("route").get<std::string>();
+            if (route != "reply")
+                throw std::runtime_error("Turn ended with " + route + ": " + data.at("text").get<std::string>());
+            return data;
+        }
         throw std::runtime_error("The turn did not reply");
     }
 };
@@ -132,18 +138,23 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         if (count(reply.at("actions"),"cancel_task",notes)) return "the release notes were cancelled";
         return count(reply.at("actions"),"cancel_task",benchmark) == 1 ? "" : "the benchmark was not cancelled";
     }},
-    {"an ambiguous stop asks first",[](Scene& s) -> std::string {
-        s.task("ログイン画面の修正","login-a");
-        s.task("ログイン画面の修正","login-b");
-        const auto reply = s.send("それ止めて");
-        if (count(reply.at("actions"),"cancel_task")) return "a task was cancelled without asking";
-        return reply.at("text").get<std::string>().empty() ? "the Bot did not ask which one" : "";
+    {"an ambiguous stop waits for a named target",[](Scene& s) -> std::string {
+        const auto mobile = s.task("モバイル版のログイン画面を修正","mobile");
+        s.task("デスクトップ版のログイン画面を修正","desktop");
+        const auto reply = s.send("その作業をキャンセルして");
+        if (!reply.at("actions").empty()) return "work changed before the user identified a target";
+        // The first reply is free text. Score what happens when the user identifies the target.
+        const auto followUp = s.send("モバイル版のほうです",reply.at("messageId").get<Id>());
+        const auto& actions = followUp.at("actions");
+        return actions.size() == 1 && count(actions,"cancel_task",mobile) == 1
+            ? "" : "expected only the mobile task to be cancelled";
     }},
     {"new criteria change the task",[](Scene& s) -> std::string {
         const auto id = s.task("Benchmark the startup time","benchmark");
-        const auto reply = s.send("For the startup benchmark, change the completion criteria to reporting p95 latency");
-        if (count(reply.at("actions"),"change_task",id) != 1) return "the task was not changed";
-        return s.store.task(id).dump().find("p95") != std::string::npos ? "" : "the new criteria were lost";
+        s.send("For the startup benchmark, change the completion criteria to require a report column named startup_p95_ms");
+        const auto criteria = s.store.task(id).at("doneWhen").get<std::string>();
+        static const std::regex column(R"(\bstartup_p95_ms\b)");
+        return std::regex_search(criteria,column) ? "" : "the saved completion criteria omitted the required column";
     }},
     {"two requests in one message start two tasks",[](Scene& s) -> std::string {
         const auto reply = s.send("Write the release notes. Separately, audit the third-party licenses.");
@@ -153,12 +164,16 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
     {"explaining a result changes no work",[](Scene& s) -> std::string {
         const auto id = s.task("Compare three rollout plans","plans");
         s.t3.finish(s.store.task(id).at("activeRun").at("runId").get<std::string>(),
-                    "1. Big bang release\n2. Canary to 5% of users for a day, then everyone\n3. Feature flag per team");
+                    "1. Use rollout_global for a big bang release\n"
+                    "2. Use rollout_canary for 5% of users for a day, then everyone\n"
+                    "3. Use rollout_team to enable one team at a time");
         for (int i = 0; i < 6 && s.store.task(id).at("state") != "completed"; ++i) s.runtime.tick();
         const auto before = s.store.tasks("release");
-        const auto reply = s.send("Explain the second option in more detail");
+        const auto reply = s.send("Explain the second option in more detail and include its rollout flag name");
         if (!reply.at("actions").empty() || s.store.tasks("release") != before) return "the explanation changed work";
-        return reply.at("text").get<std::string>().find("5%") != std::string::npos ? "" : "the answer missed the second option";
+        static const std::regex flag(R"(\brollout_canary\b)");
+        return std::regex_search(reply.at("text").get_ref<const std::string&>(),flag)
+            ? "" : "the answer omitted the second option's rollout flag";
     }},
     {"a note for running work reaches that task",[](Scene& s) -> std::string {
         const auto id = s.task("Benchmark the startup time","benchmark");
@@ -177,7 +192,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     try {
-        app::ChatGPTModel model(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
+        app::ChatGPTModel live(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
         const int trials = argc >= 4 ? std::stoi(argv[3]) : 3;
         const std::string filter = argc == 5 ? argv[4] : "";
         bool passed = true;
@@ -186,17 +201,16 @@ int main(int argc, char** argv) {
             int passes = 0;
             for (int trial = 1; trial <= trials; ++trial) {
                 std::string failure;
-                Json trace;
+                Mixed model(live);
                 try {
                     Scene scene(model,argv[2]);
                     failure = scenario(scene);
-                    trace = scene.model.trace;
                 } catch (const std::exception& error) {
                     failure = error.what();
                 }
                 if (failure.empty()) ++passes;
                 Json row = {{"scenario",name},{"trial",trial},{"pass",failure.empty()},{"failure",failure}};
-                if (!failure.empty()) row["turn"] = trace;
+                if (!failure.empty()) row["turn"] = model.trace;
                 std::cout << row.dump() << '\n';
             }
             passed = passed && passes == trials;
