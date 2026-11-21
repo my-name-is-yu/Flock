@@ -221,7 +221,7 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
         if "itemId" in args:
             if args["itemId"] == "unicode":
-                rows = [self.item(thread_id, 8, "root", "assistant_message", "猫" * 2800) | {"itemId": "unicode"}]
+                rows = [self.item(thread_id, 8, "root", "assistant_message", "—" * 2800) | {"itemId": "unicode"}]
             else:
                 rows = [row for row in rows if row["itemId"] == args["itemId"]]
         elif args["view"] == "messages":

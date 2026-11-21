@@ -1,10 +1,10 @@
 # Flock v0
 
-Flock はローカルで複数の Bot を動かす C++20 Runtime です。Bot は依頼を担当し、実作業を T3 の Session に委ねます。CLI と Web UI は同じ SQLite を使います。
+Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-## ビルド
+## Build
 
-C++20 コンパイラ、CMake 3.24 以降、SQLite、libcurl、OpenSSL の開発ライブラリが必要です。実モデルの接続には Node.js 22 以降、接続のテストには Python 3 を使います。
+You need a C++20 compiler, CMake 3.24 or later, and the SQLite, libcurl, and OpenSSL development libraries. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
 
 ```sh
 cmake -S . -B build
@@ -12,18 +12,21 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-## Bot を設定する
+## Configure a Bot
 
-状態ディレクトリの既定は `~/.config/flock` です。環境変数 `FLOCK_HOME` または CLI の `--home` で変更できます。その下の `bots/release/config.json` に Bot を設定します。
+The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
 
 ```json
 {
   "name": "Release",
   "modelProvider": "chatgpt",
   "model": "gpt-6.2-sol",
-  "environmentId": "<T3 の環境 ID>",
-  "projectId": "<T3 のプロジェクト ID>",
+  "environmentId": "<T3 environment ID>",
+  "projectId": "<T3 project ID>",
   "allowedBots": ["verifier"],
+  "conversationEnvironments": {
+    "cloud Mac": "<connected T3 environment ID>"
+  },
   "runTimeoutSeconds": 1800,
   "session": {
     "runtimeMode": "approval-required"
@@ -33,17 +36,19 @@ ctest --test-dir build --output-on-failure
       "id": "release-notes",
       "schedule": "0 10 * * 1",
       "timezone": "Asia/Tokyo",
-      "request": "次のリリースに向けた未決事項をまとめてください。"
+      "request": "Summarize the open items for the next release."
     }
   ]
 }
 ```
 
-同じディレクトリの `SOUL.md` に役割と判断基準、`MEMORY.md` にタスクをまたぐ前提を書きます。Session のモデルとプロバイダを指定する場合は、`session.model` と `session.providerInstanceId` を設定します。作業場所の指定には `session.workspaceStrategy` を使います。
+In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` for assumptions that carry across tasks. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
-`allowedBots` には依頼できる Bot のディレクトリ名を指定します。この例では、`bots/verifier/` に Verifier を設定すると Release から依頼できます。Verifier は同じやり取りに質問や結果を返せます。Verifier から Release に新しく依頼する場合は、Verifier 側の設定にも `release` を追加します。
+Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. An ambiguous destination is confirmed before work starts.
 
-## 実モデルと T3 に接続する
+Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
+
+## Connect a live model and T3
 
 ```sh
 build/app/flock model login
@@ -52,9 +57,11 @@ build/app/flock t3 login <environment-id> <MCP-URL>
 build/app/flock run
 ```
 
-それぞれの OAuth をブラウザで承認します。ChatGPT では Flock にプランの利用を許可します。T3 では Flock の Session 設定をカバーする権限を選びます。CLI が表示したローカル URL から Web UI を開けます。会話画面を閉じても、起動中の Runtime は cron と Session を監視します。
+Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan. In T3, choose permissions that cover Flock's Session settings. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
-認証なしで試すときはテスト用の状態ディレクトリに Bot を設定し、`run --fixed` を使います。2体の Bot に異なる `projectId` を設定すると独立して進みます。`ask:対象ブランチは？` と依頼すると、最初の委譲前に確認待ちになります。
+Use the Bot's message box in the Web UI to send a new request, ask for progress, or add instructions to a task. If the Bot cannot identify the task, it asks you to specify it by name. The runtime saves additional instructions for an active task before delivering them to its Session. Asking the Bot to implement a completed result starts a new task linked to that result.
+
+To try Flock without signing in, configure a Bot in a test state directory and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 ```sh
 build/app/flock --help
@@ -64,6 +71,6 @@ build/app/flock history <task-id>
 build/app/flock answer <task-id> <wait-id> 'main'
 ```
 
-実モデルが異なる完了条件を使い分けるかは、同意した ChatGPT 接続で `build/app/flock model acceptance <model-slug>` を実行すると確認できます。各試行の判断と理由を JSON Lines に出力します。
+To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
 
-通常は Session の最終報告で判断します。`--session-read` は Bot が担当する Session の履歴を制御します。`on_demand` は判断に必要な箇所を読み、`prefill` は判断の前に履歴を取得し、`off` は担当 Session の履歴取得を無効にします。別の Bot が共有した Run は、`off` でも `read_bot_evidence` から権限を照合して読めます。抜粋は1イベントにつき3回、各回8 KiBまでSQLiteに保存します。
+The Bot normally evaluates the Session's final report. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime saves up to three excerpts per event in SQLite, with a limit of 8 KiB per excerpt.

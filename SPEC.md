@@ -1,189 +1,178 @@
-# Flock v0 要件と実装順
+# Flock v0 requirements and implementation order
 
-Flock は、独立した複数の Bot を動かす Runtime です。各 Bot は自分の役割、記憶、定期依頼を持ち、許可された Bot に相談や作業を依頼できます。調査、実装、検証には担当 Bot が自分の設定で起動する T3 Session を使います。最初の Bot が返事や作業報告を受けて成果を評価し、完了、追加作業、ユーザーへの質問を判断します。
+Flock is a runtime for multiple independent Bots. Each Bot has its own role, memory, and recurring requests. It delegates the work for its tasks to T3 Sessions that it starts. The Bot takes requests and answers questions from active Sessions. When a Session finishes a Run, the Bot evaluates the result and decides whether to complete the task, request more work, or ask the user a question.
 
-v0 はローカルで動く C++20 製の単一 Runtime、SQLite、CLI、ローカル Web UI、T3 Code で構成します。1件の依頼を受けてから、セッションの失敗や Flock の再起動を挟み、成果を確認してタスクを閉じるところまでを検証します。日常の依頼や回答には Bot ごとの会話画面を使います。[ローカル Web UI の仕様](UI.md)
+v0 consists of a single local C++20 runtime, SQLite, a CLI, a local Web UI, and T3 Code. Verify the full lifecycle of a request, from intake through a Session failure and a Flock restart to evaluation of the result and task closure. Use each Bot's conversation for day-to-day requests and answers. [Local Web UI specification](UI.md)
 
-## Bot ごとの設定と状態
+## Per-Bot configuration and state
 
-| 項目 | 要件 |
+| Item | Requirement |
 | --- | --- |
-| Bot 設定 | `bots/<botId>/config.json` に、Bot 自身の判断用モデル・プロバイダ、委譲先の T3 `environmentId` と `projectId`、権限モード、Run の期限、cron を指定する。Session 用のモデル・プロバイダは別の任意指定。省略時は T3 プロジェクトの既定を使い、既定もなければ委譲前に設定不足を表示する。作業場所はプロジェクトの既定に従い、必要な場合だけ `workspaceStrategy` を指定する。 |
-| `SOUL.md` | 同じディレクトリに、ユーザーが Bot の役割、優先順位、成果の判断基準を書く。 |
-| `MEMORY.md` | ユーザーがタスクをまたいで残したい前提や過去の判断を書く。各推論ターンで Bot は自分の SOUL と MEMORY の最新版を読む。 |
-| cron | 定期依頼 ID、スケジュール、タイムゾーン、依頼文を持つ。 |
-| タスク履歴 | 依頼、完了条件、セッション、作業報告、Bot が判断に使った根拠を Bot ID とタスク ID に紐づけて SQLite に保存する。推論に渡す履歴は担当タスクのものに限る。 |
+| Bot configuration | Set the Bot's decision model and provider, the delegation target's T3 `environmentId` and `projectId`, the permission mode, the Run deadline, and cron in `bots/<botId>/config.json`. The Session model and provider are separate optional settings. When omitted, use the T3 project defaults. If those are also missing, show the configuration issue before delegation. Use the project's default workspace and specify `workspaceStrategy` only when needed. |
+| `SOUL.md` | In the same directory, the user writes the Bot's role, priorities, and criteria for evaluating results. |
+| `MEMORY.md` | The user records assumptions and previous decisions that should carry across tasks. On each inference turn, the Bot reads the current versions of its SOUL and MEMORY. |
+| cron | Stores the recurring request ID, schedule, time zone, and request text. |
+| Task history | Store requests, completion criteria, Sessions, work reports, and evidence used by the Bot in SQLite, keyed by Bot ID and task ID. Pass only the history of the relevant task to the model. |
 
-手動依頼と cron は同じ受付経路を使います。cron は5フィールド（分・時・日・月・曜日）と IANA タイムゾーンを使います。Runtime の稼働中に、Bot ID・定期依頼 ID・予定時刻（UTC）の組み合わせにつき一度だけ登録します。夏時間で存在しない現地時刻はスキップし、二度現れる現地時刻は異なる UTC の予定として扱います。停止中に過ぎた予定はスキップし、登録済みの依頼は再起動後も処理します。
+Manual requests and cron use the same intake path. Cron uses five fields (minute, hour, day of month, month, and day of week) and an IANA time zone. While the runtime is running, register each combination of Bot ID, recurring request ID, and scheduled UTC timestamp once. Skip local times that do not exist at a daylight saving transition. When a local time occurs twice, treat each occurrence as a separate UTC schedule. Skip schedules that elapsed while the runtime was stopped and continue processing requests already registered after restarting.
 
-実作業を伴うタスクは、同じ T3 環境・プロジェクトごとに1件ずつ進めます。直列化のキーは正規の `(environmentId, projectId)` です。手動依頼や cron は受付順に進み、CLI には現在の先行タスクを表示します。Bot 間の相談と、元タスクに関連する作業の実行順は [Bot 同士の依頼と返信](#bot-同士の依頼と返信) で定めます。
+Tasks that share a T3 environment and project run one at a time in the order received, across all Bots. Use the canonical `(environmentId, projectId)` as the serialization key. While the preceding task is waiting for user input or being cancelled, later manual and scheduled requests stay queued, and the CLI shows the preceding task. Tasks in different projects can proceed independently.
 
-## タスクの受付と完了条件
+## Task intake and completion criteria
 
-**Task** は Bot が所有する仕事です。Runtime は受付時に依頼文、対象プロジェクト、実行設定を保存します。Bot は依頼文と SOUL を読み、最初に実作業を任せるときに `doneWhen` を明記します。対象は `delegate` と、別の Bot への作業依頼です。不明な点があれば、先に相談か `ask_user` で確認します。たとえば「不具合を修正し、修正前には失敗する回帰テストを同じ PR に含める」が完了条件になります。
+A **Task** is work owned by a Bot. At intake, the runtime saves the request, target project, and execution settings. The Bot reads the request and SOUL, then states the completion criteria in `doneWhen` on its first `delegate` action. If anything is unclear, it calls `ask_user` first. One example criterion is “Fix the bug and include a regression test in the same PR that fails before the fix.”
 
-初回の委譲と `doneWhen` を同じトランザクションで保存します。その後は保存済みの `doneWhen` が完了判定で優先され、最新の SOUL や MEMORY は、その条件の下で進め方を決めるために使います。後続の委譲に新しい `doneWhen` を付ける操作は却下します。ユーザーが完了条件を変える場合は元のタスクを中止し、新しい依頼として登録します。
+Save the first delegation and `doneWhen` in the same transaction. The current revision's saved `doneWhen` governs the completion decision. Use the latest SOUL and MEMORY to decide how to proceed under those criteria. Reject later delegations that supply a new `doneWhen`. If the user explicitly changes the completion criteria for an active task, save a new revision of the same task. Confirm that any superseded Run and its delegated work have ended before starting replacement work. Keep earlier Runs and reports in the history under their original revisions. Evaluate completion using evidence for the current revision.
+
+## Bot-to-Bot requests and replies
+
+The sender's `allowedBots` configuration controls which Bots it may contact; permission is directional. The recipient uses its own model, SOUL, MEMORY, and T3 settings. `send_bot_message` can request a consultation or work, and the sender waits for a question, answer, result, or failure from that exchange. `reply_to_bot` routes a response to its originating request. `read_bot_evidence` validates the returned Run against the exchange before saving excerpts. Persist the exchange and recipient task together so a restart does not duplicate delivery; cancelling the originating task also cancels work created for that exchange.
 
 ## Agent Loop
 
-エージェントループは Flock の C++20 Runtime に独自実装します。1イベントの判断で、Bot はその状態で有効なアクションを1件選び、Runtime が検証して確定します。履歴読み取りを有効にした場合は、確定する前に同じイベントで記録を読めます。実モデルの初期接続は、Flock 自身が公式の「Sign in with ChatGPT」でブラウザ承認を受け、利用可能な ChatGPT プランで Responses API を直接呼び出します。モデル名は Bot の設定で選び、接続したアカウントで利用できるモデルを使います。Responses API のツール呼び出しを同じアクション契約に変換するため、固定応答のモデルにも同じループを使えます。Codex CLI のログイン資格情報や実行経路は使いません。 [公式の Sign in with ChatGPT 実装ガイド](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
+Implement the agent loop in Flock's C++20 runtime. For each event, the Bot picks one valid action from the five in the table below, and the runtime validates and commits it. When history reading is enabled, the Bot can read records for the same event before committing. To connect a live model, Flock uses the official Sign in with ChatGPT flow to obtain browser approval, then calls the Responses API directly using an eligible ChatGPT plan. Select the model in the Bot configuration from those available to the connected account. The runtime maps Responses API tool calls to the same action contract used by fixed-response models. Keep Flock's credentials and execution path independent of the Codex CLI. [Official Sign in with ChatGPT implementation guide](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt)
 
-Flock のモデル接続用の資格情報は、T3 接続用の認証から分けて保管します。ユーザーが Flock にプラン利用を許可したことを確認し、資格情報は OS の資格情報ストアか所有者のみ読めるファイルに保存します。Bot 設定、タスク履歴、ログ、モデル入力には含めません。
+Store Flock's model credentials separately from T3 credentials. Confirm that the user authorized Flock to use their plan. Store the credentials in the OS credential store or in a file readable only by its owner. Keep credentials out of Bot configuration, task history, logs, and model input.
 
-Bot と Session の役割分担は Devin Bots の公開仕様も参考にしています。Flock では Bot がタスクの窓口となり、実装・ビルド・検証は担当 Session で行います。 [Devin Bots の設定と子 Session](https://docs.devin.ai/work-with-devin/bots)
+The public Devin Bots specification also informs the division of responsibilities between Bots and Sessions. In Flock, the Bot handles the task and the assigned Session implements, builds, and verifies the work. [Devin Bots configuration and child Sessions](https://docs.devin.ai/work-with-devin/bots)
 
-たとえば `delegate` を送って T3 から Run ID が返った時点では、まだ作業の成果は分かりません。Runtime は ID を保存して待機し、実行中の監視にはモデルを呼びません。Session から質問が届いたときはその質問を、Run が終了したときは作業報告や失敗理由を担当 Bot に渡します。配下に作業が残る場合はその収束を待ちます。この待機は Flock の再起動をまたげます。
+When T3 returns a Run ID for a `delegate` call, the runtime saves the ID and starts monitoring the Run. Monitoring an active Run requires zero model calls. When the Session asks a question, pass it to the owning Bot. When the Run ends, pass its work report or failure reason to the Bot. If delegated work is still active, wait for it to settle. Monitoring can resume after a Flock restart.
 
-実装時は、Pi がモデルの応答からツール呼び出しを取り出し、その結果を次の推論に渡す流れと、Codex がツール呼び出しを対応する処理へ振り分ける実装を参考にします。Flock では、その間に上記のアクションの保存とイベント待機が入ります。 [Pi の `runLoop`](https://github.com/earendil-works/pi/blob/1402973a9dbe8c627341e04c9744c54953e285ca/packages/agent/src/agent-loop.ts#L241-L277) · [Codex の `ToolRouter`](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/router.rs#L284-L424)
+The implementation draws on how Pi extracts tool calls from a model response and feeds their results back into the next inference, and how Codex routes each tool call to its handler. Flock persists the action and waits for an event before the next inference. [Pi's `runLoop`](https://github.com/earendil-works/pi/blob/1402973a9dbe8c627341e04c9744c54953e285ca/packages/agent/src/agent-loop.ts#L241-L277) · [Codex's `ToolRouter`](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/router.rs#L284-L424)
 
-Pi はファイルの読み取り・部分編集・書き込みを個別のツールとして公開しています。Codex のマルチエージェント実装では、`send_message` と `followup_task` が内部の配送処理を共有し、メッセージを届けるだけか、相手の新しいターンを起動できるかを区別します。Flock でも、既存の質問への返答と、新しい Run を必要とする追加作業には別のツールを使います。 [Pi のツール定義](https://github.com/earendil-works/pi/blob/1402973a9dbe8c627341e04c9744c54953e285ca/packages/coding-agent/src/core/tools/index.ts#L194-L202) · [Codex のメッセージ配送](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs#L40-L47) · [追加作業の配送](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs#L40-L47)
+Pi exposes separate tools for reading, editing, and writing files. In Codex's multi-agent implementation, `send_message` and `followup_task` share internal delivery code. The first delivers a message, and the second can start a new turn for the recipient. Flock likewise uses separate tools to answer an existing question and to request additional work that needs a new Run. [Pi tool definitions](https://github.com/earendil-works/pi/blob/1402973a9dbe8c627341e04c9744c54953e285ca/packages/coding-agent/src/core/tools/index.ts#L194-L202) · [Codex message delivery](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs#L40-L47) · [Follow-up delivery](https://github.com/openai/codex/blob/7edf91b13c54f20aab22fece0abfa4a5c28379b3/codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs#L40-L47)
 
-**Session（子セッション）** は、担当 Bot がそのタスクのために起動した T3 の Thread です。**Run** はその Thread で1回の指示を実行する単位です。調査、ファイル操作、テストは Session が行います。1件のタスクが複数の Session を履歴に持てます。1件のタスクで同時に実行できる Run は1つです。
+A **Session** (child Session) is a T3 Thread started by the owning Bot for a task. A **Run** is a single execution of an instruction in that Thread. The Session handles research, file operations, and tests. A task can have multiple Sessions in its history, with at most one active Run at a time.
 
-1. **イベントを受け取る。** CLI は依頼・回答・中止を SQLite に登録する。Runtime は T3 を監視し、未回答の質問や Run の終了もイベントとして記録する。待機中の監視だけでモデルを呼ぶ回数は0回とする。
-2. **Bot が判断する。** 入力は担当 Bot の SOUL・MEMORY、依頼、保存済みの完了条件、残りの作業回数、今回のイベント、担当タスクの直近の指示・報告とする。Run の報告は対象 Run の最終回答を使い、異常終了なら終了理由と取得できた最終回答を併記する。長い記録には打ち切りの表示と参照先（環境・Thread・Run・項目 ID）を残す。履歴の読み込みとモデル入力はサイズ上限を設け、古い詳細はページ単位で取得する。
-3. **Runtime が確定する。** モデルはツール名・引数・判断理由を返す。Runtime はタスク、Session、イベントの世代、質問の有効性、残り回数を照合する。外部通信は SQLite トランザクションの外で行い、確定時に処理済みイベント、アクション、回数、状態遷移を一緒に保存する。推論中に Run の終了や中止が届いた場合は、古くなった判断を破棄して最新状態を処理する。
-4. **Runtime が実行する。** 確定済みの指示を T3 へ送るか、質問や完了を CLI に表示する。待機と期限管理は Runtime が担当する。
+1. **Receive an event.** The CLI records requests, answers, and cancellations in SQLite. The runtime monitors T3 and also records unanswered questions and Run endings as events. Monitoring alone makes zero model calls.
+2. **The Bot decides.** The model receives the owning Bot's SOUL and MEMORY, the request, the saved completion criteria, the remaining work allowance, the current event, and the task's recent instructions and reports. Use the relevant Run's final answer as its report. If it ended abnormally, include the reason and any final answer available. Mark long records as truncated and include a reference with the environment, Thread, Run, and item IDs. Set size limits on history reads and model input. Retrieve older details in pages.
+3. **The runtime commits the decision.** The model returns the tool name, arguments, and rationale. The runtime checks the task, Session, event generation, question validity, and remaining allowance. Perform external calls outside SQLite transactions. On commit, store the processed event, action, allowance, and state transition together. If the Run ends or a cancellation arrives during inference, discard the stale decision and process the latest state.
+4. **The runtime executes the action.** Send the committed instruction to T3 or display the question or completion in the CLI. The runtime manages waits and deadlines.
 
-| アクション | Bot が決めること | Runtime が検証・実行すること |
+| Action | What the Bot decides | What the runtime validates and executes |
 | --- | --- | --- |
-| `delegate` | 新しい Session に任せる仕事と期待する成果。初回は `doneWhen` も指定する。 | 対象プロジェクトで Thread を起動し、タスク・Thread・Run を紐づける。 |
-| `answer_session_question` | Session が尋ねた内容への回答。対象の質問 ID と設問ごとの答えを渡す。 | 担当タスクの Run に属する未回答の `user_input` に返答し、同じ Run の監視に戻る。追加作業は0回。 |
-| `follow_up` | 既存 Session に求める追加作業とその理由。 | 担当タスクの終了済み Run に対応する Thread に送り、新しい Run を記録する。 |
-| `complete` | どの成果が `doneWhen` を満たしたか、その根拠を説明する。 | Bot の理由をタスク履歴に保存し、完了を記録する。 |
-| `ask_user` | 作業を進めるために必要な質問。 | 質問と理由を保存し、CLI に表示する。回答をその質問に紐づけ、同じタスクで一度だけ処理する。 |
+| `delegate` | What a new Session should do and what result to expect. Include `doneWhen` on the first delegation. | Start a Thread in the target project and associate the task, Thread, and Run. |
+| `answer_session_question` | How to answer the Session's question. Supply the question ID and an answer for each prompt. | Reply to the pending `user_input` for the task's Run and resume monitoring that Run. This consumes zero additional runs. |
+| `follow_up` | What additional work the existing Session should do and why. | Send the instruction to the Thread for the task's finished Run and record a new Run. |
+| `complete` | Which result satisfies `doneWhen` and the evidence that supports completion. | Save the Bot's rationale in the task history and record completion. |
+| `ask_user` | What the user needs to answer before work can proceed. | Save the question and rationale and display the question in the CLI. Associate the answer with that question and process it once in the same task. |
 
-たとえば Session から「対象のブランチはどれか」と聞かれたとき、依頼に指定があれば Bot は `answer_session_question` でそのブランチ名を返します。ユーザーの判断が必要なら `ask_user` を元の Session の質問に紐づけ、回答を受け取ってから同じ質問に返答します。「別のブランチでもテストしてほしい」は追加作業なので、現在の Run が終わってから `follow_up` を使います。
+If a Session asks which branch to use and the request names the branch, the Bot returns it via `answer_session_question`. If the user needs to decide, link `ask_user` to the original Session question and answer that same question after the user responds. A request to test another branch requires additional work, so use `follow_up` once the current Run ends.
 
-**比較候補の `session_read`。** まず5アクションと保存済み報告で動かします。比較時だけ、担当タスクの Session・Run・項目または範囲を指定して `t3_thread_read` の原文を読めるようにします。結果は出典・抜粋・続きの有無を添えて同じイベントに返します。読み取りは新しい Run の起動、追加作業の消費、イベントの処理済み扱いのいずれも起こしません。比較開始時の上限は1イベント3回、1回あたりの抜粋は UTF-8 で8 KiB です。上限に達したら基本アクションだけを提示します。取得した抜粋・参照先・消費回数をイベントに紐づけて保存し、確定前の再起動では同じ抜粋と残り予算で判断を再開します。読み取りの標準採用はフェーズ4の比較で決めます。 [履歴の提示範囲を比較した研究](https://arxiv.org/abs/2508.21433)
+**Evaluate `session_read` as an option.** Start with the five actions and stored reports. For the comparison only, allow the Bot to use `t3_thread_read` to read the original record for a Session and Run belonging to the task, with an item or range specified. Return the source, excerpt, and whether more is available to the same event. Reading alone starts zero Runs, consumes zero additional runs, and leaves the event pending. Start the comparison with a limit of three reads per event and 8 KiB of UTF-8 per excerpt. After the limit is reached, present only the five core actions. Save each excerpt, its source reference, and the number of reads used against the event. After a restart before the decision commits, resume with the same excerpts and remaining read budget. Use the phase 4 comparison to decide whether to adopt history reading by default. [Research comparing how much history to provide](https://arxiv.org/abs/2508.21433)
 
-**追加作業は初回の後に通算3回までです。** 2回目以降の実作業の依頼は、宛先が T3 Session か別の Bot かにかかわらず、確定時にアクション ID ごとに1回を消費します。相談、送信のリトライ、返信、ユーザーへの質問、完了判定では消費しません。残り0回で追加作業を求めた場合は送信せず、理由を示してユーザー確認待ちに進みます。
+**Allow up to three additional runs after the initial delegation.** Later `delegate` actions and `follow_up` consume one run per action ID at commit. Delivery retries, answers to Sessions, questions for the user, and completion decisions consume zero. If the Bot asks for more work after it has used its allowance, hold the instruction, show the reason, and wait for user input.
 
-モデルの各呼び出しに期限を設け、タイムアウト・一時エラー・形式違反・許可されないアクションには同じイベントで通算3回の失敗を上限とします。一時エラーには間隔を延ばし、形式・状態の違反には理由を返します。明示的な追加許可が必要な場合は上の作業枠の手順を優先します。失敗回数は再起動後も保持し、3回でユーザー確認待ちとします。CLI からの明示的な再判定は新しい試行枠として履歴に残します。
+Set a deadline for each model call. Limit timeouts, transient errors, invalid formats, and disallowed actions to three failures per event in total. Increase the delay after transient errors and return the reason for format and state violations. When more work requires explicit approval, apply the work allowance procedure first. Keep the failure count across restarts and wait for user input after three failures. Record an explicit retry from the CLI as a new attempt allowance in the history.
 
-## Bot 同士の依頼と返信
+## Task states and where work resumes
 
-宛先は送信側の `config.json` の `allowedBots` から選びます。許可は方向付きです。受け手は元の依頼への質問や結果を返せます。受け手の設定と SOUL・MEMORY はその Bot 自身のものを使い、依頼文と明示的に付けた根拠を共有します。
-
-| アクション | 用途 |
+| What triggers a decision | Actions the Bot can commit |
 | --- | --- |
-| `send_bot_message` | 自分の Run を開始する前か終了後に、別の Bot に相談か作業を頼む。元タスクは Bot の返事を待つ。 |
-| `reply_to_bot` | 受け手は依頼元への質問、成果、失敗理由を返す。依頼元は受け手の質問に答える。人の判断が必要なら既存の確認待ちを経由し、回答は対応する依頼に戻す。Session の終了後に質問した場合は、その記録を参照し、同じ Session に追加指示を送れる。 |
-| `read_bot_evidence` | 結果に添えられた受け手の Run から抜粋を読む。現在の宛先許可と該当の結果を照合し、同じイベントで最大3回、各回8 KiBまで保存する。 |
+| After intake and before the first delegation | `delegate` with a required `doneWhen`, or `ask_user`. |
+| The task's Run has an unanswered question | `answer_session_question` for that question, or `ask_user` linked to the original question. |
+| The task's Run result is available and delegated work has settled | `delegate`, `follow_up` in the finished Session, `ask_user`, or `complete` if the saved criteria are met. |
+| Retry, user answer, or approval of more work | Return to the original decision point and apply the same rules to the current state. |
 
-相談は受け手の役割と与えられた文脈から回答し、T3 の実行枠を取らない。作業は受け手が必要に応じて自身の T3 Session に委譲する。同じプロジェクトなら依頼元が返事を待つ間に受け手へ枠を渡し、やり取りが終われば依頼元へ戻す。別プロジェクトの作業はそのプロジェクトの受付順に従い、互いの完了を待つ循環ができる依頼は受け付けない。初期版は、一つのタスクから同時に一つの相手へ依頼し、受け手はその依頼内で返答する。
-
-依頼・返信の記録、受け手のタスク、再開イベントは同じ SQLite トランザクションで確定します。依頼元を中止したときは、その依頼で作成した受け手のタスクも中止します。受け手が起動した Run は既存の手順で照合・中断します。受け手だけを中止した場合は、依頼元に中止結果を返します。ユーザーの操作を待つ項目だけを「確認待ち」に表示します。
-
-## タスクの状態と再開先
-
-| 判定の契機 | Bot が確定できるアクション |
+| State | Transition |
 | --- | --- |
-| 受付後、初回委譲前 | `delegate`（`doneWhen` 必須）、許可された Bot への `send_bot_message`、`ask_user`。 |
-| 担当 Run に未回答の質問がある | その質問への `answer_session_question`、または元の質問に紐づく `ask_user`。 |
-| 担当 Run の結果を取得し、委譲した作業も終了した | `delegate`、終了した Session への `follow_up`、許可された Bot への `send_bot_message`、`ask_user`、保存済み条件を満たした場合の `complete`。別の Bot が依頼元なら `reply_to_bot` で報告する。 |
-| 別の Bot の依頼、質問、回答、結果が届いた | 依頼・質問・回答には対応する `reply_to_bot`、必要に応じて `ask_user`。受けた作業の実行は `delegate`。結果を受け取った依頼元は根拠の参照、追加作業、質問、完了を判断する。 |
-| 再判定・人からの回答・追加許可 | 元の判定の契機に戻り、現在の状態で同じ規則を適用する。 |
+| Queued → Awaiting decision | Start the task when it reaches the front of the project queue. |
+| Awaiting decision | A committed delegation, follow-up, or Session answer moves the task to Awaiting delivery. A question for the user moves it to Waiting for input. A committed completion moves it to Complete. |
+| Awaiting delivery | For launches and follow-ups, identify the corresponding Run and move to Session running. After answering a question, resume monitoring the same Run. If delivery is uncertain, follow the recovery procedure. |
+| Session running | Move to Awaiting decision after a verified question for this Run arrives or the work ends. Continue monitoring ordinary progress. |
+| Waiting for input | Save the reason for the wait, the original event, and the relevant action, Run, and question as applicable. Resume as described below. |
+| Cancelling → Cancelled | Stop new inference, work requests, and answers to questions. Reconcile in-flight delivery and active work. Start the next task in the project after the relevant work ends. |
+| Complete or Cancelled | These states are terminal. Ignore late events that could restart work. |
 
-| 状態 | 遷移 |
+**Resolving a wait for user input.** The CLI shows the reason for the wait and the available actions. Accept a user's action only once for the relevant wait ID. The user can cancel the task for any wait reason. Continue monitoring trackable Runs during a wait and prioritize cancellation once requested.
+
+| Reason for waiting | User action and resumption |
 | --- | --- |
-| 受付 → 判定待ち | プロジェクトの先頭になったタスクを開始する。 |
-| 判定待ち | 委譲・追加作業・Session への回答の確定で送信待ち、人への質問でユーザー確認待ち、完了の確定で完了。 |
-| 送信待ち | 起動・追加指示は対応する Run を特定してセッション実行中へ。質問への返答は同じ Run の監視へ戻る。送信結果が不明なら復旧手順に従う。 |
-| セッション実行中 | 対応を確認できた質問、または作業終了を契機に判定待ちへ。通常の進捗は監視を続ける。 |
-| Bot の返事待ち | 対応する質問・回答・結果が届くと、そのタスクを判定待ちへ戻す。 |
-| ユーザー確認待ち | 待機理由、元のイベント、対象のアクション・Run・質問を該当する範囲で保存し、下表に従って再開する。 |
-| 中止処理中 → 中止 | 新しい推論・作業依頼・質問への返答を止め、送信中の結果と実行中の作業を照合する。対象が終了したらプロジェクトの次のタスクに進む。 |
-| 完了・中止 | 終端。遅れて届いたイベントから作業を再開しない。 |
+| Bot question | Save the answer and return to the original decision. If the original Session question is resolved first, clear the wait and resume monitoring. If the Run has ended, process its result. Discard late answers. |
+| Additional work limit | “Approve one more run” increases the allowance by one and triggers a new decision using current information. Keep the rejected instruction unsent. An answer to a regular question leaves the allowance as it is. |
+| Model failure limit | “Retry decision” resumes from the same unprocessed event. |
+| T3 approval pending or a question that cannot be answered automatically | Show the Thread link so the user can respond in T3. Resume monitoring the same Run after resolution. |
+| Run deadline reached | Continue monitoring. “Extend deadline” saves a new absolute deadline. If the work ends while waiting, evaluate its result immediately. |
+| Uncertain delivery of an instruction or answer | “Reconcile” or a user-specified Run or question starts the recovery procedure. Resend a delegation or follow-up only after confirming that T3 did not accept it. |
+| Expired T3 credentials or missing execution settings | Pause the affected connection. Reconcile after reauthentication or a configuration fix. If delivery had yet to start, return to the pre-delivery step. If delivery was uncertain, use the recovery procedure. |
 
-**ユーザー確認待ちの解除。** CLI は待機理由と選べる操作を示します。ユーザーの操作は対象の待機 ID に対して一度だけ受け付けます。全理由でタスクの中止を選べます。待機中も追跡できる Run の監視は続け、中止を受け付けた後は中止処理を優先します。
+**Cancellation and deadlines.** Save the Run's absolute deadline before the first send and preserve it across restarts. When the deadline is reached, move to Waiting for input as described above. For an explicit cancellation, first persist the cancellation request, then send `t3_thread_interrupt(threadId, runId)` for the identified active Run. If canceled during delivery, reconcile the delivery outcome and apply the same procedure to any relevant Run identified later. Confirm that the targeted work has ended after interrupting it. If delegated work is still active or its location is unknown, show the reason and links to known Threads in the CLI and keep the task in Cancelling. The user can stop the remaining work in T3. The runtime records cancellation once it verifies that the relevant work has ended. Limit automatic interruption to the targeted Run so other work the user started in the same Thread can continue. [T3 interruption specification](https://github.com/pingdotgg/t3code/blob/v0.1.11/docs/orchestration-v2/orchestrator-mcp-server.md#t3_thread_interrupt)
 
-| 待機理由 | ユーザーの操作と再開先 |
+## Using external verification tools
+
+Set up verification tools in separate projects as needed. Document their use in the request or in the Bot's SOUL. In v0, the delegated Session uses the tools. The Bot can include verification in the initial instructions or review the report and follow up with just the checks it needs. The Session includes tool results or links to them in its work report.
+
+If the completion criteria require a test to fail before a fix and pass afterward, the Bot asks for both results. If it receives only the post-fix result and finds no pre-fix result in the history, it can request that evidence with `follow_up`. If the Session could not use a tool, the Bot uses the reported circumstances to decide what to do next. Adding verification tools uses the same actions exposed to the owning Bot.
+
+When the completion criteria specify a commit or configuration, verify that the result came from that commit and configuration. If the request is to measure memory use in a build with updates enabled, measurements from a build with updates disabled leave the criterion open. Use the matching measurement record if it exists, or ask the Session to measure under the requested conditions.
+
+## Connecting to T3 v0.1.11
+
+Flock connects to T3's `/mcp` endpoint as an external MCP client. Manage the connection URL and OAuth credentials per environment. On first connection, the CLI dynamically registers an OAuth client and the user approves it in the browser through the authorization code flow with PKCE (S256). Store tokens in the OS credential store or in a file readable only by its owner so the runtime can reuse the credentials after a restart. Keep tokens out of Bot configuration, task history, logs, and model input. Launching, sending, and interrupting require an approval level that permits writes. Each Bot's permission mode must stay within that limit. External sign-in lasts 30 days in this version. This version issues no refresh tokens. When credentials expire, reauthenticate the same environment in the browser and reconcile the paused operations. [T3 external client specification](https://github.com/pingdotgg/t3code/blob/v0.1.11/docs/user/outside-agents.md)
+
+| Flock operation | T3 behavior |
 | --- | --- |
-| Bot の質問 | 回答を保存し、元の判定へ戻す。元の Session の質問が先に解決したら待機を解除して監視に戻る。Run が終了していれば結果を処理する。遅い回答は転送しない。 |
-| 追加作業の上限 | 「追加1回を許可」で枠を1回増やし、現在の情報で再判定する。却下済みの指示は送らない。普通の質問への回答は枠を増やさない。 |
-| モデルの失敗上限 | 「再判定」で同じ未処理イベントから再開する。 |
-| T3 の承認待ち・自動で回答できない質問 | Thread へのリンクを表示し、ユーザーが T3 上で対応する。解消後は同じ Run の監視へ戻る。 |
-| Run の期限到達 | 監視を続ける。「延長」で新しい絶対期限を保存する。待機中に作業が終了したら、延長操作を待たず結果の判定へ進む。 |
-| 送信・回答の受付結果が不明 | 「再照合」またはユーザーが特定した Run・質問の指定で復旧手順へ。新規・追加作業の再送は未受付を確認できた場合に限る。 |
-| T3 の認証失効・実行設定の不足 | 該当する接続だけを保留し、再認証または設定修正の後に再照合する。未送信なら送信前へ、受付結果不明なら復旧手順へ戻る。 |
+| `delegate` | Call `t3_thread_launch` in the target project. Flock associates the ordinary Thread with its own task. If the returned Run ID is still pending, match the sent action ID against the Thread history. |
+| `follow_up` | Request a new Run with `t3_thread_send(mode="queue")` in the corresponding Thread after the previous work has ended. If a separate Run was started manually, hold the send and reconcile the target again. |
+| Monitoring and history reads | Use the same target Run ID for short `t3_thread_wait` calls. Check for questions, deadlines, and cancellation between calls. A wait timeout means work is still ongoing. Follow explicit cursors from `t3_thread_read` to page through history. Use `messages` for reports and `activity` for questions and work events. If a response is truncated, retrieve the rest using the item ID and offset. |
+| `answer_session_question` | Identify the question via `list` and `read` on `t3_pending_request`. Check that it is still unanswered immediately before calling `respond`. Use a separate delivery path for starting Runs. |
+| `ask_user` and `complete` | Handle them in Flock's SQLite database and CLI. |
 
-**中止と期限。** 最初の送信前にその Run の絶対期限を保存し、再起動後も引き継ぎます。期限到達では上表の確認待ちに進みます。明示的な中止では、中止要求を先に永続化し、特定済みの実行中 Run に対して `t3_thread_interrupt(threadId, runId)` を送ります。送信中に中止された場合は受付結果を照合し、遅れて判明した担当 Run にも同じ手順を適用します。中断後は対象の終了を確認します。配下に未終了作業が残った場合や所在が不明な場合は、CLI に理由と、判明している Thread へのリンクを示して中止処理中にとどめます。ユーザーは T3 上で残った担当作業を停止できます。Runtime は対象の終了を確認して中止を確定します。Thread 全体の停止は、ユーザーが別に始めた作業にも影響するため自動では行いません。 [T3 の中断仕様](https://github.com/pingdotgg/t3code/blob/v0.1.11/docs/orchestration-v2/orchestrator-mcp-server.md#t3_thread_interrupt)
+**Associating questions with Runs.** T3's `list` returns IDs of pending `user_input` requests, and `read` returns a question ID and its prompts. Neither returns a Run ID. Flock deduplicates by `(environmentId, threadId, requestId)`. Match unanswered prompts to the question events in the assigned Thread's `activity`, which identify the originating Thread, Run, and prompts. Answer automatically only when the prompts match exactly one question in the monitored Run. A count alone is insufficient evidence of Run ownership. Direct the user to T3 if multiple Runs contain identical questions, the record is incomplete, or the question format is unsupported. Validate required prompts, available options, multiple selections, and free-text input against T3's definitions. Use the Thread-wide count of unresolved items, including approvals, as a monitoring signal. The user handles approvals in T3. If the user answers first, treat the question as resolved and resume monitoring. [Listing and answering questions](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/toolkits/thread/handlers.ts#L248-L285) · [Question event fields](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L1206-L1228)
 
-## 外部の検証ツールを使う場合
+**When work ends.** `completed` means the Run ended successfully. If the Session is still waiting on delegated work, use `untilDelegatedWorkSettled` to wait for it. When T3 returns a `resultRun`, retrieve the final report from that Run. Keep references to both the original Run and the Run that produced the report. Evaluate the result once per delegation. For failures, interruptions, and similar outcomes, pass the reason and any partial report to the Bot. The Bot decides whether the task is complete based on its saved criteria. [Wait result implementation](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L3706-L3719)
 
-検証ツールは用途ごとに別プロジェクトで用意し、使い方は依頼文や Bot の SOUL に書けます。v0 では委譲先の Session から利用します。Bot は最初の作業指示に検証を含めることも、報告を読んでから必要な確認だけを追加で頼むこともできます。Session はツールの結果や参照先を作業報告に含めます。
+## Restarts and duplicate prevention
 
-たとえば「修正前に失敗し、修正後に通ること」が条件なら、Bot は両方のテスト結果を求めます。修正後の結果しか届かず、履歴にも修正前の結果がなければ、`follow_up` で不足分の確認を頼めます。ツールを使えなかった場合も、その事情を報告として受けて次の手を決めます。検証ツールを追加するときも、担当 Bot には同じ操作を公開します。
+Before delivery, the runtime saves the action ID, destination, payload, and credential generation as a non-secret identifier. It records the start of delivery just before the external call. For launches and follow-ups, include the full action ID in the instruction and pass the same value as the MCP `clientRequestId`. Associate each answer with the original question ID. Ingest completion events once per environment, Thread, and Run. Ingest questions once per environment, Thread, and question ID.
 
-対象のコミットや設定が完了条件に含まれる場合は、その結果をどのコミット・設定で得たかも照合します。たとえば「更新機能を有効にしたビルドのメモリ使用量」が依頼なら、無効時の測定値だけでは条件が残ります。該当する測定記録があればそれを使い、足りなければ Session にその条件での計測を頼みます。
-
-## T3 v0.1.11 との接続
-
-Flock は外部 MCP クライアントとして T3 の `/mcp` に接続します。接続先 URL と OAuth 認証は環境単位で管理します。初回は CLI から OAuth クライアントを動的登録し、PKCE（S256）を使う認可コードフローでユーザーがブラウザから承認します。Runtime は再起動後も同じ認証を読み出せるよう、トークンを OS の資格情報ストアか所有者のみ読めるファイルに保存します。トークンを Bot 設定、タスク履歴、ログ、モデル入力に含めません。起動・送信・中断には書き込み可能な承認レベルが必要で、各 Bot の権限モードはその上限内に収めます。同版の外部サインインは30日間です。更新トークンは発行されないため、失効時は同じ環境をブラウザで再認証し、保留した処理を再照合します。 [T3 の外部クライアント仕様](https://github.com/pingdotgg/t3code/blob/v0.1.11/docs/user/outside-agents.md)
-
-| Flock の操作 | T3 側の処理 |
+| State at restart | How to resume |
 | --- | --- |
-| `delegate` | 対象プロジェクトで `t3_thread_launch` を呼ぶ。Flock が普通の Thread と自分のタスクを対応づける。戻り値の Run ID が未確定なら、送信したアクション ID と Thread 履歴を照合する。 |
-| `follow_up` | 前の作業が終了した担当 Thread に `t3_thread_send(mode="queue")` で新しい Run を依頼する。別の Run が手動で始まっていた場合は送信を保留し、対象を再照合する。 |
-| 監視・履歴参照 | 対象 Run ID を固定して `t3_thread_wait` を短く区切り、区切りごとに質問・期限・中止を確認する。待機のタイムアウトは作業の継続として扱う。履歴は `t3_thread_read` の明示カーソルでページをたどり、報告は `messages`、質問や作業イベントの確認は `activity` を使う。返却が途中で切れた場合は項目 ID とオフセットで続きを取得する。 |
-| `answer_session_question` | `t3_pending_request` の `list`・`read` で対象を特定し、送信直前に未回答であることを確認して `respond` する。Run を起動する送信経路とは分ける。 |
-| `ask_user`・`complete` | Flock の SQLite と CLI で処理する。 |
+| Event saved, decision pending | Re-evaluate the unprocessed event. |
+| Action committed, delivery pending | Verify that the task has not been canceled, the question has not been resolved, and the action is still applicable. Then send the saved instruction. |
+| Delegation or follow-up delivery started, acceptance result pending | For a new delegation, inspect the target project's Threads. For a follow-up, inspect the known Thread's messages. Reconnect if exactly one Run matches the full action ID, destination, and payload. If there are zero or multiple matches or reconciliation is inconclusive, disable automatic resending and wait for user input. Use titles only to narrow the search. |
+| Question answer delivery started, acceptance result pending | Reconcile using the saved Thread and question ID. If resolved, resume monitoring the relevant Run. If the question disappeared or expired, ingest the latest Run state. If acceptance is still uncertain, disable automatic resending of the answer and wait for user input. |
+| T3 ID or result saved | Resume monitoring the same Run or evaluating the saved, unprocessed event. |
 
-**質問の帰属。** T3 の `list` は未回答の `user_input` の ID、`read` は質問 ID と設問を返し、どちらにも Run ID は含まれません。Flock は `(environmentId, threadId, requestId)` で重複を防ぎます。担当 Thread の `activity` 上の質問イベント（発生元 Thread・Run・設問）と未回答の設問を照合し、監視対象 Run の一つの質問に一意に対応するときだけ自動回答します。件数だけから Run を推定しません。同じ設問が複数の Run にある場合、記録が不完全な場合、対応する設問形式を扱えない場合は、ユーザーに T3 上での対応を案内します。必須設問、選択肢、複数選択、自由入力の可否は T3 の定義に従って検証します。承認なども含む Thread 全体の未解決件数は監視の手がかりに使い、承認はユーザーが T3 上で行います。ユーザーが先に回答した場合は解決済みとして監視に戻ります。 [質問の列挙・回答](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/toolkits/thread/handlers.ts#L248-L285) · [質問イベントの返却項目](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L1206-L1228)
+**Preventing duplicate sends on reconnection.** For external launches and follow-ups, T3 v0.1.11 uses a namespace derived from the OAuth client session ID together with `clientRequestId`. A Flock restart or a new HTTP connection can reuse the same credentials. Signing in again can change the credential session. A changed session can turn an instruction with the same key into new work, so reconcile against history first. Follow the same procedure when credential continuity is uncertain. [External client namespace](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/auth/McpOAuth.ts#L620-L634) · [Launch ID generation](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/toolkits/project/handlers.ts#L210-L219) · [Follow-up ID generation](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L3622-L3639)
 
-**作業の終了。** `completed` はその Run の正常終了を表します。委譲先がさらに別の処理を待っている場合は `untilDelegatedWorkSettled` で収束を確認し、返却された `resultRun` があれば、その Run から最終報告を取得します。最初の Run と報告元の Run の両方を残し、一つの委譲に対する結果は一度だけ判定します。失敗・中断等は理由と途中の報告を Bot に渡します。最終的なタスクの完了は Bot が保存済みの条件と照合して決めます。 [待機結果の実装](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L3706-L3719)
+For transient communication failures, retry on the existing connection only for paths verified against live T3 to avoid duplicates with the same credential session, payload, and key. Wait between attempts and allow up to two retries per action after delivery starts. After restarting or reauthenticating, reconcile as described above first. Show the instruction and action ID in the CLI. Reconcile again if the user specifies an existing Run. After reconciliation, allow manual resending only if T3 confirms the instruction was never accepted. Zero history matches alone are insufficient to establish that.
 
-## 再起動と重複防止
+## Implementation order and acceptance criteria
 
-Runtime は送信前にアクション ID、宛先、送信内容、使用する認証の世代（秘密を含まない識別子）を保存し、外部呼び出しの直前に送信開始を記録します。起動・追加指示では依頼文に完全なアクション ID を含め、MCP の `clientRequestId` にも同じ値を渡します。質問への返答は元の質問 ID に紐づけます。終了イベントは環境・Thread・Run ごと、質問は環境・Thread・質問 ID ごとに一度だけ取り込みます。
+### 1. SQLite and Agent Loop
 
-| 再起動時の状態 | 再開方法 |
-| --- | --- |
-| イベントを保存済み、判断の確定前 | 未処理イベントを再評価する。 |
-| アクションを確定済み、送信開始前 | タスクの中止、質問の解決などが起きていないことを確認してから、保存した指示を送る。 |
-| 委譲・追加指示を送信開始済み、受付結果の保存前 | 新規委譲は対象プロジェクトの Thread、追加指示は既知の Thread のメッセージを読む。完全なアクション ID・宛先・内容が一致する Run が1件なら、その Run に再接続する。0件、複数件、照合不能なら自動再送を止め、ユーザー確認待ちに進む。タイトルは候補の絞り込みにだけ使える。 |
-| 質問への応答を送信開始済み、受付結果の保存前 | 保存した Thread と質問 ID で照合する。解決済みなら担当 Run の監視へ。消失・期限切れなら Run の最新状態を取り込む。受付済みか判定できない場合は自動再回答を止めてユーザー確認待ちへ。 |
-| T3 の ID または結果を保存済み | 同じ Run の監視か、保存済みの未処理イベントの判定から続ける。 |
+Start with C++20, SQLite, and fixed responses for the model and T3. Take one request through delegation, an answer to a Session question, a Flock restart, receipt of the same Run's report, and completion. Share SQLite between the CLI and runtime, enable WAL, and set a finite lock wait. Allow one runtime process per database. Prevent duplicates with unique constraints and transactions for events, actions, and answers.
 
-**再接続時の二重送信防止。** T3 v0.1.11 は、外部クライアントの起動・追加指示について、OAuth のクライアントセッション ID に由来する名前空間と `clientRequestId` を使います。Flock のプロセス再起動や HTTP の張り直しで同じ認証を再利用する場合と、再ログインで認証セッションが変わる場合を区別します。後者では同じキーでも新規作業になり得るため、履歴の照合を先に行います。認証の継続性が分からない場合も同じ扱いです。 [外部クライアントの名前空間](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/auth/McpOAuth.ts#L620-L634) · [起動の ID 生成](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/toolkits/project/handlers.ts#L210-L219) · [追加指示の ID 生成](https://github.com/pingdotgg/t3code/blob/v0.1.11/apps/server/src/mcp/OrchestratorMcpService.ts#L3622-L3639)
+- Execute zero unknown, multiple, or out-of-state actions. Include attempts to complete before initial delegation, delegate additional work while stopped at an unanswered question, and overwrite committed `doneWhen`. Make zero model calls during ordinary Run monitoring.
+- Reproduce an ambiguous request, a user answer, initial delegation, Run failure, a follow-up, and completion. Verify that the first delegation waits for the answer and that the Bot continues making decisions on the same task after the failure.
+- After three consecutive invalid model responses, wait for user input. Deadline expiration and pending approval each result in zero new Runs and zero automatic interruptions. For explicit cancellation, hold the project's next task until the interruption of the targeted Run is confirmed. After restarting during cancellation, continue tracking the same target.
+- Request three additional Runs across existing and new Sessions, then ask the user before requesting a fourth. An ordinary answer leaves the allowance as it is. Delivering the same approval twice adds one run. Redelivering events after cancellation produces zero new sends.
+- Compare a Session asking for the target branch when the request already specifies it and when only the user can decide. The first case produces zero questions for the user and the second produces one. Both cases send one answer, start zero new Runs, and use zero additional runs from the allowance. Requesting a different test after the Run ends starts one new Run and consumes one run from the allowance.
+- Reproduce a Run ending while waiting for a deadline extension, a question being resolved in T3 while the Bot is waiting for the user to answer it, and approval for more work followed by cancellation. Verify that stale CLI input for a wait that has cleared causes zero sends, zero allowance increases, and zero task resumptions.
+- Change an active task's completion criteria and restart while the superseded Run is stopping. Verify that the task keeps its ID, that replacement work waits for the old Run and its delegated work to end, and that completion uses the replacement Run's evidence under the new revision.
 
-通信の一時失敗について、同じ認証セッション・同じ内容・同じキーで重複しないことを実 T3 で確認した経路だけ、接続を維持した再試行を許します。間隔を空け、送信開始後の再試行はアクションごとに通算2回までとします。再起動・再認証後は上表の照合を先に行います。CLI には指示とアクション ID を表示し、ユーザーが既存 Run を指定すれば再照合します。再照合を経た手動再送は、T3 側で未受付を確認できた場合だけです。履歴検索で0件だったことだけでは未受付は確定しません。
+### 2. Bot configuration, cron, CLI, and a live model
 
-## 実装順と合格条件
+- Deliver the same cron occurrence twice and verify that it registers once. A time skipped at the start of daylight saving registers zero occurrences. A time repeated at the end registers twice with distinct UTC timestamps. Accept another request for the same project while the preceding task is waiting for user input. After a restart, verify that the answer reaches the original question and the queued request starts when the preceding task closes.
+- Edit SOUL after the first delegation and verify that the active task is still evaluated against its saved criteria. Give the Bots different MEMORY content to verify that model input includes only the owning Bot's MEMORY after a restart.
+- Approve Sign in with ChatGPT for Flock in a browser and connect directly to the Responses API with an eligible plan. Verify model selection and tool calling on the live connection. Give both Bots the same report, “All existing tests passed. No regression test was added.” The Bot that requires the regression test chooses a follow-up. The Bot that requires the existing tests to pass chooses completion. Hold the model and each Bot's input fixed and evaluate each Bot three times. Record every output and rationale. Each trial must choose the expected action.
 
-### 1. SQLite と Agent Loop
+### 3. Live T3 connection and recovery
 
-最初は C++20・SQLite と固定応答のモデル・T3 を使い、1件の依頼を「委譲 → Session の質問に回答 → Flock 再起動 → 同じ Run の報告受領 → 完了」まで通します。SQLite は CLI と Runtime で共有し、WAL と有限のロック待ち時間を設定します。同じ DB を処理する Runtime は1プロセスとし、イベント・アクション・回答の一意制約とトランザクションで重複を防ぎます。
+Verify this phase by connecting an independent external MCP client to T3 v0.1.11. Run the following checks against the live environment.
 
-- 未知・複数・状態外のアクションは実行0件。初回委譲前の完了、未回答の質問で停止中の追加委譲、確定済みの `doneWhen` の上書きを含める。通常の Run 監視中はモデル呼び出し0回とする。
-- 曖昧な依頼 → ユーザーの回答 → 初回委譲 → Run の失敗 → 追加指示 → 完了を再現する。回答前は初回委譲0件、失敗後も同じタスクで判断を続ける。
-- モデルの形式違反が3回続けばユーザー確認待ちとする。期限切れ・承認待ちでは新しい Run も自動中断も0件。明示的な中止は対象 Run の中断を確認するまでプロジェクトの次のタスクを開始せず、中止処理中に再起動しても同じ対象を追跡する。
-- 新旧の Session に通算3回の追加作業を依頼し、4回目はユーザーに確認する。普通の回答では回数が増えず、同じ追加許可を二度届けても増えるのは1回だけ。中止後はイベントを再配送しても新規送信0件。
-- Session が対象ブランチを尋ねるケースを、依頼に指定がある場合とユーザーしか決められない場合で比較する。前者のユーザー質問は0件、後者は1件。どちらも質問への返答は1回、新しい Run と追加作業の消費は0件。終了後に別のテストを依頼したときだけ両方が1件増える。
-- 期限切れの確認待ち中に Run が終了する場合、ユーザーへの質問中に T3 側でその質問が解決する場合、追加許可と中止が続けて届く場合を再現する。消滅した待機理由に対する古い CLI 入力で、送信・追加許可・タスク再開が起きないことを確かめる。
+- Use external OAuth to launch work, retrieve history, send follow-ups with `queue`, and interrupt work. Check project defaults for model and workspace, explicit settings, insufficient privileges, and expired credentials. Verify that an action ID can be used to track a Run even when its ID becomes available later.
+- For both initial delegation and a follow-up, restart before delivery starts, immediately after T3 accepts the instruction, and after the result is saved. Redeliver the completion notification as well. Try recovery within the same OAuth session and after signing in again. Verify that each instruction produces one Run and one result ingestion. Zero matches, multiple matches, and inconclusive reconciliation must each result in zero automatic resends.
+- Identify a pending question and answer it within the same Run. Also test restarting immediately after acceptance, the user answering first, an identical question in a different Run, and permission approval. Verify zero automatic answers when ownership is ambiguous, zero duplicate answers to resolved questions, and zero additional Runs.
+- Reproduce a separate Run started manually in the same Thread and a Session that delegates internally and puts the final report in a later Run. Verify that follow-ups and interruptions target the right work, the final report is associated correctly, and the task counts the result once.
 
-### 2. Bot 設定・cron・CLI と実モデル
+### 4. Completion decisions with live Sessions
 
-- 同じ cron の予定を2回届けても登録は1件。夏時間の開始で飛ばされた時刻は0件、終了で二度現れる時刻は UTC の異なる2件になる。先行タスクがユーザー確認待ちの間も、同じプロジェクトへの別の依頼を受け付ける。再起動後、回答は元の質問に届き、先行タスクが閉じたら次の依頼が始まる。
-- 初回委譲後に SOUL を編集しても、進行中のタスクは保存済みの条件で評価する。再起動後のモデル入力にも担当 Bot の MEMORY だけが含まれることを、Bot ごとに異なる記載で確認する。
-- Flock 用の「Sign in with ChatGPT」をブラウザで承認し、利用可能なプランで Responses API へ直接接続する。モデル選択とツール呼び出しを実際の接続で確認する。実モデルには「既存テストは成功、回帰テストは未追加」という同じ作業報告を渡す。回帰テスト追加を条件とした Bot は追加指示、既存テスト成功を条件とした Bot は完了を選ぶ。モデルと各 Bot の入力を固定してそれぞれ3回評価し、全回の出力と理由を記録する。全回で期待するアクションを選べば合格とする。
+- Request the memory usage of a build at a specified commit with updates enabled. Keep the Session's final report identical (“Measurement complete”) and vary only the commit and configuration in the T3 work records. When the Bot can read matching evidence, it should complete the task with zero additional runs. When only an older commit or different configuration is recorded, it should request the missing measurement. Hold the model, completion criteria, work allowance, and records fixed. Compare three conditions using only the final report, retrieving excerpts via `session_read` when needed, and including the same work records in the initial input. Record incorrect completions, unnecessary repeat measurements, input size, and inference count separately. Use the results to choose the history-reading approach for routine use.
+- Restart the runtime during a history read and verify that retrieved excerpts and the remaining read allowance carry over. Confirm that reads alone start zero Runs, consume zero additional runs, and complete zero events.
+- Replay short and long histories in the same target environment and record the runtime's peak RSS while waiting and while reading. Verify that the runtime does not load the entire history, independently of model input token counts and execution cost.
+- In an environment without external verification tools, submit a request such as extracting open items from meeting notes. The Bot should choose completion based on the returned list, and the CLI should show the list and the rationale.
+- For a task that needs verification, have cron request a fix for a known bug and require a test that reproduces it first. Run the reproduction test in the delegated Session, save the failure report, and restart Flock. Verify that the Bot requests the fix and a test rerun in the same Thread and can decide completion from the pre-fix and post-fix results. Use the test tools already available in the delegated Session.
 
-### 3. 実 T3 接続と復旧
-
-この段階の合格は、独立した外部 MCP クライアントから v0.1.11 に接続して確かめます。以下は実機で確認する条件です。
-
-- 外部 OAuth で起動・履歴取得・追加指示（`queue`）・中断を通す。プロジェクトの既定モデルと作業場所、明示設定、権限不足・失効を区別する。Run ID が遅れて判明する場合もアクション ID から追跡できることを確かめる。
-- 新規委譲と追加指示の各々で、送信開始前・T3 受付直後・結果保存後に再起動し、終了通知も再配送する。同じ OAuth セッションで復帰する場合と再ログインした場合を試し、同じ指示の Run と結果取り込みが各1件であること、0件・複数件・照合不能時の自動再送が0件であることを確認する。
-- 待機中の質問を特定し、同じ Run に回答する。受付直後の再起動、ユーザーの先行回答、別 Run の同文質問、権限承認も試す。帰属が曖昧な場合の自動回答は0件、解決済みの質問への二重応答と追加 Run の起動は0件とする。
-- 手動で同じ Thread に別の Run がある場合と、Session が内部委譲して後続の Run に最終報告が載る場合を再現する。無関係な作業への追加指示・中断、最終報告の取り違え、タスクへの二重計上を防げることを確認する。
-
-### 4. 実セッションでの完了判断
-
-- 「指定したコミットで更新機能を有効にしたビルドのメモリ使用量」を依頼し、Session の最終報告は同じ「計測済み」とし、T3 の作業記録にあるコミット・設定だけを変える。該当する証拠を読めた場合は追加作業0回で完了し、旧コミット・別設定の記録だけなら不足分を依頼する。同じモデル・完了条件・作業予算・記録を使い、最終報告のみ／必要時に `session_read` で抜粋を取得／同じ記録を最初から入力の3条件で比較する。誤完了と不要な再計測、入力量・推論回数を分けて記録し、常用する読み取り方式を決める。
-- 読み取り途中で Runtime を再起動し、取得済みの抜粋と残り回数を引き継ぐ。読み取りだけで新規 Run・追加作業の消費・イベントの完了がいずれも0件であることを確認する。
-- 短い履歴と長い履歴を同じ対象環境で再生し、待機中・読み取り中それぞれの Runtime のピーク RSS を記録する。モデル入力のトークン数・実行費用とは別に、履歴の全量読み込みが起きていないことを確認する。
-- 外部の検証ツールを用意していない環境で、たとえば会議メモから未決事項を抜き出す依頼を通す。結果の一覧を受け取った Bot が報告をもとに完了を選び、CLI で一覧と判断理由をたどれれば合格とする。
-- 検証が必要な例として、cron から「既知の不具合をテストで再現してから修正する」と依頼する。初回は委譲先で再現テストを実行し、失敗の報告を保存した時点で Flock を再起動する。Bot が同じ Thread に修正と再実行を頼み、修正前後の結果を見て完了を判断できることを確かめる。テストの実行には委譲先で使える既存のツールを利用する。
-
-v0 の利用者はローカルの1人です。CLI と Web UI は同じタスク・質問・判断履歴を扱います。Web UI の操作は [UI の合格条件](UI.md#合格条件)で確認します。Bot による MEMORY の自動更新と外部通知は将来の対象です。
+v0 supports one local user. The CLI and Web UI operate on the same tasks, questions, and decision history. Verify Web UI interactions using the [UI acceptance criteria](UI.md#acceptance-criteria). Automatic MEMORY updates by Bots and external notifications are future work.
