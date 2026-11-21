@@ -21,10 +21,8 @@ if(BUILD_TESTING)
   add_executable(flock_app_tests tests.cpp demo.cpp)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
-  # A regular file in the home path must not mask an argument error.
   add_test(NAME flock_cli_invalid_port
-    COMMAND flock --home "$<TARGET_FILE:flock>/state" run --port 65536)
-  set_tests_properties(flock_cli_invalid_port PROPERTIES PASS_REGULAR_EXPRESSION "Invalid port")
+    COMMAND "${CMAKE_COMMAND}" "-DFLOCK=$<TARGET_FILE:flock>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_port.cmake")
   find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_app_login
