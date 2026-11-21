@@ -30,7 +30,9 @@ class Fixture(BaseHTTPRequestHandler):
 
     def do_GET(self):
         origin = self.server.origin
-        if self.path == "/.well-known/oauth-protected-resource/mcp":
+        if self.path == "/fixture/effects":
+            self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/.well-known/oauth-protected-resource/mcp":
             self.reply({"resource": origin + "/mcp", "authorization_servers": [origin]})
         elif self.path == "/.well-known/oauth-authorization-server":
             self.reply({"issuer": origin, "authorization_endpoint": origin + "/authorize",
@@ -122,6 +124,9 @@ class Fixture(BaseHTTPRequestHandler):
         questions = [{"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
                       "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
                                                               {"label": "blue", "description": ""}]}]
+        if (name in ("t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+                (name == "t3_pending_request" and args["action"] == "respond")):
+            state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
