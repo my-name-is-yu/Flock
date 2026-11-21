@@ -1,6 +1,7 @@
 #include "flock/core.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
@@ -726,6 +727,97 @@ void peerConsultationAndPermission() {
           "consultation did not record the corresponding request and response");
 }
 
+void unsuccessfulConsultationsDoNotComplete() {
+    for (const bool cancel : {false,true}) {
+        Fixture f;
+        f.allowBeta();
+        const auto id = f.submit("Consult before deciding whether to release");
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            if (input.event["kind"] == "intake") return botRequest("beta","consult","Can we release?");
+            if (input.event["kind"] == "bot_request") return botReply("failed","Required evidence unavailable");
+            check(input.event["kind"] == "bot_result" && input.event["status"] == (cancel ? "cancelled" : "failed") &&
+                  !hasTool(input,"complete") && input.task["doneWhen"] == "",
+                  "unsuccessful initial consultation unlocked completion");
+            return ask();
+        };
+        f.reach(id,"peer_waiting");
+        if (cancel) f.store->operate(f.store->tasks("beta").front().at("id"),0,"cancel");
+        f.wait(id,"user_question");
+        check(f.logs(id,"completed") == 0 && f.t3.launches == 0,"unsuccessful consultation completed or launched work");
+    }
+}
+
+void concurrentPeerHandoff() {
+    Fixture f;
+    f.allowBeta();
+    const auto source = f.submit("Confirm the release");
+    const auto next = f.submit("Next in the project queue");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == next) return ask();
+        if (input.task["id"] == source) {
+            if (input.event["kind"] == "intake") return botRequest("beta","work","Verify the release");
+            check(input.event["kind"] == "bot_result" && input.event["status"] == "completed",
+                  "concurrent handoff lost the recipient result");
+            return complete();
+        }
+        if (input.event["kind"] == "bot_request") return work();
+        check(input.event["kind"] == "result","recipient missed its Session result");
+        return botReply("result","Verified the release");
+    };
+    const auto until = [&](const auto& ready) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (!ready() && std::chrono::steady_clock::now() < deadline) {
+            f.runtime->tickConcurrent();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(ready(),"concurrent handoff did not advance before its deadline");
+    };
+    until([&] {
+        const auto recipients = f.store->tasks("beta");
+        return recipients.size() == 1 && recipients.front()["state"] == "running";
+    });
+    const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
+    check(f.task(source)["state"] == "peer_waiting" && f.task(next)["blockedBy"]["id"] == recipient,
+          "the queued Task did not report the active peer as the owner");
+    f.runtime.reset();
+    f.t3.finish("run-1");
+    f.restart();
+    until([&] { return f.task(next)["state"] == "waiting"; });
+    f.runtime.reset();
+    check(f.task(source)["state"] == "completed" && f.task(recipient)["state"] == "completed" &&
+          f.task(next)["wait"]["reason"] == "user_question" && f.t3.launches == 1 &&
+          f.t3.follows == 0 && f.botMessages("alpha").size() == 2,
+          "the concurrent handoff skipped or duplicated the source, recipient, or next Task");
+}
+
+void consultationRestoresOwnEvidence() {
+    for (const auto mode : {"on_demand","prefill","off"}) {
+        Fixture f;
+        f.read = mode;
+        f.allowBeta();
+        f.restart();
+        const auto source = f.submit("Verify with a Session and consult");
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            if (input.event["kind"] == "intake") return work();
+            if (input.event["kind"] == "result") return botRequest("beta","consult","Confirm policy");
+            if (input.event["kind"] == "bot_request") return botReply("result","Policy confirmed");
+            check(input.event["kind"] == "bot_result" && input.event["sessionResult"]["resultRunId"] == "run-1-result",
+                  "the consultation result omitted the source Bot's settled report");
+            check(hasTool(input,"session_read") == (f.read == "on_demand") && !hasTool(input,"read_bot_evidence"),
+                  "the source Bot's history ignored its selected read mode");
+            if (f.read == "on_demand" && input.evidence.empty())
+                return {"session_read",{{"threadId","thread-1"},{"runId","run-1-result"}},"Read original evidence"};
+            check(input.evidence.size() == (f.read == "off" ? 0 : 1),"own Session evidence did not match its selected mode");
+            return complete();
+        };
+        f.reach(source,"running");
+        f.t3.finish("run-1");
+        f.reach(source,"completed");
+        const auto expected = f.read == "off" ? 0 : f.read == "prefill" ? 2 : 1;
+        check(f.t3.reads == expected && f.t3.launches == 1,"the consultation changed read or Run counts");
+    }
+}
+
 void peerCancelWithLateSessionResult() {
     Fixture f;
     f.allowBeta();
@@ -883,6 +975,8 @@ int main() {
             {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
             {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
+            {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},

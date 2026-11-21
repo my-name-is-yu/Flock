@@ -189,10 +189,15 @@ void peerHistory(const std::filesystem::path& path) {
     check(hasEvent(finished.at("events"),"completed","判定基準を確認しました") && t3.launches == 0,
           "consultation did not show the result without starting a T3 Session");
 
-    for (int i = 0; i < 201; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
+    for (int i = 0; i < 2001; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
     const auto newest = browser.get("/api/view?bot=release");
     auto cursor = newest.at("olderBefore").get<Id>();
     check(cursor > 0,"missing older peer history cursor");
+    check(newest.at("queued").size() == 2000,"overview lost its pending queue");
+    const auto blocker = newest.at("queued").front().at("blockedBy").at("id");
+    check(std::all_of(newest.at("queued").begin(),newest.at("queued").end(),[&](const Json& row) {
+        return row.at("blockedBy").at("id") == blocker;
+    }),"overview reported a different head for the same project");
     const auto recipient = browser.get("/api/view?bot=triage");
     const auto peerMessages = [](const Json& page) {
         Json messages = Json::array();

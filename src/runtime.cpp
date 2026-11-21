@@ -412,13 +412,14 @@ ORDER BY id)SQL");
         }
         if (event["kind"] == "question") return {"answer_session_question","ask_user"};
         std::vector<std::string> tools{"delegate","ask_user"};
-        if (event["kind"] == "result" && !task["lastRun"].is_null()) {
-            tools.insert(tools.end(),{"follow_up","complete"});
+        if ((event["kind"] == "result" || event.contains("sessionResult")) && !task["lastRun"].is_null()) {
+            tools.push_back("follow_up");
             if (options.sessionRead == "on_demand" && event["evidence"].size() < 3) tools.push_back("session_read");
         }
+        if (event["kind"] == "result" && !task["lastRun"].is_null()) tools.push_back("complete");
         if (event["kind"] == "bot_result") {
-            tools.push_back("complete");
-            if (!task["lastRun"].is_null()) tools.push_back("follow_up");
+            if ((event["requestKind"] == "consult" && event["status"] == "completed") ||
+                !field(task,"doneWhen").empty()) tools.push_back("complete");
             if (event["evidence"].size() < 3 && canRead) tools.push_back("read_bot_evidence");
         }
         if (canSend) tools.push_back("send_bot_message");
@@ -798,7 +799,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
             peer = db.peerExchange(task["id"]);
-            if (event["kind"] == "bot_answer") {
+            if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
                 auto report = settledSessionReport(task);
                 if (!report.is_null()) event["sessionResult"] = std::move(report);
             }

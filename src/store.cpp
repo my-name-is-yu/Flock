@@ -362,13 +362,17 @@ void Store::operate(Id id, Id waitId, std::string_view operation, const Json& da
 
 Json Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
-    auto result = p_->load(id);
+    return p_->taskDetails(id,true);
+}
+
+Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
+    auto result = load(id);
     result["blockedBy"] = nullptr;
-    auto pending = p_->outbox(result);
+    auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
     result["pendingAction"] = pending;
-    if (result["state"] == "queued") {
-        auto row = p_->query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
+    if (includeBlocker && result["state"] == "queued") {
+        auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
                              " FROM project_task_order head JOIN project_task_order task"
                              " USING(environment_id,project_id) JOIN tasks owner ON owner.id=head.id"
                              " WHERE task.id=? AND head.position=1 AND head.id<>task.id",
@@ -376,7 +380,7 @@ Json Store::task(Id id) const {
         if (row.next()) result["blockedBy"] = {{"id",row.number(0)},{"botId",row.string(1)},
                                               {"request",row.string(2)},{"state",row.string(3)}};
     }
-    auto runs = p_->query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id FROM runs"
+    auto runs = query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id FROM runs"
                           " JOIN outbox ON runs.action_id=outbox.id WHERE runs.task_id=? ORDER BY outbox.rowid", {id});
     result["runs"] = Json::array();
     while (runs.next())
@@ -391,6 +395,41 @@ Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
                           {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(task(rows.number(0)));
+    return result;
+}
+
+Json Store::activeTasks(std::string_view bot) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+WITH queue AS MATERIALIZED (SELECT * FROM project_task_order)
+SELECT task.id,task.state,task.data,owner.id,owner.bot_id,owner.state,json_extract(owner.data,'$.request')
+FROM tasks task
+LEFT JOIN queue target ON task.state='queued' AND target.id=task.id
+LEFT JOIN queue head ON head.environment_id=target.environment_id AND head.project_id=target.project_id
+  AND head.position=1 AND head.id<>task.id
+LEFT JOIN tasks owner ON owner.id=head.id
+WHERE task.bot_id=? AND task.state NOT IN ('completed','cancelled')
+ORDER BY task.id DESC)SQL", {bot});
+    Json result = Json::array();
+    while (rows.next()) {
+        auto task = rows.json(2);
+        task["id"] = rows.number(0);
+        task["state"] = rows.string(1);
+        task["blockedBy"] = nullptr;
+        if (rows.number(3)) task["blockedBy"] = {{"id",rows.number(3)},{"botId",rows.string(4)},
+                                                {"state",rows.string(5)},{"request",rows.string(6)}};
+        result.push_back(std::move(task));
+    }
+    return result;
+}
+
+Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
+                          " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
+                          " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
+    Json result = Json::array();
+    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
     return result;
 }
 

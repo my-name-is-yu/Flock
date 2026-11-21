@@ -125,6 +125,8 @@ public:
     Json task(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
+    Json activeTasks(std::string_view botId) const;
+    Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
