@@ -467,10 +467,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
 
 Json Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
-    auto task = p_->load(id);
-    task["blockedBy"] = task["state"] == "queued" ? p_->queueBlocker(id) : Json(nullptr);
-    p_->addTaskDetails(task);
-    return task;
+    return p_->taskDetails(id,true);
 }
 
 bool Store::hasTask(Id id) const {
@@ -485,6 +482,13 @@ static void restoreWaitAnchor(const StoreImpl& store, Json& task) {
     auto row = store.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
                            " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {task["id"],wait["id"]});
     if (row.next()) wait["messageId"] = row.number(0);
+}
+
+Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
+    auto task = load(id);
+    task["blockedBy"] = includeBlocker && task["state"] == "queued" ? queueBlocker(id) : Json(nullptr);
+    addTaskDetails(task);
+    return task;
 }
 
 void Store::Impl::addTaskDetails(Json& result) const {
@@ -543,12 +547,7 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
                           " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
                           " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) {
-        auto task = p_->load(rows.number(0));
-        task["blockedBy"] = nullptr;
-        p_->addTaskDetails(task);
-        result.push_back(std::move(task));
-    }
+    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
     return result;
 }
 
