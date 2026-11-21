@@ -466,8 +466,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto old = field(current,"environmentId");
             auto target = field(current,"pendingEnvironmentId");
             if (target.empty()) target = old;
-            if (const auto peer = db.peerExchange(current["id"]);
-                peer && (peer->sender == current["id"] || peer->kind != "work")) return false;
+            const auto id = current["id"].get<Id>();
+            const auto peer = db.peerExchange(id);
+            if (peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working"))
+                return false;
+            const auto event = db.currentEvent(current);
+            const bool preservePeerAnswer = peer && peer->recipient == id && peer->kind == "work" &&
+                peer->phase == "working" && !event.is_null() && event["consumed"] != true &&
+                event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
                 return true;
@@ -481,10 +487,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             db.clearWait(current,"user_instruction");
             db.unlockQuestion(current,"user_instruction");
-            clearDeferredCompletionMarker(current["id"].get<Id>(),current.value("eventId",Id{0}));
-            db.consumeEvent(current);
-            if (current["lastRun"].is_null())
-                db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            if (!preservePeerAnswer) {
+                clearDeferredCompletionMarker(id,current.value("eventId",Id{0}));
+                db.consumeEvent(current);
+                if (current["lastRun"].is_null())
+                    db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            }
             current["state"] = "deciding";
             for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","environmentReleased","replanReconcileAt","feedback"})
                 current.erase(key);
@@ -1143,7 +1151,14 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         if (tool == "send_bot_message" || tool == "reply_to_bot") {
             if (!present(field(args,"text"))) throw Conflict("A Bot message requires text");
             if (tool == "reply_to_bot") {
-                change(snapshot,[&](Json& current) { replyPeer(current,event,decision,actionId()); return true; });
+                change(snapshot,[&](Json& current) {
+                    if (field(args,"kind") == "result" &&
+                        (hasPending(current) || current.value("replanning",false) ||
+                         (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))))
+                        return false;
+                    replyPeer(current,event,decision,actionId());
+                    return true;
+                });
                 return;
             }
             const auto kind = field(args,"kind");
@@ -1315,7 +1330,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     bool peerExchangeDefersReplan(Id id) {
         std::lock_guard lock(db.mutex);
         const auto peer = db.peerExchange(id);
-        return peer && (peer->sender == id || peer->kind != "work");
+        return peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working");
     }
 
     void step(Id id) {
