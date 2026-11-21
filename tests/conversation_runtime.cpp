@@ -568,6 +568,17 @@ void unknownSendThenScopeChange() {
           runs[1]["revisionId"] == f.task(id)["currentRevision"] &&
           f.event(id,"report")["revisionId"] == before["currentRevision"],
           "the prior report or Run was silently attributed to the new revision");
+    const auto history = f.store->history(id,0,200);
+    const auto oldReport = std::ranges::find_if(history,[](const Json& row) { return row["kind"] == "report"; });
+    check(oldReport != history.end(),"the stale result fixture is missing its earlier report");
+    constexpr auto explain = "Explain the result from the earlier run";
+    f.script(explain,{{"kind","answer_result"},{"resultMessageId",oldReport->at("id")}});
+    const auto revised = f.task(id);
+    const auto response = f.response(f.receive("explain-superseded-result",explain));
+    check(response["route"] == "clarify" && !response.contains("source") &&
+          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
+          "the model's stale result ID escaped the current revision's candidates or changed work");
     f.t3.finish("run-2","New p95 evidence");
     f.reach(id,"completed");
     const auto result = f.event(id,"completed");
