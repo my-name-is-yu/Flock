@@ -89,6 +89,25 @@ For an offline demonstration, use a separate Flock home and start
 starting with `ask:` produces a demo Bot question, and replying lets the
 fixture Session run to completion.
 
+## Model call allowance
+
+Set `modelCallLimit` in a Bot's `config.json` to a positive integer. The
+default is 20. Flock takes the limit from the originating request's saved
+settings. Its routing, result explanations, task decisions, and Bot exchanges
+consume attempts from the same allowance. Explicit replies to a clarification
+use the originating message's allowance. Independent requests get their own.
+
+Flock saves each attempt in SQLite before invoking the model. Failed attempts,
+retries, and in-flight attempts at restart count. The `model_attempts` table
+records usage fields when available. Missing fields are unknown.
+
+When the allowance runs out, choose **Approve one more model call** on the
+paused conversation message or task. For a task, `flock approve TASK WAIT`
+uses the current wait ID. If another Bot's task is paused, open that Bot's
+waiting item. Each approval grants one attempt. The additional Run
+allowance remains separate. T3 observation, reconciliation, and calls made
+inside T3 or an external provider are outside the local model call allowance.
+
 ## Six-trial model acceptance
 
 After ChatGPT sign-in, run the following command with a slug from the model

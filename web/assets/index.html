@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="/conversation.css">
   <link rel="stylesheet" href="/composer.css">
   <link rel="stylesheet" href="/dialog.css">
+  <link rel="stylesheet" href="/bot-editor.css">
   <script type="module" src="/app.js"></script>
 </head>
 <body>
@@ -20,6 +21,9 @@
     <aside id="navigation" class="sidebar" aria-label="Bot navigation">
       <div class="sidebar-head">
         <h2 id="bots-heading" class="sidebar-title">Bots</h2>
+        <button id="new-bot-button" class="icon-button new-bot-button" type="button" aria-label="New bot" title="New bot" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
         <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">×</button>
       </div>
       <div class="sidebar-scroll">
@@ -109,5 +113,6 @@
     <div id="detail-nav" class="detail-nav" role="tablist" aria-label="Settings sections" hidden></div>
     <div id="detail-body" class="dialog-body"></div>
   </dialog>
+  <dialog id="bot-editor" class="bot-editor-dialog" aria-labelledby="studio-title"></dialog>
 </body>
 </html>

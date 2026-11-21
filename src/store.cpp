@@ -154,6 +154,7 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateConversation();
+        migrateModelBudget();
         exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
              " WHERE environment_id<>json_extract(data,'$.environmentId')");
     } catch (...) { sqlite3_close(db); throw; }
@@ -301,6 +302,7 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    modelCallLimit(item.config);
     Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
@@ -372,6 +374,9 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     } else if (operation == "approve" && reason == "budget") {
         task["remaining"] = task["remaining"].get<int>() + 1;
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
+    } else if (operation == "approve" && reason == "model_budget") {
+        grantModelCall(taskModelBudget(task));
+        journal(id,"model_budget_granted",{{"waitId",waitId}});
     } else if (operation == "retry" && reason == "model_failure") {
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");

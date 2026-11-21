@@ -1,13 +1,14 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
+  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -27,6 +28,7 @@ const peerMessageLabels = {
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for more work', 'The task reached its additional run limit. You can approve one more run.'],
+  model_budget: ['Approval for another model call', 'The request reached its model call limit. You can approve one more model call.'],
   model_failure: ['Retry decision', 'The model failed to make a decision after several attempts. You can retry.'],
   t3_input: ['Action in T3', 'Open the assigned thread in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'The session reached its deadline. You can set a new one.'],
@@ -201,8 +203,13 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 
-function pinnedBotsInShortcutOrder() {
-  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+let botDraft = null;
+function sidebarBots() {
+  if (botDraft?.mode !== 'edit') return bots;
+  return bots.map((bot) => (bot.id === botDraft.botId ? { ...bot, name: botDraft.name, avatar: botDraft.avatar } : bot));
+}
+function pinnedBotsInShortcutOrder(source = bots) {
+  return [...pins].map((id) => source.find((bot) => bot.id === id)).filter(Boolean);
 }
 function focusKey(key) {
   sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
@@ -353,19 +360,33 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
+function draftRow(draft) {
+  const row = node('div', 'bot-row draft');
+  row.setAttribute('aria-hidden', 'true');
+  const select = node('span', 'bot-select');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', draft.name));
+  const text = node('span', 'bot-text');
+  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  select.append(avatar(draft, 'bot-avatar'), text);
+  row.append(select);
+  return row;
+}
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const pinned = pinnedBotsInShortcutOrder();
+  const source = sidebarBots();
+  const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
   elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
   list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
   if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length) list.append(node('p', 'activity-empty', 'No Bots configured'));
+  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
   if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -399,7 +420,7 @@ function renderHeader() {
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -563,9 +584,21 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
+function clarificationTitle(clarification) {
+  return clarification?.route === 'model_budget' ? waitLabel('model_budget') : 'Clarification requested';
+}
 function clarificationActions(clarification) {
-  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   const actions = node('div', 'event-actions');
+  if (clarification.route === 'model_budget') {
+    const waitMessageId = clarification.messageId;
+    const key = `message/${waitMessageId}`;
+    const approve = button('Approve one more model call', 'button',
+      () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+    approve.disabled = pendingWaits.has(key);
+    actions.append(approve);
+    return actions;
+  }
+  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   if (clarification.destinations) {
     for (const destination of clarification.destinations)
       actions.append(button(destination, 'button', () => beginReply(target, destination)));
@@ -674,17 +707,17 @@ function eventCard(event, context, place) {
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
-  const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(view, openTask));
-    else if (openTask) {
+    if (pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
+    else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
-      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
+      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
     } else {
       const resolution = node('p', 'msg-resolution');
@@ -750,9 +783,9 @@ function eventCard(event, context, place) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (openTask?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
-    reply.disabled = pendingWaits.has(openTask.wait.id);
+  if (pendingWait?.wait.reason === 'user_question') {
+    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
   }
 
@@ -887,6 +920,10 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
     if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
+    else if (loaded && !bots.length) {
+      empty.append(node('p', null, 'Create a Bot to get started.'));
+      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+    }
     fragment.append(empty);
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
@@ -1182,6 +1219,49 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+let reopenSettingsOnClose = false;
+const botEditor = createBotEditor(elements['bot-editor'], {
+  api,
+  onDraft(draft) {
+    botDraft = draft;
+    renderBots();
+  },
+  async onSaved(savedBot, savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    await refreshBots();
+    if (savedMode === 'create') {
+      selectBot(savedBot.id);
+      return;
+    }
+    if (view?.id === savedBot.id) await refreshView(view);
+    if (returnToSettings && view?.id === savedBot.id && view.data) {
+      openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
+    }
+  },
+  onCancel(savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    if (savedMode === 'edit' && returnToSettings && view?.data) {
+      openDetail({ kind: 'settings', section: 'general' });
+    }
+  },
+});
+
+function openNewBot(origin = elements['new-bot-button']) {
+  reopenSettingsOnClose = false;
+  closeMenu(false);
+  openNavigation(false, false);
+  closeDetail();
+  botEditor.openCreate({ bots, origin });
+}
+
+function openEditAppearance(bot) {
+  reopenSettingsOnClose = true;
+  closeDetail();
+  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+}
+
 function generalContent(bot) {
   const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
@@ -1189,7 +1269,16 @@ function generalContent(bot) {
   detailAvatar = { state: presence, mount: () => {
     return showAvatar(face, bot, { still: false, state: presence });
   } };
-  hero.append(face, node('p', 'settings-name', bot.name));
+  hero.append(
+    face,
+    node('p', 'settings-name', bot.name),
+    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
+  );
+  if (detail?.status) {
+    const note = node('p', 'settings-status', detail.status);
+    note.setAttribute('role', 'status');
+    hero.append(note);
+  }
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
   role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
@@ -1267,6 +1356,7 @@ function waitContent(context, task) {
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
+  else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
   else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
     if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
@@ -1357,8 +1447,8 @@ function renderDetail() {
   }
   if (detail.kind === 'clarification') {
     const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, clarification)) {
-      elements['detail-title'].textContent = 'Clarification requested';
+    if (changed('detail', detail, clarification, [...pendingWaits])) {
+      elements['detail-title'].textContent = clarificationTitle(clarification);
       elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
       if (clarification) elements['detail-body'].append(clarificationActions(clarification));
     }
@@ -1477,21 +1567,27 @@ async function loadSessions() {
 
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
-  if (!context || pendingWaits.has(waitId)) return;
-  pendingWaits.set(waitId, context.id);
+  await submitOperation(context, waitId, { taskId: task.id, waitId, operation, ...fields });
+}
+async function submitOperation(context, key, payload) {
+  if (!context || pendingWaits.has(key)) return;
+  const isOpen = () => view === context && (payload.waitMessageId
+    ? detail?.kind === 'clarification' && detail.messageId === payload.waitMessageId
+    : detail?.waitId === payload.waitId);
+  pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   try {
-    await api('operations', { botId: context.id, taskId: task.id, waitId, operation, ...fields });
-    setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
-    if (view?.id === context.id && detail?.waitId === waitId) closeDetail();
+    await api('operations', { botId: context.id, ...payload });
+    setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
+    if (isOpen()) closeDetail();
   } catch (error) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
-    if (view?.id === context.id && detail?.waitId === waitId) showDetailError(message);
+    if (isOpen()) showDetailError(message);
   } finally {
     if (view?.id === context.id) await refreshView(view);
-    pendingWaits.delete(waitId);
+    pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
 }
@@ -1534,6 +1630,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);
 });
+elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
@@ -1594,7 +1691,7 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
-  if (digit && !event.isComposing && !elements.detail.open &&
+  if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
     const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
     if (bot) {
@@ -1605,7 +1702,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'Escape') return;
   if (menu) closeMenu();
-  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
 function refresh() {

@@ -3,7 +3,8 @@
   background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; min-width: 0;
 }
 .sidebar-head { height: var(--header-height); padding: 0 var(--space-3) 0 1.35rem; display: flex; align-items: center; gap: var(--space-2); flex: none; }
-.sidebar-title { font-size: var(--text-md); font-weight: 600; }
+.sidebar-title { font-size: var(--text-md); font-weight: 600; letter-spacing: -.01em; }
+.new-bot-button { margin-left: auto; }
 .sidebar-scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 0 .7rem var(--space-4); flex: 1; }
 .nav-section { padding-bottom: var(--space-4); }
 .nav-section + .nav-section { padding-top: var(--space-3); }
@@ -127,7 +128,6 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 @media (max-width: 700px) {
   .sidebar { display: none; }
   .workspace.nav-open .sidebar { display: flex; }
-  #close-navigation { margin-left: auto; }
 }
 @media (prefers-reduced-motion: reduce) {
   .connection[data-state="loading"], .working-dots i, .pin-presence, .activity-status.live .activity-mark { animation: none; }
