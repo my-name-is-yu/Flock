@@ -27,6 +27,7 @@ const peerMessageLabels = {
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for more work', 'The task reached its additional run limit. You can approve one more run.'],
+  model_budget: ['Approval for another model call', 'The request reached its model call limit. You can approve one more model call.'],
   model_failure: ['Retry decision', 'The model failed to make a decision after several attempts. You can retry.'],
   t3_input: ['Action in T3', 'Open the assigned thread in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'The session reached its deadline. You can set a new one.'],
@@ -450,7 +451,7 @@ function renderActivity() {
         openDetail({ kind: 'clarification', messageId: clarification.messageId });
       });
       const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Clarification requested'));
+      line.append(node('span', 'wait-dot'), node('span', 'activity-title', clarificationTitle(clarification)));
       const subtitle = node('span', 'activity-subtitle', clarification.text);
       subtitle.title = clarification.text;
       row.append(line, subtitle);
@@ -556,9 +557,21 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
+function clarificationTitle(clarification) {
+  return clarification?.route === 'model_budget' ? waitLabel('model_budget') : 'Clarification requested';
+}
 function clarificationActions(clarification) {
-  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   const actions = node('div', 'event-actions');
+  if (clarification.route === 'model_budget') {
+    const waitMessageId = clarification.messageId;
+    const key = `message/${waitMessageId}`;
+    const approve = button('Approve one more model call', 'button',
+      () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+    approve.disabled = pendingWaits.has(key);
+    actions.append(approve);
+    return actions;
+  }
+  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   if (clarification.destinations) {
     for (const destination of clarification.destinations)
       actions.append(button(destination, 'button', () => beginReply(target, destination)));
@@ -1260,6 +1273,7 @@ function waitContent(context, task) {
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
+  else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
   else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
     if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
@@ -1350,8 +1364,8 @@ function renderDetail() {
   }
   if (detail.kind === 'clarification') {
     const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, clarification)) {
-      elements['detail-title'].textContent = 'Clarification requested';
+    if (changed('detail', detail, clarification, [...pendingWaits])) {
+      elements['detail-title'].textContent = clarificationTitle(clarification);
       elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
       if (clarification) elements['detail-body'].append(clarificationActions(clarification));
     }
@@ -1470,21 +1484,27 @@ async function loadSessions() {
 
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
-  if (!context || pendingWaits.has(waitId)) return;
-  pendingWaits.set(waitId, context.id);
+  await submitOperation(context, waitId, { taskId: task.id, waitId, operation, ...fields });
+}
+async function submitOperation(context, key, payload) {
+  if (!context || pendingWaits.has(key)) return;
+  const isOpen = () => view === context && (payload.waitMessageId
+    ? detail?.kind === 'clarification' && detail.messageId === payload.waitMessageId
+    : detail?.waitId === payload.waitId);
+  pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   try {
-    await api('operations', { botId: context.id, taskId: task.id, waitId, operation, ...fields });
-    setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
-    if (view?.id === context.id && detail?.waitId === waitId) closeDetail();
+    await api('operations', { botId: context.id, ...payload });
+    setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
+    if (isOpen()) closeDetail();
   } catch (error) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
-    if (view?.id === context.id && detail?.waitId === waitId) showDetailError(message);
+    if (isOpen()) showDetailError(message);
   } finally {
     if (view?.id === context.id) await refreshView(view);
-    pendingWaits.delete(waitId);
+    pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
 }

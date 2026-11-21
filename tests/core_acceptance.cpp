@@ -906,6 +906,108 @@ void peerConsultationAndPermission() {
           "consultation did not record the corresponding request and response");
 }
 
+void modelBudgetFollowsBotConsultation() {
+    Fixture f;
+    f.allowBeta();
+    constexpr auto request = "Check the release policy";
+    const auto receipt = f.store->receive({"alpha",request,"e","p",{{"modelCallLimit",2}}},"policy",request);
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event["kind"] == "route_conversation")
+            return {"route_conversation",{{"routes",Json::array({{{"kind","create_task"}}})}},"Start the request"};
+        if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
+        if (input.event["kind"] == "bot_request") {
+            check(input.config["model"] == "beta-model","recipient did not get its own model configuration");
+            return botReply("result","Require a verified PR");
+        }
+        check(input.event["kind"] == "bot_result","sender did not resume with the consultation reply");
+        return complete();
+    };
+    f.runtime->routeConversation();
+    const Id sender = f.store->tasks("alpha").front().at("id");
+    check(f.task(sender)["sourceMessageId"] == receipt["messageId"],"routed task lost its originating message");
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    const auto recipientWait = f.wait(recipient,"model_budget");
+    f.restart();
+    for (int i = 0; i < 4; ++i) f.runtime->tick();
+    check(f.model.calls == 2 && f.task(recipient)["wait"]["id"] == recipientWait,
+          "the recipient reached the provider without approval, or restart changed its wait");
+    Store writer(f.directory/"state.db");
+    writer.operate(recipient,recipientWait,"approve");
+    f.rejects(recipient,recipientWait,"approve");
+    const auto senderWait = f.wait(sender,"model_budget");
+    check(f.model.calls == 3 && f.task(recipient)["state"] == "completed",
+          "one approval did not resume only one call in the exchange");
+    writer.operate(sender,senderWait,"approve");
+    f.reach(sender,"completed");
+    check(f.model.calls == 4 && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
+          "the sender did not finish under its shared model budget and separate Run allowance");
+}
+
+void modelBudgetCountsFailedAttempts() {
+    Fixture f;
+    const auto id = f.store->submit({"alpha","Retry a decision","e","p",{{"modelCallLimit",2}}});
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] != id || f.model.calls >= 3) return ask();
+        if (f.model.calls == 1) throw ModelError("Transient failure with usage",true,{{"input_tokens",42}});
+        throw ModelError("Transient failure without usage",true);
+    };
+    f.reach(id,"deciding");
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 5;
+    const auto wait = f.wait(id,"model_budget");
+    f.restart();
+    f.runtime->tick();
+    check(f.model.calls == 2 && f.task(id)["wait"]["id"] == wait,"the third failed retry reached the model");
+
+    // Read the persisted ledger through an independent connection.
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"could not read the attempt ledger");
+    std::vector<Json> usage;
+    const auto result = sqlite3_exec(db.get(),"SELECT coalesce(usage,'null') FROM model_attempts ORDER BY id",
+        [](void* context,int,char** values,char**) {
+            static_cast<std::vector<Json>*>(context)->push_back(Json::parse(values[0],nullptr,false));
+            return 0;
+        },&usage,nullptr);
+    check(result == SQLITE_OK && usage == std::vector<Json>{{{"input_tokens",42}},nullptr},
+          "usage was lost or missing usage was counted as zero");
+
+    const auto independent = f.store->submit({"alpha","Independent request","e","other",{{"modelCallLimit",2}}});
+    f.wait(independent,"user_question");
+    check(f.model.calls == 3 && f.task(id)["wait"]["id"] == wait,"an independent request needed the paused budget");
+    f.store->operate(id,wait,"approve");
+    f.wait(id,"user_question");
+    check(f.model.calls == 4 && f.task(id)["remaining"] == 3,"approval did not resume the saved retry event");
+}
+
+void modelBudgetAllowsT3ObservationAndRecovery() {
+    Fixture f;
+    f.model.script = [](const ModelInput& input) { return input.event["kind"] == "intake" ? work() : reply(); };
+    const auto id = f.store->submit({"alpha","Use one model call","e","p",{{"modelCallLimit",1}}});
+    f.reach(id,"sending");
+    f.t3.loseAcknowledgement = true;
+    const auto deliveryWait = f.wait(id,"unknown_delivery");
+    f.store->operate(id,deliveryWait,"reconcile");
+    f.reach(id,"running");
+    check(f.model.calls == 1 && f.t3.reconciles == 1 && f.t3.launches == 1,
+          "delivery recovery used a model call or resent the Run");
+    f.t3.question("run-1");
+    const auto modelWait = f.wait(id,"model_budget");
+    const auto polls = f.t3.polls;
+    f.restart();
+    f.runtime->tick();
+    check(f.t3.polls > polls && f.model.calls == 1 && f.task(id)["wait"]["id"] == modelWait,
+          "model approval blocked T3 observation or reset the pending decision");
+    f.store->operate(id,modelWait,"approve");
+    f.reach(id,"running");
+    check(f.model.calls == 2 && f.t3.replies == 1 && f.task(id)["remaining"] == 3,
+          "the approved call did not answer the original question");
+}
+
 void unsuccessfulConsultationsDoNotComplete() {
     for (const bool cancel : {false,true}) {
         Fixture f;
@@ -1220,6 +1322,9 @@ int main() {
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
             {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Model budget across routing and Bot consultation",modelBudgetFollowsBotConsultation},
+            {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
+            {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
             {"Fresh result prefill failure",freshResultStillRequiresPrefill},

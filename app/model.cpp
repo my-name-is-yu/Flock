@@ -298,6 +298,19 @@ Json toolSchema(const std::string& name, bool initial) {
 bool nonblank(const std::string& value) {
     return value.find_first_not_of(" \t\r\n") != std::string::npos;
 }
+
+Json tokenUsage(const Json& response) {
+    auto result = Json::object();
+    const auto usage = response.find("usage");
+    if (usage != response.end() && usage->is_object()) {
+        for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
+            const auto count = usage->find(key);
+            if (count != usage->end() && count->is_number_integer() && count->get<long double>() >= 0)
+                result[key] = *count;
+        }
+    }
+    return result;
+}
 }
 
 ChatGPTModel::ChatGPTModel(std::filesystem::path directory) : directory_(std::move(directory)) {}
@@ -308,7 +321,8 @@ Json ChatGPTModel::call(std::string_view operation, const Json& input) {
     if (!response.is_object() || (!response.contains("result") && !response.contains("error")))
         throw ModelError("Flock's ChatGPT transport returned an invalid result", true);
     if (response.contains("error"))
-        throw ModelError(response.value("error","ChatGPT transport error"),response.value("transient",false));
+        throw ModelError(response.value("error","ChatGPT transport error"),response.value("transient",false),
+                         tokenUsage(response));
     return response["result"];
 }
 
@@ -320,16 +334,16 @@ Json ChatGPTModel::models() { return call("models"); }
 Decision ChatGPTModel::decide(const ModelInput& input) {
     const auto begin = std::chrono::steady_clock::now();
     const auto response = call("infer",responseRequest(input));
-    auto decision = responseDecision(response.at("output"),input.tools);
-    decision.usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+    auto usage = tokenUsage(response);
+    usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - begin).count();
-    if (const auto usage = response.find("usage"); usage != response.end() && usage->is_object()) {
-        for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
-            if (usage->contains(key) && (*usage)[key].is_number_integer())
-                decision.usage[key] = (*usage)[key];
-        }
+    try {
+        auto decision = responseDecision(response.value("output",Json(nullptr)),input.tools);
+        decision.usage = std::move(usage);
+        return decision;
+    } catch (const ModelError& error) {
+        throw ModelError(error.what(),error.transient,std::move(usage));
     }
-    return decision;
 }
 
 Json responseRequest(const ModelInput& input) {

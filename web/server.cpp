@@ -232,9 +232,15 @@ private:
                 if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
+            const auto operation = requiredText(body,"operation",32);
+            if (body.contains("waitMessageId")) {
+                if (operation != "approve" || body.contains("taskId") || body.contains("waitId"))
+                    throw InputError("invalid_operation");
+                store_.approveMessageModelCall(bot,bodyId(body,"waitMessageId"));
+                return json(res,200,{{"accepted",true}});
+            }
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
-            const auto operation = requiredText(body,"operation",32);
             const auto data = operationData(body,operation);
             if (web::field(store_.task(id),"botId") != bot) return error(res,404,"task_not_found");
             store_.operate(id,wait,operation,data);

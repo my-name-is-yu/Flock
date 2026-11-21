@@ -1,5 +1,6 @@
 #include "flock/core.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -645,6 +646,61 @@ void pendingRouterDoesNotBlockIndependentProject() {
           "a pending conversation decision blocked an independent project's model decision");
 }
 
+void concurrentTasksShareModelBudget() {
+    using namespace std::chrono_literals;
+    Fixture f;
+    constexpr auto local = "ローカルMacで利用件数を集計して";
+    constexpr auto cloud = "クラウドMacでメモリを計測して";
+    const auto text = std::string(local) + "。\n" + cloud;
+    f.model.routes[text] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",local},{"environment","desktop"}},
+        {{"kind","create_task"},{"segment",cloud},{"environment","cloud"}}
+    })}};
+    auto routing = f.routing();
+    routing.config["modelCallLimit"] = 2;
+    f.store->receive(routing,"compound-budget",text);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(tasks.size() == 2,"compound request did not create separate tasks");
+    f.tick();
+
+    std::atomic_int modelCalls = 0;
+    std::promise<void> releaseModel;
+    const auto release = releaseModel.get_future().share();
+    f.model.beforeIntake = [&](const ModelInput&) {
+        if (++modelCalls == 1) release.wait();
+    };
+    f.runtime->tickConcurrent();
+    Json paused;
+    const auto deadline = std::chrono::steady_clock::now() + 4s;
+    while (paused.is_null() && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& task : tasks) {
+            const auto current = f.task(task.at("id"));
+            if (current["state"] == "waiting" && current["wait"]["reason"] == "model_budget") paused = current;
+        }
+        if (paused.is_null()) std::this_thread::sleep_for(5ms);
+    }
+    releaseModel.set_value();
+    f.restart();
+    check(modelCalls == 1 && !paused.is_null(),
+          "concurrent tasks used the same last slot or held SQLite locked during inference");
+    const Id pausedId = paused.at("id"), waitId = paused.at("wait").at("id");
+    f.tick(3);
+    check(modelCalls == 1 && f.task(pausedId)["wait"]["id"] == waitId,"restart reset the shared allowance");
+
+    const auto approve = [&] {
+        Store writer(f.dir/"state.db");
+        try { writer.operate(pausedId,waitId,"approve"); return true; }
+        catch (const Conflict&) { return false; }
+    };
+    auto first = std::async(std::launch::async,approve);
+    auto second = std::async(std::launch::async,approve);
+    const bool firstApplied = first.get(), secondApplied = second.get();
+    check(firstApplied != secondApplied,"two SQLite connections applied the same approval");
+    f.reach(pausedId,"running");
+    check(modelCalls == 2 && f.t3.sent.size() == 2,"approval did not resume the blocked task exactly once");
+}
+
 void inFlightAnswerCannotMoveToAnUnrelatedWait() {
     Fixture f;
     const auto naming = f.store->submit(f.routing("名前を決める"));
@@ -915,6 +971,7 @@ int main() {
         completeRacingWithNewCriteria();
         staleRoutingDecisionIsRecomputed();
         pendingRouterDoesNotBlockIndependentProject();
+        concurrentTasksShareModelBudget();
         inFlightAnswerCannotMoveToAnUnrelatedWait();
         unresolvedStopHoldsOnlyItsCandidates();
         cancellationReleasesOnlyAfterStopConfirmation();

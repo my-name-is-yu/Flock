@@ -794,8 +794,8 @@ std::string quoteText(std::string_view text) {
     return result;
 }
 
-Action answerResult(Model& model, std::string_view question, Result source, const Json& config) {
-    const auto decision = model.decide({
+Action answerResult(const DecideModel& model, std::string_view question, Result source, const Json& config) {
+    const auto decision = model({
         .task = Json::object(),
         .event = {{"kind","answer_conversation_result"},{"text",question},{"source",resultData(source, 8192)}},
         .history = Json::array(), .notes = {}, .tools = {"answer_conversation_result","clarify_conversation_result"},
@@ -920,9 +920,9 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     return std::nullopt;
 }
 
-Plan decide(std::string_view text, const Context& context, Model& model, const Json& config) {
+Plan decide(std::string_view text, const Context& context, const DecideModel& model, const Json& config) {
     if (auto result = shortcut(text, context)) return std::move(*result);
-    const auto decision = model.decide({
+    const auto decision = model({
         .task = Json::object(), .event = decisionContext(text, context), .history = context.history,
         .notes = {}, .tools = {"route_conversation"}, .feedback = {}, .config = config
     });
