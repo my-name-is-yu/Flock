@@ -31,6 +31,8 @@
           <div id="pinned" class="pins" role="group" aria-label="Pin" hidden></div>
           <div id="bot-list" class="bot-list"></div>
         </section>
+        <div id="bot-activity" class="bot-activity" role="group" aria-labelledby="activity-scope-name" hidden>
+        <p class="activity-scope"><span id="activity-scope-avatar" class="avatar"></span><span id="activity-scope-name" class="activity-scope-name"></span></p>
         <section class="nav-section" aria-labelledby="waits-heading">
           <div class="section-heading"><h2 id="waits-heading">Waiting for input</h2><span id="wait-count" class="count" hidden>0</span></div>
           <div id="wait-list" class="activity-list"></div>
@@ -40,6 +42,7 @@
           <div id="session-list" class="activity-list"></div>
           <button id="more-sessions" class="text-button load-sessions" type="button" hidden>Show earlier sessions</button>
         </section>
+        </div>
       </div>
       <div class="sidebar-foot">
         <div id="connection" class="connection" data-state="loading" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-text">Connecting…</span></div>
@@ -64,8 +67,7 @@
           </button>
           <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status" hidden>
             <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
-            <span class="profile-pill"><span id="profile-name" class="profile-name"></span><span class="profile-offline" aria-hidden="true">Offline</span></span>
-            <span id="profile-status" class="sr-only"></span>
+            <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
           </button>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
           <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
@@ -83,7 +85,7 @@
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
             <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
-            <p class="reply-target"><span id="reply-label" class="sr-only"></span><span id="reply-question"></span></p>
+            <p class="reply-target"><span id="reply-label" class="sr-only"></span><span id="reply-question"></span><span id="reply-choice" class="reply-choice" hidden></span></p>
             <button id="cancel-reply" type="button" class="reply-cancel" aria-label="Cancel reply" title="Cancel reply (Esc)">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>
             </button>

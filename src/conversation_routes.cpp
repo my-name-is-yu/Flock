@@ -81,9 +81,17 @@ bool sameSource(const Result& excerpt, const Result& result) {
 }
 
 bool knownSource(const Context& context, const Result& result) {
+    const auto inPlan = [](const std::vector<Route>& plan, const Result& result) {
+        return std::ranges::any_of(plan,[&](const Route& route) {
+            const auto* source = sourceOf(route.action);
+            return source && sameSource(result,*source);
+        });
+    };
     return (context.reply.result && sameSource(result,*context.reply.result)) ||
+           inPlan(context.reply.destinationPlan,result) ||
            (context.pendingClarification && context.pendingClarification->result &&
                 sameSource(result,*context.pendingClarification->result)) ||
+           (context.pendingClarification && inPlan(context.pendingClarification->destinationPlan,result)) ||
            (context.recentSource && sameSource(result,*context.recentSource)) ||
            std::ranges::any_of(context.rankedResults,[&](const Result& entry) { return sameSource(result,entry); });
 }
@@ -180,10 +188,12 @@ AND NOT EXISTS (
                     try {
                         botNotes = notes(message->bot);
                     } catch (const std::exception& error) {
+                        const auto diagnostic = Json::parse(Json(error.what()).dump(
+                            -1, ' ', false, Json::error_handler_t::replace)).get<std::string>();
                         plan = routingQuestion(message->text,
-                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                            ja ? "このBotのノートを読み込めませんでした (" + diagnostic +
                                  ")。ファイルを修正してから返信してください。"
-                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                               : "I couldn't read this Bot's notes (" + diagnostic +
                                  "). Fix the file and reply to try again.");
                     }
                     if (plan.routes.empty())
@@ -242,6 +252,11 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     const bool resolving = clarification && plan.resolution->kind == Resolution::Kind::resolved;
     if (resolving) messageModelBudget(id,clarification->id);
     bool clarify = routes.empty() || (plan.resolution && !clarification);
+    const auto destinationRoute = std::ranges::find_if(routes,[](const Route& route) {
+        const auto* question = std::get_if<Clarify>(&route.action);
+        return question && question->operation == "destination";
+    });
+    const bool savingDestinationPlan = destinationRoute != routes.end();
     for (const auto& route : routes) {
         Json segment = {{"number",segments.size()+1},{"route",routeName(route.action)},{"text",route.segment}};
         if (const auto target = targetOf(route.action)) {
@@ -254,6 +269,25 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         }
         if (const auto creation = std::get_if<CreateTask>(&route.action); creation && creation->resume)
             segment["resume"] = true;
+        if (savingDestinationPlan) {
+            std::visit([&](const auto& item) {
+                if constexpr (requires { item.request; }) segment["instruction"] = item.request;
+                if constexpr (requires { item.instruction; }) segment["instruction"] = item.instruction;
+                if constexpr (requires { item.environment; }) {
+                    auto saved = item.environment;
+                    if (saved.empty()) saved = field(routing,"environmentId");
+                    else {
+                        const auto target = targetOf(route.action);
+                        const auto canonical = verifiedEnvironment(target ? load(target->taskId) : routing,routing,saved);
+                        if (!canonical.empty()) saved = canonical;
+                    }
+                    segment["environment"] = std::move(saved);
+                }
+                if constexpr (requires { item.intent; }) segment.update({{"intent",item.intent},{"doneWhen",item.doneWhen}});
+                if constexpr (requires { item.text; }) segment["response"] = item.text;
+                if constexpr (requires { item.answer; }) segment["answer"] = item.answer;
+            },route.action);
+        }
         if (const auto question = std::get_if<Clarify>(&route.action)) {
             clarify = true;
             addLine(question->question);
@@ -276,6 +310,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (context.reply.kind == Reply::Kind::invalid && !readOnly) return false;
         const auto source = sourceOf(action);
         if (source && !knownSource(context,*source)) return false;
+        if (context.selection && !readOnly && (!resolving || clarification->id != context.reply.id ||
+                                  std::holds_alternative<CreateTask>(action))) return false;
         if (const auto creation = std::get_if<CreateTask>(&action)) {
             if (!hasText(creation->request) || creation->request.size() > messageSize) return false;
             if (creation->resume && !source) return false;
@@ -300,6 +336,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         if (field(task,"botId") != bot || integer(task,"generation") != target->generation ||
             integer(task,"currentRevision") != target->revision || integer(wait,"id") != target->waitId)
             return false;
+        if (context.selection && target->taskId != context.selection) return false;
         if (std::holds_alternative<Status>(action)) return true;
         if ((std::holds_alternative<AppendInstruction>(action) || std::holds_alternative<ReviseTask>(action)) &&
             !namedTargetMatches(route.segment,context,target->taskId)) return false;
@@ -343,6 +380,13 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     if (!clarify) {
         for (const auto& route : routes) {
             if (validate(route)) continue;
+            if (resolving && clarification->operation == "destination" && !clarification->destinationPlan.empty()) {
+                const auto response = ja ? "確認中の依頼を適用できません。元の依頼をもう一度送ってください。"
+                                         : "The pending request could not be applied. Send the original request again.";
+                applyRoutes(message,context,Plan{{{text,Respond{response,std::nullopt}}},
+                    Resolution{clarification->id,Resolution::Kind::superseded}});
+                return;
+            }
             clarify = true;
             if (const auto target = targetOf(route.action)) candidateIds.insert(target->taskId);
             break;
@@ -440,9 +484,9 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
                     }
                     segments[index]["effectTaskId"] = linkedTask;
                     status = "working";
-                    addLine(item.source ? (ja ? "元の作業を参照して、新しい作業として受け付けました。"
-                                               : "I queued a new task linked to the earlier work.")
-                                        : (ja ? "作業を受け付けました。" : "I queued the task."));
+                    addLine(item.source ? (ja ? "元の結果をもとに、新しい依頼として受け付けました。"
+                                               : "I queued this as a new request based on the earlier result.")
+                                        : (ja ? "依頼を受け付けました。" : "I queued your request."));
                 },
                 [&](const AppendInstruction& item) { saveInstruction(item.target,item.instruction,item.source,nullptr); },
                 [&](const ReviseTask& item) { saveInstruction(item.target,item.instruction,item.source,&item); },
@@ -455,8 +499,13 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
                 [&](const CancelTask& item) {
                     operate(item.target.taskId,0,"cancel",Json::object(),true);
                     linkedTask = item.target.taskId;
-                    status = load(linkedTask)["state"] == "cancelled" ? "done" : "stopping";
-                    addLine(ja ? "停止を受け付けました。" : "I accepted the stop request.");
+                    const auto stopped = load(linkedTask);
+                    const auto request = field(stopped,"request");
+                    const auto name = bounded(request.substr(0,request.find('\n')),160);
+                    status = stopped["state"] == "cancelled" ? "done" : "stopping";
+                    if (status == "done") addLine(ja ? "「" + name + "」を中止しました。" : "I stopped “" + name + "”.");
+                    else addLine(ja ? "「" + name + "」の停止を依頼しました。停止を確認したらお知らせします。"
+                                    : "I’ve asked to stop “" + name + "”. I’ll let you know once it has stopped.");
                 },
                 [](const Clarify&) {}
             },routes[index].action);
@@ -474,10 +523,11 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             if (candidateIds.contains(task.id) && task.state != "completed" && task.state != "cancelled")
                 candidates.push_back({{"taskId",task.id},{"request",task.name}});
         }
-        if (response.empty()) addLine(ja ? "対象の作業と指示を確認してください。"
-                                         : "Please confirm the task and instruction.");
+        if (response.empty()) addLine(ja ? "対象の依頼と、希望する対応を確認させてください。"
+                                         : "Please confirm which request you mean and what you'd like me to do.");
     }
-    const auto* question = routes.size() == 1 ? std::get_if<Clarify>(&routes.front().action) : nullptr;
+    const auto* question = savingDestinationPlan ? std::get_if<Clarify>(&destinationRoute->action)
+        : routes.size() == 1 ? std::get_if<Clarify>(&routes.front().action) : nullptr;
     const bool resultQuestion = question && question->source && knownSource(context,*question->source);
     if (clarification && (!clarify || (resultQuestion && clarification->result &&
                                         sameSource(*question->source,*clarification->result)))) {
@@ -495,13 +545,15 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
     Json answer = {{"messageId",reply},{"replyToMessageId",id},{"text",response},{"route",route},{"status",status}};
     if (!candidates.empty()) answer["candidates"] = candidates;
     if (clarificationOperation == "destination") answer["destinations"] = context.environments;
-    if (!replySource.is_null() && (!clarify || resultQuestion)) answer["source"] = replySource;
+    if (resultQuestion) answer["source"] = sourceRef(*question->source);
+    if (!clarify && !replySource.is_null()) answer["source"] = replySource;
     exec("UPDATE journal SET data=? WHERE id=?", {answer,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?", {linkedTask ? Json(linkedTask) : Json(nullptr),
         Json{{"status",status}},id});
     exec("INSERT INTO route_decisions(message_id,reply_id,status,data) VALUES(?,?,?,?)",
          {id,reply,replyStatus,Json{{"sequence",sequence},{"inboxWatermark",watermark},
-                                    {"segments",segments},{"candidates",candidates},{"operation",clarificationOperation}}});
+                                    {"segments",segments},{"candidates",candidates},{"operation",clarificationOperation},
+                                    {"destinationPlan",savingDestinationPlan}}});
     for (const auto& candidate : candidates)
         exec("INSERT INTO route_candidates(message_id,task_id) VALUES(?,?)",{id,candidate.at("taskId")});
 }

@@ -43,7 +43,6 @@ constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int waitLimit = 12;
 constexpr int recentTurnLimit = 8;
-constexpr int clarificationLookback = 24;
 constexpr int namePageSize = 4;
 constexpr int resultLimit = 8;
 
@@ -202,6 +201,48 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
         rememberTaskId(result.taskId);
         return result;
     };
+    const auto savedTarget = [&](const Json& data) {
+        const auto taskId = integer(data,"taskId");
+        if (taskId) rememberTaskId(taskId);
+        return Target{taskId,integer(data,"generation"),integer(data,"revisionId"),integer(data,"waitId")};
+    };
+    const auto savedRevision = [&](const Json& data) -> std::optional<RevisionDraft> {
+        if (!data.is_object()) return std::nullopt;
+        return RevisionDraft{savedTarget(data),field(data,"intent"),field(data,"doneWhen")};
+    };
+    const auto readDestinationPlan = [&](const Json& segments, const Reply& pending) {
+        std::vector<Route> routes;
+        for (const auto& segment : segments) {
+            const auto kind = field(segment,"route");
+            const auto target = savedTarget(segment);
+            std::optional<Result> source;
+            if (const auto ref = segment.find("source"); ref != segment.end()) {
+                source = readResult(integer(*ref,"messageId"),*ref);
+                if (!source) return std::vector<Route>{};
+            }
+            const auto instruction = field(segment,"instruction");
+            const auto environment = field(segment,"environment");
+            Action action;
+            if (kind == "clarify")
+                action = Clarify{pending.question,{},std::move(source),"destination",
+                                 savedRevision(segment.value("revisionDraft",Json(nullptr))),
+                                 segment.value("resume",false)};
+            else if (kind == "create_task")
+                action = CreateTask{instruction,std::move(source),environment,segment.value("resume",false)};
+            else if (kind == "append_instruction") action = AppendInstruction{target,instruction,std::move(source)};
+            else if (kind == "revise_task")
+                action = ReviseTask{target,instruction,field(segment,"intent"),field(segment,"doneWhen"),
+                                    environment,std::move(source)};
+            else if (kind == "answer_wait") action = AnswerWait{target,field(segment,"answer")};
+            else if (kind == "cancel_task") action = CancelTask{target};
+            else if (kind == "respond") action = Respond{field(segment,"response"),std::move(source)};
+            else if (kind == "status")
+                action = Status{field(segment,"response"),target.taskId ? std::optional{target} : std::nullopt};
+            else return std::vector<Route>{};
+            routes.push_back({field(segment,"text"),std::move(action)});
+        }
+        return routes;
+    };
     constexpr auto clarificationCandidates = R"SQL(
 SELECT t.id,json_extract(t.data,'$.request')
 FROM route_decisions r, json_each(r.data,'$.candidates') candidate
@@ -212,7 +253,8 @@ JOIN tasks t ON t.id=json_extract(candidate.value,'$.taskId') WHERE r.message_id
 SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
        json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation'),
        COALESCE(json_extract(r.data,'$.segments[0].revisionDraft'),'null'),
-       json_extract(r.data,'$.segments[0].resume')
+       json_extract(r.data,'$.segments[0].resume'),
+       CASE WHEN json_extract(r.data,'$.destinationPlan') THEN json_extract(r.data,'$.segments') ELSE 'null' END
 FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
 WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
 )SQL",{reply,bot,id});
@@ -225,14 +267,16 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         if (!row.string(7).empty()) pending.resume = row.number(7) != 0;
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
-        const auto draft = row.json(6);
-        if (draft.is_object())
-            pending.revisionDraft = RevisionDraft{
-                Target{integer(draft,"taskId"),integer(draft,"generation"),integer(draft,"revisionId"),
-                       integer(draft,"waitId")},field(draft,"intent"),field(draft,"doneWhen")};
+        pending.revisionDraft = savedRevision(row.json(6));
+        if (const auto segments = row.json(8); segments.is_array()) {
+            pending.destinationPlan = readDestinationPlan(segments,pending);
+            for (const auto& segment : segments)
+                if (segment.value("route",std::string{}) == "clarify" && segment.contains("resume"))
+                    pending.resume = segment["resume"].get<bool>();
+        }
         if (const auto source = data.find("source"); source != data.end()) {
             pending.result = readResult(integer(*source,"messageId"),*source);
-            if (pending.result) pending.originalText = row.string(4);
+            if (pending.result && pending.destinationPlan.empty()) pending.originalText = row.string(4);
         }
         if (const auto captured = row.string(2); !captured.empty()) {
             const auto waits = Json::parse(captured);
@@ -286,11 +330,9 @@ WHERE t.bot_id=? AND j.id=? AND j.kind='waiting'
         }
     } else {
         auto rows = query(R"SQL(
-SELECT r.reply_id,r.message_id FROM (
-  SELECT id FROM messages WHERE bot_id=? AND sequence<(SELECT sequence FROM messages WHERE id=?)
-  ORDER BY sequence DESC LIMIT ?
-) recent JOIN route_decisions r ON r.message_id=recent.id WHERE r.status='awaiting_resolution'
-)SQL",{bot,id,clarificationLookback});
+SELECT r.reply_id,r.message_id FROM route_decisions r JOIN messages m ON m.id=r.message_id
+WHERE r.status='awaiting_resolution' AND m.bot_id=? AND m.id<? ORDER BY r.message_id DESC
+)SQL",{bot,id});
         Id match = 0, latest = 0;
         while (rows.next()) {
             if (latest) context.multiplePendingClarifications = true;
@@ -310,6 +352,18 @@ SELECT r.reply_id,r.message_id FROM (
             if (auto pending = readClarification(match)) context.reply = std::move(*pending);
         } else if (latest && !context.multiplePendingClarifications)
             context.pendingClarification = readClarification(latest);
+    }
+
+    if (const auto candidate = integer(routing,"candidateTaskId")) {
+        const bool offered = context.reply.kind == Reply::Kind::clarification &&
+            std::ranges::find(context.reply.candidates,candidate) != context.reply.candidates.end();
+        if (offered) context.selection = candidate;
+        else {
+            const auto anchor = context.reply.id ? context.reply.id : replyTo;
+            context.reply = Reply{};
+            context.reply.kind = Reply::Kind::invalid;
+            context.reply.id = anchor;
+        }
     }
 
     auto turns = query(R"SQL(

@@ -225,12 +225,15 @@ void linkedResultStartsANewSession() {
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
     const auto resultId = f.store->latestTaskResult(original).at("id");
-    f.script("2案目で実装して",{{"kind","create_task"},{"resultMessageId",resultId},{"resultOption",2}});
-    f.receive("implement","2案目で実装して");
+    f.script("2案目を説明して",{{"kind","answer_result"},{"resultMessageId",resultId},{"resultOption",2}});
+    f.receive("explain","2案目を説明して",resultId.get<Id>());
+    f.script("それを実装して",{{"kind","create_task"}});
+    f.receive("implement","それを実装して");
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
     check(id != original && task["sourceTaskId"] == original &&
           task["sourceResultRefs"].size() == 1 &&
+          task["sourceResultRefs"][0]["messageId"] == resultId && task["sourceResultRefs"][0]["option"] == 2 &&
           task["sourceResultRefs"][0]["text"] == "2. Capture a fixture trace",
           "implementation was not linked to the selected earlier result");
     f.reach(id,"running");
@@ -238,8 +241,10 @@ void linkedResultStartsANewSession() {
           f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
           f.event(original,"completed") == earlier,"linked implementation changed prior work or reused its Thread");
     const auto& instruction = f.t3.sent.back().instruction;
-    check(instruction.find("Capture a fixture trace") != std::string::npos &&
-          instruction.find("Measure by hand") == std::string::npos,
+    check(instruction.find("それを実装して") != std::string::npos &&
+          instruction.find(", option 2 (reference only):\n2. Capture a fixture trace") != std::string::npos &&
+          instruction.find("Measure by hand") == std::string::npos &&
+          instruction.find("Measure after release") == std::string::npos,
           "the new Session did not receive the selected option");
 }
 
@@ -272,6 +277,11 @@ void followUpCarriesTheRepliedToReport() {
     route["resultOption"] = 2;
     f.script("案2を実装",route);
     const auto message = f.receive("selected-option","案2を実装",report);
+    const auto source = f.response(message).at("source");
+    check(source["messageId"] == report && source["option"] == 2 && source["text"] == "2. Capture a fixture trace" &&
+          f.task(id)["pendingInstructions"][0]["source"] == source &&
+          f.task(id)["sourceResultRefs"] == Json::array({source}),
+          "the active task did not save the selected result with the pending instruction");
     f.restart();
     f.t3.finish("run-2","Separate baseline checked");
     f.reach(id,"deciding");
@@ -462,24 +472,198 @@ void modelDestinationClarificationKeepsRevision() {
     const auto id = f.store->submit(routing);
     f.reach(id,"running");
 
-    const auto request = "Move Release notes to mock";
+    constexpr auto intent = "Measure acceptance on the release branch";
+    constexpr auto doneWhen = "all tests pass";
+    const auto request = "Move Release notes to mock, change its scope to ‘Measure acceptance on the release branch’, "
+                         "and require that all tests pass";
     f.script(request,{{"kind","clarify"},{"text","Which destination should I use?"},
-                      {"operation","destination"},{"candidates",{id}}});
+                      {"operation","destination"},{"candidates",{id}},
+                      {"intent",intent},{"doneWhen",doneWhen}});
     const auto before = f.task(id);
     const auto message = f.store->receive(routing,"move-destination",request);
     f.runtime->routeConversation();
     const auto clarification = f.response(message);
-    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+    check(clarification["route"] == "clarify" && clarification.contains("destinations") &&
           f.task(id) == before,
           "the model's destination question changed the task before confirmation");
+    f.restart();
     const auto destination = f.store->receive(routing,"pick-destination","mock",clarification["messageId"]);
     f.runtime->routeConversation();
     const auto response = f.response(destination);
     const auto revised = f.task(id);
-    check(response["route"] == "revise_task" && revised["intent"] == before["intent"] &&
-          revised["doneWhen"] == before["doneWhen"] && revised["pendingEnvironmentId"] == "mock-executor" &&
+    check(response["route"] == "revise_task" && revised["intent"] == intent && revised["doneWhen"] == doneWhen &&
+          revised["pendingEnvironmentId"] == "mock-executor" &&
+          revised["revisions"].back()["intent"] == intent && revised["revisions"].back()["doneWhen"] == doneWhen &&
           f.store->clarifications("alpha").empty(),
           "the destination answer dropped the revision instead of applying the chosen environment");
+}
+
+void compoundDestinationKeepsRequestsOnTheirOwnEnvironments() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on desktop";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","desktop"}}
+    })}};
+    const auto message = f.store->receive(routing,"compound-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+          f.store->tasks("alpha").empty() && f.t3.sent.empty(),
+          "a compound request applied an effect before destination confirmation");
+    f.restart();
+    const auto reply = f.store->receive(routing,"choose-backup","backup",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(f.response(reply)["route"] == "compound" && tasks.size() == 2 && f.store->clarifications("alpha").empty(),
+          "confirming the destination did not apply the original two routes");
+    for (const auto& task : tasks) f.reach(task["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark)) {
+            check(saved.find(archive) == std::string::npos && task["runs"].back()["environmentId"] == "backup-executor",
+                  "the chosen destination or separate benchmark instruction was lost");
+        } else {
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "confirming the benchmark changed the archive request or destination");
+        }
+    }
+}
+
+void destinationChoiceCannotApplyPartOfAStaleCompoundRequest() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing("Old inventory audit"));
+    f.reach(old,"running");
+    const std::string work = "Run a benchmark on cloud or desktop";
+    const std::string revise = "Require a signed report for Old inventory audit";
+    const auto request = work + "; " + revise;
+    auto companion = revision(old,"doneWhen","a signed report");
+    companion["segment"] = revise;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",work}},companion
+    })}};
+    const auto clarification = f.response(f.receive("compound-stale",request));
+    check(clarification.contains("destinations") && f.store->tasks("alpha").size() == 1,
+          "a compound task was created before the destination was confirmed");
+
+    f.script(revise,revision(old,"doneWhen","a signed report"));
+    f.receive("revise-original-task",revise);
+    const auto updated = f.task(old);
+    const auto answer = f.response(f.receive("choose-after-change","cloud",clarification["messageId"]));
+    check(answer["route"] == "respond" && f.store->tasks("alpha").size() == 1 &&
+          f.task(old) == updated && f.store->clarifications("alpha").empty(),
+          "a stale companion route did not prevent the entire pending compound request from being applied");
+}
+
+void typedDestinationChoiceRestoresACompoundRequest() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on desktop";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","desktop"}}
+    })}};
+    const auto message = f.store->receive(routing,"typed-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && f.store->tasks("alpha").empty(),
+          "a compound request applied work before destination confirmation");
+
+    f.model.routes["backup"] = {
+        {"routes",Json::array({{{"kind","create_task"},{"segment",benchmark},{"environment","backup"}}})},
+        {"resolution","resolved"},{"clarificationMessageId",clarification.at("messageId")}};
+        const auto reply = f.store->receive(routing,"typed-backup","backup");
+        f.runtime->routeConversation();
+        const auto tasks = f.store->tasks("alpha");
+    check(f.response(reply)["route"] == "compound" && tasks.size() == 2 &&
+          f.store->clarifications("alpha").empty(),
+          "a typed destination choice dropped the original compound routes");
+    for (const auto& summary : tasks) f.reach(summary["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark))
+            check(task["runs"].back()["environmentId"] == "backup-executor",
+                  "the typed destination did not reach the pending work");
+        else
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "the typed destination moved the companion work");
+    }
+}
+
+void destinationConfirmationKeepsCompanionsOnTheirSavedEnvironment() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on ローカルMac";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","ローカルMac"}}
+    })}};
+    const auto message = f.store->receive(routing,"remap-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && f.store->tasks("alpha").empty(),
+          "a compound request applied work before destination confirmation");
+
+    auto remapped = f.routing();
+    remapped.config["conversationEnvironments"]["backup"] = "backup-executor";
+    remapped.config["conversationEnvironments"]["ローカルMac"] = "desktop-east";
+    const auto reply = f.store->receive(remapped,"confirm-backup","backup",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(tasks.size() == 2 && f.store->clarifications("alpha").empty(),
+          "confirming a destination after an alias remap did not apply the pending routes");
+    for (const auto& summary : tasks) f.reach(summary["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark))
+            check(task["runs"].back()["environmentId"] == "backup-executor",
+                  "the confirmed destination did not reach the pending work");
+        else
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "an alias remap redirected the companion to a different environment");
+    }
+}
+
+void canonicalDestinationWinsOverAlias() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["cloud"] = "staging";
+    constexpr auto first = "Run the benchmark on cloud";
+    f.script(first,{{"kind","create_task"},{"environment","cloud"}});
+    const auto direct = f.store->receive(routing,"canonical-id",first);
+    f.runtime->routeConversation();
+    check(f.response(direct)["route"] == "create_task","the canonical ID was not accepted directly");
+    const auto task = f.store->tasks("alpha").front()["id"].get<Id>();
+    f.reach(task,"running");
+    f.t3.finish("run-1","Benchmark evidence");
+    f.reach(task,"completed");
+
+    constexpr auto second = "Run the comparison on cloud or staging";
+    f.script(second,{{"kind","create_task"}});
+    const auto ambiguous = f.store->receive(routing,"canonical-clarification",second);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(ambiguous);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array(),
+          "the destination choice was not offered");
+    const auto reply = f.store->receive(routing,"canonical-choice","cloud",clarification["messageId"]);
+    f.runtime->routeConversation();
+    check(f.response(reply)["route"] == "create_task","the canonical ID was not accepted as a choice");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the confirmed task did not start");
+    check(f.t3.sent[0].environmentId == "cloud" && f.t3.sent[1].environmentId == "cloud",
+          "a canonical destination was shadowed by an alias during dispatch");
 }
 
 void lastConfiguredDestinationIsAvailable() {
@@ -527,6 +711,95 @@ void independentRequestsAndPartialStop() {
     check(f.task(notes)["wait"] == wait && f.t3.interrupted.empty() &&
           f.event(notes,"cancel_requested").is_null() && f.event(notes,"user_answer").is_null(),
           "unrelated instructions or partial stop affected the current question");
+}
+
+void questionReplyKeepsItsTargetAndOfferedAnswer() {
+    Fixture f;
+    const auto offered = f.store->submit(f.routing("Release notes"));
+    const auto other = f.store->submit(f.routing("Build audit","alpha","cloud"));
+    f.model.questions[offered] = {{"question","Which label should I use?"},{"choices",{"Cancel this task","Status"}}};
+    f.reach(offered,"waiting");
+    f.reach(other,"running");
+    const auto wait = f.task(offered).at("wait");
+    const auto otherBefore = f.task(other);
+
+    const auto wrong = f.response(f.receive("wrong-stop","Cancel Build audit",wait.at("messageId")));
+    check(wrong["route"] == "respond" && f.task(offered)["wait"] == wait &&
+          f.event(offered,"user_answer").is_null() && f.task(other) == otherBefore,
+          "a stop targeting another task answered the question or changed work");
+
+    const auto answer = f.response(f.receive("offered-stop-label","Cancel this task",wait.at("messageId")));
+    check(answer["route"] == "answer_wait" && f.event(offered,"user_answer")["text"] == "Cancel this task" &&
+          f.event(offered,"cancel_requested").is_null(),"an offered answer was treated as a cancellation");
+    const auto afterAnswer = f.task(offered);
+    const auto stale = f.response(f.receive("stale-question-stop","Cancel Release notes",wait.at("messageId")));
+    check(stale["route"] == "respond" && f.task(offered) == afterAnswer && f.task(other) == otherBefore,
+          "a cancellation sent to a closed question changed work");
+}
+
+void reportReplyCancelsOnlyItsActiveTask() {
+    Fixture f;
+    const auto measured = f.store->submit(f.routing("Measure startup"));
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Measure again"}},"Collect another sample"};
+    };
+    f.reach(measured,"running");
+    f.t3.finish("run-1","Startup took 100ms");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2 && f.task(measured)["state"] == "running"; },
+                   "the report fixture did not start its follow-up");
+    const auto history = f.store->history(measured);
+    const auto report = std::ranges::find_if(history,[](const Json& event) { return event["kind"] == "report"; });
+    check(report != history.end(),"the active task did not produce a report anchor");
+    const auto anchor = report->at("id").get<Id>();
+    const auto other = f.store->submit(f.routing("Prepare release notes","alpha","cloud"));
+    f.reach(other,"running");
+    const auto measuredBefore = f.task(measured), otherBefore = f.task(other);
+
+    constexpr auto partial = "Stop using the old timer for Measure startup";
+    constexpr auto mismatched = "Cancel Prepare release notes";
+    constexpr auto named = "Cancel Measure startup";
+    f.script(partial,target("cancel_task",measured));
+    f.script(mismatched,target("cancel_task",other));
+    f.script(named,target("cancel_task",measured));
+    const auto notAStop = f.response(f.receive("partial-report-stop",partial,anchor));
+    const auto wrong = f.response(f.receive("wrong-report-stop",mismatched,anchor));
+    check(notAStop["route"] == "clarify" && (wrong["route"] == "clarify" || wrong["route"] == "respond") &&
+          f.task(measured) == measuredBefore && f.task(other) == otherBefore && f.t3.interrupted.empty(),
+          "a report reply cancelled a partial instruction or a differently named task");
+
+    const auto stop = f.response(f.receive("report-stop",named,anchor));
+    check(stop["route"] == "cancel_task" && f.task(measured)["state"] == "cancelling" && f.task(other) == otherBefore,
+          "the report did not cancel its named active task");
+    f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"the report stop did not reach the follow-up Run");
+    check(f.t3.interrupted == std::vector{std::pair<std::string,std::string>{"desktop","run-2"}},
+          "the report stop interrupted the wrong Run");
+}
+
+void closedNamesakeDoesNotBlockUpdates() {
+    Fixture f;
+    const auto closed = f.store->submit(f.routing("Release notes"));
+    const auto unrelated = f.store->submit(f.routing("Deployment checklist","alpha","cloud"));
+    f.store->operate(closed,0,"cancel");
+    f.store->operate(unrelated,0,"cancel");
+    const auto active = f.store->submit(f.routing("Release notes"));
+    constexpr auto instruction = "Add a changelog link to Release notes";
+
+    f.script(instruction,target("append_instruction",active));
+    const auto accepted = f.response(f.receive("namesake-update",instruction));
+    check(accepted["route"] == "append_instruction" && f.event(active,"instruction_accepted")["text"] == instruction &&
+          f.event(closed,"instruction_accepted").is_null(),"a closed namesake blocked the active task's update");
+
+    const auto before = f.task(active);
+    constexpr auto mismatched = "Add a changelog link to Deployment checklist";
+    f.script(mismatched,target("append_instruction",active));
+    const auto rejected = f.response(f.receive("closed-task-update",mismatched));
+    check(rejected["route"] == "clarify" && f.task(active) == before,
+          "an update naming a different closed task was applied to active work");
+
+    const auto competing = f.store->submit(f.routing("Release notes","alpha","cloud"));
+    const auto ambiguous = f.response(f.receive("two-active-namesakes",instruction));
+    check(ambiguous["route"] == "clarify" && f.task(active) == before &&
+          f.event(competing,"instruction_accepted").is_null(),"an update selected between two active namesakes");
 }
 
 void explanationDoesNotHoldCompletion() {
@@ -717,9 +990,15 @@ void unknownSendThenScopeChange() {
     const auto revised = f.task(id);
     const auto response = f.response(f.receive("explain-superseded-result",explain));
     check(response["route"] == "clarify" && !response.contains("source") &&
-          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          response["text"] == "Please tell me which request, result, or question you mean and what you'd like me to do." &&
           f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
           "the model's stale result ID escaped the current revision's candidates or changed work");
+    constexpr auto oldStop = "Cancel this task";
+    f.script(oldStop,target("cancel_task",id));
+    const auto staleStop = f.response(f.receive("stop-from-superseded-report",oldStop,oldReport->at("id")));
+    check((staleStop["route"] == "respond" || staleStop["route"] == "clarify") &&
+          f.task(id) == revised && f.t3.interrupted.size() == 1,
+          "a report from a superseded revision stopped the current work");
     f.t3.finish("run-2","New p95 evidence");
     f.reach(id,"completed");
     const auto result = f.event(id,"completed");
@@ -1202,8 +1481,16 @@ int main() {
         destinationClarificationPreservesAndValidatesRevisionDraft();
         deferredCompletionPreservesDestinationRevisionDraft();
         modelDestinationClarificationKeepsRevision();
+        compoundDestinationKeepsRequestsOnTheirOwnEnvironments();
+        destinationChoiceCannotApplyPartOfAStaleCompoundRequest();
+        typedDestinationChoiceRestoresACompoundRequest();
+        destinationConfirmationKeepsCompanionsOnTheirSavedEnvironment();
+        canonicalDestinationWinsOverAlias();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
+        questionReplyKeepsItsTargetAndOfferedAnswer();
+        reportReplyCancelsOnlyItsActiveTask();
+        closedNamesakeDoesNotBlockUpdates();
         restartRestoresCancelledTaskDirections();
         explanationDoesNotHoldCompletion();
         independentRequestQueuesSeparately();

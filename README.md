@@ -45,7 +45,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 
 In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` for assumptions that carry across tasks. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
-Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. An ambiguous destination is confirmed before work starts.
+Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. An ambiguous destination is confirmed before work starts.
 
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
 
@@ -62,7 +62,7 @@ build/app/flock run
 
 Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan. In T3, choose permissions that cover Flock's Session settings. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
 
-Use the Bot's message box in the Web UI to send a new request, ask for progress, or add instructions to a task. If the Bot cannot identify the task, it asks you to specify it by name. The runtime saves additional instructions for an active task before delivering them to its Session. Asking the Bot to implement a completed result starts a new task linked to that result.
+Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, for example two requests with the same name, it asks you to choose one, and each choice shows when that request started. The runtime saves additional instructions for an active task before delivering them to its Session. Asking the Bot to implement a completed result starts a new task linked to that result.
 
 To try Flock without signing in, configure a Bot in a test state directory and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
