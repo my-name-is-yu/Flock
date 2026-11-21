@@ -4,7 +4,7 @@ Flock はローカルで複数の Bot を動かす C++20 Runtime です。Bot �
 
 ## ビルド
 
-C++20 コンパイラ、CMake 3.24 以降、SQLite と libcurl の開発ライブラリが必要です。実モデルの接続には Node.js 22 以降を使います。
+C++20 コンパイラ、CMake 3.24 以降、SQLite、libcurl、OpenSSL の開発ライブラリが必要です。実モデルの接続には Node.js 22 以降、接続のテストには Python 3 を使います。
 
 ```sh
 cmake -S . -B build
@@ -62,3 +62,5 @@ build/app/flock answer <task-id> <wait-id> 'main'
 ```
 
 実モデルが異なる完了条件を使い分けるかは、同意した ChatGPT 接続で `build/app/flock model acceptance <model-slug>` を実行すると確認できます。各試行の判断と理由を JSON Lines に出力します。
+
+通常は Session の最終報告で判断します。作業記録を根拠にする比較では `run --session-read on_demand` で Bot に履歴参照を許可できます。1イベントにつき3回、各回8 KiBまでの抜粋をSQLiteに保存します。

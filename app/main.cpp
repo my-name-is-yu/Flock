@@ -20,7 +20,7 @@ namespace flockv0::app {
 namespace {
 constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
-  run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand]
+  run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand|prefill]
   bots
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
@@ -152,8 +152,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, co
         else if (option == "--port") port = static_cast<unsigned>(number(args,"port",0,65535));
         else if (option == "--session-read") {
             options.sessionRead = args.pop("session read mode");
-            if (options.sessionRead != "off" && options.sessionRead != "on_demand")
-                throw Conflict("Session read mode must be off or on_demand");
+            if (options.sessionRead != "off" && options.sessionRead != "on_demand" && options.sessionRead != "prefill")
+                throw Conflict("Session read mode must be off, on_demand or prefill");
         } else throw Conflict("Unknown run option: " + option);
     }
 #ifndef FLOCK_WITH_WEB
@@ -205,7 +205,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, co
     }
 }
 
-void operate(Store& store, const std::string& operation, Arguments& args) {
+void operate(Store& store, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args,"task ID");
     Id wait = 0;
     Json details = Json::object();
@@ -219,6 +219,14 @@ void operate(Store& store, const std::string& operation, Arguments& args) {
             else if (flag == "--run") details["runId"] = args.pop("Run ID");
             else if (flag == "--question") details["questionId"] = args.pop("question ID");
             else throw Conflict("Unknown reconciliation option: " + flag);
+        }
+        const auto status = store.task(task);
+        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
+            (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
+            const auto bot = bots.get(status["botId"].get<std::string>());
+            if (status["environmentId"] != Json(bot.environmentId) || status["projectId"] != Json(bot.projectId))
+                throw Conflict("The project route changed. Cancel this task and submit a new request.");
+            details["session"] = bot.settings.value("session",Json::object());
         }
     }
     args.end();
@@ -279,7 +287,7 @@ int runCli(Arguments& args) {
         print(store.task(id));
     } else if (command == "history" || command == "tasks") taskCommand(store,command,args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" ||
-             command == "reconcile" || command == "cancel") operate(store,command,args);
+             command == "reconcile" || command == "cancel") operate(store,bots,command,args);
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;
 }

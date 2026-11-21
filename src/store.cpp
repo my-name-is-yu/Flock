@@ -162,6 +162,11 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     data["reason"] = reason;
     data["eventId"] = task.value("eventId", Id{});
     data["run"] = task["activeRun"];
+    if (data["run"].is_null() && reason == "unknown_delivery") {
+        const auto action = outbox(task);
+        if (action.is_object() && action.contains("candidate") && !field(action["candidate"],"link").empty())
+            data["run"] = action["candidate"];
+    }
     if (task.contains("actionId")) data["actionId"] = task["actionId"];
     exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task["id"], data});
     data["id"] = last();

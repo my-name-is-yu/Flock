@@ -409,7 +409,7 @@ async function infer(payload) {
   }
   const completed = await parseStream(response.body, response.headers.get("x-request-id"));
   if (!Array.isArray(completed.output)) throw new Failure("ChatGPT completed without Responses output");
-  return completed.output;
+  return { output: completed.output, usage: completed.usage };
 }
 
 try {

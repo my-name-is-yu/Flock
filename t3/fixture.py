@@ -118,6 +118,9 @@ class Fixture(BaseHTTPRequestHandler):
         assert "environmentId" not in args
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
+        if name == "t3_project_read":
+            assert args["projectId"] == "project"
+            return {"id": "project", "defaultModelSelection": None}
         if name == "t3_thread_launch":
             assert args["projectId"] == "project" and args["clientRequestId"] == "flock-action-0123"
             assert "modelSelection" not in args and "workspaceStrategy" not in args
@@ -180,6 +183,20 @@ class Fixture(BaseHTTPRequestHandler):
                          self.item(thread_id, 3, "later", "user_message", "Delegated task child-task [completed]",
                                    source="server"),
                          self.item(thread_id, 4, "later", "assistant_message", "delegated report")])
+        elif scenario in ("notification-result", "mixed-result", "shortened-result"):
+            label = "Owned delegate"
+            summary_label = label
+            if scenario == "shortened-result":
+                prefix = "Read notes.md and identify which action items are assigned to "
+                label = prefix + "the..."
+                summary_label = prefix + "the release owner…"
+            rows.extend([self.item(thread_id, 2, "root", "subagent", "done") |
+                         {"subagentId": "child-task", "title": label},
+                         self.item(thread_id, 3, "later", "notification", f'Delegated task "{summary_label}" finished') |
+                         {"creationSource": None, "createdBy": None}])
+            if scenario == "mixed-result":
+                rows.append(self.item(thread_id, 4, "later", "user_message", "simultaneous manual input", source="web"))
+            rows.append(self.item(thread_id, 5, "later", "assistant_message", "delegated report"))
         elif scenario == "manual-result":
             rows.extend([self.item(thread_id, 2, "later", "user_message", "manual request", source="web"),
                          self.item(thread_id, 3, "later", "assistant_message", "manual result")])

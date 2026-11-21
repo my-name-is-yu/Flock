@@ -199,8 +199,8 @@ Json Bots::cards() const {
             Json item = {{"id",id},{"name",bot.name},{"soul",notes(id).soul},{"cron",schedules}};
             if (!bot.avatar.is_null()) item["avatar"] = bot.avatar;
             items.push_back(std::move(item));
-        } catch (const Conflict& error) {
-            items.push_back({{"id",id},{"name",id},{"soul",error.what()},{"cron",Json::array()}});
+        } catch (const std::exception&) {
+            items.push_back({{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}});
         }
     }
     return items;

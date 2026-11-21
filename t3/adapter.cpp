@@ -184,8 +184,24 @@ Json wait(Client& client, const RunRef& run, bool delegated, int timeout = 400) 
     return response;
 }
 
-// A delegated completion is reported thread-wide by T3 wait. Verify each additional
-// result against T3's server-authored completion input and the owning subagent activity.
+bool sameDelegateTitle(std::string_view activity, std::string_view notice) {
+    if (activity == notice) return true;
+    // T3 truncates the activity title and the completion notice independently.
+    const auto stem = [](std::string_view title) {
+        if (title.ends_with("...")) return title.substr(0,title.size()-3);
+        if (title.ends_with("…")) return title.substr(0,title.size()-std::string_view("…").size());
+        return title;
+    };
+    const auto first = stem(activity);
+    const auto second = stem(notice);
+    return (first.size() >= 48 && first.size() != activity.size() && second.starts_with(first)) ||
+           (second.size() >= 48 && second.size() != notice.size() && first.starts_with(second));
+}
+
+// A delegated completion is reported thread-wide by T3 wait. In v0.1.11 a
+// completion wake can be a typed notification with the child's title, with
+// no task ID in that item. Require a unique settled child in the already
+// owned chain and reject any intervening Run with an ordinary prompt.
 bool ownsResult(Client& client, const RunRef& requested, const std::string& effectiveRunId,
                 const std::string& resultRunId) {
     if (resultRunId == effectiveRunId || resultRunId == requested.runId) return true;
@@ -207,31 +223,73 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
         if (found == ordered.end()) return false;
         candidates.insert(found->second);
     }
+    struct Child {
+        std::string title, updatedAt;
+    };
+    struct Trigger {
+        std::string taskId, notice, updatedAt;
+    };
     std::map<std::string, std::set<std::string>> subtasks;
-    std::map<std::string, std::string> triggers;
+    std::map<std::string,Child> children;
+    std::map<std::string, std::vector<Trigger>> triggers;
+    std::set<std::string> ordinaryInputs;
     Scan scan;
     walk(client, scan, requested.threadId, "activity", 700, -1, [&](const Json& item) {
         if (!local(item, requested.threadId)) return true;
         const auto run = str(item, "runId");
         const auto type = str(item, "type");
-        if (type == "subagent" && !str(item, "subagentId").empty()) subtasks[run].insert(str(item, "subagentId"));
-        if (type == "user_message" && candidates.contains(run) && !triggers.contains(run)) {
+        if (type == "subagent") {
+            const auto id = str(item, "subagentId");
+            const auto title = str(item, "title");
+            if (!id.empty()) {
+                subtasks[run].insert(id);
+                if (!title.empty())
+                    children.emplace(id,Child{title,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
+            }
+        }
+        if (!candidates.contains(run)) return true;
+        if (type == "notification") {
+            const auto message = str(item,"text");
+            constexpr std::string_view header = "Delegated task \"";
+            constexpr std::string_view footer = "\" finished";
+            if (str(item,"status") == "completed" && !boolean(item,"textTruncated") &&
+                message.starts_with(header) && message.ends_with(footer) && message.size() > header.size()+footer.size()) {
+                triggers[run].push_back({{},message.substr(header.size(),message.size()-header.size()-footer.size()),
+                                         str(item,"updatedAt")});
+            } else ordinaryInputs.insert(run);
+        }
+        if (type == "user_message") {
             const auto text = str(item, "text");
             constexpr std::string_view prefix = "Delegated task ";
             std::string taskId;
-            if (str(item, "createdBy") == "agent" && str(item, "creationSource") == "server" && text.starts_with(prefix)) {
+            if (str(item, "createdBy") == "agent" && str(item, "creationSource") == "server" &&
+                text.starts_with(prefix) && !text.starts_with("Delegated task \"")) {
                 const auto end = text.find_first_of(" \r\n\t", prefix.size());
                 if (end != std::string::npos) taskId = text.substr(prefix.size(), end - prefix.size());
             }
-            triggers.emplace(run, std::move(taskId));
+            if (taskId.empty()) ordinaryInputs.insert(run);
+            else triggers[run].push_back({std::move(taskId),{},{}});
         }
         return true;
     });
     auto tasks = subtasks[requested.runId];
     tasks.merge(subtasks[effectiveRunId]);
+    std::set<std::string> delivered;
     for (auto ordinal = base + 1; ordinal <= ending; ++ordinal) {
         const auto& id = ordered.at(ordinal);
-        if (!triggers.contains(id) || !tasks.contains(triggers.at(id))) return false;
+        if (!triggers.contains(id) || ordinaryInputs.contains(id)) return false;
+        for (const auto& trigger : triggers.at(id)) {
+            auto childId = trigger.taskId;
+            if (!trigger.notice.empty()) {
+                if (trigger.updatedAt.empty()) return false;
+                for (const auto& [id,child] : children) {
+                    if (!sameDelegateTitle(child.title,trigger.notice)) continue;
+                    if (!childId.empty() || child.updatedAt.empty() || child.updatedAt > trigger.updatedAt) return false;
+                    childId = id;
+                }
+            }
+            if (!tasks.contains(childId) || !delivered.insert(childId).second) return false;
+        }
         tasks.merge(subtasks[id]);
     }
     return true;
@@ -371,6 +429,13 @@ std::string actionPrompt(const Command& command) {
     return "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
 }
 
+void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_view origin) {
+    // checkedUrl permits plaintext HTTP only on loopback. A local-only T3 environment
+    // opens in its own browser client, where the user authorized this connection.
+    if (origin.starts_with("http://") && !run.threadId.empty())
+        run.link = std::string(origin) + "/" + encode(environment) + "/" + encode(run.threadId);
+}
+
 Json launchArgs(const Command& command) {
     Json args = {{"projectId", command.projectId}, {"title", "Flock task"},
                  {"message", actionPrompt(command)}, {"clientRequestId", command.actionId}};
@@ -425,11 +490,16 @@ Delivery failureDelivery(const Failure& failure) {
 }
 
 Delivery workReply(const Failure& failure) {
+    if (failure.kind == Failure::Kind::Auth) {
+        auto refused = failureDelivery(failure);
+        refused.definitelyUnsent = true;
+        return refused;
+    }
     if (failure.code == "model_unavailable" || failure.code == "provider_unavailable" ||
         (failure.code == "invalid_request" && (failure.serverMessage.starts_with("Pass modelSelection:") ||
           failure.serverMessage == "The project was not found." ||
           failure.serverMessage.find("No thread was created.") != std::string::npos)))
-        return result(Outcome::NotAccepted, "T3 rejected the project, model, or workspace settings before starting a Run");
+        return {Outcome::Settings, {}, "T3 rejected the project, model, or workspace settings before starting a Run", true};
     return failureDelivery(failure);
 }
 
@@ -565,7 +635,9 @@ Delivery answer(Client& client, const Command& command) {
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
     const auto watching = wait(client, command.target, false, 1);
     const auto runId = str(watching, "runId");
-    if (str(watching, "status") != "waiting")
+    // Codex's Run projection can stay "running" while its input activity
+    // is "waiting". Attribution below checks the actual owned question.
+    if (!active(str(watching, "status")))
         return result(Outcome::NotAccepted, "Use T3 to answer this question because the assigned Run is not waiting for input");
     auto attribution = attribute(client, {thread, runId, command.target.link}, command.questionId);
     if (attribution.kind == Attribution::Kind::Resolved) return result(Outcome::QuestionGone);
@@ -597,10 +669,19 @@ public:
     std::optional<Delivery> preflight(const Command& command) override {
         try {
             verifyCommand(command);
-            if (command.tool == "delegate") launchArgs(command);
-            requireOperate(credential(command.environmentId, command.config));
+            auto connection = credential(command.environmentId, command.config);
+            requireOperate(connection);
+            if (command.tool == "delegate") {
+                launchArgs(command);
+                Client client(std::move(connection));
+                const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
+                if (str(project,"id") != command.projectId)
+                    return result(Outcome::Settings,"The configured ID does not identify the canonical T3 project");
+            }
             return std::nullopt;
         } catch (const Failure& failure) {
+            if (failure.code == "invalid_request" && failure.serverMessage == "The project was not found.")
+                return result(Outcome::Settings,"The configured T3 project was not found");
             return failureDelivery(failure);
         }
     }
@@ -611,8 +692,9 @@ public:
             verifyCommand(command);
             auto connection = credential(command.environmentId, command.config);
             if (command.authGeneration.empty() || connection.generation != command.authGeneration)
-                return result(Outcome::NotAccepted, "The T3 sign-in changed before Flock sent this action");
+                return {Outcome::Auth, {}, "The T3 sign-in changed before Flock sent this action", true};
             requireOperate(connection);
+            const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command);
             const bool launch = command.tool == "delegate";
@@ -633,19 +715,28 @@ public:
                     (delivery != "started" && delivery != "queued")) invalidResponse();
             }
             RunRef run{str(reply, "threadId"), str(reply, "runId"), str(reply, "link")};
+            useLocalThreadLink(run,command.environmentId,origin);
             if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
             return result(Outcome::Accepted, {}, std::move(run));
         } catch (const Failure& failure) {
             if (invoked) return workReply(failure);
-            return failureDelivery(failure);
+            auto refused = failureDelivery(failure);
+            if (command.tool != "answer_session_question") refused.definitelyUnsent = true;
+            return refused;
         }
     }
 
     Delivery reconcile(const Command& command) override {
         try {
             verifyCommand(command);
-            Client client(credential(command.environmentId, command.config));
-            if (command.tool != "answer_session_question") return reconcileWork(client, command);
+            auto connection = credential(command.environmentId, command.config);
+            const auto origin = checkedUrl(connection.mcpUrl).origin;
+            Client client(std::move(connection));
+            if (command.tool != "answer_session_question") {
+                auto recovered = reconcileWork(client, command);
+                useLocalThreadLink(recovered.run,command.environmentId,origin);
+                return recovered;
+            }
             if ((!command.candidate.threadId.empty() && command.candidate.threadId != command.target.threadId) ||
                 (!command.candidate.runId.empty() && command.candidate.runId != command.target.runId) ||
                 (!command.candidateQuestionId.empty() && command.candidateQuestionId != command.questionId))
@@ -678,8 +769,9 @@ public:
                 auto report = readReport(client, source, "messages", "assistant_message");
                 if (observed.status != "completed") {
                     const auto error = readReport(client, source, "activity", "error");
+                    observed.detail = "T3 Run ended as " + observed.status;
                     if (!error.text.empty()) {
-                        report.text = report.text.empty() ? error.text : error.text + "\n\n" + report.text;
+                        observed.detail = bounded(error.text,2048);
                         if (report.itemId.empty()) report.itemId = error.itemId;
                         report.truncated = report.truncated || error.truncated;
                     }
@@ -697,7 +789,7 @@ public:
             const auto count = position(member(thread, "pendingRequestCount"));
             if (count != 0) {
                 const auto requests = pending(client, run.threadId);
-                if (count == 1 && requests.size() == 1 && status == "waiting") {
+                if (count == 1 && requests.size() == 1 && active(status)) {
                     const auto& id = *requests.begin();
                     auto match = attribute(client, {run.threadId, effective, run.link}, id);
                     if (match.kind == Attribution::Kind::Owned) {

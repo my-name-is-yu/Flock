@@ -51,7 +51,8 @@ struct FixedT3 : T3 {
             ++launches;
             if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
             const auto& project = command.projectId;
-            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + std::to_string(launches),"javascript:unexpected"},{}};
+            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
+            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + std::to_string(launches),link},{}};
         }
         check(command.tool == "answer_session_question","unexpected command in fixture");
         replies.push_back(command);
@@ -178,7 +179,7 @@ void exercise(const std::filesystem::path& path) {
     check(releasePage["bot"]["cron"][0]["timezone"] == "Asia/Tokyo" && releasePage["bot"]["soul"] != triagePage["bot"]["soul"],
           "Bot settings were mixed");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
-          triagePage["waits"][0]["wait"]["run"]["link"] == "https://app.t3.codes/threads/linked%20env/thread-triage",
+          triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
     const auto settingsPage = browser.get("/api/view?bot=settings");
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
@@ -218,7 +219,7 @@ void exercise(const std::filesystem::path& path) {
     check(hasEvent(page["events"],"report",finished.report) && hasEvent(page["events"],"completed","Draft complete"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
-    check(external["wait"]["run"]["link"] == "https://app.t3.codes/threads/linked%20env/thread-triage",
+    check(external["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "restart lost the active T3 approval link");
     const Id externalId = external["wait"]["id"];
     t3.observations["thread-triage"] = {};

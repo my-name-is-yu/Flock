@@ -264,7 +264,18 @@ Json ChatGPTModel::login(bool printUrl, bool reconsent) {
 Json ChatGPTModel::status() { return call("status"); }
 Json ChatGPTModel::models() { return call("models"); }
 Decision ChatGPTModel::decide(const ModelInput& input) {
-    return responseDecision(call("infer",responseRequest(input)),input.tools);
+    const auto begin = std::chrono::steady_clock::now();
+    const auto response = call("infer",responseRequest(input));
+    auto decision = responseDecision(response.at("output"),input.tools);
+    decision.usage["wallMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    if (const auto usage = response.find("usage"); usage != response.end() && usage->is_object()) {
+        for (const auto* key : {"input_tokens","output_tokens","total_tokens"}) {
+            if (usage->contains(key) && (*usage)[key].is_number_integer())
+                decision.usage[key] = (*usage)[key];
+        }
+    }
+    return decision;
 }
 
 Json responseRequest(const ModelInput& input) {
@@ -353,7 +364,7 @@ bool runModelAcceptance(Model& model, const std::string& slug, std::ostream& out
             bool ok = false;
             try {
                 const auto decision = model.decide(input);
-                record.update({{"tool",decision.tool},{"args",decision.args},{"reason",decision.reason}});
+                record.update({{"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}});
                 const auto field = regression ? "instruction" : "report";
                 ok = decision.tool == expected && decision.args.contains(field) && decision.args[field].is_string() &&
                     nonblank(decision.args[field].get_ref<const std::string&>());

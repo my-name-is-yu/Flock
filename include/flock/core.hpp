@@ -84,6 +84,7 @@ struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
     RunRef run;
     std::string detail;
+    bool definitelyUnsent = false;
 };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";

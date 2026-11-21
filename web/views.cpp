@@ -1,6 +1,7 @@
 #include "views.hpp"
 
 #include <array>
+#include <charconv>
 #include <set>
 
 namespace flockv0::web {
@@ -29,7 +30,8 @@ std::string threadSegment(std::string_view id) {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string segment;
     for (const unsigned char c : id) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~')
             segment += static_cast<char>(c);
         else {
             segment += '%';
@@ -40,12 +42,31 @@ std::string threadSegment(std::string_view id) {
     return segment;
 }
 
+bool localThreadLink(std::string_view url, std::string_view path) {
+    if (!url.starts_with("http://")) return false;
+    url.remove_prefix(7);
+    const auto slash = url.find('/');
+    if (slash == std::string_view::npos || url.substr(slash) != path) return false;
+    const auto server = url.substr(0,slash);
+    for (const std::string_view host : {"127.0.0.1","localhost","[::1]"}) {
+        if (server == host) return true;
+        if (!server.starts_with(host) || server.size() <= host.size()+1 || server[host.size()] != ':') continue;
+        const auto port = server.substr(host.size()+1);
+        unsigned number = 0;
+        const auto [end,error] = std::from_chars(port.data(),port.data()+port.size(),number);
+        if (error == std::errc{} && end == port.data()+port.size() && number > 0 && number <= 65535) return true;
+    }
+    return false;
+}
+
 Json runView(const Json& run, std::string_view environment) {
     const auto thread = field(run,"threadId");
     if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
         return nullptr;
+    const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
+    const auto saved = field(run,"link");
     return {{"threadId",thread},{"runId",field(run,"runId")},
-            {"link","https://app.t3.codes/threads/" + threadSegment(environment) + "/" + threadSegment(thread)}};
+            {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
 }
 
 Json avatarView(const Json& source) {

@@ -333,16 +333,28 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
                 if (!cancelling) task["state"] = "running";
                 return true;
             }
+            if (outcome.kind == Delivery::Kind::Unknown && !outcome.run.threadId.empty() &&
+                action["phase"] == "ready" && !reply && !cancelling) {
+                auto saved = action;
+                saved.erase("phase");
+                saved.erase("authGeneration");
+                saved["candidate"] = runJson(outcome.run);
+                db.exec("UPDATE outbox SET data=? WHERE id=?", {saved,action["id"]});
+                db.journal(id,"run_id_pending",{{"actionId",action["id"]},{"thread",runJson(outcome.run)}});
+                return true;
+            }
             const auto reason = outcome.kind == Delivery::Kind::Auth ? "auth" :
                                 outcome.kind == Delivery::Kind::Settings ? "settings" : "unknown_delivery";
             const auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" :
                                                          bounded(outcome.detail,2048);
-            if (outcome.kind == Delivery::Kind::NotAccepted) {
+            const bool retryableDelivery = outcome.kind == Delivery::Kind::NotAccepted || outcome.definitelyUnsent;
+            if (retryableDelivery) {
                 db.exec("UPDATE outbox SET phase=? WHERE id=?", {cancelling ? "closed" : "ready",action["id"]});
+                if (!reply) task["deadline"] = 0;
                 if (cancelling) task["actionId"] = "";
             }
             if (cancelling) {
-                if (field(task,"cancellationDetail") == detail && outcome.kind != Delivery::Kind::NotAccepted) return false;
+                if (field(task,"cancellationDetail") == detail && !retryableDelivery) return false;
                 task["cancellationDetail"] = detail;
                 db.journal(id,"cancelling",{{"detail",detail},{"actionId",action["id"]}});
             } else db.wait(task,reason,{{"text",detail}});
@@ -429,6 +441,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             const auto text = bounded(excerpt.text,8192);
             evidence.push_back({{"environmentId",req.environmentId},{"threadId",req.threadId},{"runId",req.runId},
                 {"itemId",excerpt.itemId},{"text",text},{"more",excerpt.more || text.size() < excerpt.text.size()},
+                {"itemTruncated",excerpt.nextOffset > req.offset || text.size() < excerpt.text.size()},
                 {"nextCursor",excerpt.nextCursor},{"nextOffset",excerpt.nextOffset}});
             db.exec("UPDATE events SET evidence=? WHERE id=?", {evidence,event["id"]});
             auto entry = evidence.back();

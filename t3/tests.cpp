@@ -108,6 +108,18 @@ int main(int argc, char** argv) {
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
               "delegate result is tied to owned subagent activity");
+        fixture({{"scenario", "notification-result"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
+              "v0.1.11 completion notification is tied to a unique owned delegate");
+        fixture({{"scenario", "shortened-result"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
+              "independent T3 title truncation preserves unique delegate attribution");
+        fixture({{"scenario", "mixed-result"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
+              "manual input in a continuation Run prevents attribution");
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
@@ -141,7 +153,9 @@ int main(int argc, char** argv) {
         signIn("env-1");
         check(adapter->authGeneration("env-1", launch.config) != launch.authGeneration, "reauthorization changes generation");
         check(adapter->preflight(launch)->kind == Delivery::Kind::Auth, "read-only OAuth cannot operate");
-        check(adapter->send(launch).kind == Delivery::Kind::NotAccepted, "stale generation blocks commands before send");
+        const auto staleAuth = adapter->send(launch);
+        check(staleAuth.kind == Delivery::Kind::Auth && staleAuth.definitelyUnsent,
+              "stale generation blocks commands before send");
         check(adapter->reconcile(launch).kind == Delivery::Kind::Accepted, "reauthorization can recover original Run");
         fixture({{"revoked", true}});
         check(adapter->observe("env-1", launch.config, run).status == "auth", "server-side OAuth revocation is surfaced");

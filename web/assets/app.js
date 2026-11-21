@@ -84,9 +84,13 @@ function avatar(bot, className = '') {
   return host;
 }
 function linkToRun(run, label = 'T3 で開く') {
-  if (!run?.link?.startsWith('https://app.t3.codes/threads/')) return null;
+  if (!run?.link) return null;
+  const url = new URL(run.link);
+  const hosted = url.origin === 'https://app.t3.codes' && url.pathname.startsWith('/threads/');
+  const local = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if ((!hosted && !local) || url.username || url.password) return null;
   const link = node('a', 'link', `${label} ↗`);
-  link.href = run.link;
+  link.href = url.href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
   return link;
