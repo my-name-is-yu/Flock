@@ -239,8 +239,8 @@ function openBrowser(url) {
   });
 }
 
-async function showBrowserOrPrintUrl(url, printUrl) {
-  if (printUrl || !await openBrowser(url)) console.error(url);
+async function showBrowserOrPrintUrl(url, printUrl, callbackSettled) {
+  if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
 }
 
 async function login({ printUrl = false, reconsent = false } = {}) {
@@ -269,7 +269,14 @@ async function login({ printUrl = false, reconsent = false } = {}) {
     if (!profile.clientId) url.searchParams.set("agent_name_hint", "Flock");
     if (reconsent && profile.clientId) url.searchParams.set("prompt", "consent");
     console.error("Continue with ChatGPT. Approve Flock's plan access in your browser.");
-    const [{ code, clientId }] = await Promise.all([listener.result, showBrowserOrPrintUrl(url.toString(), printUrl)]);
+    let callbackSettled = false;
+    const callback = listener.result.then(
+      result => { callbackSettled = true; return result; },
+      error => { callbackSettled = true; throw error; },
+    );
+    const [{ code, clientId }] = await Promise.all([
+      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled),
+    ]);
     if (!profile.clientId) {
       profile.clientId = clientId;
       saveProfile(profile);

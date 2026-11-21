@@ -230,6 +230,9 @@ class Fixture(BaseHTTPRequestHandler):
             if args["itemId"] == "unicode":
                 text = "界" + "🙂" * 3000 + "犬" + "🐦" * 3000 + "\n夕焼け"
                 rows = [self.item(thread_id, 8, "root", "assistant_message", text) | {"itemId": "unicode"}]
+            elif args["itemId"] == "dense-bmp":
+                rows = [self.item(thread_id, 8, "root", "assistant_message", "界" * 7000) |
+                        {"itemId": "dense-bmp"}]
             elif args["itemId"] == "translation":
                 rows = [self.item(thread_id, 8, "root", "assistant_message", "—" * 2800) | {"itemId": "translation"}]
             else:

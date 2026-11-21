@@ -35,6 +35,8 @@ function simulateAuthorization(mode) {
     if (mode === "opener-failed") {
       queueMicrotask(() => opener.emit("exit", 1));
       setTimeout(() => { void decline(); }, 40);
+    } else if (mode === "opener-fails-after-callback") {
+      void decline().then(() => setTimeout(() => opener.emit("exit", 1), 40));
     } else {
       void decline().then(() => setTimeout(() => opener.emit("exit", 0), 100));
     }
@@ -53,7 +55,7 @@ function checkLogin(executable) {
       '#!/bin/sh\nexec "$FLOCK_TEST_NODE" --import "$FLOCK_TEST_PRELOAD" "$@"\n',
       { mode: 0o700 },
     );
-    for (const mode of ["opener-pending", "opener-failed"]) {
+    for (const mode of ["opener-pending", "opener-failed", "opener-fails-after-callback"]) {
       const result = childProcess.spawnSync(executable, ["--home", join(root, mode), "model", "login"], {
         encoding: "utf8",
         timeout: 10_000,
@@ -71,6 +73,9 @@ function checkLogin(executable) {
       if (mode === "opener-failed") {
         assert.match(result.stderr, /^https:\/\/auth\.openai\.com\/authorize\?/m,
           "CLI should show a manual authorization URL when the browser fails to open");
+      } else if (mode === "opener-fails-after-callback") {
+        assert.doesNotMatch(result.stderr, /^https:\/\/auth\.openai\.com\/authorize\?/m,
+          "CLI should not show a stale URL after the callback has settled");
       }
     }
   } finally {
