@@ -320,7 +320,7 @@ Json questionFields(const Json& questions) {
     auto fields = Json::array();
     for (const auto& question : questions) {
         const auto id = str(question, "id");
-        if (id.empty() || !ids.insert(id).second || trim(str(question, "question")).empty() ||
+        if (id.empty() || !ids.insert(id).second || trimSessionQuestionText(str(question, "question")).empty() ||
             !question.contains("options") || !question["options"].is_array()) return {};
         for (const auto key : {"allowCustomAnswer", "multiSelect", "required"}) {
             if (question.contains(key) && !question[key].is_boolean()) return {};
@@ -332,8 +332,9 @@ Json questionFields(const Json& questions) {
         for (const auto& option : question["options"]) {
             const auto label = str(option, "label");
             const auto specified = option.find("value");
-            if (trim(label).empty() || (specified != option.end() && !specified->is_string())) return {};
-            const auto value = specified == option.end() ? trim(label) : specified->get<std::string>();
+            const auto trimmedLabel = trimSessionQuestionText(label);
+            if (trimmedLabel.empty() || (specified != option.end() && !specified->is_string())) return {};
+            const auto value = specified == option.end() ? std::string(trimmedLabel) : specified->get<std::string>();
             if (!values.insert(value).second) return {};
             options.push_back({{"label", label}, {"value", value}, {"description", str(option, "description")}});
         }

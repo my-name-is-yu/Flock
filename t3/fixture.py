@@ -124,7 +124,7 @@ class Fixture(BaseHTTPRequestHandler):
         questions = [
             {"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
              "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
-                                                     {"label": "blue", "description": ""}]},
+                                                     {"label": "　blue　", "description": ""}]},
             {"id": "note", "header": "Note", "question": "Any notes?", "options": [], "required": False},
             {"id": "message", "header": "Message", "question": "Edit the message", "options": [],
              "initialAnswer": "Proposed message"},

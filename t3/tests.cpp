@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
               field.at("freeform") == false, "question retains its prompt and input constraints");
         const auto& options = field.at("options");
         check(options.size() == 2 && options.at(0).at("label") == "Green" && options.at(0).at("value") == "green" &&
-              options.at(1).at("label") == "blue" && options.at(1).at("value") == "blue",
+              options.at(1).at("label") == "　blue　" && options.at(1).at("value") == "blue",
               "question retains the display labels and answer values for both options");
         Command answer = launch;
         answer.tool = "answer_session_question";

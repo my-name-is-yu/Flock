@@ -71,6 +71,8 @@ struct Question {
     std::string requestId;
     Json fields = Json::array();
 };
+// T3 trims ordinary input and labels without explicit values using JavaScript String.trim.
+std::string_view trimSessionQuestionText(std::string_view text);
 // Validate a model answer against the observed fields and encode it for Session submission.
 Json sessionQuestionAnswers(const Json& fields, const Json& answers);
 struct Observation {

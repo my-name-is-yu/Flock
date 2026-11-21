@@ -4,6 +4,23 @@
 #include <set>
 
 namespace flockv0 {
+std::string_view trimSessionQuestionText(std::string_view text) {
+    static constexpr std::string_view whitespace[] = {
+        " ", "\t", "\n", "\v", "\f", "\r", "\u00a0", "\u1680", "\u2000", "\u2001", "\u2002",
+        "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a",
+        "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff"
+    };
+    while (!text.empty()) {
+        const auto previousSize = text.size();
+        for (auto space : whitespace) {
+            if (text.starts_with(space)) text.remove_prefix(space.size());
+            if (text.ends_with(space)) text.remove_suffix(space.size());
+        }
+        if (text.size() == previousSize) break;
+    }
+    return text;
+}
+
 namespace {
 Json fieldAnswer(const Json& field, const Json& options, const Json& answer) {
     const auto selected = answer.is_array() ? answer : Json::array({answer});
@@ -21,12 +38,12 @@ Json fieldAnswer(const Json& field, const Json& options, const Json& answer) {
             continue;
 
         if (selected.size() != 1) throw Conflict("A freeform answer must be submitted on its own");
-        const bool blank = text.find_first_not_of(" \t\r\n") == std::string::npos;
         const bool editor = field.contains("initialAnswer");
-        if (blank && !editor && options.empty() && !field.value("required",true)) return "";
-        if (!field.value("freeform",options.empty()) || (blank && !editor))
+        const auto custom = editor ? std::string_view(text) : trimSessionQuestionText(text);
+        if (!editor && custom.empty() && options.empty() && !field.value("required",true)) return "";
+        if (!field.value("freeform",options.empty()) || (custom.empty() && !editor))
             throw Conflict("Answer does not match the question's input options");
-        return value;
+        return std::string(custom);
     }
     return multiple ? selected : selected.front();
 }
