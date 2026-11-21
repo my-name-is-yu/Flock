@@ -464,6 +464,7 @@ Json clarificationData(const Reply& reply) {
                  {"candidates",reply.candidates},{"operation",reply.operation},{"waitsAtIntake",std::move(waits)},
                  {"incompleteWaitsAtIntake",reply.incompleteWaitsAtIntake}};
     if (reply.result) data["result"] = resultData(*reply.result,1024);
+    if (reply.resume) data["resume"] = true;
     if (reply.revisionDraft) {
         const auto& draft = *reply.revisionDraft;
         data["revisionDraft"] = {{"taskId",draft.target.taskId},{"generation",draft.target.generation},
@@ -635,6 +636,9 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
     const auto* task = taskById(context, id);
     const auto resultId = readId(route, "resultMessageId");
     const auto proposedOption = readId(route, "resultOption");
+    const auto resumeField = route.find("resume");
+    require(resumeField == route.end() || resumeField->is_boolean());
+    const bool resume = resumeField != route.end() && resumeField->get<bool>();
     require(proposedOption <= 99 && (!id || task));
     if (kind == "answer_result") {
         checkFields(route, {"kind","segment","resultMessageId","resultOption"});
@@ -645,7 +649,7 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         return Respond{{}, std::move(source)};
     }
     if (kind == "clarify") {
-        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId","resultOption"});
+        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId","resultOption","resume"});
         auto question = readText(route, "text", 2000);
         require(!question.empty());
         std::vector<Id> choices;
@@ -672,11 +676,12 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
             require(option >= 0);
             source = selectWorkResult(resultId,option,context,anchor,segment);
         }
+        require(!resume || (operation == "destination" && choices.empty() && source && source->state == "cancelled"));
         std::optional<RevisionDraft> draft;
         if (operation == "destination" && choices.size() == 1)
             draft = RevisionDraft{target(*taskById(context,choices.front())),{},{}};
         return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation),
-                       std::move(draft)};
+                       std::move(draft),resume};
     }
     const auto mentionedOption = (resultId || anchor.result || proposedOption ||
         kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;
@@ -693,14 +698,15 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         return Respond{std::move(text), std::nullopt};
     }
     if (kind == "create_task") {
-        checkFields(route, {"kind","segment","resultMessageId","resultOption","environment"});
+        checkFields(route, {"kind","segment","resultMessageId","resultOption","environment","resume"});
         require(anchor.kind != Reply::Kind::wait && !genericAnswer(segment) && !explicitBudgetGrant(segment));
         auto source = selectWorkResult(resultId,option,context,anchor,segment);
+        require(!resume || (source && source->state == "cancelled"));
         const auto mentioned = mentionedDestinations(context,segment);
         auto environment = readText(route,"environment",256);
         if (!mentioned.empty() && (environment.empty() || !destinationMatches(context,environment,mentioned)))
             return Clarify{translate(japanese(segment),"Which configured execution destination should I use?",
-                                      "設定済みの実行先を選んでください。"),{},std::move(source),"destination"};
+                                      "設定済みの実行先を選んでください。"),{},std::move(source),"destination",std::nullopt,resume};
         require(environment.empty() || destinationMatches(context,environment,mentioned));
         require(!source || oneOf(source->state, {"completed","cancelled"}));
         const auto instruction = normalize(segment);
@@ -711,7 +717,7 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
                    (sentence(request) == sentence(instruction) || sentence(request) == sentence(correction));
         };
         require(!std::ranges::any_of(context.tasks, namesExistingWork));
-        return CreateTask{std::string(segment),std::move(source),std::move(environment)};
+        return CreateTask{std::string(segment),std::move(source),std::move(environment),resume};
     }
 
     require(task && active(*task));
@@ -958,7 +964,7 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         auto instruction = reply.originalText + "\n\nExecution destination: " + std::string(destination);
         Plan plan;
         if (reply.candidates.empty())
-            plan = single(reply.originalText,CreateTask{std::move(instruction),reply.result,std::string(destination)});
+            plan = single(reply.originalText,CreateTask{std::move(instruction),reply.result,std::string(destination),reply.resume});
         else {
             const auto* selected = taskById(context,reply.candidates.front());
             if (reply.candidates.size() != 1 || !selected || !active(*selected)) {

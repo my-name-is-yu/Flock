@@ -43,6 +43,7 @@ struct Reply {
     std::optional<RevisionDraft> revisionDraft;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
+    bool resume = false;
     bool operator==(const Reply&) const = default;
 };
 
@@ -62,7 +63,12 @@ struct Context {
 
 struct Respond { std::string text; std::optional<Result> source; };
 struct Status { std::string text; std::optional<Target> target; };
-struct CreateTask { std::string request; std::optional<Result> source; std::string environment; };
+struct CreateTask {
+    std::string request;
+    std::optional<Result> source;
+    std::string environment;
+    bool resume = false;
+};
 struct AppendInstruction { Target target; std::string instruction; std::optional<Result> source; };
 struct ReviseTask {
     Target target;
@@ -77,6 +83,7 @@ struct Clarify {
     std::optional<Result> source = std::nullopt;
     std::string operation{};
     std::optional<RevisionDraft> revisionDraft = std::nullopt;
+    bool resume = false;
 };
 using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
                             AnswerWait, CancelTask, Clarify>;

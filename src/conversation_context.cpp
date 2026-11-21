@@ -211,7 +211,8 @@ JOIN tasks t ON t.id=json_extract(candidate.value,'$.taskId') WHERE r.message_id
         auto row = query(R"SQL(
 SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
        json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation'),
-       COALESCE(json_extract(r.data,'$.segments[0].revisionDraft'),'null')
+       COALESCE(json_extract(r.data,'$.segments[0].revisionDraft'),'null'),
+       json_extract(r.data,'$.segments[0].resume')
 FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
 WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
 )SQL",{reply,bot,id});
@@ -221,6 +222,7 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         pending.id = reply;
         pending.originalText = row.string(1);
         pending.operation = row.string(5);
+        pending.resume = row.number(7) != 0;
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
         const auto draft = row.json(6);

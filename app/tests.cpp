@@ -415,6 +415,8 @@ void responseContract() {
     check(routingTool["name"] == "route_conversation" &&
           routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
           "conversation provider request must use the routing tool");
+    const auto& routeFields = routingTool["parameters"]["properties"]["routes"]["items"]["properties"];
+    check(routeFields["resume"]["type"] == "boolean","the conversation tool did not expose the explicit restart flag");
     const auto& routingPrompt = routing.at("instructions").get_ref<const std::string&>();
     check(routingPrompt.find("You are the Flock Bot routing") != std::string::npos &&
           routingPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&

@@ -243,6 +243,8 @@ Json toolSchema(const std::string& name, bool initial) {
                 {"description","The exact messageId of a supplied result."}}},
             {"resultOption",{{"type","integer"},{"minimum",1},{"maximum",99},
                 {"description","The option number supplied for the selected excerpt in that result."}}},
+            {"resume",{{"type","boolean"},
+                {"description","Set true only when the user explicitly asks to resume the same cancelled work."}}},
             {"intent",textParameter("The user's explicitly revised scope, quoted verbatim from this segment.")},
             {"doneWhen",textParameter("The user's explicitly revised completion criteria, quoted verbatim from this segment.")},
             {"environment",textParameter("The chosen configured environment alias.")},
@@ -379,6 +381,9 @@ When the user requests a destination, use a matching configured alias or canonic
 If the requested destination cannot be identified, clarify with operation=destination. It may include one
 already identified task, or no task for new work. Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
+Set resume=true on create_task only if the user explicitly asks to resume the same cancelled task.
+Include its resultMessageId. Omit resume for a new request that uses a cancelled task as a reference.
+If the restart needs a destination clarification, include resume=true and resultMessageId on that clarification.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact messageId as resultMessageId.
 Respect an explicit reply's result. Use the bodies of results and their options, recentSource, and
