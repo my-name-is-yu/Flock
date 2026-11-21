@@ -626,7 +626,8 @@ void followUpsKeepThePriorResult() {
     Store store(fixture.database()), writer(fixture.database());
     RuntimeFixture execution(store);
     const auto original = task(writer,"Original report");
-    execution.finish(store,original,"1. Ignore samples\n" + std::string(3800,'x') + "\n2. Use paired observations");
+    const std::string report = "1. Ignore samples\n" + std::string(3800,'x') + "\n2. Use paired observations";
+    execution.finish(store,original,report);
     const auto sourceId = store.latestTaskResult(original).at("id").get<Id>();
     const auto unrelated = task(writer,"Unrelated report");
     execution.finish(store,unrelated,"1. Compare earlier dates\n2. Discard the baseline");
@@ -638,6 +639,8 @@ void followUpsKeepThePriorResult() {
         }
         const auto& text = input.event.at("text");
         if (text == "Explain option 2") return route("answer_result",{{"resultMessageId",sourceId},{"resultOption",2}});
+        if (text == "Implement all approaches in the original report")
+            return route("create_task",{{"resultMessageId",sourceId},{"resultOption",0}});
         if (text == "案2以外を実装") return route("create_task",{{"resultMessageId",sourceId},{"resultOption",2}});
         if (text == "案2を適用して") return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",2}});
         return route("create_task");
@@ -658,6 +661,11 @@ void followUpsKeepThePriorResult() {
     check(deictic["route"] == "create_task" && deictic["source"] == answer["source"] &&
           store.tasks("alpha").front()["sourceResultRefs"] == Json::array({answer["source"]}),
           "the deictic follow-up lost the cited result or selected option");
+    const auto whole = send("whole","Implement all approaches in the original report",answer.at("messageId"));
+    check(whole.at("route") == "create_task" && whole.at("source").at("messageId") == sourceId &&
+          whole.at("source").at("option") == 0 && whole.at("source").at("text") == report &&
+          store.tasks("alpha").front()["sourceResultRefs"] == Json::array({whole.at("source")}),
+          "an explicit whole-report request received only the explained option");
     const auto count = store.tasks("alpha").size();
     check(send("exclude","案2以外を実装",sourceId)["route"] == "clarify" &&
           send("ambiguous","案2を適用して")["route"] == "clarify" && store.tasks("alpha").size() == count,
@@ -772,11 +780,14 @@ void longResultOptionsStayAvailable() {
         Store store(fixture.database()), writer(fixture.database());
         RuntimeFixture execution(store);
         const auto id = task(writer,"Compare the proposals");
-        const std::string option = "## Option 2: Pair measurements\n\n"
+        const std::string heading = paddingSize == 3000 ? "### Option 2: Pair measurements" :
+            "Option 2: Pair measurements\n---------------------------";
+        const std::string option = heading + "\n\n"
             "1. Compare both builds using exactly the same workload.\n"
             "2. Repeat the paired run to separate variance from regressions.";
         execution.finish(store,id,"## 1. Compare one build\n" + std::string(paddingSize,'A') +
-            "\n\n" + option + "\n\n## 3. Defer comparison\n\n## 3. Drop the comparison");
+            "\n\n" + option + "\n\n## Overall recommendation\nPrefer the first option.\n\n"
+            "## 3. Defer comparison\n\n## 3. Drop the comparison");
         const auto history = store.history(id,0,100);
         const auto report = std::ranges::find_if(history,[](const Json& row) { return row.at("kind") == "report"; });
         check(report != history.end(),"Missing report in the long result fixture");

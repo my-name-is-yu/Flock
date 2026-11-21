@@ -241,8 +241,8 @@ Json toolSchema(const std::string& name, bool initial) {
             {"taskId",{{"type","integer"},{"minimum",1}}},
             {"resultMessageId",{{"type","integer"},{"minimum",1},
                 {"description","The exact messageId of a supplied result."}}},
-            {"resultOption",{{"type","integer"},{"minimum",1},{"maximum",99},
-                {"description","The option number supplied for the selected excerpt in that result."}}},
+            {"resultOption",{{"type","integer"},{"minimum",0},{"maximum",99},
+                {"description","The selected option number, or 0 for work explicitly covering the whole report."}}},
             {"intent",textParameter("The user's explicitly revised scope, quoted verbatim from this segment.")},
             {"doneWhen",textParameter("The user's explicitly revised completion criteria, quoted verbatim from this segment.")},
             {"environment",textParameter("The chosen configured environment alias.")},
@@ -379,6 +379,8 @@ When the user requests a destination, use a matching configured alias or canonic
 If the requested destination cannot be identified, clarify with operation=destination. It may include one
 already identified task, or no task for new work. Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
+For work explicitly covering the whole result, set resultOption to 0. For "implement it" or a similar
+request referring to the last selected excerpt, omit resultOption to keep that excerpt.
 Use the source ID with append_instruction/revise_task only for this active task's own result.
 For a question about an existing result, use answer_result with its exact messageId as resultMessageId.
 Respect an explicit reply's result. Use the bodies of results and their options, recentSource, and
