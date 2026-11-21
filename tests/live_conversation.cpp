@@ -4,9 +4,11 @@
 #include "model.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <ranges>
 #include <regex>
 #include <unistd.h>
 
@@ -192,14 +194,28 @@ int main(int argc, char** argv) {
         return 2;
     }
     try {
-        app::ChatGPTModel live(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
-        const int trials = argc >= 4 ? std::stoi(argv[3]) : 3;
+        int trials = 3;
+        if (argc >= 4) {
+            const std::string_view input(argv[3]);
+            const auto [end,error] = std::from_chars(input.data(),input.data() + input.size(),trials);
+            if (error != std::errc{} || end != input.data() + input.size() || trials < 1) {
+                std::cerr << "Trials must be a positive integer\n";
+                return 2;
+            }
+        }
         const std::string filter = argc == 5 ? argv[4] : "";
+        auto selected = scenarios | std::views::filter([&](const auto& item) {
+            return item.first.find(filter) != std::string::npos;
+        });
+        if (selected.empty()) {
+            std::cerr << "No scenario matches '" << filter << "'\n";
+            return 2;
+        }
+        app::ChatGPTModel live(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
         bool passed = true;
-        for (const auto& [name,scenario] : scenarios) {
-            if (name.find(filter) == std::string::npos) continue;
+        for (const auto& [name,scenario] : selected) {
             int passes = 0;
-            for (int trial = 1; trial <= trials; ++trial) {
+            for (int trial = 0; trial < trials; ++trial) {
                 std::string failure;
                 Mixed model(live);
                 try {
@@ -209,7 +225,7 @@ int main(int argc, char** argv) {
                     failure = error.what();
                 }
                 if (failure.empty()) ++passes;
-                Json row = {{"scenario",name},{"trial",trial},{"pass",failure.empty()},{"failure",failure}};
+                Json row = {{"scenario",name},{"trial",trial + 1},{"pass",failure.empty()},{"failure",failure}};
                 if (!failure.empty()) row["turn"] = model.trace;
                 std::cout << row.dump() << '\n';
             }
