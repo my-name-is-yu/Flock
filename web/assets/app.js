@@ -222,10 +222,11 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   render('bottom');
   const context = view;
   if (context) {
-    context.refresh = coalescedRefresh(scroll => refreshView(context, scroll));
+    context.pageRead = Promise.resolve();
+    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
     void context.refresh('bottom');
     if (context.dm) {
-      context.dm.refresh = coalescedRefresh(scroll => refreshPeerConversation(context, scroll));
+      context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
       void context.dm.refresh('bottom');
     }
   }
@@ -1591,7 +1592,9 @@ async function refreshView(context, scroll) {
   if (context !== view) return;
   const isCurrent = () => context === view;
   try {
-    const latest = await api(botQuery('view', context.id));
+    const params = new URLSearchParams({ bot: context.id });
+    if (context.data) params.set('changesAfter', context.data.historyCursor);
+    const latest = await api(`view?${params}`);
     await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
     if (!isCurrent()) return;
     mergeLatest(context, latest);
@@ -1624,19 +1627,29 @@ const refreshBots = coalescedRefresh(async () => {
     retrySync();
   }
 });
+// Serialize manual pages with refreshes of the same Bot so a late page cannot restore stale badges.
+function readTimeline(context, read) {
+  const next = (context.pageRead ?? Promise.resolve()).then(read, read);
+  context.pageRead = next;
+  return next;
+}
+
 async function loadOlder() {
   const context = timelineContext();
-  const cursor = context?.olderBefore;
-  if (!cursor || context.loadingOlder) return;
+  if (!context?.olderBefore || context.loadingOlder) return;
   context.loadingOlder = true;
   if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
-    const { events, olderBefore } = await conversationPage(context, cursor);
-    if (context !== timelineContext() || context.olderBefore !== cursor) return;
-    context.olderBefore = olderBefore;
-    for (const event of events) context.events.set(event.id, event);
-    renderTimeline('older');
+    await readTimeline(context, async () => {
+      if (context !== timelineContext() || !context.olderBefore) return;
+      const cursor = context.olderBefore;
+      const { events, olderBefore } = await conversationPage(context, cursor);
+      if (context !== timelineContext() || context.olderBefore !== cursor) return;
+      context.olderBefore = olderBefore;
+      for (const event of events) context.events.set(event.id, event);
+      renderTimeline('older');
+    });
   } catch {
     if (context !== timelineContext()) return;
     if (context.peerId) context.olderFailed = true;

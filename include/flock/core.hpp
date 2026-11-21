@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -153,6 +154,12 @@ public:
     std::vector<std::string> peerPartners(std::string_view bot) const;
     // A change hint for readers, covering writes on this connection and other connections.
     std::pair<std::int64_t,std::int64_t> changeStamp() const;
+    struct ConversationChanges {
+        Id through;
+        std::map<std::string,std::vector<Id>> messages;
+    };
+    // Original messages affected by replies and instruction delivery since a journal cursor.
+    ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
     const std::filesystem::path& path() const;
 
 private:

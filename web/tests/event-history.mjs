@@ -50,3 +50,23 @@ await refreshEventHistory(previouslyEmpty, page([], 0), noPage, current);
 await refreshEventHistory(previouslyEmpty, page([3, 4], 3), () => page([1, 2], 0), current);
 assert.deepEqual(ids(previouslyEmpty), [1, 2, 3, 4]);
 assert.equal(previouslyEmpty.olderBefore, 0);
+
+const oldMessage = { id: 2, kind: 'conversation_message', data: { status: 'needs_you' } };
+const budgetReply = { id: 4, kind: 'conversation_reply', data: { replyToMessageId: 2, route: 'model_budget', status: 'needs_you' } };
+const loaded = { events: new Map([oldMessage, budgetReply, ...page([90, 91, 100], 90).events].map(e => [e.id, e])),
+  olderBefore: 2, newestEvent: 100 };
+const latestAfterApproval = { ...page([100, 101], 100), changedMessageIds: [91, 92] };
+const corrected = { ...oldMessage, data: { status: 'received' } };
+const resolved = { ...budgetReply, data: { replyToMessageId: 2, status: 'done' } };
+const delivered = { id: 91, kind: 'conversation_message', data: { deliveredToT3: true } };
+await refreshEventHistory(loaded, latestAfterApproval, cursor => {
+  if (cursor === 92) return { events: [delivered], olderBefore: 91 };
+  if (cursor === 5) return { events: [{ id: 1 }, corrected, resolved], olderBefore: 0 };
+  return noPage();
+}, current);
+assert.deepEqual(loaded.events.get(91), delivered);
+assert.deepEqual(loaded.events.get(2), corrected);
+assert.deepEqual(loaded.events.get(4), resolved);
+assert.equal(loaded.events.has(1), false);
+assert.equal(loaded.olderBefore, 2);
+await refreshEventHistory(loaded, { ...latestAfterApproval, changedMessageIds: [] }, noPage, current);
