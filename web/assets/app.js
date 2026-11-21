@@ -750,14 +750,15 @@ function eventCard(event, context, place) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (replyTarget) {
-    const [label, target] = replyTarget;
-    actions.append(iconButton('reply', label, () => beginReply(target)));
-  }
   if (openTask?.wait.reason === 'user_question') {
     const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
     reply.disabled = pendingWaits.has(openTask.wait.id);
     actions.append(reply);
+  }
+
+  if (replyTarget) {
+    const [label, target] = replyTarget;
+    actions.append(iconButton('reply', label, () => beginReply(target)));
   }
   line.append(bubble, actions);
   row.append(line, ...extras);
