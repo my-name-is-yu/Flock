@@ -43,7 +43,7 @@ ctest --test-dir build --output-on-failure
 
 同じディレクトリの `SOUL.md` に役割と判断基準、`MEMORY.md` にタスクをまたぐ前提を書きます。Session のモデルとプロバイダを指定する場合は、`session.model` と `session.providerInstanceId` を設定します。作業場所の指定には `session.workspaceStrategy` を使います。
 
-`conversationEnvironments` は任意です。「計測はクラウドMacで」のような切り替えに使う名前を、同じ `projectId` を利用できる T3 環境に割り当てます。対象環境にも T3 接続と実行権限が必要です。
+`conversationEnvironments` は任意です。「計測はクラウドMacで」のような切り替えに使う名前を、同じ `projectId` を利用できる T3 環境に割り当てます。対象環境にも T3 接続と実行権限が必要です。 設定済みの名前または正規 ID を指定できます。実行先の判定が曖昧な場合は、送信前に確認します。
 
 ## 実モデルと T3 に接続する
 
