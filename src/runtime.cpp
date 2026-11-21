@@ -887,13 +887,23 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             auto batch = pendingBatch(task,std::min(instructionBatchBytes,limit - std::min(limit,reserved)));
             supersedeInstructions(task,batch.superseded);
             pending = std::move(batch.instructions);
-            reserved += maxReferenceTextBytes;
             for (const auto& item : pending) reserved += item.at("text").get_ref<const std::string&>().size() + 2;
-            const auto earlier = needsContext
-                ? db.sessionInstructions(task,goal,pending,limit - std::min(limit,reserved)) : Json::array();
-            includeWorkContext(instruction,earlier,pending,goal,criteria);
-            resultReferences = appendResultReferences(instruction,task,pending,earlier,
-                                                      limit - std::min(limit,instruction.size()));
+            const auto available = limit - std::min(limit,reserved);
+            auto earlier = needsContext ? db.sessionInstructions(task,goal,pending,available) : Json::array();
+            std::string references;
+            resultReferences = appendResultReferences(references,task,pending,earlier,available);
+            std::size_t historyBytes = 0;
+            for (const auto& item : earlier) historyBytes += item.at("text").get_ref<const std::string&>().size() + 2;
+            if (historyBytes + references.size() > available) {
+                // Only reclaim space used by real reference labels and excerpts.
+                earlier = db.sessionInstructions(task,goal,pending,available - references.size());
+                includeWorkContext(instruction,earlier,pending,goal,criteria);
+                references.clear();
+                resultReferences = appendResultReferences(references,task,pending,earlier,limit - instruction.size());
+            } else {
+                includeWorkContext(instruction,earlier,pending,goal,criteria);
+            }
+            instruction += references;
             instruction += actionTag;
             task["deadline"] = 0;
         }

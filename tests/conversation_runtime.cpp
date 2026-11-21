@@ -1466,7 +1466,8 @@ void resumedBacklogFitsOneT3Command() {
         f.receive(tag,text);
         return text;
     };
-    for (int i = 0; i < 6; ++i) add(old,"old supplement ",i);
+    std::vector<std::string> inherited;
+    for (int i = 0; i < 6; ++i) inherited.push_back(add(old,"old supplement ",i));
     f.store->operate(old,0,"cancel");
     f.t3.finish("run-1","Stopped");
     f.reach(old,"cancelled");
@@ -1481,9 +1482,9 @@ void resumedBacklogFitsOneT3Command() {
     for (int i = 0; i < 5; ++i) accepted.push_back(add(next,"new supplement ",i));
     f.reach(next,"running");
     const auto& command = f.t3.sent.back();
-    check(sessionPrompt(command.actionId,command.instruction).size() <= 120000 &&
-          command.instruction.find("old supplement 5") != std::string::npos,
-          "the resumed command exceeded T3's limit or dropped the most recent inherited direction");
+    check(sessionPrompt(command.actionId,command.instruction).size() <= 120000,"the resumed command exceeded T3's limit");
+    for (std::size_t i = 1; i < inherited.size(); ++i)
+        check(command.instruction.find(inherited[i]) != std::string::npos,"a recent inherited direction that fit was lost");
     for (const auto& text : accepted)
         check(command.instruction.find(text) != std::string::npos,"the resumed command dropped an accepted direction");
 }
