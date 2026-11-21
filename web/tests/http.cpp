@@ -138,6 +138,14 @@ void boundary(Browser& browser) {
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
 }
 
+// The list and the selected-Bot view must agree on what each Bot is doing.
+void samePresence(Browser& browser) {
+    for (const auto& row : browser.get("/api/bots")) {
+        const auto view = browser.get("/api/view?bot=" + row["id"].get<std::string>());
+        check(row["presence"] == view["presence"],"Bot list presence differs from the Bot view");
+    }
+}
+
 void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
 
 bool hasEvent(const Json& events, std::string_view kind, std::string_view text) {
@@ -186,6 +194,9 @@ void exercise(const std::filesystem::path& path) {
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
     check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
+    samePresence(browser);
+    check(list[0]["presence"] == "waiting" && list[3]["id"] == "broken" && list[3]["presence"] == "idle",
+          "Bot list presence did not follow task states");
     const Id waitId = waits[0]["wait"]["id"];
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
@@ -203,6 +214,8 @@ void exercise(const std::filesystem::path& path) {
           t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
+    samePresence(browser);
+    check(browser.get("/api/bots")[0]["presence"] == "working","resumed Bot was not listed as working");
 
     server.reset();
     runtime.reset();

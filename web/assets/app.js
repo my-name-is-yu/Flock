@@ -134,9 +134,11 @@ function setTheme(mode) {
 }
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
+  const changedState = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
-  if (focus && narrow.matches) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
+  // Only move focus when the panel actually opens or closes, so a pin shortcut typed in the composer keeps the caret.
+  if (focus && narrow.matches && changedState) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
 function selectBot(botId) {
   menu = null;
@@ -151,55 +153,181 @@ function selectBot(botId) {
   if (view) void refreshView(view);
 }
 
+const icons = {
+  more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
+  settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
+  open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
+};
+const activePresence = new Set(['working', 'thinking', 'waiting']);
+const busyPresence = new Set(['working', 'thinking']);
+const sidebar = byId('navigation');
+
+// Pin order is the order the user pinned in, so ⌥⇧N keeps pointing at the same Bot while the list re-sorts.
+function pinnedBots() {
+  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+}
+function focusKey(key) {
+  sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
+}
+function setMenu(botId, focus) {
+  menu = botId;
+  renderBots();
+  if (focus === 'first' || focus === 'last') {
+    const items = sidebar.querySelectorAll('.menu-popover [role="menuitem"]');
+    items[focus === 'first' ? 0 : items.length - 1]?.focus();
+  } else if (focus) focusKey(focus);
+}
+function closeMenu(restore = true) {
+  const botId = menu;
+  if (!botId) return;
+  setMenu(null, restore ? `menu:${botId}` : null);
+}
+function togglePin(bot) {
+  if (pins.has(bot.id)) pins.delete(bot.id);
+  else pins.add(bot.id);
+  save('flock-pins', [...pins]);
+  setMenu(null, `menu:${bot.id}`);
+}
+async function openBotSettings(bot) {
+  menu = null;
+  if (view?.id !== bot.id) selectBot(bot.id);
+  else renderBots();
+  const context = view;
+  if (context && !context.data) await refreshView(context);
+  if (context && context === view && context.data) openDetail({ kind: 'settings' });
+}
+function menuButton(bot) {
+  const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
+  toggle.innerHTML = icons.more;
+  toggle.dataset.focus = `menu:${bot.id}`;
+  toggle.setAttribute('aria-label', `${bot.name} のメニュー`);
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', menu === bot.id);
+  toggle.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    setMenu(bot.id, event.key === 'ArrowDown' ? 'first' : 'last');
+  });
+  if (menu === bot.id) toggle.setAttribute('aria-controls', 'bot-menu');
+  return toggle;
+}
+function menuPopover(bot) {
+  const list = node('div', 'menu-popover');
+  list.id = 'bot-menu';
+  list.setAttribute('role', 'menu');
+  list.setAttribute('aria-label', `${bot.name} のメニュー`);
+  const actions = [
+    [pins.has(bot.id) ? 'ピン留めを解除' : 'ピン留め', icons.pin, () => togglePin(bot)],
+    ['設定を開く', icons.settings, () => void openBotSettings(bot)],
+  ];
+  actions.forEach(([label, icon, run], index) => {
+    const item = button(null, null, run);
+    item.innerHTML = icon;
+    item.append(node('span', null, label));
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
+    item.dataset.focus = `item:${bot.id}:${index}`;
+    list.append(item);
+  });
+  list.addEventListener('keydown', (event) => {
+    const items = [...list.querySelectorAll('[role="menuitem"]')];
+    const index = items.indexOf(document.activeElement);
+    const moves = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 };
+    if (event.key in moves) {
+      event.preventDefault();
+      items[(moves[event.key] + items.length) % items.length].focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+    } else if (event.key === 'Tab') closeMenu(false);
+  });
+  return list;
+}
+function presenceText(bot) {
+  return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
+}
+function botRow(bot) {
+  const row = node('div', 'bot-row');
+  const active = view?.id === bot.id;
+  row.classList.toggle('selected', active);
+  row.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'bot-select', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', bot.name));
+  if (bot.presence === 'waiting') name.append(node('span', 'presence-dot'));
+  const preview = node('span', 'bot-preview');
+  if (busyPresence.has(bot.presence)) {
+    const dots = node('span', 'working-dots');
+    dots.setAttribute('aria-hidden', 'true');
+    dots.append(node('i'), node('i'), node('i'));
+    preview.append(dots);
+  }
+  preview.append(bot.preview || '会話はまだありません');
+  const text = node('span', 'bot-text');
+  text.append(name, preview);
+  select.append(avatar(bot, 'bot-avatar'), text);
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  row.append(select, menuButton(bot));
+  if (menu === bot.id) row.append(menuPopover(bot));
+  return row;
+}
+function pinTile(bot, index) {
+  const tile = node('div', 'pin-tile');
+  const active = view?.id === bot.id;
+  tile.classList.toggle('selected', active);
+  tile.classList.toggle('menu-open', menu === bot.id);
+  const select = button(null, 'pin', () => selectBot(bot.id));
+  select.dataset.focus = `bot:${bot.id}`;
+  if (active) select.setAttribute('aria-current', 'true');
+  const shortcut = index < 9 ? index + 1 : null;
+  if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
+  const face = node('span', 'pin-face');
+  face.append(avatar(bot, 'pin-avatar'));
+  if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
+  select.append(face, node('span', 'pin-name', bot.name));
+  const status = presenceText(bot);
+  if (status) select.append(status);
+  const tooltip = node('span', 'pin-tooltip');
+  tooltip.setAttribute('aria-hidden', 'true');
+  tooltip.append(node('span', null, bot.name));
+  if (shortcut) tooltip.append(node('kbd', null, `⌥⇧${shortcut}`));
+  tile.append(select, tooltip, menuButton(bot));
+  if (menu === bot.id) tile.append(menuPopover(bot));
+  return tile;
+}
+function skeletonRows(count, className = 'skeleton-row') {
+  return Array.from({ length: count }, () => {
+    const row = node('div', className);
+    row.setAttribute('aria-hidden', 'true');
+    if (className === 'skeleton-bot') row.append(node('span', 'skeleton-avatar'));
+    const lines = node('span', 'skeleton-lines');
+    lines.append(node('span', 'skeleton-line'), node('span', 'skeleton-line short'));
+    row.append(lines);
+    return row;
+  });
+}
+
 function renderBots() {
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
-  const pinned = [];
-  const rest = [];
-  for (const bot of bots) {
-    const isPinned = pins.has(bot.id);
-    const row = node('div', isPinned ? 'pinned-bot' : 'bot-row');
-    const active = view?.id === bot.id;
-    row.classList.toggle('selected', active);
-    const select = button(null, isPinned ? 'pin' : 'bot-select', () => selectBot(bot.id));
-    select.title = bot.name;
-    select.setAttribute('aria-label', bot.name);
-    if (active) select.setAttribute('aria-current', 'true');
-    select.append(avatar(bot));
-    if (!isPinned) {
-      const text = node('span', 'bot-text');
-      text.append(node('span', 'bot-name', bot.name), node('span', 'bot-preview', bot.preview || '会話はまだありません'));
-      select.append(text);
-    }
-    const toggle = button('⋯', 'icon-button pin-menu', () => {
-      const opened = menu !== bot.id;
-      menu = opened ? bot.id : null;
-      renderBots();
-      const replacement = [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id);
-      if (opened) replacement?.nextElementSibling?.querySelector('button')?.focus();
-      else replacement?.focus();
-    });
-    toggle.dataset.bot = bot.id;
-    toggle.setAttribute('aria-label', `${bot.name} のメニュー`);
-    toggle.setAttribute('aria-expanded', menu === bot.id);
-    row.append(select, toggle);
-    if (menu === bot.id) {
-      const popover = node('div', 'pin-popover');
-      popover.append(button(isPinned ? 'ピン留めを解除' : 'ピン留めする', null, () => {
-        if (isPinned) pins.delete(bot.id);
-        else pins.add(bot.id);
-        save('flock-pins', [...pins]);
-        menu = null;
-        renderBots();
-        [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot.id)?.focus();
-      }));
-      row.append(popover);
-    }
-    (isPinned ? pinned : rest).push(row);
-  }
-  elements.pinned.replaceChildren(...pinned);
+  // Re-rendering replaces the buttons, so carry keyboard focus over to the matching new element.
+  const focused = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
+  const pinned = pinnedBots();
+  // Bots that are working or waiting rise to the top; sort a copy so the default selection keeps the configured order.
+  const rank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
+  const rest = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => rank(a) - rank(b));
+  elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
-  elements['bot-list'].replaceChildren(...rest);
-  if (!bots.length) elements['bot-list'].append(node('p', 'activity-empty', listLoaded ? '設定済みの Bot はありません' : '読み込み中…'));
+  const list = elements['bot-list'];
+  list.setAttribute('aria-busy', !listLoaded);
+  list.replaceChildren(...rest.map(botRow));
+  if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
+  else if (!bots.length) list.append(node('p', 'activity-empty', '設定済みの Bot はありません'));
+  if (focused) focusKey(focused);
 }
 
 function renderHeader() {
@@ -226,29 +354,50 @@ function renderHeader() {
   elements['profile-status'].textContent = connection === 'offline' ? 'Runtime に未接続' : stateLabels[presence];
 }
 
-function activityTitle(request, className) {
-  const title = node('span', className, request);
-  title.title = request;
-  return title;
+function activityRow(tag, className, title, status, statusClass) {
+  const row = node(tag, `activity ${className}`);
+  const heading = node('span', 'activity-title', title);
+  const line = node('span', `activity-status ${statusClass}`.trim());
+  line.append(node('span', 'activity-mark'), node('span', null, status));
+  row.append(heading, line);
+  return row;
+}
+function sessionRow(task, session, status, live) {
+  const link = session.link?.startsWith('https://app.t3.codes/threads/') ? session.link : null;
+  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
+  row.title = `#${task.id} ${task.request}`;
+  if (link) {
+    row.href = link;
+    row.target = '_blank';
+    row.rel = 'noopener noreferrer';
+    row.insertAdjacentHTML('beforeend', icons.open);
+    row.lastElementChild.classList.add('activity-open');
+    row.append(node('span', 'sr-only', '（T3 で開く）'));
+  }
+  return row;
 }
 function renderActivity() {
   const data = view?.data;
+  const loading = !!view && !data;
   const waits = data?.waits ?? [];
-  if (changed('waits', view?.id, waits)) {
-    elements['wait-count'].textContent = waits.length;
-    elements['wait-count'].classList.toggle('has-waits', waits.length > 0);
+  if (changed('waits', view?.id, loading, waits)) {
+    const count = elements['wait-count'];
+    count.textContent = waits.length;
+    count.hidden = !waits.length;
+    elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = waits.map((task) => {
-      const row = button(null, 'activity wait-select', () => {
+      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
+      row.type = 'button';
+      row.title = waitText(task.wait);
+      row.addEventListener('click', () => {
         openNavigation(false);
         openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
       });
-      const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', waitLabel(task.wait.reason)));
-      row.append(line, activityTitle(task.request, 'activity-subtitle'));
       return row;
     });
     elements['wait-list'].replaceChildren(...rows);
-    if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', '確認待ちはありません'));
+    if (loading) elements['wait-list'].append(...skeletonRows(1));
+    else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', '確認待ちはありません'));
   }
   const groups = new Map(view?.loadedSessions);
   for (const task of data?.sessionTasks ?? []) groups.set(task.id, task);
@@ -256,22 +405,32 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, [...groups.values()], active)) return;
-  const rows = [];
+  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  const live = [];
+  const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      const row = node('article', 'activity session-entry');
-      const status = active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
-      const line = node('span', 'activity-line');
-      line.append(badge(status), node('span', 'activity-subtitle', `#${task.id}`));
-      row.append(activityTitle(task.request, 'activity-title'), line);
-      const link = linkToRun(session);
-      if (link) row.append(link);
-      rows.push(row);
+      const state = session.state
+        ?? active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
+      if (state !== 'ended') live.push(sessionRow(task, session, stateLabels[state] ?? state, true));
+      else {
+        const result = { completed: '完了', cancelled: '中止' }[task.state] ?? '終了';
+        ended.push(sessionRow(task, session, result, false));
+      }
     }
   }
-  elements['session-list'].replaceChildren(...rows);
-  if (!rows.length) elements['session-list'].append(node('p', 'activity-empty', 'セッションはまだありません'));
+  const rows = [];
+  for (const [label, items] of [['進行中', live], ['終了', ended]]) {
+    if (!items.length) continue;
+    const heading = node('h3', 'activity-group');
+    heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
+    rows.push(heading, ...items);
+  }
+  const list = elements['session-list'];
+  list.setAttribute('aria-busy', loading);
+  list.replaceChildren(...rows);
+  if (loading) list.append(...skeletonRows(2));
+  else if (!rows.length) list.append(node('p', 'activity-empty', 'セッションはまだありません'));
 }
 
 function beginReply(task) {
@@ -711,16 +870,22 @@ elements.message.addEventListener('input', () => {
   else renderComposer();
 });
 document.addEventListener('click', (event) => {
-  if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
+  if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });
 document.addEventListener('keydown', (event) => {
+  // ⌥⇧1…⌥⇧9 switch to the pinned Bot in that position; event.code keeps it layout- and Option-key-independent.
+  const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
+  if (digit && !event.isComposing && !elements.detail.open) {
+    const bot = pinnedBots()[Number(digit[1]) - 1];
+    if (bot) {
+      event.preventDefault();
+      selectBot(bot.id);
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
-  if (menu) {
-    const bot = menu;
-    menu = null;
-    renderBots();
-    [...document.querySelectorAll('.pin-menu')].find((el) => el.dataset.bot === bot)?.focus();
-  } else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  if (menu) closeMenu();
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
 });
 
 function refresh() {

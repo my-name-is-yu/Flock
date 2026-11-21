@@ -169,6 +169,27 @@ Json taskSessions(const Json& task) {
     return sessions;
 }
 
+// One Bot-level state across its tasks: working outranks thinking, which outranks waiting.
+std::string nextPresence(std::string_view presence, std::string_view state) {
+    if (state == "running" || state == "cancelling") return "working";
+    if ((state == "deciding" || state == "sending") && presence != "working") return "thinking";
+    if (state == "waiting" && presence != "working" && presence != "thinking") return "waiting";
+    return std::string(presence);
+}
+
+std::string presence(Store& store, std::string_view bot) {
+    std::string result = "idle";
+    for (Id cursor = 0;;) {
+        const auto tasks = store.tasks(bot,cursor,taskBatch);
+        for (const auto& task : tasks) {
+            result = nextPresence(result,field(task,"state"));
+            if (result == "working") return result;
+        }
+        if (tasks.size() < taskBatch) return result;
+        cursor = tasks.back().at("id").get<Id>();
+    }
+}
+
 // Store exposes a task cursor rather than separate queries for waits or Sessions.
 // Scan bounded batches to keep older, still-open waits visible behind newer requests.
 Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
@@ -187,12 +208,8 @@ Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
             const auto id = task.at("id").get<Id>();
             const auto state = field(task,"state");
             if (overview) {
-                auto& presence = result["presence"];
-                if (state == "waiting") {
-                    result["waits"].push_back(currentWait(task));
-                    if (presence != "working" && presence != "thinking") presence = "waiting";
-                } else if (state == "running" || state == "cancelling") presence = "working";
-                else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
+                result["presence"] = nextPresence(result["presence"].get<std::string>(),state);
+                if (state == "waiting") result["waits"].push_back(currentWait(task));
                 if (state == "queued" && !task.at("blockedBy").is_null()) {
                     auto queued = taskSummary(task);
                     queued["blockedBy"] = taskSummary(task.at("blockedBy"));
@@ -231,6 +248,7 @@ Json botList(Store& store, const Json& bots) {
         if (id.empty()) continue;
         auto row = botSummary(bot);
         row["preview"] = preview(store,id);
+        row["presence"] = presence(store,id);
         result.push_back(std::move(row));
     }
     return result;
