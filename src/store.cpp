@@ -302,7 +302,7 @@ std::string taskIntent(const Json& task) {
 }
 
 Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
-                                      std::size_t availableBytes) const {
+                                      std::size_t availableBytes, std::string_view instruction) const {
     std::lock_guard lock(mutex);
     std::map<std::pair<Id,int>,Json> byMessage;
     std::size_t sourceBytes = 8192;
@@ -366,18 +366,30 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
 
     int deliveredCount = 20;
     std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes;
+    const auto rememberResume = [&](Id message, const std::string& request) {
+        if (!deliveredCount || !message || request.empty() || request == intent ||
+            instruction.find(request) != instruction.npos) return;
+        --deliveredCount;
+        const auto context = "Earlier resume request, subject to the current task intent, completion criteria, "
+            "and execution destination (" + field(task,"environmentId") + "):\n" + request;
+        remember({{"messageId",message},{"text",context}},deliveredBytes);
+    };
     const auto restart = task.find("restartContext");
     Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
+    if (parent && !task.at("lastRun").is_null())
+        rememberResume(task.at("sourceMessageId"),field(task,"request"));
     Id child = task.at("id");
     while (parent && availableBytes > 2) {
         auto row = query("SELECT json_extract(data,'$.restartContext.taskId'),"
-                         "coalesce(json_extract(data,'$.cancelledInstructions'),'[]') FROM tasks WHERE id=? AND id<?",
+                         "coalesce(json_extract(data,'$.cancelledInstructions'),'[]'),"
+                         "json_extract(data,'$.sourceMessageId'),json_extract(data,'$.request') FROM tasks WHERE id=? AND id<?",
                          {parent,child});
         if (!row.next()) throw Conflict("Invalid cancelled task reference");
         const auto cancelled = row.json(1);
         for (auto item = cancelled.rbegin(); item != cancelled.rend() && pendingBytes > 4; ++item)
             remember(*item,pendingBytes,4);
         delivered(parent,deliveredCount,deliveredBytes);
+        if (row.number(0)) rememberResume(row.number(2),row.string(3));
         child = parent;
         parent = row.number(0);
     }

@@ -28,17 +28,47 @@ struct InstructionBatch {
     Json instructions = Json::array(), superseded = Json::array();
 };
 
+bool matchesWorkRevision(const Json& task, const Json& item) {
+    return (!item.contains("intent") || item.at("intent") == taskIntent(task)) &&
+           (!item.contains("doneWhen") || item.at("doneWhen") == task.value("requestedDoneWhen",field(task,"doneWhen")));
+}
+
+std::string pendingText(const Json& task, const Json& item) {
+    const auto text = field(item,"text");
+    if (!item.contains("environmentId") || (!item.contains("intent") && !item.contains("doneWhen"))) return text;
+    const auto destination = task.value("pendingEnvironmentId",field(task,"environmentId"));
+    if (!matchesWorkRevision(task,item)) return "Use the current execution destination " + destination + ".";
+    if (item.at("environmentId") == destination) return text;
+    return "Apply the work directions in this earlier message. The current execution destination is " +
+           destination + " and supersedes any destination in the quote.\n" + text;
+}
+
 InstructionBatch pendingBatch(const Json& task, std::size_t byteLimit = instructionBatchBytes) {
     InstructionBatch batch;
     if (!hasPending(task)) return batch;
     const auto& pending = task["pendingInstructions"];
-    std::map<std::string,std::size_t> latestOverrideIndices;
+    std::set<std::string> newerKeys;
+    std::set<std::size_t> superseded;
+    bool newerDestination = false;
     std::set<std::size_t> selectedOverrides;
     for (std::size_t i = pending.size(); i > 0; --i) {
         const auto& item = pending[i-1];
-        const auto key = field(item,"replaceKey");
-        if (key.empty() || !latestOverrideIndices.emplace(key,i-1).second) continue;
-        const auto size = field(item,"text").size() + 4;
+        auto key = field(item,"replaceKey");
+        if (key.empty()) continue;
+        if (key == "environment") {
+            const bool laterMove = std::exchange(newerDestination,true);
+            if ((item.contains("intent") || item.contains("doneWhen")) && matchesWorkRevision(task,item))
+                key = item.contains("doneWhen") ? "criteria" : "intent";
+            else if (laterMove) {
+                superseded.insert(i-1);
+                continue;
+            }
+        }
+        if (!newerKeys.insert(key).second) {
+            superseded.insert(i-1);
+            continue;
+        }
+        const auto size = pendingText(task,item).size() + 4;
         if (size <= byteLimit) {
             selectedOverrides.insert(i-1);
             byteLimit -= size;
@@ -49,7 +79,7 @@ InstructionBatch pendingBatch(const Json& task, std::size_t byteLimit = instruct
         const auto& item = pending[i];
         if (const auto key = field(item,"replaceKey"); !key.empty()) {
             if (selectedOverrides.contains(i)) batch.instructions.push_back(item);
-            else if (latestOverrideIndices.at(key) != i) batch.superseded.push_back(item);
+            else if (superseded.contains(i)) batch.superseded.push_back(item);
         } else if (acceptsIndependentInstructions) {
             const auto size = field(item,"text").size() + 4;
             if (size <= byteLimit) {
@@ -65,7 +95,7 @@ constexpr std::string_view directionHeading = "\n\nUser instructions accepted fo
 constexpr std::string_view intentHeading = "\n\nTask intent:\n";
 constexpr std::string_view criteriaHeading = "\n\nCompletion criteria:\n";
 
-void includeWorkContext(std::string& instruction, const Json& earlier, const Json& pending,
+void includeWorkContext(std::string& instruction, const Json& task, const Json& earlier, const Json& pending,
                         std::string_view intent, std::string_view criteria) {
     bool hasIntent = instruction.find(intent) != instruction.npos;
     bool hasCriteria = instruction.find(criteria) != instruction.npos;
@@ -73,7 +103,7 @@ void includeWorkContext(std::string& instruction, const Json& earlier, const Jso
         instruction += directionHeading;
         for (const auto* batch : {&earlier,&pending}) {
             for (const auto& item : *batch) {
-                const auto text = field(item,"text");
+                const auto text = batch == &pending ? pendingText(task,item) : field(item,"text");
                 const auto key = field(item,"replaceKey");
                 if (key == "intent" || key == "criteria") {
                     hasIntent = hasIntent || text.find(intent) != text.npos;
@@ -887,21 +917,21 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             auto batch = pendingBatch(task,std::min(instructionBatchBytes,limit - std::min(limit,reserved)));
             supersedeInstructions(task,batch.superseded);
             pending = std::move(batch.instructions);
-            for (const auto& item : pending) reserved += item.at("text").get_ref<const std::string&>().size() + 2;
+            for (const auto& item : pending) reserved += pendingText(task,item).size() + 2;
             const auto available = limit - std::min(limit,reserved);
-            auto earlier = needsContext ? db.sessionInstructions(task,goal,pending,available) : Json::array();
+            auto earlier = needsContext ? db.sessionInstructions(task,goal,pending,available,instruction) : Json::array();
             std::string references;
             resultReferences = appendResultReferences(references,task,pending,earlier,available);
             std::size_t historyBytes = 0;
             for (const auto& item : earlier) historyBytes += item.at("text").get_ref<const std::string&>().size() + 2;
             if (historyBytes + references.size() > available) {
                 // Only reclaim space used by real reference labels and excerpts.
-                earlier = db.sessionInstructions(task,goal,pending,available - references.size());
-                includeWorkContext(instruction,earlier,pending,goal,criteria);
+                earlier = db.sessionInstructions(task,goal,pending,available - references.size(),instruction);
+                includeWorkContext(instruction,task,earlier,pending,goal,criteria);
                 references.clear();
                 resultReferences = appendResultReferences(references,task,pending,earlier,limit - instruction.size());
             } else {
-                includeWorkContext(instruction,earlier,pending,goal,criteria);
+                includeWorkContext(instruction,task,earlier,pending,goal,criteria);
             }
             instruction += references;
             instruction += actionTag;

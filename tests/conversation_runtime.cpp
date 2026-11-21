@@ -933,7 +933,7 @@ void restartRestoresCancelledTaskDirections() {
     f.restart();
 
     const auto anchor = cancellationMessage(next);
-    constexpr auto again = "Resume the measurement on クラウドMac";
+    constexpr auto again = "Resume the measurement on クラウドMac and keep the flamegraph";
     f.script(again,{{"kind","create_task"},{"resultMessageId",anchor},{"resume",true},{"environment","クラウドMac"}});
     f.receive("resume-again",again,anchor);
     const auto last = f.store->tasks("alpha").front().at("id").get<Id>();
@@ -964,7 +964,8 @@ void restartRestoresCancelledTaskDirections() {
     checkSession(last,"desktop",goal,criteria);
     const auto& moved = f.t3.sent.back().instruction;
     check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) &&
-          moved.find(trace) != moved.npos && moved.find(trace) == moved.rfind(trace) && f.task(last)["remaining"] == 1,
+          moved.find(trace) != moved.npos && moved.find(trace) == moved.rfind(trace) &&
+          moved.find("keep the flamegraph") != moved.npos && f.task(last)["remaining"] == 1,
           "the moved Session lost an applicable direction or spent extra allowance");
 }
 
