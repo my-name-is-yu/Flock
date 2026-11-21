@@ -6,6 +6,7 @@
 #include <array>
 #include <charconv>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -179,6 +180,16 @@ Bot Bots::get(std::string_view id) const {
         }
     }
     if (config.contains("avatar")) bot.avatar = config["avatar"];
+    const auto allowedBots = config.value("allowedBots",Json::array());
+    if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
+    std::set<std::string> allowedIds;
+    for (const auto& item : allowedBots) {
+        if (!item.is_string()) throw Conflict("allowedBots must contain only Bot IDs");
+        const auto& peerId = item.get_ref<const std::string&>();
+        if (!validId(peerId) || peerId == id || !allowedIds.insert(peerId).second)
+            throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
+        bot.allowedBots.push_back(peerId);
+    }
     const auto schedules = config.value("cron",Json::array());
     if (!schedules.is_array()) throw Conflict("cron must be an array");
     std::set<std::string> scheduleIds;
@@ -197,6 +208,25 @@ Bot Bots::get(std::string_view id) const {
 BotNotes Bots::notes(std::string_view id) const {
     const auto bot = path(id);
     return {readText(bot / "SOUL.md",8192,true),readText(bot / "MEMORY.md",8192,true)};
+}
+
+std::vector<PeerBot> Bots::peers(std::string_view id) const {
+    const auto tryGetConfiguredBot = [this](std::string_view botId) -> std::optional<Bot> {
+        try {
+            return get(botId);
+        } catch (const Conflict&) {
+            return std::nullopt;
+        } catch (const std::filesystem::filesystem_error&) {
+            return std::nullopt;
+        }
+    };
+    const auto sender = tryGetConfiguredBot(id);
+    if (!sender) return {};
+    std::vector<PeerBot> result;
+    for (const auto& peerId : sender->allowedBots) {
+        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake("")});
+    }
+    return result;
 }
 
 Json Bots::cards() const {

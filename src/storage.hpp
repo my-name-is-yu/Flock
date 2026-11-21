@@ -24,6 +24,11 @@ std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 
+struct PeerExchange {
+    std::string id, kind, phase, lastMessage;
+    Id sender = 0, recipient = 0;
+};
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
@@ -33,11 +38,16 @@ struct Store::Impl {
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
-    Json queueBlocker(const Json&, std::string_view environment) const;
     Json load(Id) const;
+    Json queueBlocker(Id) const;
+    Json taskDetails(Id, bool includeBlocker) const;
+    void restoreWaitAnchor(Json& task) const;
     void save(Json&);
-    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr, bool peerRequest = false);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
+    std::optional<PeerExchange> peerExchange(Id) const;
+    void peerMessage(const PeerExchange&, const Json&);
+    void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
     void migrateConversation();
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;

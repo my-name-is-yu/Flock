@@ -14,7 +14,6 @@ std::string field(const Json& object, std::string_view key) {
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;
-constexpr unsigned taskBatch = 100;
 
 void copyFields(Json& output, const Json& source, std::initializer_list<const char*> keys) {
     if (!source.is_object()) return;
@@ -161,6 +160,18 @@ Json eventView(const Json& event) {
                 details["run"] = std::move(run);
             }
         }
+    } else if (kind == "bot_message") {
+        copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind","text","replyTo"});
+        const auto evidence = data.find("evidence");
+        if (evidence != data.end() && evidence->is_array()) {
+            auto& references = details["evidence"] = Json::array();
+            for (const auto& reference : *evidence) {
+                auto run = runView(reference,field(reference,"environmentId"));
+                if (run.is_null()) continue;
+                copyFields(run,reference,{"itemId"});
+                references.push_back(std::move(run));
+            }
+        }
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
@@ -183,7 +194,7 @@ std::string preview(Store& store, std::string_view bot) {
         if ((kind == "report" || kind == "completed" || kind == "conversation_reply" ||
              (kind == "waiting" && field(data,"reason") == "user_question")) && !text.empty())
             return bounded(text,240);
-        if (request.empty() && (kind == "request" || kind == "conversation_message")) request = bounded(text,240);
+        if (request.empty() && (kind == "request" || kind == "conversation_message" || kind == "bot_message")) request = bounded(text,240);
     }
     return request;
 }
@@ -230,68 +241,35 @@ Json taskSessions(const Json& task) {
     return sessions;
 }
 
-// Store exposes a task cursor rather than separate queries for waits or Sessions.
-// Scan bounded batches to keep older, still-open waits visible behind newer requests.
-Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
-    Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
-    if (overview) {
-        result["waits"] = Json::array();
-        result["queued"] = Json::array();
-        result["activeSessions"] = Json::array();
-        result["presence"] = "idle";
-    }
-    auto& sessionTasks = result["sessionTasks"];
-    bool moreSessions = false;
-    for (;;) {
-        const auto tasks = store.tasks(bot,cursor,taskBatch);
-        for (const auto& task : tasks) {
-            const auto id = task.at("id").get<Id>();
-            const auto state = field(task,"state");
-            if (overview) {
-                auto& presence = result["presence"];
-                const auto display = displayState(task);
-                if (state == "waiting") {
-                    result["waits"].push_back(currentWait(task));
-                    if (presence == "idle" || presence == "queued") presence = "waiting";
-                }
-                if (display == "stopping") presence = display;
-                else if (presence != "stopping") {
-                    if (state == "running") presence = "working";
-                    else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
-                    else if (state == "queued" && presence == "idle") presence = "queued";
-                }
-                if (state == "queued" && !task.at("blockedBy").is_null()) {
-                    auto queued = taskSummary(task);
-                    const auto& blocker = task.at("blockedBy");
-                    queued["blockedBy"] = Json::object();
-                    if (field(blocker,"botId") == bot) {
-                        queued["blockedBy"] = taskSummary(blocker);
-                        copyFields(queued["blockedBy"],blocker,{"botId"});
-                    }
-                    result["queued"].push_back(std::move(queued));
-                }
-                const auto& active = task.at("activeRun");
-                if (!active.is_null()) {
-                    result["activeSessions"].push_back({{"taskId",id},{"threadId",field(active,"threadId")},
-                        {"runId",field(active,"runId")},{"environmentId",field(task,"environmentId")},
-                        {"state",display}});
-                }
+Json activity(Store& store, std::string_view bot) {
+    constexpr std::string_view priority[] = {"idle","queued","peer_waiting","waiting","thinking","working","stopping"};
+    std::size_t highest = 0;
+    Json result = {{"waits",Json::array()},{"queued",Json::array()},{"activeSessions",Json::array()}};
+    for (const auto& task : store.activeTasks(bot)) {
+        const auto state = field(task,"state");
+        const auto display = displayState(task);
+        const auto presence = display == "stopping" ? "stopping"
+            : state == "running" ? "working" : state == "deciding" || state == "sending" ? "thinking" : state;
+        for (std::size_t i = highest + 1; i < std::size(priority); ++i)
+            if (presence == priority[i]) highest = i;
+        if (state == "waiting") result["waits"].push_back(currentWait(task));
+        const auto& blocker = task.at("blockedBy");
+        if (state == "queued" && !blocker.is_null()) {
+            auto queued = taskSummary(task);
+            queued["blockedBy"] = Json::object();
+            if (field(blocker,"botId") == bot) {
+                queued["blockedBy"] = taskSummary(blocker);
+                copyFields(queued["blockedBy"],blocker,{"botId"});
             }
-            if (task.at("runs").empty()) continue;
-            if (sessionTasks.size() < sessionsSize) {
-                auto group = taskSummary(task);
-                group["sessions"] = taskSessions(task);
-                sessionTasks.push_back(std::move(group));
-                result["sessionsBefore"] = id;
-            } else {
-                moreSessions = true;
-                if (!overview) return result;
-            }
+            result["queued"].push_back(std::move(queued));
         }
-        if (tasks.size() < taskBatch) break;
-        cursor = tasks.back().at("id").get<Id>();
+        const auto& active = task.at("activeRun");
+        if (!active.is_null()) {
+            result["activeSessions"].push_back({{"taskId",task.at("id")},{"threadId",field(active,"threadId")},
+                {"runId",field(active,"runId")},{"environmentId",field(task,"environmentId")},{"state",display}});
+        }
     }
-    if (!moreSessions) result["sessionsBefore"] = 0;
+    result["presence"] = priority[highest];
     return result;
 }
 } // namespace
@@ -320,7 +298,19 @@ Json conversation(Store& store, std::string_view bot, Id before) {
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
-    return activity(store,bot,before,false);
+    const auto tasks = store.sessionTasks(bot,before,sessionsSize + 1);
+    Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
+    auto& page = result["sessionTasks"];
+    for (const auto& task : tasks) {
+        if (page.size() == sessionsSize) {
+            result["sessionsBefore"] = page.back()["id"];
+            break;
+        }
+        auto group = taskSummary(task);
+        group["sessions"] = taskSessions(task);
+        page.push_back(std::move(group));
+    }
+    return result;
 }
 
 Json taskDetail(const Json& task, const Json& latestResult) {
@@ -360,7 +350,8 @@ Json taskDetail(const Json& task, const Json& latestResult) {
 Json botView(Store& store, const Json& bot) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0);
-    result.update(activity(store,id,0,true));
+    result.update(activity(store,id));
+    result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
     auto& clarifications = result["clarifications"] = Json::array();
     for (const auto& clarification : store.clarifications(id)) {

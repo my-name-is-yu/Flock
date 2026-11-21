@@ -1,11 +1,14 @@
 #include "flock/core.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <utility>
 #include <unistd.h>
@@ -27,6 +30,17 @@ Decision reply() {
     Json answers = {{"branch","main"}};
     return {"answer_session_question",{{"requestId","branch-question"},{"answers",answers}},"Use the branch specified by the user"};
 }
+Decision botRequest(std::string bot, const char* kind, const char* message) {
+    auto args = Json{{"botId",std::move(bot)},{"kind",kind},{"text",message}};
+    if (std::string_view(kind) == "work") args["doneWhen"] = Evidence;
+    return {"send_bot_message",std::move(args),"Ask the specialist"};
+}
+Decision botReply(const char* kind, const char* message) {
+    return {"reply_to_bot",{{"kind",kind},{"text",message}},"Respond to the current exchange"};
+}
+bool hasTool(const ModelInput& input, std::string_view tool) {
+    return std::find(input.tools.begin(),input.tools.end(),tool) != input.tools.end();
+}
 
 struct Script : Model {
     std::function<Decision(const ModelInput&)> script;
@@ -42,7 +56,15 @@ struct SimulatedT3 : T3 {
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
+    std::vector<ReadRequest> readRequests;
+    std::function<void()> beforeRead;
+    std::vector<RunRef> interruptedRuns;
+    std::function<void()> onPreflight;
     std::string authGeneration(const std::string&,const Json&) override { return generation; }
+    std::optional<Delivery> preflight(const Command&) override {
+        if (onPreflight) onPreflight();
+        return std::nullopt;
+    }
     Delivery send(const Command& cmd) override {
         seen.push_back(cmd);
         check(cmd.authGeneration == generation,"OAuth generation missing from committed send");
@@ -82,11 +104,17 @@ struct SimulatedT3 : T3 {
     }
     void interrupt(const std::string&,const Json&,const RunRef& ref) override {
         check(runs.contains(ref.runId),"interrupted unrelated Run");
+        interruptedRuns.push_back(ref);
         ++interrupts;
     }
     Excerpt read(const ReadRequest& req) override {
-        check(runs.contains(req.runId),"read unrelated Run");
+        const bool reported = std::any_of(runs.begin(),runs.end(),[&](const auto& entry) {
+            return entry.second.resultRunId == req.runId;
+        });
+        check(!req.runId.empty() && (runs.contains(req.runId) || reported),"read unrelated Run");
+        readRequests.push_back(req);
         ++reads;
+        if (beforeRead) beforeRead();
         return {reads == 1 ? "commit wanted, updates enabled" : "RSS 25 MiB",
                 req.threadId,req.runId,"item-"+std::to_string(reads),"next",100,reads==1};
     }
@@ -118,6 +146,7 @@ struct Fixture {
     Seconds now = unixTime();
     std::string read = "off";
     std::map<std::string,BotNotes> notes{{"alpha",{"Initial SOUL","ALPHA_ONLY"}},{"beta",{"Second SOUL","BETA_ONLY"}}};
+    std::map<std::string,std::vector<PeerBot>,std::less<>> peers;
 
     Fixture() {
         char temp[] = "/tmp/flock-acceptance-XXXXXX";
@@ -134,9 +163,17 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(directory/"state.db");
+        RuntimeOptions options{[&] { return now; },read};
+        options.peers = [&](std::string_view source) {
+            const auto found = peers.find(source);
+            return found == peers.end() ? std::vector<PeerBot>{} : found->second;
+        };
         runtime = std::make_unique<Runtime>(*store,model,t3,[&](std::string_view id) {
             return notes.at(std::string(id));
-        },RuntimeOptions{[&] { return now; },read});
+        },std::move(options));
+    }
+    void allowBeta() {
+        peers["alpha"] = {{"Verifier",{"beta","","e","p",{{"runTimeoutSeconds",10},{"model","beta-model"}}}}};
     }
     Id submit(std::string request = "inspect", std::string bot = "alpha", std::string project = "p") {
         return store->submit({bot,request,"e",project,{{"runTimeoutSeconds",10}}});
@@ -165,6 +202,12 @@ struct Fixture {
         return static_cast<int>(std::count_if(log.begin(),log.end(),[&](const Json& j) {
             return j["kind"] == Json(kind);
         }));
+    }
+    std::vector<Json> botMessages(std::string_view bot) {
+        std::vector<Json> messages;
+        for (const auto& item : store->conversation(bot))
+            if (item["kind"] == "bot_message") messages.push_back(item["data"]);
+        return messages;
     }
 };
 
@@ -442,6 +485,481 @@ void evidenceResume() {
           "history read did not resume its budget");
 }
 
+void peerWorkAndRestart() {
+    Fixture f;
+    f.allowBeta();
+    const auto root = f.submit("Decide whether the PR can ship");
+    const auto unrelated = f.submit("Ordinary request queued before the handoff");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        const auto taskId = input.task["id"].get<Id>();
+        if (taskId == unrelated) return ask();
+        if (taskId == root) {
+            if (event["kind"] == "intake") {
+                check(hasTool(input,"send_bot_message"),"configured peer was unavailable");
+                return botRequest("beta","work","Verify the PR before release");
+            }
+            if (event["kind"] == "bot_question") {
+                check(event["fromBotId"] == "beta" && event["text"] == "Which branch?",
+                      "peer question arrived without its sender or text");
+                if (!event.contains("userAnswer")) return ask();
+                check(event["userAnswer"] == "main","the human answer did not return to the original Bot question");
+                return botReply("answer","Use main");
+            }
+            check(event["kind"] == "bot_result" && event["text"] == "Verified the PR on main" &&
+                  input.task["doneWhen"] == Evidence,"peer result did not resume the original work contract");
+            if (input.evidence.empty()) {
+                check(hasTool(input,"read_bot_evidence"),"peer result evidence could not be inspected");
+                return {"read_bot_evidence",{{"messageId",event["messageId"]}},"Verify the specialist's evidence"};
+            }
+            check(input.evidence.back()["text"] == "commit wanted, updates enabled",
+                  "owned peer Session evidence was not returned");
+            return complete();
+        }
+        check(input.task["botId"] == "beta" && input.notes.soul == "Second SOUL" && input.notes.memory == "BETA_ONLY",
+              "work did not run as the recipient Bot");
+        if (event["kind"] == "bot_request") {
+            check(event["fromBotId"] == "alpha" && event["text"] == "Verify the PR before release" &&
+                  input.task["request"] == "Verify the PR before release" &&
+                  input.history.dump().find("ALPHA_ONLY") == std::string::npos,
+                  "peer intake lost its sender or inherited the sender's memory");
+            return botReply("question","Which branch?");
+        }
+        if (event["kind"] == "bot_answer") {
+            check(event["text"] == "Use main","clarification did not resume the recipient's task");
+            return work();
+        }
+        check(event["kind"] == "result","recipient did not receive its T3 result");
+        return botReply("result","Verified the PR on main");
+    };
+
+    f.reach(root,"peer_waiting");
+    check(f.task(root)["wait"].is_null() && f.task(root)["doneWhen"] == Evidence,
+          "waiting for a peer became a human wait or lost the completion contract");
+    f.restart();
+    const auto recipientTasks = f.store->tasks("beta");
+    check(recipientTasks.size() == 1,"handoff was not persisted exactly once");
+    const auto recipient = recipientTasks.front()["id"].get<Id>();
+    check(f.task(recipient)["blockedBy"].is_null(),"recipient was shown as blocked despite having the execution slot");
+    const auto humanWait = f.wait(root,"user_question");
+    check(f.task(recipient)["state"] == "peer_waiting" && f.task(unrelated)["state"] == "queued" && f.t3.launches == 0,
+          "clarification started unrelated work or launched a Session prematurely");
+    f.restart();
+    f.store->operate(root,humanWait,"answer",{{"text","main"}});
+    f.rejects(root,humanWait,"answer",{{"text","dev"}});
+    f.reach(recipient,"running");
+    check(f.t3.launches == 1 && f.t3.seen.back().projectId == "p" && f.t3.seen.back().config.at("model") == "beta-model" &&
+          f.task(unrelated)["state"] == "queued" && f.task(root)["state"] == "peer_waiting",
+          "recipient did not inherit the project execution slot using its own configuration");
+
+    f.restart();
+    f.t3.finish("run-1");
+    f.reach(recipient,"completed");
+    f.restart();
+    for (int step = 0; step < 8 && f.t3.reads == 0; ++step) f.runtime->tick();
+    check(f.t3.reads == 1 && f.logs(root,"completed") == 0,"reading evidence did not leave a result to evaluate");
+    const auto& read = f.t3.readRequests.back();
+    check(read.environmentId == "e" && read.threadId == "thread-1" && read.runId == "run-1-result" &&
+          read.config.at("model") == "beta-model","peer evidence did not read the recipient's result with its own settings");
+    f.restart();
+    f.reach(root,"completed");
+    f.wait(unrelated,"user_question");
+    check(f.store->tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 &&
+          f.task(root)["additionalUsed"] == 0 && f.logs(root,"user_answer") == 1 && f.logs(root,"completed") == 1,
+          "restart duplicated the recipient, Session, evidence read, user answer or completion");
+    const struct Message {
+        const char* type;
+        const char* from;
+        const char* to;
+        const char* text;
+    } expected[] = {
+        {"request","alpha","beta","Verify the PR before release"},
+        {"question","beta","alpha","Which branch?"},
+        {"answer","alpha","beta","Use main"},
+        {"result","beta","alpha","Verified the PR on main"},
+    };
+    for (const auto bot : {"alpha","beta"}) {
+        const auto messages = f.botMessages(bot);
+        check(messages.size() == std::size(expected),"conversation lost or duplicated a message after restart");
+        const auto exchange = messages.front().at("exchangeId").get<std::string>();
+        check(!exchange.empty(),"conversation lost its exchange identity");
+        std::set<std::string> ids;
+        for (std::size_t i = 0; i < messages.size(); ++i) {
+            const auto& message = messages[i];
+            const auto& want = expected[i];
+            const auto id = message.at("messageId").get<std::string>();
+            check(message.at("messageType") == want.type && message.at("fromBotId") == want.from &&
+                  message.at("toBotId") == want.to && message.at("text") == want.text,
+                  "conversation showed the wrong message or participants");
+            check(!id.empty() && ids.insert(id).second && message.at("exchangeId") == exchange,
+                  "conversation lost the identity of a reply or exchange");
+            if (i > 0)
+                check(message.at("replyTo") == messages[i - 1].at("messageId"),"conversation broke the reply chain");
+        }
+        check(messages.back().at("status") == "completed","conversation lost the successful outcome");
+    }
+}
+
+void checkPeerClarificationAfterRun(std::string_view readMode) {
+    Fixture f;
+    f.read = readMode;
+    f.restart();
+    f.allowBeta();
+    const auto root = f.submit("Verify the release");
+    bool requestedClarificationRead = false;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        if (input.task["id"] == root) {
+            if (event["kind"] == "intake") return botRequest("beta","work","Verify the release");
+            if (event["kind"] == "bot_question") {
+                check(event["text"] == "Which branch should I retest?","wrong question reached Release");
+                if (!event.contains("userAnswer")) return ask();
+                check(event["userAnswer"] == "main","wrong human answer reached Release");
+                return botReply("answer","Retest main");
+            }
+            check(event["kind"] == "bot_result" && event["text"] == "Retested main" &&
+                  event["references"][0]["runId"] == "run-2-result","Release lost the final evidence");
+            if (input.evidence.empty())
+                return {"read_bot_evidence",{{"messageId",event["messageId"]}},"Inspect the retest report"};
+            check(input.evidence.back()["runId"] == "run-2-result","Release read a different Run's evidence");
+            return complete();
+        }
+        if (event["kind"] == "bot_request") return work();
+        if (event["kind"] == "bot_answer") {
+            const auto& report = event.at("sessionResult");
+            check(event["text"] == "Retest main" && report["run"]["runId"] == "run-1" &&
+                  report["resultRunId"] == "run-1-result","Verifier lost the clarification or its session context");
+            check(hasTool(input,"session_read") == (readMode == "on_demand"),"history read ignored the selected mode");
+            if (readMode == "on_demand" && input.evidence.empty()) {
+                requestedClarificationRead = true;
+                return {"session_read",{{"threadId",report["run"]["threadId"]},{"runId",report["resultRunId"]}},
+                        "Inspect the earlier verification"};
+            }
+            if (readMode == "on_demand")
+                check(requestedClarificationRead,"on-demand reading exposed evidence without a request");
+            if (readMode != "off")
+                check(!input.evidence.empty() && input.evidence.back()["runId"] ==
+                      (readMode == "prefill" ? "run-1" : "run-1-result"),"Verifier lost the read excerpt");
+            check(hasTool(input,"follow_up"),"Verifier lost the settled Session");
+            return {"follow_up",{{"instruction","Retest main"}},"Continue the existing verification Session"};
+        }
+        check(event["kind"] == "result","unexpected event in Verifier");
+        if (event["run"]["runId"] == "run-1") return botReply("question","Which branch should I retest?");
+        return botReply("result","Retested main");
+    };
+
+    f.reach(root,"peer_waiting");
+    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    const auto initialRun = f.task(recipient)["activeRun"];
+    f.t3.finish("run-1");
+    const auto waitId = f.wait(root,"user_question");
+    f.store->operate(root,waitId,"answer",{{"text","main"}});
+    const auto answerWasDelivered = [&] {
+        const auto messages = f.botMessages("beta");
+        return !messages.empty() && messages.back().at("messageType") == "answer" &&
+               messages.back().at("text") == "Retest main";
+    };
+    for (int step = 0; step < 12 && !answerWasDelivered(); ++step) f.runtime->tick();
+    check(answerWasDelivered(),"recipient conversation did not show the clarification before restart");
+    f.restart();
+    const auto readsBeforeAnswer = f.t3.reads;
+    f.reach(recipient,"running");
+    if (readMode == "off")
+        check(f.t3.reads == readsBeforeAnswer,"the Bot answer read T3 despite session history being off");
+    else
+        check(f.t3.reads == readsBeforeAnswer + 1 && f.t3.readRequests.back().runId ==
+              (readMode == "prefill" ? "run-1" : "run-1-result"),
+              "the Bot answer did not reopen the earlier verification record");
+
+    const auto continuation = f.t3.seen.back();
+    check(f.t3.launches == 1 && f.t3.follows == 1 && continuation.target.threadId == initialRun["threadId"].get<std::string>() &&
+          continuation.target.runId == initialRun["runId"].get<std::string>() &&
+          continuation.instruction.find("Retest main") != std::string::npos && f.task(recipient)["additionalUsed"] == 1,
+          "the retest did not continue the same settled T3 Session");
+    f.t3.finish("run-2");
+    f.reach(root,"completed");
+    check(f.logs(recipient,"report") == 2 && f.logs(root,"completed") == 1 && f.botMessages("alpha").size() == 4,
+          "the settled verification result was not delivered exactly once");
+}
+
+void peerClarificationAfterRun() {
+    for (const auto mode : {"on_demand","prefill","off"}) checkPeerClarificationAfterRun(mode);
+}
+
+void peerConsultationAndPermission() {
+    Fixture f;
+    f.allowBeta();
+    const auto denied = f.submit("Consult a Bot outside the configured grants");
+    int deniedAttempts = 0;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        check(hasTool(input,"send_bot_message"),"permit validation was not tested with an available send tool");
+        ++deniedAttempts;
+        return botRequest("gamma","consult","What is the release policy?");
+    };
+    f.wait(denied,"model_failure");
+    check(deniedAttempts == 3 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
+          "an unlisted recipient received a message or the available send tool was not exercised");
+    f.store->operate(denied,0,"cancel");
+    f.reach(denied,"cancelled");
+
+    f.peers.at("alpha").front().intake.projectId = "second";
+    const auto busy = f.submit("Run a verification in the Verifier's project","beta","second");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == busy) return work();
+        if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
+        if (input.event["kind"] == "bot_request") {
+            check(!hasTool(input,"delegate") && !hasTool(input,"send_bot_message"),
+                  "consultation inherited T3 work permissions or a reverse grant");
+            return botReply("result","Require a verified PR");
+        }
+        check(input.event["kind"] == "bot_result" && input.event["text"] == "Require a verified PR",
+              "consultation did not deliver the response in context");
+        return complete();
+    };
+    f.reach(busy,"running");
+    const auto consultation = f.submit("Ask the Verifier about our release policy");
+    f.reach(consultation,"completed");
+    const auto messages = f.botMessages("alpha");
+    check(f.t3.seen.size() == 1 && f.t3.interrupts == 0 && f.task(busy)["state"] == "running" &&
+          f.task(consultation)["additionalUsed"] == 0 && f.store->tasks("beta").size() == 2,
+          "consultation used T3, consumed work allowance or affected the Verifier's active Run");
+    check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
+          messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
+          "consultation did not record the corresponding request and response");
+}
+
+void unsuccessfulConsultationsDoNotComplete() {
+    for (const bool cancel : {false,true}) {
+        Fixture f;
+        f.allowBeta();
+        const auto id = f.submit("Consult before deciding whether to release");
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            if (input.event["kind"] == "intake") return botRequest("beta","consult","Can we release?");
+            if (input.event["kind"] == "bot_request") return botReply("failed","Required evidence unavailable");
+            check(input.event["kind"] == "bot_result" && input.event["status"] == (cancel ? "cancelled" : "failed") &&
+                  !hasTool(input,"complete") && input.task["doneWhen"] == "",
+                  "unsuccessful initial consultation unlocked completion");
+            return ask();
+        };
+        f.reach(id,"peer_waiting");
+        if (cancel) f.store->operate(f.store->tasks("beta").front().at("id"),0,"cancel");
+        f.wait(id,"user_question");
+        check(f.logs(id,"completed") == 0 && f.t3.launches == 0,"unsuccessful consultation completed or launched work");
+    }
+}
+
+void concurrentPeerHandoff() {
+    Fixture f;
+    f.allowBeta();
+    const auto source = f.submit("Confirm the release");
+    const auto next = f.submit("Next in the project queue");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == next) return ask();
+        if (input.task["id"] == source) {
+            if (input.event["kind"] == "intake") return botRequest("beta","work","Verify the release");
+            check(input.event["kind"] == "bot_result" && input.event["status"] == "completed",
+                  "concurrent handoff lost the recipient result");
+            return complete();
+        }
+        if (input.event["kind"] == "bot_request") return work();
+        check(input.event["kind"] == "result","recipient missed its Session result");
+        return botReply("result","Verified the release");
+    };
+    const auto until = [&](const auto& ready) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+        while (!ready() && std::chrono::steady_clock::now() < deadline) {
+            f.runtime->tickConcurrent();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        check(ready(),"concurrent handoff did not advance before its deadline");
+    };
+    until([&] {
+        const auto recipients = f.store->tasks("beta");
+        return recipients.size() == 1 && recipients.front()["state"] == "running";
+    });
+    const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
+    check(f.task(source)["state"] == "peer_waiting" && f.task(next)["blockedBy"]["id"] == recipient,
+          "the queued Task did not report the active peer as the owner");
+    f.runtime.reset();
+    f.t3.finish("run-1");
+    f.restart();
+    until([&] { return f.task(next)["state"] == "waiting"; });
+    f.runtime.reset();
+    check(f.task(source)["state"] == "completed" && f.task(recipient)["state"] == "completed" &&
+          f.task(next)["wait"]["reason"] == "user_question" && f.t3.launches == 1 &&
+          f.t3.follows == 0 && f.botMessages("alpha").size() == 2,
+          "the concurrent handoff skipped or duplicated the source, recipient, or next Task");
+}
+
+void consultationRestoresOwnEvidence() {
+    for (const auto mode : {"on_demand","prefill","off","prefill-unavailable"}) {
+        Fixture f;
+        const bool unavailable = std::string_view(mode) == "prefill-unavailable";
+        f.read = unavailable ? "prefill" : mode;
+        if (unavailable) f.t3.beforeRead = [&] {
+            if (f.t3.reads == 2) throw std::runtime_error("Fixture T3 history unavailable after the consultation");
+        };
+        f.allowBeta();
+        f.restart();
+        const auto source = f.submit("Verify with a Session and consult");
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            if (input.event["kind"] == "intake") return work();
+            if (input.event["kind"] == "result") return botRequest("beta","consult","Confirm policy");
+            if (input.event["kind"] == "bot_request") return botReply("result","Policy confirmed");
+            check(input.event["kind"] == "bot_result" && input.event["sessionResult"]["resultRunId"] == "run-1-result",
+                  "the consultation result omitted the source Bot's settled report");
+            check(hasTool(input,"session_read") == (f.read == "on_demand") && !hasTool(input,"read_bot_evidence"),
+                  "the source Bot's history ignored its selected read mode");
+            if (f.read == "on_demand" && input.evidence.empty())
+                return {"session_read",{{"threadId","thread-1"},{"runId","run-1-result"}},"Read original evidence"};
+            check(input.evidence.size() == (f.read == "off" || unavailable ? 0 : 1),"own Session evidence did not match its selected mode");
+            return complete();
+        };
+        f.reach(source,"running");
+        f.t3.finish("run-1");
+        f.reach(source,"completed");
+        const auto expected = f.read == "off" ? 0 : f.read == "prefill" ? 2 : 1;
+        check(f.t3.reads == expected && f.t3.launches == 1,"the consultation changed read or Run counts");
+    }
+}
+
+void freshResultStillRequiresPrefill() {
+    Fixture f;
+    f.read = "prefill";
+    f.restart();
+    f.t3.beforeRead = [] { throw std::runtime_error("Fixture T3 history unavailable"); };
+    const auto task = f.submit("Verify fresh evidence");
+    f.model.script = [&](const ModelInput& input) {
+        check(input.event["kind"] == "intake","fresh result reached the model without required prefill");
+        return work();
+    };
+    f.reach(task,"running");
+    f.t3.finish("run-1");
+    f.wait(task,"model_failure");
+    check(f.model.calls == 1 && f.logs(task,"completed") == 0,"failed prefill completed or judged a fresh result");
+}
+
+void peerCancelWithLateSessionResult() {
+    Fixture f;
+    f.allowBeta();
+    const auto root = f.submit("Ask the specialist to verify the PR");
+    const auto unrelated = f.submit("Next ordinary request");
+    int lateDecisions = 0;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == unrelated) return ask();
+        if (input.event["kind"] == "bot_request") return work();
+        if (input.event["kind"] == "intake") return botRequest("beta","work","Verify the PR");
+        ++lateDecisions;
+        return botReply("result","Late verification");
+    };
+    f.reach(root,"peer_waiting");
+    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    f.store->operate(root,0,"cancel");
+    for (int step = 0; step < 8 && f.t3.interrupts == 0; ++step) f.runtime->tick();
+    check(f.t3.interrupts == 1 && f.t3.interruptedRuns.back().threadId == "thread-1" &&
+          f.t3.interruptedRuns.back().runId == "run-1" && f.task(unrelated)["state"] == "queued",
+          "cancel interrupted the wrong Run or released its slot before settlement");
+    f.restart();
+    f.t3.finish("run-1");
+    f.reach(recipient,"cancelled");
+    f.reach(root,"cancelled");
+    f.wait(unrelated,"user_question");
+    const auto messages = f.botMessages("alpha");
+    check(lateDecisions == 0 && f.t3.launches == 1 && f.logs(root,"completed") == 0 &&
+          messages.size() == 2 && messages.back().at("status") == "cancelled",
+          "a late worker result reopened or replaced the cancelled exchange");
+}
+
+void peerProjectCycle() {
+    Fixture f;
+    f.allowBeta();
+    f.peers.at("alpha").front().intake.projectId = "second";
+    f.peers["beta"] = {{"Release",{"alpha","","e","p"}}};
+    const auto alpha = f.submit("Verify in the second project");
+    const auto beta = f.submit("Verify in the first project","beta","second");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event["kind"] == "bot_request") return work();
+        if (input.event["kind"] == "result") {
+            check(input.event["status"] == "failed","recipient did not receive the failed Session outcome");
+            return botReply("failed","Could not verify the second project");
+        }
+        if (input.event["kind"] == "bot_result") {
+            check(input.event["status"] == "failed" && input.event["text"] == "Could not verify the second project",
+                  "sender lost the recipient's explicit failure");
+            return ask();
+        }
+        if (input.task["id"] == alpha) return botRequest("beta","work","Verify in the second project");
+        return botRequest("alpha","work","Verify in the first project");
+    };
+    f.wait(beta,"model_failure");
+    const auto messagesBeforeCancel = f.botMessages("beta");
+    check(f.task(beta)["doneWhen"] == "" && f.store->tasks("alpha").size() == 1 &&
+          messagesBeforeCancel.size() == 1 && messagesBeforeCancel.front().at("fromBotId") == "alpha",
+          "cross-project cycle was not rejected before creating work or saving a completion contract");
+    f.store->operate(beta,0,"cancel");
+    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    check(f.t3.launches == 1 && f.t3.seen.back().projectId == "second",
+          "the original work request did not progress on its recipient project after the cycle was prevented");
+    f.t3.finish("run-1","failed");
+    f.wait(alpha,"user_question");
+    const auto messages = f.botMessages("alpha");
+    check(messages.size() == 2 && messages.back()["status"] == "failed" && f.logs(alpha,"completed") == 0,
+          "the original exchange hid the failed outcome or completed the sender's work");
+}
+
+void peerCancelWhileQueued() {
+    Fixture f;
+    f.allowBeta();
+    f.peers.at("alpha").front().intake.projectId = "second";
+    const auto running = f.submit("Existing verification","beta","second");
+    const auto source = f.submit("Request separate verification in the occupied project");
+    bool receivedCancellation = false;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == running) return work();
+        check(input.task["id"] == source,"queued work started before its project was available");
+        if (input.event["kind"] == "intake") return botRequest("beta","work","Verify the second project");
+        receivedCancellation = input.event["kind"] == "bot_result" && input.event["status"] == "cancelled";
+        return ask();
+    };
+    f.reach(running,"running");
+    f.reach(source,"peer_waiting");
+    const auto queued = f.store->tasks("beta").front()["id"].get<Id>();
+    check(f.task(queued)["state"] == "queued" && f.task(queued)["blockedBy"]["id"] == running,
+          "test did not queue the delegated task behind an active Run");
+    f.store->operate(queued,0,"cancel");
+    f.reach(queued,"cancelled");
+    f.wait(source,"user_question");
+    check(receivedCancellation && f.task(running)["state"] == "running" && f.t3.launches == 1 && f.t3.interrupts == 0,
+          "queued cancellation stranded the sender or affected the unrelated active Run");
+}
+
+void peerCancelDuringPreflight() {
+    Fixture f;
+    f.allowBeta();
+    f.peers.at("alpha").front().intake.projectId = "second";
+    const auto source = f.submit("Delegate verification to the second project");
+    f.model.script = [](const ModelInput& input) {
+        if (input.event["kind"] == "bot_request") return work();
+        return botRequest("beta","work","Verify the second project");
+    };
+    f.reach(source,"peer_waiting");
+    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    bool cancelledDuringPreflight = false;
+    f.t3.onPreflight = [&] {
+        Store cli(f.directory/"state.db");
+        cli.operate(source,0,"cancel");
+        cancelledDuringPreflight = true;
+    };
+    for (int step = 0; step < 8 && !cancelledDuringPreflight; ++step) f.runtime->tick();
+    f.t3.onPreflight = {};
+    check(cancelledDuringPreflight && f.t3.seen.empty(),"a peer launch started after its sender was cancelled");
+    f.reach(source,"cancelled");
+    f.reach(recipient,"cancelled");
+}
+
 void inferenceInvalidatedByCancel() {
     Fixture f;
     const auto id = f.submit();
@@ -477,6 +995,14 @@ int main() {
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
+            {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
+            {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
+            {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
+            {"Fresh result prefill failure",freshResultStillRequiresPrefill},
+            {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
+            {"Queued Bot handoff cancellation",peerCancelWhileQueued},
+            {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {
         try { run(); std::cout << "PASS " << name << '\n'; }
         catch (const std::exception& e) { std::cerr << "FAIL " << name << ": " << e.what() << '\n'; return 1; }

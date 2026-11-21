@@ -10,4 +10,8 @@ if(BUILD_TESTING)
   add_executable(flock_t3_tests tests.cpp)
   target_link_libraries(flock_t3_tests PRIVATE flock_t3)
   add_test(NAME flock_t3 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py" $<TARGET_FILE:flock_t3_tests>)
+  add_executable(flock_t3_peer_recovery_tests peer_recovery.cpp)
+  target_link_libraries(flock_t3_peer_recovery_tests PRIVATE flock_t3)
+  add_test(NAME flock_t3_peer_recovery COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
+    $<TARGET_FILE:flock_t3_peer_recovery_tests> peer-recovery)
 endif()
