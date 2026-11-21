@@ -613,6 +613,44 @@ void followUpsKeepThePriorResult() {
           "a proposal count was treated as a selected option");
 }
 
+void comparisonsDoNotSelectOneOfSeveralOptions() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto taskId = task(writer,"Compare the alternatives");
+    const std::string report = "1. Keep the current flow\n2. Compare both options";
+    execution.finish(store,taskId,report);
+    const auto resultId = store.latestTaskResult(taskId).at("id").get<Id>();
+    const auto tasksBefore = store.tasks("alpha");
+    const auto launches = execution.t3.launches;
+    constexpr auto comparison = "Compare option 1 and option 2.";
+    constexpr auto mutation = "Create a task from option 1 and option 2.";
+    bool answered = false;
+    execution.model.conversation = [&](const ModelInput& input) {
+        if (input.tools.front() == "answer_conversation_result") {
+            check(input.event.at("text") == comparison && input.event.at("source").at("messageId") == resultId &&
+                  input.event.at("source").at("text") == report,
+                  "the comparison answer did not receive the whole referenced result");
+            answered = true;
+            return Decision{"answer_conversation_result",{{"text","The options differ in their validation steps."}},{}};
+        }
+        const auto& text = input.event.at("text").get_ref<const std::string&>();
+        if (text == comparison) return route("answer_result",{{"resultMessageId",resultId}});
+        return route("create_task",{{"resultMessageId",resultId}});
+    };
+    const auto compareId = receive(writer,"compare-options",comparison,resultId);
+    execution.runtime.routeConversation();
+    const auto response = reply(store,compareId);
+    check(response.at("route") == "respond" && response.at("source").at("messageId") == resultId && answered &&
+          store.tasks("alpha") == tasksBefore && execution.t3.launches == launches,
+          "a comparison across options did not answer without selecting or dispatching work");
+    const auto mutationId = receive(writer,"mutate-options",mutation,resultId);
+    execution.runtime.routeConversation();
+    check(reply(store,mutationId).at("route") == "clarify" && store.tasks("alpha") == tasksBefore &&
+          execution.t3.launches == launches,
+          "a mutating request selected between multiple referenced options");
+}
+
 void longResultOptionsStayAvailable() {
     for (const auto paddingSize : {3000, 3500}) {
         Fixture fixture;
@@ -862,6 +900,7 @@ int main() {
         longResultOptionsStayAvailable();
         explicitFactsReplaceResultClarificationAtomically();
         followUpsKeepThePriorResult();
+        comparisonsDoNotSelectOneOfSeveralOptions();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
         legacyHistory();

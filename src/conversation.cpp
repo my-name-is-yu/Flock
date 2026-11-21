@@ -440,7 +440,8 @@ JOIN tasks t ON t.id=json_extract(candidate.value,'$.taskId') WHERE r.message_id
     const auto readClarification = [&](Id reply) -> std::optional<Reply> {
         auto row = query(R"SQL(
 SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
-       json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation')
+       json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation'),
+       COALESCE(json_extract(r.data,'$.segments[0].revisionDraft'),'null')
 FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
 WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
 )SQL",{reply,bot,id});
@@ -452,6 +453,11 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         pending.operation = row.string(5);
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
+        const auto draft = row.json(6);
+        if (draft.is_object())
+            pending.revisionDraft = RevisionDraft{
+                Target{integer(draft,"taskId"),integer(draft,"generation"),integer(draft,"revisionId"),
+                       integer(draft,"waitId")},field(draft,"intent"),field(draft,"doneWhen")};
         if (const auto source = data.find("source"); source != data.end()) {
             pending.result = readResult(integer(*source,"messageId"),*source);
             if (pending.result) pending.originalText = row.string(4);
@@ -771,6 +777,12 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
             candidateIds.insert(question->candidates.begin(),question->candidates.end());
             clarificationOperation = question->operation;
             segment["candidates"] = question->candidates;
+            if (question->revisionDraft) {
+                const auto& draft = *question->revisionDraft;
+                segment["revisionDraft"] = {{"taskId",draft.target.taskId},
+                    {"generation",draft.target.generation},{"revisionId",draft.target.revision},
+                    {"waitId",draft.target.waitId},{"intent",draft.intent},{"doneWhen",draft.doneWhen}};
+            }
         }
         segments.push_back(std::move(segment));
     }

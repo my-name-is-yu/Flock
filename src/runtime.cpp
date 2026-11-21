@@ -207,7 +207,9 @@ AND (ready.state<>'queued' OR json_extract(ready.data,'$.environmentReleased') O
             const auto state = field(task,"state");
             const auto reason = field(task["wait"],"reason");
             const bool replanning = task.value("replanning",false);
-            if (observed.kind == Observation::Kind::Finished && observed.settled) {
+            const bool settledRunReleasesStopBarrier =
+                observed.kind == Observation::Kind::Finished && observed.settled;
+            if (settledRunReleasesStopBarrier) {
                 db.clearWait(task,"run_finished");
                 db.unlockQuestion(task,"run_finished");
                 // An ended Run cannot accept an outstanding reply. Preserve the
@@ -386,8 +388,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             });
             return;
         }
-        // The exact assigned Run is observed again after restart or a lost interrupt response.
-        // Only an observation that includes all delegated work can release the stop barrier.
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
         if (observed.kind == Observation::Kind::Finished) {
