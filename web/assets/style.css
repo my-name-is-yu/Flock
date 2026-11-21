@@ -1,10 +1,6 @@
-/* Tokens, base styles and shared primitives. Area styles live in sidebar.css, conversation.css,
-   composer.css and dialog.css. Colors are written once as light-dark(light, dark); the scheme follows
-   the system unless theme.js sets data-theme on <html>. */
 :root {
   color-scheme: light dark;
 
-  /* Surfaces */
   --canvas: light-dark(#ffffff, #121212);
   --sidebar: light-dark(#f6f6f4, #171717);
   --raised: light-dark(#f2f2f0, #1c1c1c);
@@ -14,12 +10,10 @@
   --selected: light-dark(#e7e7e3, #272727);
   --hairline: light-dark(#e3e3df, #2a2a2a);
 
-  /* Text */
   --text: light-dark(#1f1e24, #ececec);
   --text-2: light-dark(#5f5d66, #a6a6a6);
   --text-3: light-dark(#8d8b93, #727272);
 
-  /* Accent and states */
   --accent: light-dark(#5a45a3, #b7a4f2);
   --accent-fill: light-dark(#5a45a3, #7a63c9);
   --accent-fill-hover: light-dark(#463482, #8b76d6);
@@ -38,7 +32,6 @@
   --shadow-sm: 0 4px 16px var(--shadow-color);
   --shadow-lg: 0 20px 56px var(--shadow-color);
 
-  /* Type, radii and spacing scales */
   --font-sans: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", system-ui, sans-serif;
   --text-xs: .72rem;
   --text-sm: .8rem;
@@ -85,7 +78,6 @@ h1, h2, h3, p { margin: 0; }
 svg { display: block; }
 ::selection { background: var(--accent-soft-hover); }
 
-/* App shell: one viewport-tall row; only the sidebar list and the conversation scroll. */
 .workspace {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -96,7 +88,6 @@ svg { display: block; }
 }
 .main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
 
-/* Shared primitives */
 .avatar { display: grid; place-items: center; overflow: visible; width: 2.25rem; height: 2.25rem; flex: none; background: none; }
 .avatar > svg, .avatar > canvas { width: 100%; height: 100%; }
 .icon-button { background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm); width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center; font-size: 1.25rem; flex: none; }

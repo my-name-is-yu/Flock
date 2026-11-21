@@ -1,4 +1,3 @@
-/* Detail dialog: Bot settings and wait operations. */
 dialog { width: min(35rem, calc(100% - 1.8rem)); max-height: min(90vh, 45rem); margin: auto; color: var(--text); border: 0; border-radius: var(--radius-xl); padding: 0; background: var(--overlay); box-shadow: var(--shadow-lg); }
 dialog::backdrop { background: var(--backdrop); }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) 1.2rem var(--space-2); }

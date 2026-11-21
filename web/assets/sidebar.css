@@ -1,4 +1,3 @@
-/* Sidebar: brand, Bot list and pins, waits, sessions and the footer. */
 .sidebar { background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .brand { height: var(--header-height); padding: 0 1.45rem; display: flex; align-items: center; gap: .65rem; flex: none; font-size: var(--text-xl); font-weight: 700; letter-spacing: -.04em; }
 .brand img { flex: none; }
@@ -40,7 +39,6 @@
 .wait-dot, .status-dot { width: .42rem; height: .42rem; border-radius: 50%; flex: none; background: var(--text-3); }
 .wait-dot { background: var(--warning); }
 
-/* Footer: connection status only while loading or offline, then the theme switch. */
 .sidebar-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3) var(--space-3) 1.45rem; min-height: 3rem; }
 .connection { display: flex; align-items: center; gap: .49rem; min-width: 0; font-size: var(--text-xs); color: var(--text-2); }
 .connection[data-state="ready"] .status-dot { display: none; }
