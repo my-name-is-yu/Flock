@@ -11,6 +11,19 @@
 .header-inner > * { pointer-events: auto; }
 .header-menu { position: absolute; left: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
 .settings-button { position: absolute; right: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
+.header-text-button {
+  position: absolute; top: .75rem; display: flex; align-items: center; gap: .4rem;
+  min-height: 2.15rem; border: 0; border-radius: var(--radius-md); padding: .35rem .6rem;
+  background: transparent; color: var(--text-2); font-size: var(--text-sm); font-weight: 600;
+}
+.header-text-button:hover { color: var(--text); background: var(--hover); }
+.header-text-button svg { width: 1.18rem; height: 1.18rem; }
+.peer-picker { right: calc(clamp(.75rem, 2vw, 1.25rem) + 2.3rem); }
+.peer-back { left: clamp(.75rem, 2vw, 1.25rem); }
+.peer-heading { display: grid; justify-items: center; max-width: min(26rem, 48vw); }
+.peer-faces { display: flex; justify-content: center; gap: .08rem; }
+.peer-face { width: 3.2rem; height: 3.2rem; }
+.peer-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile { display: grid; justify-items: center; background: none; border: 0; padding: 0; border-radius: var(--radius-lg); max-width: min(18rem, 60vw); }
 .profile-face { position: relative; display: block; }
 .avatar-profile { width: 3.2rem; height: 3.2rem; border-radius: var(--radius-lg); }
@@ -135,6 +148,10 @@
   .timeline { --avatar-size: 1.5rem; --avatar-gap: .45rem; }
   .bubble { max-width: calc(100% - 2.2rem); }
   .msg.user .bubble { max-width: 88%; }
+  .header-text-button { justify-content: center; width: 2.15rem; padding: 0; }
+  .header-text-button span { display: none; }
+  .peer-back { left: 3rem; }
+  .peer-face { width: 2.85rem; height: 2.85rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   .typing span { animation: none; opacity: .55; }
@@ -148,11 +165,21 @@
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .system-note .msg-time { opacity: 1; }
-.peer-exchange { min-width: 0; max-width: 42rem; margin-top: .8rem; }
+.peer-exchange-entry { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0 .35rem; min-width: 0; margin-top: .8rem; }
+.peer-exchange { min-width: 0; max-width: min(100%, 42rem); }
 .peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--text-2); cursor: pointer; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
 .peer-exchange > summary:hover { color: var(--text); }
 .peer-exchange-task { margin-inline-start: .6rem; font-size: var(--text-xs); }
+.peer-exchange-open { padding: .35rem .25rem; line-height: 1.5; }
 .peer-message-list { list-style: none; display: grid; gap: .8rem; margin: .35rem 0 0 .55rem; border-inline-start: 1px solid var(--hairline); padding: .1rem 0 .1rem .8rem; }
 .peer-message { display: grid; gap: .22rem; min-width: 0; }
 .peer-message > .link { justify-self: start; }
 .event-meta { display: flex; flex-wrap: wrap; gap: .4rem; color: var(--text-2); font-size: var(--text-xs); }
+
+.peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
+.peer-dm-message .msg-name { overflow-wrap: anywhere; }
+.peer-dm-message .msg-time { opacity: 1; }
+.peer-dm-sources { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; padding-inline-start: var(--avatar-col); }
+.peer-dm-sources .text-button, .peer-dm-sources .link { font-size: var(--text-xs); padding: 0; }
+.peer-dm-message.user .peer-dm-sources { padding-inline: 0 .2rem; }
+.peer-read-only { padding: .7rem 1rem 1.1rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }

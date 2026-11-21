@@ -6,6 +6,7 @@ struct WebCallbacks {
     // Array of objects with id, name, soul, cron, and optional avatar.
     std::function<Json()> bots;
     std::function<Intake(std::string_view botId, std::string_view request)> intake;
+    std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
 };
 class WebServer {
 public:

@@ -31,6 +31,10 @@ class DemoModel final : public Model {
             return {"complete",{{"report",in.event.value("report","")}},
                 "The demo Session reported that it completed the requested work."};
         }
+        if (event == "bot_request" && in.event.value("initiator","") == "user") {
+            return {"reply_to_bot",{{"kind","result"},{"text","I received your message. This is a simulated Bot reply."}},
+                "The fixed demo confirms receipt in the Bot conversation."};
+        }
         if (std::ranges::find(in.tools,"delegate") != in.tools.end()) {
             std::string answer;
             for (const auto& row : in.history)

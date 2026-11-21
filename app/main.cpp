@@ -186,6 +186,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, co
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
             [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+            options.peers,
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

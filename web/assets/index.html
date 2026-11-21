@@ -64,6 +64,15 @@
             <span id="profile-status" class="sr-only"></span>
           </button>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
+          <h1 id="peer-heading" class="peer-heading" tabindex="-1" hidden></h1>
+          <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
+            <span>Back to Bot</span>
+          </button>
+          <button id="peer-picker" class="header-text-button peer-picker" type="button" aria-label="Bot DMs" aria-haspopup="dialog" title="Bot DMs" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
+            <span>Bot DMs</span>
+          </button>
           <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
           </button>
@@ -75,6 +84,7 @@
           <div id="timeline" class="timeline"></div>
         </div>
       </section>
+      <p id="peer-read-only" class="peer-read-only" role="status" hidden></p>
       <div class="composer-container" id="composer-container" hidden>
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>

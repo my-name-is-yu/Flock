@@ -656,6 +656,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         if (event["kind"] == "bot_question") return {"reply_to_bot","ask_user"};
         if (peer && peer->recipient == task["id"]) {
             if (event["kind"] == "question") return {"answer_session_question","ask_user"};
+            if (!peer->contextBot.empty()) return {"reply_to_bot"};
             if (peer->kind == "consult") return {"reply_to_bot","ask_user"};
             if (event["kind"] == "result" || event.contains("sessionResult")) {
                 std::vector<std::string> tools{"delegate","follow_up","reply_to_bot","ask_user"};
@@ -917,19 +918,6 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         return message;
     }
 
-    void peerEvent(Json& task, Json message, std::string_view kind) {
-        db.consumeEvent(task);
-        task.erase("feedback");
-        if (message.contains("evidence")) {
-            message["references"] = std::move(message["evidence"]);
-            message.erase("evidence");
-        }
-        message["kind"] = kind;
-        const auto key = "bot/" + field(message,"messageId");
-        db.event(task,key,std::move(message));
-        if (task["state"] != "queued") task["state"] = "deciding";
-    }
-
     void recordDecision(const Json& task, const Json& event, const Decision& decision, std::string_view action) {
         db.journal(task["id"],"decision",{{"actionId",action},{"tool",decision.tool},{"args",decision.args},
             {"reason",decision.reason},{"eventId",event["id"]},{"evidence",event["evidence"]},{"usage",decision.usage},
@@ -965,11 +953,12 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         peer.intake.scheduledAt = 0;
         const auto id = db.submit(peer.intake,0,nullptr,true);
         auto recipient = db.load(id);
-        const PeerExchange exchange{action,kind,"working","",sender["id"],id};
-        db.exec("INSERT INTO peer_exchanges VALUES(?,?,'working',?,?,?)",{action,kind,action,sender["id"],id});
+        const PeerExchange exchange{action,kind,"working","",sender["id"],id,{}};
+        db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task)"
+                " VALUES(?,?,'working',?,?,?)",{action,kind,action,sender["id"],id});
         auto message = peerMessage(exchange,sender,recipient,"request",peer.intake.request,action);
         db.peerMessage(exchange,message);
-        peerEvent(recipient,std::move(message),"bot_request");
+        db.peerEvent(recipient,std::move(message),"bot_request");
         db.save(recipient);
         db.consumeEvent(sender);
         sender.erase("feedback");
@@ -999,9 +988,11 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
 
     void finishPeer(const PeerExchange& exchange, const Json& recipient, std::string_view status, std::string_view text,
                     const std::string& action) {
-        auto sender = db.load(exchange.sender);
+        const bool human = !exchange.contextBot.empty();
+        auto sender = human ? Json{{"botId",exchange.contextBot}} : db.load(exchange.sender);
         const auto type = status == "completed" ? std::string_view{"result"} : status;
         auto message = peerMessage(exchange,recipient,sender,type,text,action);
+        if (human) message["recipient"] = "user";
         message["status"] = status;
         if (status != "cancelled") {
             const auto ref = resultReference(recipient);
@@ -1009,9 +1000,9 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         }
         db.exec("UPDATE peer_exchanges SET phase='closed',last_message=? WHERE id=?",{action,exchange.id});
         db.peerMessage(exchange,message);
-        if (!terminal(sender) && sender["state"] != "cancelling") {
+        if (!human && !terminal(sender) && sender["state"] != "cancelling") {
             db.clearWait(sender,"bot_result");
-            peerEvent(sender,std::move(message),"bot_result");
+            db.peerEvent(sender,std::move(message),"bot_result");
             db.save(sender);
         }
     }
@@ -1025,14 +1016,17 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         const bool receiving = peer->recipient == task["id"] && peer->phase == "working";
         if (!answering && !(receiving && (type == "question" || type == "result" || type == "failed")))
             throw Conflict("This reply does not match the current Bot exchange");
-        const auto otherId = answering ? peer->recipient : peer->sender;
-        auto other = db.load(otherId);
-        if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
+        const bool human = !peer->contextBot.empty();
+        Json other;
+        if (!human) {
+            other = db.load(answering ? peer->recipient : peer->sender);
+            if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
+        }
         db.consumeEvent(task);
         task.erase("feedback");
         recordDecision(task,event,decision,action);
-        if (type == "result" || type == "failed") {
-            const auto status = type == "result" ? "completed" : "failed";
+        if (human || type == "result" || type == "failed") {
+            const auto status = type == "result" ? "completed" : type;
             task["state"] = "completed";
             task["peerOutcome"] = status;
             finishPeer(*peer,task,status,body,action);
@@ -1043,7 +1037,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                     {answering ? "working" : "question",action,peer->id});
             auto message = peerMessage(*peer,task,other,type,body,action);
             db.peerMessage(*peer,message);
-            peerEvent(other,std::move(message),answering ? "bot_answer" : "bot_question");
+            db.peerEvent(other,std::move(message),answering ? "bot_answer" : "bot_question");
             db.save(other);
             task["state"] = "peer_waiting";
         }
@@ -1201,7 +1195,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             const auto observed = observe(task);
             if (ingest(task,observed) || observed.kind != Observation::Kind::Question) return;
         }
-        Json event, history = Json::array();
+        Json event, history = Json::array(), pairHistory = Json::array();
         std::optional<PeerExchange> peer;
         {
             std::lock_guard lock(db.mutex);
@@ -1209,6 +1203,16 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
             if (task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>() && db.completionHeld(task)) return;
             peer = db.peerExchange(task["id"]);
+            if (peer && !peer->contextBot.empty()) {
+                const auto before = event.at("pairHistoryBefore").get<Id>();
+                event.erase("pairHistoryBefore");
+                const auto messages = db.peerConversation(peer->contextBot,field(task,"botId"),before,8);
+                for (const auto& entry : messages) {
+                    auto message = entry.at("data");
+                    message["text"] = bounded(field(message,"text"),1500);
+                    pairHistory.push_back(std::move(message));
+                }
+            }
             if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
                 auto report = settledSessionReport(task);
                 if (!report.is_null()) event["sessionResult"] = std::move(report);
@@ -1259,6 +1263,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (!choices.empty()) summary["peers"] = std::move(choices);
             if (peer) summary["peer"] = {{"exchangeId",peer->id},{"requestKind",peer->kind},
                 {"role",peer->sender == task["id"] ? "sender" : "recipient"}};
+            if (peer && !peer->contextBot.empty()) summary["pairHistory"] = std::move(pairHistory);
             const auto evidence = event["evidence"];
             event.erase("evidence");
             event.erase("consumed");

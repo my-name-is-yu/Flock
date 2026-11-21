@@ -139,6 +139,14 @@ public:
     Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
+    // The same chronological page from either side of a Bot pair, with one row per message.
+    Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
+    std::vector<std::string> peerPartners(std::string_view bot) const;
+    std::optional<Json> peerReceipt(std::string_view bot, std::string_view peer,
+                                    std::string_view clientMessageId, std::string_view text) const;
+    // The caller resolves target using the contextual Bot's directional peer permissions.
+    Json receivePeer(std::string_view contextBot, const Intake& target,
+                     std::string_view clientMessageId, std::string_view text);
     const std::filesystem::path& path() const;
 
 private:
