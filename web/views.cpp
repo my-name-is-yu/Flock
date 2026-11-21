@@ -132,6 +132,19 @@ Json eventView(const Json& event) {
     else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId"});
     else if (kind == "completed") copyFields(details,data,{"text","reason","doneWhen"});
+    else if (kind == "bot_message") {
+        copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind","text","replyTo"});
+        const auto evidence = data.find("evidence");
+        if (evidence != data.end() && evidence->is_array()) {
+            auto& references = details["evidence"] = Json::array();
+            for (const auto& reference : *evidence) {
+                auto run = runView(reference,field(reference,"environmentId"));
+                if (run.is_null()) continue;
+                copyFields(run,reference,{"itemId"});
+                references.push_back(std::move(run));
+            }
+        }
+    }
     else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
@@ -150,7 +163,7 @@ std::string preview(Store& store, std::string_view bot) {
         if ((kind == "report" || kind == "completed" ||
              (kind == "waiting" && field(data,"reason") == "user_question")) && !text.empty())
             return bounded(text,240);
-        if (request.empty() && kind == "request") request = bounded(text,240);
+        if (request.empty() && (kind == "request" || kind == "bot_message")) request = bounded(text,240);
     }
     return request;
 }
@@ -214,6 +227,7 @@ Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
                     if (presence != "working" && presence != "thinking") presence = "waiting";
                 } else if (state == "running" || state == "cancelling") presence = "working";
                 else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
+                else if (state == "peer_waiting" && presence == "idle") presence = "peer_waiting";
                 if (state == "queued" && !task.at("blockedBy").is_null()) {
                     auto queued = taskSummary(task);
                     queued["blockedBy"] = taskSummary(task.at("blockedBy"));

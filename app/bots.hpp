@@ -24,6 +24,7 @@ struct Bot {
     std::string id, name, environmentId, projectId;
     Json settings = Json::object(), avatar;
     std::vector<Schedule> schedules;
+    std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;
 };
 
@@ -33,6 +34,7 @@ public:
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
     BotNotes notes(std::string_view id) const;
+    std::vector<PeerBot> peers(std::string_view id) const;
     Json cards() const;
 private:
     std::filesystem::path directory_;

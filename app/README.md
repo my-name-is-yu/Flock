@@ -25,6 +25,7 @@ Example `bots/release/config.json`
   "model": "MODEL_SLUG_FROM_FLOCK_MODEL_MODELS",
   "environmentId": "CANONICAL_T3_ENVIRONMENT_ID",
   "projectId": "CANONICAL_T3_PROJECT_ID",
+  "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
   "session": {
     "runtimeMode": "approval-required"
@@ -43,6 +44,13 @@ Example `bots/release/config.json`
 Use the exact environment and project IDs from T3. The optional `session`
 object accepts `model`, `providerInstanceId`, `runtimeMode`, and
 `workspaceStrategy`. Omitted Session settings use the T3 project's defaults.
+Add the IDs of Bots that this Bot may contact to `allowedBots`. It defaults
+to an empty list. For the example above, set up `bots/verifier/` with its own
+configuration and role. Release may send Verifier a question or request work,
+and Verifier can reply within that request. Set `allowedBots` on Verifier
+separately if it should also initiate new requests to Release. When a request
+needs a Session, the receiving Bot uses its own configured route and settings.
+
 Omit `cron` or set it to an empty array for a manual-only Bot. Cron uses five
 numeric fields with wildcards, lists, ranges, and steps. In the weekday field,
 both 0 and 7 mean Sunday. Schedules use the configured IANA timezone and

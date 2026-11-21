@@ -23,6 +23,7 @@ ctest --test-dir build --output-on-failure
   "model": "gpt-6.2-sol",
   "environmentId": "<T3 の環境 ID>",
   "projectId": "<T3 のプロジェクト ID>",
+  "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
   "session": {
     "runtimeMode": "approval-required"
@@ -39,6 +40,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 同じディレクトリの `SOUL.md` に役割と判断基準、`MEMORY.md` にタスクをまたぐ前提を書きます。Session のモデルとプロバイダを指定する場合は、`session.model` と `session.providerInstanceId` を設定します。作業場所の指定には `session.workspaceStrategy` を使います。
+
+`allowedBots` には依頼できる Bot のディレクトリ名を指定します。この例では、`bots/verifier/` に Verifier を設定すると Release から依頼できます。Verifier は同じやり取りに質問や結果を返せます。Verifier から Release に新しく依頼する場合は、Verifier 側の設定にも `release` を追加します。
 
 ## 実モデルと T3 に接続する
 

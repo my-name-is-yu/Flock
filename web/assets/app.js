@@ -17,7 +17,10 @@ const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
   queued: '受付済み', deciding: '判定中', sending: '送信中', running: '作業中', waiting: '確認待ち',
   cancelling: '中止処理中', completed: '完了', cancelled: '中止', ended: '実行終了',
-  idle: '待機中', thinking: '判断中', working: 'セッション作業中',
+  idle: '待機中', thinking: '判断中', working: 'セッション作業中', peer_waiting: 'Bot の返事待ち',
+};
+const peerMessageLabels = {
+  request: '依頼', question: '質問', answer: '回答', result: '結果', cancelled: '中止', failed: '失敗',
 };
 const waitLabels = {
   user_question: ['Bot からの質問', 'Bot が回答を待っています。'],
@@ -206,12 +209,13 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
+  const avatarState = presence === 'peer_waiting' ? 'waiting' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: presence });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
-  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: presence });
+  } else if (elements['profile-status'].dataset.state !== presence) profileAvatar.update({ state: avatarState });
   elements['profile-name'].textContent = bot.name;
   elements.profile.setAttribute('aria-label', `${bot.name} の設定を開く`);
   elements['profile-status'].dataset.state = presence;
@@ -292,19 +296,22 @@ function detailText(label, value) {
   row.append(node('strong', null, label), document.createTextNode(value));
   return row;
 }
+function eventTime(event) {
+  const timestamp = new Date(event.time * 1000);
+  const time = node('time', null, clock.format(timestamp));
+  time.dateTime = timestamp.toISOString();
+  return time;
+}
 function eventCard(event, waits, closed, queued) {
   const data = event.data;
   const outbound = event.kind === 'user_answer' || (event.kind === 'request' && data.source !== 'cron');
   const row = node('article', `event${outbound ? ' outbound' : ''}`);
   const card = node('div', 'event-card');
   const metadata = node('div', 'event-meta');
-  const timestamp = new Date(event.time * 1000);
-  const time = node('time', null, clock.format(timestamp));
-  time.dateTime = timestamp.toISOString();
   const labels = { request: data.source === 'cron' ? '定期依頼' : 'あなた', user_answer: 'あなたの回答',
     report: 'セッション報告', completed: '完了報告', cancelled: 'タスクを中止' };
   const label = event.kind === 'waiting' ? waitLabel(data.reason) : labels[event.kind];
-  metadata.append(node('strong', null, label), node('span', null, `#${event.taskId}`), time);
+  metadata.append(node('strong', null, label), node('span', null, `#${event.taskId}`), eventTime(event));
   row.append(metadata, card);
   if (event.kind === 'waiting') {
     card.classList.add('question-card');
@@ -345,13 +352,45 @@ function eventCard(event, waits, closed, queued) {
   return row;
 }
 
+function peerConversation(messages, activeBot, names) {
+  const first = messages[0];
+  const { fromBotId, toBotId } = first.data;
+  const name = (id) => names.get(id) ?? id;
+  const otherBot = name(fromBotId === activeBot ? toBotId : fromBotId);
+  const group = node('details', 'peer-exchange');
+  group.dataset.firstMessage = first.id;
+  const summary = node('summary');
+  summary.append(node('span', null, `${otherBot} とのやり取り（${messages.length}件）`),
+    node('span', 'peer-exchange-task', `#${first.taskId}`));
+  const list = node('ol', 'peer-message-list');
+  list.setAttribute('role', 'list');
+  for (const message of messages) {
+    const { fromBotId: from, toBotId: to, messageType, requestKind, text, evidence } = message.data;
+    const item = node('li', 'peer-message');
+    const metadata = node('div', 'event-meta');
+    const label = messageType === 'request' && requestKind === 'consult'
+      ? '相談' : peerMessageLabels[messageType] ?? 'メッセージ';
+    metadata.append(node('strong', null, `${name(from)} から ${name(to)} へ`),
+      node('span', null, label), eventTime(message));
+    item.append(metadata, node('p', 'event-text', text));
+    for (const reference of evidence ?? []) {
+      const link = linkToRun(reference, 'T3 で根拠を見る');
+      if (link) item.append(link);
+    }
+    list.append(item);
+  }
+  group.append(summary, list);
+  return group;
+}
+
 function renderTimeline(scroll = 'auto') {
   const older = elements.older;
   const data = view?.data;
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !view?.olderBefore;
   older.disabled = !!view?.loadingOlder;
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded)) return;
+  const names = new Map(bots.map((bot) => [bot.id, bot.name]));
+  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded, [...names])) return;
   const scroller = elements.conversation;
   const previousHeight = scroller.scrollHeight;
   const previousTop = scroller.scrollTop;
@@ -359,17 +398,35 @@ function renderTimeline(scroll = 'auto') {
   const waits = new Map((data?.waits ?? []).map((task) => [task.wait.id, task]));
   const queued = new Map((data?.queued ?? []).map((task) => [task.id, task]));
   const closed = new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution]));
+  const opened = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')]
+    .map((group) => group.dataset.firstMessage));
+  const focused = elements.timeline.contains(document.activeElement)
+    ? document.activeElement.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage : null;
+  let focusTarget = null;
   const fragment = document.createDocumentFragment();
+  let peerMessages = [];
+  const appendPeerMessages = () => {
+    if (!peerMessages.length) return;
+    const group = peerConversation(peerMessages, view.id, names);
+    if (peerMessages.some((message) => opened.has(String(message.id)))) group.open = true;
+    if (peerMessages.some((message) => String(message.id) === focused)) focusTarget = group.firstElementChild;
+    fragment.append(group);
+    peerMessages = [];
+  };
   let day = '';
   for (const event of events) {
     if (event.kind === 'wait_closed') continue;
     const eventDay = dayFormat.format(event.time * 1000);
+    if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId)
+      appendPeerMessages();
     if (eventDay !== day) {
       fragment.append(node('p', 'day', eventDay));
       day = eventDay;
     }
-    fragment.append(eventCard(event, waits, closed, queued));
+    if (event.kind === 'bot_message') peerMessages.push(event);
+    else fragment.append(eventCard(event, waits, closed, queued));
   }
+  appendPeerMessages();
   if (!fragment.childElementCount) {
     const empty = node('div', 'empty-state');
     if (data?.bot) empty.append(avatar(data.bot));
@@ -379,6 +436,7 @@ function renderTimeline(scroll = 'auto') {
     fragment.append(empty);
   }
   elements.timeline.replaceChildren(fragment);
+  focusTarget?.focus({ preventScroll: true });
   if (scroll === 'older') scroller.scrollTop = previousTop + scroller.scrollHeight - previousHeight;
   else if (scroll === 'bottom' || atBottom) scroller.scrollTop = scroller.scrollHeight;
   else scroller.scrollTop = previousTop;

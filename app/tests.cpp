@@ -223,6 +223,36 @@ void notesAndRoutingOnRestart() {
     rejects<Conflict>([&] { bots.get("../first"); },"path traversal accepted as Bot ID");
 }
 
+void directionalPeerConfiguration() {
+    Sandbox temp;
+    const Bots bots(temp.path);
+    auto release = botConfig();
+    release["allowedBots"] = Json::array({"verifier","missing"});
+    createBot(temp.path / "release",release,"Own releases","Release-only memory");
+    auto verifier = botConfig("verification-model");
+    verifier["name"] = "Verifier";
+    verifier["environmentId"] = "verification-environment";
+    verifier["projectId"] = "verification-project";
+    verifier["session"]["runtimeMode"] = "approval-required";
+    createBot(temp.path / "verifier",verifier,"Verify changes","Verifier-only memory");
+
+    const auto peers = bots.peers("release");
+    check(peers.size() == 1 && peers[0].name == "Verifier" && peers[0].intake.botId == "verifier",
+        "allowed peers must resolve to configured destinations");
+    const auto& intake = peers[0].intake;
+    check(intake.environmentId == "verification-environment" && intake.projectId == "verification-project" &&
+        intake.config["model"] == "verification-model" && intake.config["session"]["runtimeMode"] == "approval-required",
+        "receiver must use its own route and settings");
+    check(bots.peers("verifier").empty(),"grant must be directional and default to empty");
+
+    release["allowedBots"] = Json::array();
+    write(temp.path / "release" / "config.json",release.dump());
+    check(bots.peers("release").empty(),"resolver must observe changes to grants");
+    release["allowedBots"] = Json::array({"../verifier"});
+    write(temp.path / "release" / "config.json",release.dump());
+    rejects<Conflict>([&] { bots.get("release"); },"invalid peer ID accepted");
+}
+
 void responseContract() {
     ModelInput input{
         {{"doneWhen","An existing requirement"}},
@@ -246,6 +276,22 @@ void responseContract() {
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
         Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+
+    input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
+    const auto peerRequest = responseRequest(input);
+    const auto& peerTools = peerRequest["tools"][0]["tools"];
+    check(peerTools[0]["parameters"]["properties"]["kind"]["enum"] == Json::array({"consult","work"}) &&
+        peerTools[0]["parameters"]["properties"].contains("doneWhen") &&
+        peerTools[0]["parameters"]["required"] == Json::array({"reason","botId","kind","text"}),
+        "first peer work may set a criterion while consultation only needs a question");
+    check(peerTools[1]["parameters"]["properties"]["kind"]["enum"] == Json::array({"question","answer","result","failed"}) &&
+        peerTools[2]["parameters"]["properties"]["messageId"]["type"] == "string",
+        "peer reply and evidence tools must use the runtime contract");
+    input.task["doneWhen"] = "Saved work acceptance";
+    const auto nextPeerRequest = responseRequest(input);
+    check(!nextPeerRequest["tools"][0]["tools"][0]["parameters"]["properties"].contains("doneWhen"),
+        "later peer work must keep the saved criterion");
 
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
@@ -293,6 +339,7 @@ int main() {
         cronSyntaxAndTimeZones();
         cronIntakeAndRestart();
         notesAndRoutingOnRestart();
+        directionalPeerConfiguration();
         responseContract();
         acceptanceRunner();
     } catch (const std::exception& error) {

@@ -149,6 +149,61 @@ bool hasEvent(const Json& events, std::string_view kind, std::string_view text) 
     return false;
 }
 
+void peerHistory(const std::filesystem::path& path) {
+    struct PeerModel final : Model {
+        Decision decide(const ModelInput& input) override {
+            if (input.event["kind"] == "intake") {
+                return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
+                    "Triage owns the criteria"};
+            }
+            if (input.event["kind"] == "bot_request") {
+                return {"reply_to_bot",{{"kind","result"},{"text","再現条件を確認してください"}},
+                    "The requested criteria are already known"};
+            }
+            check(input.event["kind"] == "bot_result","unexpected peer history fixture event");
+            return {"complete",{{"report","判定基準を確認しました"}},"Triage answered the request"};
+        }
+    } model;
+
+    Store store(path);
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = [](std::string_view sender) -> std::vector<PeerBot> {
+        if (sender != "release") return {};
+        return {{"Triage",{"triage","","local-env","release"}}};
+    };
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const auto task = browser.request("release","判定基準の確認");
+    tick(runtime,2);
+    const auto waiting = browser.get("/api/view?bot=release");
+    check(waiting["waits"].empty() && waiting["presence"] == "peer_waiting",
+          "waiting on a peer was presented as a user action");
+    tick(runtime,8);
+    check(store.task(task)["state"] == "completed" && t3.launches == 0,"consultation did not finish without T3");
+
+    for (int i = 0; i < 36; ++i) store.submit({"release","Newer request " + std::to_string(i),"local-env","release"});
+    const auto newest = browser.get("/api/view?bot=release");
+    check(newest["olderBefore"].get<Id>() > 0,"missing older peer history cursor");
+    const auto older = browser.get("/api/conversation?bot=release&before=" + std::to_string(newest["olderBefore"].get<Id>()));
+    const auto recipient = browser.get("/api/view?bot=triage");
+    const auto messages = [](const Json& page) {
+        Json messages = Json::array();
+        for (const auto& event : page["events"])
+            if (event["kind"] == "bot_message") messages.push_back(event["data"]);
+        return messages;
+    };
+    const auto exchange = messages(older);
+    check(exchange.size() == 2 && exchange == messages(recipient),"peer history differs across sender, recipient or pagination");
+    check(exchange[0]["messageType"] == "request" && exchange[0]["requestKind"] == "consult" &&
+          exchange[0]["fromBotId"] == "release" &&
+          exchange[1]["messageType"] == "result" && exchange[1]["fromBotId"] == "triage" &&
+          exchange[0]["exchangeId"].is_string() && exchange[0]["exchangeId"] == exchange[1]["exchangeId"] &&
+          exchange[1]["replyTo"] == exchange[0]["messageId"],"peer history lost its message or thread identity");
+    check(messages(browser.get("/api/view?bot=settings")).empty(),"peer history appeared in a third Bot's conversation");
+}
+
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
@@ -267,6 +322,10 @@ void exercise(const std::filesystem::path& path) {
 } // namespace
 
 int main() {
-    try { TestDirectory directory; exercise(directory.path / "state.db"); }
+    try {
+        TestDirectory directory;
+        exercise(directory.path / "state.db");
+        peerHistory(directory.path / "peers.db");
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

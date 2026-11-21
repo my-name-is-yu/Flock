@@ -167,6 +167,16 @@ Bot Bots::get(std::string_view id) const {
         }
     }
     if (config.contains("avatar")) bot.avatar = config["avatar"];
+    const auto allowedBots = config.value("allowedBots",Json::array());
+    if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
+    std::set<std::string> allowedIds;
+    for (const auto& item : allowedBots) {
+        if (!item.is_string()) throw Conflict("allowedBots must contain only Bot IDs");
+        const auto& peerId = item.get_ref<const std::string&>();
+        if (!validId(peerId) || peerId == id || !allowedIds.insert(peerId).second)
+            throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
+        bot.allowedBots.push_back(peerId);
+    }
     const auto schedules = config.value("cron",Json::array());
     if (!schedules.is_array()) throw Conflict("cron must be an array");
     std::set<std::string> scheduleIds;
@@ -185,6 +195,25 @@ Bot Bots::get(std::string_view id) const {
 BotNotes Bots::notes(std::string_view id) const {
     const auto bot = path(id);
     return {readText(bot / "SOUL.md",8192,true),readText(bot / "MEMORY.md",8192,true)};
+}
+
+std::vector<PeerBot> Bots::peers(std::string_view id) const {
+    std::vector<std::string> allowed;
+    try {
+        allowed = get(id).allowedBots;
+    } catch (const std::exception&) {
+        return {};
+    }
+    std::vector<PeerBot> result;
+    for (const auto& peerId : allowed) {
+        try {
+            const auto peer = get(peerId);
+            result.push_back({peer.name,peer.intake("")});
+        } catch (const std::exception&) {
+            // The peer can become unavailable while the sender is working.
+        }
+    }
+    return result;
 }
 
 Json Bots::cards() const {
