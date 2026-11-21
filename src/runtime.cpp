@@ -58,6 +58,8 @@ struct Runtime::Impl {
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
 
+    struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
+
     Impl(Store::Impl& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
         : db(store), model(m), t3(adapter), notes(std::move(loader)), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
@@ -445,7 +447,15 @@ ORDER BY id)SQL");
     }
 
     Json readExcerpt(const ReadRequest& req) {
-        const auto excerpt = t3.read(req);
+        const auto excerpt = [&] {
+            try {
+                return t3.read(req);
+            } catch (const ModelError& error) {
+                throw HistoryUnavailable(error.what(),error.transient);
+            } catch (const std::exception& error) {
+                throw HistoryUnavailable(error.what(),false);
+            }
+        }();
         if ((!excerpt.threadId.empty() && excerpt.threadId != req.threadId) ||
             (!excerpt.runId.empty() && excerpt.runId != req.runId))
             throw Conflict("History source does not match the requested Run");
@@ -487,6 +497,23 @@ ORDER BY id)SQL");
             db.journal(current["id"],"session_read",entry);
             return true;
         });
+    }
+
+    enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
+
+    PrefillResult prefillHistory(const Json& task, const Json& event) {
+        if (options.sessionRead != "prefill" || !event["evidence"].empty() ||
+            (event["kind"] != "result" && !event.contains("sessionResult")))
+            return PrefillResult::NotNeeded;
+        const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
+        const auto run = runRef(report["run"]);
+        try {
+            readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
+            return PrefillResult::Persisted;
+        } catch (const HistoryUnavailable&) {
+            if (!event.contains("sessionResult")) throw;
+            return PrefillResult::UnavailableWithSettledReport;
+        }
     }
 
     std::vector<PeerBot> peersFor(const Json& task) const {
@@ -831,18 +858,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 }
             }
             const auto tools = available(task,event,peer,!choices.empty(),canRead);
-            if (options.sessionRead == "prefill" && event["evidence"].empty() &&
-                (event["kind"] == "result" || event.contains("sessionResult"))) {
-                const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
-                const auto run = runRef(report["run"]);
-                try {
-                    readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
-                    return;
-                } catch (const std::exception&) {
-                    if (!event.contains("sessionResult")) throw;
-                    // Peer replies already carry a settled report and can proceed without a fresh excerpt.
-                }
-            }
+            if (prefillHistory(task,event) == PrefillResult::Persisted) return;
             auto bot = notes(field(task,"botId"));
             bot.soul = bounded(bot.soul,8192);
             bot.memory = bounded(bot.memory,8192);
