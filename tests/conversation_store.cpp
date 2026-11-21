@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <thread>
@@ -46,6 +47,27 @@ Id receive(Store& store, std::string_view id, std::string_view text, Id anchor =
     return store.receive(Fixture::bot(),id,text,anchor).at("messageId");
 }
 
+void checkSingleDelivery(Store& store, Id message) {
+    const auto tasks = store.tasks("alpha");
+    check(tasks.size() == 1 && tasks.at(0).at("request") == "Write a release note" &&
+          tasks.at(0).at("state") == "queued","Delivery did not queue exactly the requested work");
+    const auto timeline = store.conversation("alpha",0,100);
+    const auto messages = std::ranges::count_if(timeline,[](const Json& row) {
+        return row.at("kind") == "conversation_message";
+    });
+    const auto userMessage = std::ranges::find_if(timeline,[&](const Json& row) {
+        return row.at("kind") == "conversation_message" && row.at("id") == message;
+    });
+    check(messages == 1 && userMessage != timeline.end() &&
+          userMessage->at("data").at("text") == "Write a release note",
+          "Delivery lost or duplicated the user's message");
+    const auto replies = std::ranges::count_if(timeline,[](const Json& row) {
+        return row.at("kind") == "conversation_reply";
+    });
+    check(replies == 1 && reply(store,message).at("route") == "create_task",
+          "Delivery lost or duplicated the task acknowledgement");
+}
+
 void retryAcrossConnections() {
     Fixture fixture;
     Store left(fixture.database()), right(fixture.database());
@@ -63,15 +85,15 @@ void retryAcrossConnections() {
     two.join();
     if (first) std::rethrow_exception(first);
     if (second) std::rethrow_exception(second);
-    check(a && a == b && left.tasks("alpha").size() == 1,"Concurrent delivery duplicated work");
-    check(reply(left,a)["route"] == "create_task","Expected explicit new task");
+    check(a && a == b,"Concurrent delivery returned different receipts");
+    checkSingleDelivery(left,a);
     bool rejected = false;
     try { receive(right,"retry","Write a different release note"); }
     catch (const Conflict&) { rejected = true; }
     check(rejected,"Changed message payload did not conflict");
     Store restarted(fixture.database());
-    check(receive(restarted,"retry","Write a release note") == a && restarted.tasks("alpha").size() == 1,
-          "Receipt or effect was lost on restart");
+    check(receive(restarted,"retry","Write a release note") == a,"Receipt was lost on restart");
+    checkSingleDelivery(restarted,a);
 }
 
 void clarificationAndStatus() {
@@ -82,19 +104,41 @@ void clarificationAndStatus() {
     const auto other = task(store,"Work for another Bot","beta");
     const auto id = receive(store,"stop","Stop that");
     const auto clarifier = reply(store,id);
-    check(clarifier["route"] == "clarify" && clarifier["candidates"].size() == 2,
+    const auto hasCandidate = [&](Id id, std::string_view name) {
+        return std::ranges::any_of(clarifier.at("candidates"),[&](const Json& candidate) {
+            return candidate.at("taskId") == id && candidate.at("request") == name;
+        });
+    };
+    check(clarifier.at("route") == "clarify" && clarifier.at("candidates").size() == 2 &&
+          hasCandidate(a,"Release work") && hasCandidate(b,"Measurement work"),
           "Ambiguous stop did not name exactly this Bot's candidates");
     check(store.task(a)["state"] == "queued" && store.task(b)["state"] == "queued","An ambiguous stop changed a task");
     const auto status = reply(store,receive(store,"status","進捗は？"));
-    check(status["route"] == "status" && status["text"].get<std::string>().find("Release work — Queued") != std::string::npos,
-          "A Japanese status request was blocked by a clarification or did not yield English task status");
+    const auto& progress = status.at("text").get_ref<const std::string&>();
+    check(status.at("route") == "status" && progress.find("Release work") != std::string::npos &&
+          progress.find("Measurement work") != std::string::npos && progress.find("Queued") != std::string::npos &&
+          progress.find("Work for another Bot") == std::string::npos,
+          "Status did not report this Bot's queued work while clarification was open");
+    check(store.tasks("alpha").size() == 2 && store.task(a).at("state") == "queued" &&
+          store.task(b).at("state") == "queued","A status request changed the work");
     receive(store,"select","Measurement work",clarifier["messageId"]);
     check(store.task(a)["state"] == "queued" && store.task(b)["state"] == "cancelled" &&
           store.task(other)["state"] == "queued" && store.clarifications("alpha").empty(),"Selection did not affect exactly the chosen task");
     const auto resume = reply(store,receive(store,"resume","Resume the measurement work"));
-    check(resume["route"] == "create_task" && store.tasks("alpha").size() == 3 &&
-          store.tasks("alpha").front()["sourceTaskId"] == b && store.task(b)["state"] == "cancelled",
-          "Explicit resume did not create a linked task");
+    const auto tasks = store.tasks("alpha");
+    const auto resumed = std::ranges::find_if(tasks,[&](const Json& task) {
+        return task.at("id") != a && task.at("id") != b;
+    });
+    check(resume.at("route") == "create_task" && tasks.size() == 3 && resumed != tasks.end() &&
+          resumed->at("sourceTaskId") == b && resumed->at("state") == "queued" &&
+          store.task(b).at("state") == "cancelled","Explicit resume did not queue new work linked to the cancelled task");
+}
+
+Json pendingText(Store& store, Id id) {
+    auto text = Json::array();
+    for (const auto& instruction : store.task(id).value("pendingInstructions",Json::array()))
+        text.push_back(instruction.at("text"));
+    return text;
 }
 
 void compoundAndUnmatchedCancellation() {
@@ -103,22 +147,40 @@ void compoundAndUnmatchedCancellation() {
     const auto a = task(store,"A");
     const auto b = task(store,"B");
     const auto compound = reply(store,receive(store,"compound","Run A on main. Separately: Implement C"));
-    check(compound["route"] == "compound" && store.tasks("alpha").size() == 3 &&
-          store.task(a)["pendingInstructions"].size() == 1 && !store.task(b).contains("pendingInstructions"),
-          "Compound message did not apply both segments to the intended work");
+    const auto tasks = store.tasks("alpha");
+    const auto created = std::ranges::find_if(tasks,[](const Json& task) {
+        return task.at("request") == "Implement C";
+    });
+    check(compound.at("route") == "compound" && tasks.size() == 3 && created != tasks.end(),
+          "The independent segment did not create exactly the requested task");
+    const auto c = created->at("id").get<Id>();
+    const auto checkWork = [&](const char* message) {
+        check(store.tasks("alpha").size() == 3 && store.task(a).at("state") == "queued" &&
+              store.task(b).at("state") == "queued" && store.task(c).at("state") == "queued" &&
+              pendingText(store,a) == Json::array({"Run A on main"}) &&
+              pendingText(store,b).empty() && pendingText(store,c).empty(),message);
+    };
+    checkWork("The compound message did not save only the intended instruction");
 
     const auto unclear = reply(store,receive(store,"unclear","Run on main. Separately: Implement D"));
-    check(unclear["route"] == "clarify" && store.tasks("alpha").size() == 3,
-          "A compound request applied an independent segment while its other segment was unclear");
+    check(unclear.at("route") == "clarify","An unclear compound request did not ask which work to change");
+    checkWork("A compound request applied a segment while its other segment was unclear");
 
     const auto separate = task(store,"Release","beta");
     const auto response = store.receive(Fixture::bot("beta"),"unknown","Stop the missing task");
-    check(reply(store,response["messageId"],"beta")["route"] != "cancel_task" &&
-          store.task(separate)["state"] == "queued","An unmatched name cancelled unrelated work");
+    check(reply(store,response.at("messageId"),"beta").at("route") == "clarify" &&
+          store.task(separate).at("state") == "queued","An unmatched name cancelled unrelated work");
 
-    const auto crossBot = reply(store,receive(store,"cross","Run on main. Separately: Implement E",response["messageId"]));
-    check(crossBot["route"] != "compound" && store.tasks("alpha").size() == 3,
-          "A stale or foreign reply anchor allowed a partial compound effect");
+    const auto extra = task(store,"Inventory","beta");
+    const auto stop = store.receive(Fixture::bot("beta"),"stop","Stop that");
+    const auto betaQuestion = reply(store,stop.at("messageId"),"beta");
+    check(betaQuestion.at("route") == "clarify" && betaQuestion.at("candidates").size() == 2,
+          "The other Bot did not issue an actionable clarification");
+    const auto crossBot = receive(store,"cross","Run A on main. Separately: Implement E",betaQuestion.at("messageId"));
+    reply(store,crossBot);
+    checkWork("A reply to another Bot's clarification applied work");
+    check(store.task(separate).at("state") == "queued" && store.task(extra).at("state") == "queued" &&
+          store.clarifications("beta").size() == 2,"A foreign reply changed the other Bot's work or clarification");
 }
 
 void legacyHistory() {
@@ -146,15 +208,29 @@ INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","so
     sqlite3_close(db);
     check(rc == SQLITE_OK,"Legacy schema fixture failed");
     Store store(fixture.database());
-    check(store.task(1)["revisions"].size() == 1 && store.task(1)["revisions"][0]["doneWhen"] == "Check all cases" &&
-          store.task(2)["revisions"].empty() && store.task(2)["state"] == "queued","Legacy revision migration is incorrect");
+    const auto completed = store.task(1);
+    const auto& revisions = completed.at("revisions");
+    check(completed.at("state") == "completed" && revisions.size() == 1 &&
+          completed.at("currentRevision") == revisions.at(0).at("id") &&
+          revisions.at(0).at("intent") == "Previous work" && revisions.at(0).at("doneWhen") == "Check all cases",
+          "Legacy work lost its completion criteria or original request");
+    const auto queued = store.task(2);
+    check(queued.at("revisions").empty() && queued.at("state") == "queued",
+          "Migration changed queued legacy work before its criteria were set");
+    const auto latest = store.latestTaskResult(1);
+    check(latest.at("id") == 9 && latest.at("data").at("text") == "Proposed two approaches",
+          "The original completion disappeared from the migrated task");
     const auto detail = reply(store,receive(store,"result","Explain option 2"));
-    check(detail["route"] == "respond" && detail["source"]["messageId"] == 8 &&
-          detail["text"].get<std::string>().find("Chosen approach") != std::string::npos &&
-          store.tasks("alpha").size() == 2,"Legacy report lost its identity or created work");
+    const auto& explanation = detail.at("text").get_ref<const std::string&>();
+    check(detail.at("route") == "respond" && detail.at("source").at("taskId") == 1 &&
+          detail.at("source").at("messageId") == 8 && explanation.find("Chosen approach") != std::string::npos &&
+          explanation.find("First approach") == std::string::npos && store.tasks("alpha").size() == 2,
+          "The answer did not explain only the selected legacy option with its original source");
     Store refreshed(fixture.database());
-    check(refreshed.task(1)["revisions"].size() == 1 && refreshed.tasks("alpha").size() == 2,
-          "Opening a migrated DB repeated legacy work or revision backfill");
+    const auto reopened = refreshed.task(1);
+    check(reopened.at("currentRevision") == completed.at("currentRevision") &&
+          reopened.at("revisions").size() == 1 && refreshed.tasks("alpha").size() == 2,
+          "Opening a migrated DB changed its current revision or duplicated legacy work");
 }
 }
 

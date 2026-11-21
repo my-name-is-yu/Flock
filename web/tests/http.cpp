@@ -10,6 +10,7 @@
 using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
+constexpr auto comparisonRequest = "Compare the three options";
 constexpr auto proposedOptions = "1. Reconcile manually\n2. Summarize the differences first\n3. Review after publication";
 
 void check(bool condition, std::string_view message) {
@@ -38,7 +39,7 @@ struct FixedModel : Model {
             }
             return {"ask_user",{{"question","Should I include only user-facing changes?"},{"choices",{"User-facing only","All changes"}}},"The publication scope needs to be specified"};
         }
-        if (input.task["request"] == "Compare the three options")
+        if (input.task["request"] == comparisonRequest)
             return {"complete",{{"report",proposedOptions}},"The Session compared all three options"};
         return {"complete",{{"report","Draft complete"}},"The Session report matches the criterion"};
     }
@@ -130,7 +131,9 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Sec-Fetch-Site","same-site"}}),403);
     Browser::checked(browser.client.Post("/api/requests",draft,"application/json"),403);
-    Browser::checked(browser.client.Post("/api/messages",draft,"application/json"),403);
+    const auto message = R"({"botId":"release","clientMessageId":"untrusted-message","text":"Create a draft"})";
+    Browser::checked(browser.client.Post("/api/messages",message,"application/json"),403);
+    check(browser.get("/api/conversation?bot=release")["events"].empty(),"rejected message appeared in the conversation");
     Browser::checked(browser.client.Post("/api/requests",{{"Origin",browser.origin}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/requests",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/requests",browser.headers(),draft,"text/plain"),415);
@@ -154,6 +157,17 @@ bool hasEvent(const Json& events, std::string_view kind, std::string_view text) 
     return false;
 }
 
+Json conversationReply(const Json& page, Id messageId) {
+    Json result;
+    for (const auto& event : page.at("events")) {
+        if (event["kind"] != "conversation_reply" || event["data"]["replyToMessageId"] != messageId) continue;
+        check(result.is_null(),"message received more than one Bot reply");
+        result = event.at("data");
+    }
+    check(!result.is_null(),"message received no Bot reply");
+    return result;
+}
+
 void conversationEntry(const std::filesystem::path& path) {
     Store store(path);
     FixedModel model;
@@ -162,52 +176,70 @@ void conversationEntry(const std::filesystem::path& path) {
     Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
     auto server = startWeb(store,0,callbacks(&disableIntake));
     Browser browser(*server);
-    const auto taskId = browser.request("release","Compare the three options");
+    const auto taskId = browser.request("release",comparisonRequest);
     tick(runtime,3);
     t3.observations["thread-release"] = {
-        .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions, .settled = true
+        .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions,
+        .itemId = "comparison-report", .settled = true
     };
     tick(runtime,2);
-    check(store.task(taskId)["state"] == "completed","fixture did not produce a completed comparison");
+    const auto taskPath = "/api/task?bot=release&taskId=" + std::to_string(taskId);
+    const auto completed = browser.get(taskPath);
+    check(completed["id"] == taskId && completed["state"] == "completed","task details did not show the completed comparison");
+    const auto& result = completed.at("result");
+    check(result["kind"] == "completed" && result["taskId"] == taskId && result["data"]["text"] == proposedOptions,
+          "task details lost the completion report");
+    const auto& reportRun = result.at("data").at("run");
+    check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
+          "task details did not point to the Run and report item that produced the result");
 
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","Explain option 2 in more detail"}};
     const auto receipt = browser.post("/api/messages",message,201);
-    check(receipt["status"] == "received" && receipt["messageId"].is_number_integer(),"conversation receipt was missing");
+    const auto messageId = receipt.at("messageId").get<Id>();
+    check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
     disableIntake = true;
     check(browser.post("/api/messages",message,201) == receipt,"retry did not recover its receipt with changed Bot settings");
     auto changed = message;
     changed["text"] = "Explain option 3 in more detail";
     browser.post("/api/messages",changed,409);
     changed = message;
-    changed["replyToMessageId"] = 1;
+    changed["replyToMessageId"] = result.at("id");
     browser.post("/api/messages",changed,409);
     browser.post("/api/messages",{{"botId","release"},{"text","Additional clarification"}},400);
 
+    tick(runtime,3);
     const auto page = browser.get("/api/view?bot=release");
     unsigned questions = 0, answers = 0;
-    for (const auto& event : page["events"]) {
-        const auto& data = event["data"];
-        if (event["kind"] == "conversation_message" && data["messageId"] == receipt["messageId"]) ++questions;
-        if (event["kind"] == "conversation_reply" && data["replyToMessageId"] == receipt["messageId"]) {
-            ++answers;
-            check(data["route"] == "respond" && data["text"].get<std::string>().find("Summarize the differences first") != std::string::npos,
-                  "answer did not reference the second option");
-            check(data["source"]["taskId"] == taskId && data["source"]["messageId"].is_number_integer(),
-                  "answer source was not visible in the conversation");
+    for (const auto& event : page.at("events")) {
+        if (event["kind"] == "conversation_message") {
+            ++questions;
+            const auto& data = event.at("data");
+            check(event["id"] == messageId && data["messageId"] == messageId && data["text"] == message["text"],
+                  "the saved conversation entry did not match the submitted message");
         }
+        if (event["kind"] == "conversation_reply") ++answers;
     }
-    check(questions == 1 && answers == 1 && store.tasks().size() == 1 && store.task(taskId)["runs"].size() == 1 && t3.launches == 1,
+    const auto response = conversationReply(page,messageId);
+    const auto responseText = response.at("text").get<std::string>();
+    check(response["route"] == "respond" && responseText.find("Summarize the differences first") != std::string::npos &&
+          responseText.find("Reconcile manually") == std::string::npos && responseText.find("Review after publication") == std::string::npos,
+          "answer did not explain only the second option");
+    check(response["source"]["taskId"] == taskId && response["source"]["messageId"] == result["id"],
+          "answer did not point to the completed comparison");
+    check(questions == 1 && answers == 1 && store.tasks().size() == 1 && t3.launches == 1,
           "read-only conversation or retry created extra messages, Tasks or Runs");
-    const auto task = browser.get("/api/task?bot=release&taskId=" + std::to_string(taskId));
-    check(task["id"] == taskId && task["runs"].size() == 1 && !task.contains("config"),"task details omitted a Run or exposed config");
-    check(task["result"]["kind"] == "completed" && task["result"]["data"]["text"] == proposedOptions &&
-        task["result"]["data"]["run"]["runId"] == task["runs"][0]["runId"],
-        "task details lost its completion or source Run");
+    const auto task = browser.get(taskPath);
+    check(task["runs"].size() == 1 && task["runs"][0]["runId"] == reportRun["runId"] && !task.contains("config"),
+          "task details omitted the comparison Run or exposed config");
     Browser::checked(browser.client.Get("/api/task?bot=triage&taskId=" + std::to_string(taskId)),404);
 
     const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","What's the status?"}};
-    browser.post("/api/messages",status,201);
-    check(store.tasks().size() == 1,"read-only request with changed settings created work");
+    const auto statusReceipt = browser.post("/api/messages",status,201);
+    tick(runtime,3);
+    const auto statusReply = conversationReply(browser.get("/api/view?bot=release"),statusReceipt.at("messageId"));
+    const auto statusReplyText = statusReply.at("text").get<std::string>();
+    check(statusReplyText.find(comparisonRequest) != std::string::npos && statusReplyText.find("Complete") != std::string::npos &&
+          store.tasks().size() == 1 && t3.launches == 1,"progress inquiry with changed settings failed to report completion without creating work");
     disableIntake = false;
     const auto firstWaitTask = browser.request("triage","Decide what to publish");
     const auto secondWaitTask = store.submit({"triage","Decide what to publish next time","linked env","next-scope"});
@@ -219,11 +251,16 @@ void conversationEntry(const std::filesystem::path& path) {
     t3.observations["thread-next-scope"] = t3.observations.at("thread-triage");
     tick(runtime,2);
     const auto waitPage = browser.get("/api/view?bot=triage");
-    Id question = 0;
-    for (const auto& row : waitPage["waits"]) {
-        if (row["id"] == firstWaitTask) question = row["wait"]["messageId"];
+    Json firstWait, secondWait;
+    for (const auto& row : waitPage.at("waits")) {
+        if (row["id"] == firstWaitTask) firstWait = row.at("wait");
+        if (row["id"] == secondWaitTask) secondWait = row.at("wait");
     }
-    check(question > 0 && waitPage["waits"].size() == 2,"HTTP projection lacks a stable question anchor");
+    check(waitPage["waits"].size() == 2 && !firstWait.is_null() && !secondWait.is_null(),
+          "the Bot conversation did not expose both pending questions");
+    const auto question = firstWait.at("messageId").get<Id>();
+    const auto otherQuestion = secondWait.at("messageId").get<Id>();
+    check(question > 0 && otherQuestion > 0 && question != otherQuestion,"pending questions did not have distinct reply anchors");
     const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","User-facing only"},{"replyToMessageId",question}};
     const auto answerReceipt = browser.post("/api/messages",reply,201);
     tick(runtime,2);
@@ -231,12 +268,20 @@ void conversationEntry(const std::filesystem::path& path) {
     auto delayed = reply;
     delayed["clientMessageId"] = "delayed-answer-first";
     delayed["text"] = "All changes";
-    const auto delayedResponse = browser.client.Post("/api/messages",browser.headers(),delayed.dump(),"application/json");
-    check(delayedResponse && (delayedResponse->status == 201 || delayedResponse->status == 409),"stale answer was not handled");
+    const auto delayedReceipt = browser.post("/api/messages",delayed,201);
     tick(runtime,2);
-    check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-triage" &&
-        store.task(secondWaitTask)["wait"]["reason"] == "user_question" && store.tasks().size() == 3,
-        "exact or stale answer changed another wait or created a Task");
+    const auto afterAnswer = browser.get("/api/view?bot=triage");
+    const auto delayedReply = conversationReply(afterAnswer,delayedReceipt.at("messageId"));
+    check(delayedReply.at("route") == "respond" && !delayedReply.at("text").get<std::string>().empty(),
+          "Bot did not respond to the late answer");
+    check(t3.replies.size() == 1 && t3.replies[0].environmentId == "linked env" &&
+          t3.replies[0].target.threadId == "thread-triage" && t3.replies[0].target.runId == firstWait["run"]["runId"].get<std::string>() &&
+          t3.replies[0].questionId == "scope-question" && t3.replies[0].answers == Json{{"scope",reply["text"]}},
+          "T3 did not receive exactly one matching answer for the original question");
+    const auto& waits = afterAnswer.at("waits");
+    check(waits.size() == 1 && waits[0]["id"] == secondWaitTask && waits[0]["wait"]["messageId"] == otherQuestion &&
+          waits[0]["wait"]["reason"] == "user_question" && store.tasks().size() == 3,
+          "exact or stale answer changed another wait or created a Task");
 }
 
 void exercise(const std::filesystem::path& path) {
