@@ -119,7 +119,6 @@ function setConnection(state) {
   if (connection === state) return;
   connection = state;
   elements.connection.dataset.state = state;
-  // A healthy connection needs no label; only the first load and an outage are announced.
   elements['connection-text'].textContent = state === 'offline' ? 'Runtime に接続できません' : '';
   renderHeader();
 }
