@@ -210,7 +210,6 @@ void Store::Impl::requestCancellation(Json& task) {
     if (!task.value("pendingInstructions",Json::array()).empty())
         task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
-    task.erase("deferredCompletionEventId");
     consumeEvent(task);
     journal(id,"cancel_requested",Json::object());
     if (task["state"] == "queued" && !peer) {
@@ -247,7 +246,8 @@ Json Store::Impl::currentEvent(const Json& task) const {
     return result;
 }
 void Store::Impl::consumeEvent(const Json& task) {
-    exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=?", {task["eventId"], task["id"]});
+    exec("UPDATE events SET consumed=1,data=json_remove(data,'$._flockDeferredCompletion','$._flockSavedCompletion')"
+         " WHERE id=? AND task_id=? AND consumed=0", {task["eventId"], task["id"]});
 }
 void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
