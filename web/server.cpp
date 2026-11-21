@@ -1,4 +1,5 @@
 #include "flock/web.hpp"
+#include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
 
@@ -245,7 +246,8 @@ Json operationData(const Json& body, std::string_view operation) {
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
-        : store_(store), callbacks_(std::move(callbacks)) {
+        : store_(store), callbacks_(std::move(callbacks)),
+          changes_(store,[this](const web::ChangeFeed::Scope& scope) { return snapshot(scope); }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
@@ -279,6 +281,7 @@ public:
         server_.Get("/api/bots",[this](const Request&, Response& res) {
             json(res,200,botList());
         });
+        server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -335,12 +338,45 @@ public:
     }
 
     ~LoopbackServer() override {
+        changes_.stop();
         server_.stop();
         worker_.join();
     }
     unsigned port() const override { return port_; }
 
 private:
+    void changes(const Request& req, Response& res) {
+        const auto bot = req.get_param_value("bot");
+        const auto peer = req.get_param_value("peer");
+        if (req.get_param_value_count("bot") > 1 || req.get_param_value_count("peer") > 1 ||
+            bot.size() > 1024 || peer.size() > 1024 ||
+            (req.has_param("bot") && bot.empty()) ||
+            (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
+            return error(res,400,"invalid_subscription");
+        auto subscription = changes_.subscribe({bot,peer});
+        if (!subscription) return error(res,503,"event_stream_unavailable");
+        auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
+        res.set_chunked_content_provider("text/event-stream",
+            [this,cursor](std::size_t offset, httplib::DataSink& sink) {
+                if (!sink.is_writable()) return false;
+                if (offset == 0) {
+                    constexpr std::string_view ready = "retry: 2500\nevent: ready\ndata: {}\n\n";
+                    return sink.write(ready.data(),ready.size());
+                }
+                const auto update = changes_.next(*cursor);
+                if (!update) {
+                    sink.done();
+                    return true;
+                }
+                if (!sink.is_writable()) return false;
+                const auto event = update->empty()
+                    ? std::string("event: ping\ndata: {}\n\n")
+                    : "event: change\ndata: " + update->dump(-1,' ',false,Json::error_handler_t::replace) + "\n\n";
+                return sink.write(event.data(),event.size());
+            },
+            [this,cursor](bool) { changes_.release(*cursor); });
+    }
+
     HandlerResult guard(const Request& req, Response& res) const {
         const auto portSuffix = port_ == 80 ? std::string{} : ":" + std::to_string(port_);
         const auto host = req.get_header_value("Host");
@@ -392,10 +428,12 @@ private:
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false,false);
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
+                changes_.rescan();
                 return json(res,200,web::botSettings(saved));
             }
             auto parsed = parseBotProfile(body,true,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
+            changes_.rescan();
             return json(res,201,web::botSettings(created));
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
@@ -419,6 +457,23 @@ private:
 
     bool grantsPeer(std::string_view bot, std::string_view peer) const {
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
+    }
+
+    bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
+        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        const auto partners = store_.peerPartners(bot);
+        return std::ranges::find(partners,peer) != partners.end();
+    }
+
+    Json snapshot(const web::ChangeFeed::Scope& scope) const {
+        const auto& [id,peer] = scope;
+        if (id.empty()) return botList();
+        const auto known = bots();
+        const auto* bot = botById(known,id);
+        if (!bot) return nullptr;
+        if (peer.empty()) return web::botView(store_,*bot);
+        if (!canReadPeer(id,peer,botById(known,peer) != nullptr)) return nullptr;
+        return web::peerConversation(store_,id,peer,0);
     }
 
     Json botList() const {
@@ -449,11 +504,8 @@ private:
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
         const bool configured = botById(known,peer) != nullptr;
-        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
-            const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end())
-                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        }
+        if (!canReadPeer(bot,peer,configured))
+            return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         json(res,200,web::peerConversation(store_,bot,peer,before));
     }
 
@@ -512,6 +564,7 @@ private:
 
     Store& store_;
     WebCallbacks callbacks_;
+    web::ChangeFeed changes_;
     httplib::Server server_;
     std::thread worker_;
     unsigned port_ = 0;

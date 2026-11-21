@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -597,6 +598,91 @@ void exercise(const std::filesystem::path& path) {
     conversationPages(reopened,cli,release,next,triage,earlierRequests);
     sessionPages(reopened,cli,*runtime,triage);
 }
+
+void readChanges(Browser& stream, const std::string& path, const std::function<bool(const Json&)>& next) {
+    using namespace std::chrono_literals;
+    stream.client.set_read_timeout(2);
+    const auto deadline = std::chrono::steady_clock::now() + 8s;
+    bool ready = false;
+    bool finished = false;
+    std::string buffer;
+    const auto result = stream.client.Get(path,[&](const httplib::Response& response) {
+        return response.status == 200 && response.get_header_value("Content-Type") == "text/event-stream";
+    },[&](const char* data, std::size_t size) {
+        buffer.append(data,size);
+        for (auto end = buffer.find("\n\n"); end != std::string::npos; end = buffer.find("\n\n")) {
+            const auto frame = buffer.substr(0,end);
+            buffer.erase(0,end + 2);
+            if (frame.find("event: ready\n") != std::string::npos) ready = true;
+            constexpr std::string_view prefix = "event: change\ndata: ";
+            if (!frame.starts_with(prefix)) continue;
+            check(ready,"received an invalidation before the stream was ready");
+            finished = !next(Json::parse(frame.substr(prefix.size())));
+            if (finished) return false;
+        }
+        return std::chrono::steady_clock::now() < deadline;
+    });
+    check(!result && ready && finished,"stream missed an invalidation");
+}
+
+void eventStream(const std::filesystem::path& path) {
+    Store store(path);
+    Store cli(path);
+    auto web = callbacks();
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    Browser stream(*server);
+    Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
+    Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
+
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    unsigned changes = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        if (changes == 3) {
+            check(change == Json{{"list",true}},"an unrelated Bot invalidated the selected view");
+            return false;
+        }
+        check(change == Json{{"list",true},{"bot","release"}},"unexpected SSE invalidation scope or payload");
+        if (changes == 0) {
+            cli.submit(web.intake("release","CLI write"));
+        } else if (changes == 1) {
+            tick(runtime,3);
+        } else {
+            check(browser.get("/api/view?bot=release").at("presence") == "working",
+                "a state-only Runtime change did not reach the view");
+            cli.submit(web.intake("triage","Other Bot"));
+        }
+        ++changes;
+        return true;
+    });
+}
+
+void peerEventStream(const std::filesystem::path& path) {
+    Store store(path);
+    auto web = callbacks();
+    web.peers = fixturePeers;
+    RuntimeOptions options;
+    options.peers = fixturePeers;
+    PeerModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    Browser stream(*server);
+    bool initial = true;
+    readChanges(stream,"/api/events?bot=release&peer=triage",[&](const Json& change) {
+        const Json pair = {{"bot","release"},{"peer","triage"}};
+        if (change.contains("dm")) check(change.at("dm") == pair,"the DM stream sent the wrong scope");
+        if (std::exchange(initial,false)) {
+            check(change == Json{{"list",true},{"bot","release"},{"dm",pair}},"missing initial DM scope");
+            seedPeerHistory(browser,runtime,t3);
+            return true;
+        }
+        return !change.contains("dm");
+    });
+}
 void botProfileEndpoints(const std::filesystem::path& path) {
     Store store(path);
     std::map<std::string,Json,std::less<>> profiles;
@@ -756,6 +842,8 @@ int main() {
     try {
         TestDirectory directory;
         exercise(directory.path / "state.db");
+        eventStream(directory.path / "events.db");
+        peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
         botProfileEndpoints(directory.path / "profiles.db");

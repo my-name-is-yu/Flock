@@ -1,4 +1,5 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
@@ -219,7 +220,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   save('flock-selected-bot', botId);
   elements.conversation.scrollTop = 0;
   render('bottom');
-  if (view) void refreshView(view, 'bottom');
+  if (view) void requestSync({ bot: true, dm: !!view.dm, scroll: 'bottom' });
+  subscribeToView();
 }
 function selectLocation() {
   const params = new URLSearchParams(location.search);
@@ -1281,12 +1283,11 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await refreshBots();
+    await requestSync({ list: true, bot: view?.id === savedBot.id });
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
     }
-    if (view?.id === savedBot.id) await refreshView(view);
     if (returnToSettings && view?.id === savedBot.id && view.data) {
       openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
     }
@@ -1536,16 +1537,26 @@ function render(scroll) {
   renderDetail();
 }
 
-function mergeLatest(context, latest) {
-  const { events, olderBefore } = latest;
-  const first = events[0]?.id;
-  const missedPage = first && first > context.newestEvent;
-  if (!context.events.size || missedPage) {
-    context.events.clear();
-    context.olderBefore = olderBefore;
+async function syncEvents(context, events, olderBefore, isCurrent, loadPage) {
+  const incoming = [...events];
+  let cursor = olderBefore;
+  // Reconnect can leave more than one page between the visible history and the latest page.
+  while (context.events.size && cursor && cursor > context.newestEvent) {
+    const page = await loadPage(cursor);
+    if (!isCurrent()) return false;
+    incoming.push(...page.events);
+    if (page.olderBefore >= cursor) throw new Error('Invalid conversation cursor');
+    cursor = page.olderBefore;
   }
-  for (const event of events) context.events.set(event.id, event);
+  if (!isCurrent()) return false;
+  if (!context.events.size) context.olderBefore = olderBefore;
+  else if (olderBefore > context.newestEvent) context.olderBefore = Math.min(context.olderBefore, cursor);
+  for (const event of incoming) context.events.set(event.id, event);
   context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
+  return true;
+}
+
+function mergeLatest(context, latest) {
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
   const reply = replies.get(context.id);
@@ -1565,61 +1576,59 @@ function mergeLatest(context, latest) {
     }
   }
 }
-async function refreshPeerConversation(context, scroll) {
+async function refreshPeerConversation(context) {
   const dm = context.dm;
   const generation = ++dm.generation;
+  const isCurrent = () => context === view && generation === dm.generation;
+  const readPage = async (before) => {
+    const { messages, hasOlder } = await api(peerQuery(dm, before));
+    return { events: messages, olderBefore: hasOlder ? messages[0]?.id ?? 0 : 0 };
+  };
   try {
-    const page = await api(peerQuery(dm));
-    if (context !== view || generation !== dm.generation) return;
-    const first = page.messages[0]?.id;
-    if (!dm.events.size || first > dm.newestEvent) {
-      dm.events.clear();
-      dm.olderBefore = page.hasOlder ? first : 0;
-    }
-    for (const event of page.messages) dm.events.set(event.id, event);
-    dm.newestEvent = page.messages.at(-1)?.id ?? dm.newestEvent;
+    const page = await readPage();
+    if (!await syncEvents(dm, page.events, page.olderBefore, isCurrent, readPage)) return true;
     dm.loaded = true;
     dm.error = null;
   } catch (error) {
-    if (context !== view || generation !== dm.generation) return;
+    if (!isCurrent()) return true;
     if (!dm.loaded) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    return [403, 404].includes(error.status);
   }
-  render(scroll);
+  return true;
 }
-async function refreshView(context, scroll) {
+async function refreshView(context) {
   const generation = ++context.generation;
-  const peerRefresh = context.dm && refreshPeerConversation(context, scroll);
+  const isCurrent = () => context === view && generation === context.generation;
   try {
     const latest = await api(botQuery('view', context.id));
-    if (context !== view || generation !== context.generation) return;
+    const readPage = (before) => api(botQuery('conversation', context.id, before));
+    if (!await syncEvents(context, latest.events, latest.olderBefore, isCurrent, readPage)) return true;
     mergeLatest(context, latest);
     setConnection('ready');
-    render(scroll);
-    if (context.openSettingsOnLoad) {
-      const botId = context.openSettingsOnLoad;
-      context.openSettingsOnLoad = null;
-      openSettingsFromMenu(botId);
-    }
+    return true;
   } catch (error) {
-    if (context !== view || generation !== context.generation) return;
-    if (error.status === 404) void refreshBots();
-    else setConnection('offline');
-  } finally {
-    await peerRefresh;
+    if (!isCurrent()) return true;
+    if (error.status === 404) {
+      void requestSync({ list: true });
+      return true;
+    }
+    setConnection('offline');
+    return false;
   }
 }
 async function refreshBots() {
   const generation = ++listGeneration;
   try {
     const latest = await api('bots');
-    if (generation !== listGeneration) return;
+    if (generation !== listGeneration) return true;
     bots = latest;
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
-    render();
+    return true;
   } catch {
     if (generation === listGeneration) setConnection('offline');
+    return false;
   }
 }
 async function loadOlder() {
@@ -1684,8 +1693,9 @@ async function submitOperation(context, key, payload) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
     if (isOpen()) showDetailError(message);
+    if (view === context) await requestSync({ bot: true, list: true });
   } finally {
-    if (view?.id === context.id) await refreshView(view);
+    if (!liveUpdates.live && view?.id === context.id) await requestSync({ bot: true, list: true });
     pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
@@ -1713,8 +1723,8 @@ async function submit(event) {
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
-    if (showingComposer(context.id)) await refreshView(view, 'bottom');
-    void refreshBots();
+    if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
+    if (!liveUpdates.live) await requestSync({ list: true, bot: showingComposer(context.id), scroll: 'bottom' });
   } catch (error) {
     if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
@@ -1816,14 +1826,81 @@ document.addEventListener('keydown', (event) => {
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
-function refresh() {
-  if (document.hidden) return;
-  void refreshBots();
-  if (view) void refreshView(view);
+let pendingSync;
+let syncInFlight;
+let syncRetry;
+
+function requestSync({ list = false, bot = false, dm = false, scroll } = {}) {
+  if (!pendingSync || pendingSync.context !== view) {
+    pendingSync = { list: pendingSync?.list, context: view };
+  }
+  pendingSync.list ||= list;
+  pendingSync.bot ||= bot;
+  pendingSync.dm ||= dm;
+  pendingSync.scroll ??= scroll;
+  syncInFlight ??= Promise.resolve().then(async () => {
+    try {
+      while (pendingSync) {
+        const next = pendingSync;
+        pendingSync = null;
+        const { context } = next;
+        const results = await Promise.all([
+          !next.list || refreshBots(),
+          !next.bot || context !== view || !context || refreshView(context),
+          !next.dm || context !== view || !context?.dm || refreshPeerConversation(context),
+        ]);
+        render(view === context ? next.scroll : undefined);
+        if (next.bot && view === context && context?.data && context.openSettingsOnLoad) {
+          const botId = context.openSettingsOnLoad;
+          context.openSettingsOnLoad = null;
+          openSettingsFromMenu(botId);
+        }
+        if (results.includes(false) && !document.hidden) {
+          syncRetry ??= setTimeout(() => {
+            syncRetry = null;
+            syncAll();
+          }, 2500);
+        }
+      }
+    } finally {
+      syncInFlight = null;
+    }
+  });
+  return syncInFlight;
 }
+
+function syncAll() {
+  if (!document.hidden) void requestSync({ list: true, bot: !!view, dm: !!view?.dm });
+}
+
+const liveUpdates = createLiveUpdates(syncAll, (change) => {
+  const dm = view?.dm;
+  void requestSync({
+    list: change.list === true,
+    bot: !!view && change.bot === view.id,
+    dm: !!dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId,
+  });
+});
+
+function subscribeToView() {
+  if (document.hidden) {
+    liveUpdates.use(null);
+    return;
+  }
+  const params = new URLSearchParams();
+  if (view) params.set('bot', view.id);
+  if (view?.dm) params.set('peer', view.dm.peerId);
+  liveUpdates.use(params.size ? `/api/events?${params}` : '/api/events');
+}
+
+function resumeUpdates() {
+  subscribeToView();
+  syncAll();
+}
+
 render();
-refresh();
-setInterval(refresh, 2500);
-document.addEventListener('visibilitychange', refresh);
-window.addEventListener('pageshow', (event) => { if (event.persisted) refresh(); });
+resumeUpdates();
+document.addEventListener('visibilitychange', resumeUpdates);
+window.addEventListener('pagehide', () => liveUpdates.use(null));
+window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
