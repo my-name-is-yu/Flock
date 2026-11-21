@@ -366,9 +366,8 @@ void acceptanceRunner() {
                 "trial record is duplicated or has an invalid number");
             const auto& inputs = model.inputs.at(bot);
             const auto& input = inputs.at(number - 1);
-            check(input.task == inputs.front().task && input.event == inputs.front().event &&
-                  input.notes.soul == inputs.front().notes.soul && input.notes.memory == inputs.front().notes.memory &&
-                  input.config.at("model") == "model-slug","model and trial inputs must stay fixed for each Bot");
+            check(responseRequest(input) == responseRequest(inputs.front()) && input.config.at("model") == "model-slug",
+                  "the complete Responses request must stay fixed for each Bot");
             check(trial.at("model") == "model-slug" && trial.at("doneWhen") == input.task.at("doneWhen") &&
                   trial.at("sessionReport") == input.event.at("report"),"record did not identify its actual trial input");
             const bool failed = wrongAction && bot == "regression" && number == 1;

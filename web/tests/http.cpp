@@ -158,6 +158,11 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
 
     auto page = browser.get("/api/view?bot=release");
     check(page.at("olderBefore").get<Id>() > 0,"conversation did not offer older history");
+    const std::map<std::string,std::pair<std::string,std::string>> expectedResults{
+        {"report",{"report","T3 finished while the browser was closed"}},
+        {"completed",{"text","Draft complete"}},
+    };
+    std::set<std::string> foundResults;
     std::set<Id> cursors;
     Id oldestSeen = 0;
     do {
@@ -169,7 +174,13 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
             previous = id;
             const auto task = event.at("taskId").get<Id>();
             check(task != triage,"conversation included another Bot's history");
-            if (event.at("kind") != "request") continue;
+            const auto kind = event.at("kind").get<std::string>();
+            if (const auto expected = expectedResults.find(kind); task == release && expected != expectedResults.end()) {
+                check(oldestSeen > 0 && foundResults.insert(kind).second &&
+                      event.at("data").at(expected->second.first) == expected->second.second,
+                      "older page returned a wrong or repeated report or completion");
+            }
+            if (kind != "request") continue;
             const auto request = expectedRequests.find(task);
             const auto& data = event.at("data");
             check(request != expectedRequests.end() && data.at("text") == request->second,
@@ -185,6 +196,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
         page = browser.get("/api/conversation?bot=release&before=" + std::to_string(before));
     } while (true);
     check(expectedRequests.empty(),"conversation pagination skipped requests");
+    check(foundResults.size() == expectedResults.size(),"conversation pagination skipped a report or completion");
 }
 
 void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
@@ -193,7 +205,11 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
         const auto id = std::to_string(i);
         expectedTasks.insert(cli.submit({"triage","Session " + id,"linked env","separate-" + id}));
     }
-    tick(runtime,3);
+    const auto allRunsStarted = [&] {
+        return std::ranges::all_of(expectedTasks,[&](Id id) { return cli.task(id).at("runs").size() == 1; });
+    };
+    for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
+    check(allRunsStarted(),"session fixtures did not each start one Run");
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");

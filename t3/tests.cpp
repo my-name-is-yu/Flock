@@ -173,16 +173,22 @@ int main(int argc, char** argv) {
         read.threadId = "thread";
         read.runId = "root";
         read.itemId = "unicode";
-        std::string expectedText;
+        std::string expectedText = "界";
         for (int i = 0; i < 500; ++i) expectedText += "猫🙂犬魚🐦";
         expectedText += "\n夕焼け";
         std::string receivedText;
+        bool firstExcerpt = true;
         Excerpt chunk;
         do {
             chunk = adapter->read(read);
             check(!chunk.text.empty() && chunk.text.size() <= 8192, "each Unicode excerpt fits the byte limit");
             check(chunk.threadId == "thread" && chunk.runId == "root" && chunk.itemId == "unicode",
                   "continuation retains the excerpt's thread, Run and item");
+            if (firstExcerpt) {
+                check(chunk.more && chunk.nextOffset == 2729 && chunk.text.ends_with("魚"),
+                      "the fixture did not return the boundary before a split surrogate pair");
+                firstExcerpt = false;
+            }
             receivedText += chunk.text;
             check(receivedText.size() <= expectedText.size(), "continuation does not repeat text");
             check(!chunk.more || chunk.nextOffset > read.offset, "a continued excerpt advances its cursor");
