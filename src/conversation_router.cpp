@@ -141,7 +141,7 @@ int positiveInt(std::string_view text) {
     return result.ec == std::errc{} && result.ptr == text.data() + text.size() && value > 0 ? value : 0;
 }
 int ordinal(std::string_view text) {
-    static const std::regex number(R"((?:^|[^0-9])([1-9][0-9]?)(案目|番目|つ目)|\b(?:option|proposal|alternative|choice)\s*#?([1-9][0-9]?)(?![0-9]))");
+    static const std::regex number(R"((?:^|[^0-9])([1-9][0-9]?)(案目|番目|つ目)|(?:案\s*|\b(?:option|proposal|alternative|choice)\s*#?)([1-9][0-9]?)(?![0-9]))");
     int found = 0;
     auto add = [&](int value) {
         found = found != 0 && found != value ? -1 : value;
@@ -289,6 +289,7 @@ bool doWorkOnResult(std::string_view text) {
 }
 bool explicitlySelectsImplementation(std::string_view text) {
     return any(text, {"で実装して", "を実装して", "で実装を進めて"}) ||
+           sentence(text).ends_with("を実装") ||
            starts(text, {"implement ", "please implement ", "build option ", "please build option "});
 }
 

@@ -35,6 +35,17 @@ std::string replacementKey(const Json& item) {
     return field(item,"environmentId").empty() ? "target" : "environment";
 }
 
+void includeSource(std::string& instruction, const Json& source) {
+    const auto excerpt = field(source,"text");
+    if (!excerpt.empty()) instruction += "\n\nReferenced work excerpt:\n" + excerpt;
+}
+
+std::string instructionText(const Json& item) {
+    auto text = field(item,"text");
+    if (const auto source = item.find("source"); source != item.end()) includeSource(text,*source);
+    return text;
+}
+
 struct InstructionBatch {
     Json instructions = Json::array(), superseded = Json::array();
 };
@@ -48,7 +59,7 @@ InstructionBatch pendingBatch(const Json& task) {
         if (auto key = replacementKey(pending[i]); !key.empty()) latestOverrideIndices[std::move(key)] = i;
     }
     std::size_t reservedOverrideBytes = 0;
-    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += field(pending[i],"text").size() + 4;
+    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += instructionText(pending[i]).size() + 4;
     auto batchBytes = reservedOverrideBytes;
     bool acceptsIndependentInstructions = true;
     for (std::size_t i = 0; i < pending.size(); ++i) {
@@ -57,7 +68,7 @@ InstructionBatch pendingBatch(const Json& task) {
             if (latestOverrideIndices.at(key) == i) batch.instructions.push_back(item);
             else batch.superseded.push_back(item);
         } else if (acceptsIndependentInstructions) {
-            const auto size = field(item,"text").size() + 4;
+            const auto size = instructionText(item).size() + 4;
             if (batchBytes + size <= 64000) {
                 batch.instructions.push_back(item);
                 batchBytes += size;
@@ -70,7 +81,7 @@ InstructionBatch pendingBatch(const Json& task) {
 void includeInstructions(std::string& instruction, const Json& pending) {
     if (pending.empty()) return;
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
-    for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
+    for (const auto& item : pending) instruction += "\n\n" + instructionText(item);
 }
 
 void validateAnswers(const Json& fields, const Json& answers) {
@@ -143,11 +154,14 @@ struct Runtime::Impl {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
 SELECT id FROM tasks AS ready
-WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
-  SELECT 1 FROM tasks AS prior WHERE prior.environment_id=ready.environment_id
-  AND prior.project_id=ready.project_id AND prior.id<ready.id
+WHERE state NOT IN ('completed','cancelled')
+AND (ready.state<>'queued' OR json_extract(ready.data,'$.environmentReleased') OR NOT EXISTS (
+  SELECT 1 FROM tasks AS prior WHERE prior.project_id=ready.project_id AND prior.id<ready.id
   AND prior.state NOT IN ('completed','cancelled')
-) ORDER BY id)SQL");
+  AND COALESCE(json_extract(prior.data,'$.environmentReleased'),0)=0
+  AND COALESCE(json_extract(prior.data,'$.environmentId'),prior.environment_id)
+      =COALESCE(json_extract(ready.data,'$.environmentId'),ready.environment_id)
+)) ORDER BY id)SQL");
         std::vector<Id> result;
         while (rows.next()) result.push_back(rows.number(0));
         return result;
@@ -157,18 +171,9 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         return db.load(id);
     }
 
-    bool hasUnreleasedExecutionInEnvironment(const Json& task, std::string_view environment) {
-        auto rows = db.query(R"SQL(
-SELECT 1 FROM tasks WHERE project_id=? AND id<>? AND state NOT IN ('queued','completed','cancelled')
-AND COALESCE(json_extract(data,'$.environmentReleased'),0)=0
-AND COALESCE(json_extract(data,'$.environmentId'),environment_id)=? LIMIT 1
-)SQL", {task["projectId"],task["id"],environment});
-        return rows.next();
-    }
-
     void activate(const Json& task) {
         change(task,[&](Json& current) {
-            if (hasUnreleasedExecutionInEnvironment(current,field(current,"environmentId"))) return false;
+            if (!db.queueBlocker(current,field(current,"environmentId")).is_null()) return false;
             db.event(current,"intake",{{"kind","intake"}});
             current["state"] = "deciding";
             return true;
@@ -425,7 +430,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 return true;
             }
             if ((target != old || current.value("environmentReleased",false) || current["state"] == "queued") &&
-                hasUnreleasedExecutionInEnvironment(current,target)) return false;
+                !db.queueBlocker(current,target).is_null()) return false;
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;
@@ -638,7 +643,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         if (event["kind"] == "question") return {"answer_session_question","ask_user"};
         if (event["kind"] == "result" && !task["lastRun"].is_null()) {
             std::vector<std::string> tools{"delegate","follow_up","ask_user"};
-            if (revision(task) == event.value("revisionId",Json(nullptr))) tools.insert(tools.begin()+2,"complete");
+            if (!hasPending(task) && revision(task) == event.value("revisionId",Json(nullptr)))
+                tools.insert(tools.begin()+2,"complete");
             if (options.sessionRead == "on_demand" && event["evidence"].size() < 3) tools.push_back("session_read");
             return tools;
         }
@@ -708,6 +714,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             task["additionalUsed"] = task["additionalUsed"].get<int>() + 1;
         }
         if (work) {
+            if (const auto sources = task.find("sourceResultRefs"); tool == "delegate" && sources != task.end())
+                for (const auto& source : *sources) includeSource(instruction,source);
             includeInstructions(instruction,pending);
             instruction += "\n\n[Flock action ID: " + action + "]";
             task["deadline"] = 0;
@@ -743,7 +751,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             const auto key = replacementKey(item);
             if (key == "target" && std::exchange(sawTarget,true)) continue;
             if (!key.empty() && key != "target") continue;
-            auto text = bounded(field(item,"text"),remaining);
+            auto text = bounded(instructionText(item),remaining);
             remaining -= text.size();
             excerpts.push_back(std::move(text));
         }
@@ -860,8 +868,14 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
         }
         Json event, history = Json::array();
         {
-            std::lock_guard lock(db.mutex);
+            std::unique_lock lock(db.mutex);
             event = db.currentEvent(task);
+            const bool hasUnprocessedAnswer = event.contains("userAnswer") && event["consumed"] == false;
+            if (task["activeRun"].is_null() && !task["lastRun"].is_null() && hasPending(task) && !hasUnprocessedAnswer) {
+                lock.unlock();
+                continueTask(task);
+                return;
+            }
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
             if (event["kind"] == "result" && db.completionHeld(task)) return;
             auto rows = db.query(R"SQL(
@@ -925,10 +939,7 @@ AND kind IN ('decision','report','user_answer','session_answered') ORDER BY id D
         if (state == "cancelling") cancel(task);
         else if (task.value("replanning",false)) replan(task);
         else if (state == "queued") activate(task);
-        else if (state == "deciding") {
-            if (task["activeRun"].is_null() && !task["lastRun"].is_null() && hasPending(task)) continueTask(task);
-            else decide(task);
-        }
+        else if (state == "deciding") decide(task);
         else if (state == "sending") {
             Json action;
             {

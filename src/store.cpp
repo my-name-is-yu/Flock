@@ -132,6 +132,19 @@ void Store::Impl::save(Json& task) {
     exec("UPDATE tasks SET state=?,generation=?,data=? WHERE id=?",
          {task["state"], task["generation"], task, task["id"]});
 }
+Json Store::Impl::queueBlocker(const Json& task, std::string_view environment) const {
+    auto row = query(R"SQL(
+SELECT id,bot_id,json_extract(data,'$.request'),state FROM tasks
+WHERE project_id=?1 AND id<>?2 AND state NOT IN ('completed','cancelled')
+AND COALESCE(
+    CASE WHEN json_extract(data,'$.environmentReleased') THEN json_extract(data,'$.pendingEnvironmentId') END,
+    json_extract(data,'$.environmentId'),environment_id)=?3
+AND (id<?2 OR (state<>'queued' AND COALESCE(json_extract(data,'$.environmentReleased'),0)=0))
+ORDER BY id LIMIT 1
+)SQL", {task["projectId"],task["id"],environment});
+    if (!row.next()) return nullptr;
+    return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
+}
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
     return last();
@@ -353,12 +366,10 @@ Json Store::task(Id id) const {
     if (pending.is_object()) pending.erase("authGeneration");
     result["pendingAction"] = pending;
     if (result["state"] == "queued") {
-        auto row = p_->query("SELECT id,bot_id,json_extract(data,'$.request'),state FROM tasks"
-                             " WHERE environment_id=? AND project_id=? AND id<?"
-                             " AND state NOT IN ('completed','cancelled') ORDER BY id LIMIT 1",
-                             {result["environmentId"],result["projectId"],id});
-        if (row.next()) result["blockedBy"] = {{"id",row.number(0)},{"botId",row.string(1)},
-                                              {"request",row.string(2)},{"state",row.string(3)}};
+        auto environment = field(result,"environmentId");
+        if (result.value("environmentReleased",false))
+            environment = result.value("pendingEnvironmentId",environment);
+        result["blockedBy"] = p_->queueBlocker(result,environment);
     }
     auto runs = p_->query("SELECT runs.thread_id,runs.run_id,runs.link,runs.action_id,runs.environment_id,"
                           "json_extract(outbox.data,'$.revisionId') FROM runs"

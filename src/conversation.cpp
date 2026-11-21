@@ -584,6 +584,7 @@ void Store::Impl::routeMessage(Id id) {
                         (environment.empty() || environment != field(task,"environmentId") || task.value("replanning",false));
                     Json pending = {{"messageId",id},{"text",route.text},{"revisionId",revision},
                                     {"conflicting",conflicting}};
+                    if (segment.contains("source")) pending["source"] = segment["source"];
                     if (!environment.empty()) {
                         pending["environmentId"] = environment;
                         if (conflicting) task["pendingEnvironmentId"] = environment;

@@ -44,6 +44,7 @@ struct Store::Impl {
                                        Id replyTo, const Json& routing);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool completionHeld(const Json&) const;
+    Json queueBlocker(const Json&, std::string_view environment) const;
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;
     void wait(Json&, std::string_view reason, Json data = Json::object());
