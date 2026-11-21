@@ -88,8 +88,8 @@ CREATE INDEX IF NOT EXISTS tasks_route ON tasks(environment_id,project_id,id)
 CREATE INDEX IF NOT EXISTS tasks_bot ON tasks(bot_id,id DESC);
 CREATE TABLE IF NOT EXISTS journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
-  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, bot_id TEXT,
-  CHECK(task_id IS NOT NULL OR bot_id IS NOT NULL));
+  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX IF NOT EXISTS journal_task ON journal(task_id,id);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -114,6 +114,8 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateConversation();
+        exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
+             " WHERE environment_id<>json_extract(data,'$.environmentId')");
     } catch (...) { sqlite3_close(db); throw; }
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
@@ -129,8 +131,8 @@ Json Store::Impl::load(Id id) const {
 }
 void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
-    exec("UPDATE tasks SET state=?,generation=?,data=? WHERE id=?",
-         {task["state"], task["generation"], task, task["id"]});
+    exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
+         {task["state"], task["generation"], task, task["environmentId"], task["id"]});
 }
 Json Store::Impl::queueBlocker(const Json& task, std::string_view environment) const {
     auto row = query(R"SQL(
@@ -272,6 +274,8 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     const auto wait = task["wait"];
     if (operation == "cancel") {
         if (waitId && (wait.is_null() || wait["id"] != waitId)) throw Conflict("Waiting item is no longer current");
+        if (!task.value("pendingInstructions",Json::array()).empty())
+            task["cancelledInstructions"] = task.at("pendingInstructions");
         clearWait(task, "cancel");
         journal(id, "cancel_requested", Json::object());
         if (task["state"] == "queued") {
@@ -432,11 +436,11 @@ SELECT page.id,page.task_id,page.time,page.kind,
             ) THEN 'true' ELSE 'false' END))) END
 FROM (
   SELECT j.* FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
-    AND j.bot_id IS NULL
+    AND j.conversation_bot_id IS NULL
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
-  UNION ALL SELECT * FROM journal WHERE bot_id=?
+  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN route_decisions decision ON decision.message_id=m.id
 WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL", {bot,bot,before,before,std::clamp(limit,1u,200u)});

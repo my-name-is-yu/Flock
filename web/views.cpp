@@ -136,7 +136,7 @@ Json candidateViews(const Json& candidates) {
 
 Json sourceView(const Json& source, bool includeText = false) {
     Json view = Json::object();
-    copyFields(view,source,{"taskId","messageId","revisionId"});
+    copyFields(view,source,{"taskId","messageId","revisionId","option"});
     if (includeText) copyFields(view,source,{"text"});
     return view;
 }
@@ -365,7 +365,7 @@ Json botView(Store& store, const Json& bot) {
     auto& clarifications = result["clarifications"] = Json::array();
     for (const auto& clarification : store.clarifications(id)) {
         Json view = Json::object();
-        copyFields(view,clarification,{"messageId","text"});
+        copyFields(view,clarification,{"messageId","text","destinations"});
         if (clarification.contains("candidates")) view["candidates"] = candidateViews(clarification.at("candidates"));
         clarifications.push_back(std::move(view));
     }

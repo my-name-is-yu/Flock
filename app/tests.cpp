@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "demo.hpp"
 #include "model.hpp"
 
 #include <chrono>
@@ -310,6 +311,69 @@ void acceptanceRunner() {
     }
     check(count == 6,"six trial rows were not recorded");
 }
+void fixedDemoWithUserCriteriaAndContinuation() {
+    Sandbox fixture;
+    Store store(fixture.path / "state.db");
+    struct ChangeRouter final : Model {
+        Json route;
+        Decision decide(const ModelInput&) override {
+            return {"route_conversation",{{"routes",Json::array({route})}},"Apply the fixture's request"};
+        }
+    } changes;
+    auto t3 = makeDemoT3();
+    const auto demo = makeDemoModel();
+    const auto notes = [](auto) { return BotNotes{}; };
+    const Intake intake{"demo","Measure the result","local","project"};
+    const auto tickUntil = [](Runtime& runtime,const auto& ready,std::string_view message) {
+        for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
+        check(ready(),message);
+    };
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        store.receive(intake,"bare-status","progress");
+        runtime.routeConversation();
+        check(store.tasks("demo").empty() && store.conversation("demo").back()["data"]["route"] == "status",
+              "bare progress started a new Task in the fixed demo");
+    }
+    const auto task = store.submit(intake);
+    {
+        Runtime routing(store,changes,*t3,notes);
+        changes.route = {{"kind","revise_task"},{"taskId",task},{"doneWhen","Confirm the output"}};
+        store.receive(intake,"criteria","Completion criteria: Confirm the output");
+        routing.routeConversation();
+    }
+    check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
+          "the requested criteria was prematurely marked as fixed");
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        tickUntil(runtime,[&] { return store.task(task)["state"] == "running"; },"the fixed demo never started");
+    }
+    const auto first = store.task(task);
+    check(first["doneWhen"] == "Confirm the output" && first["remaining"] == 3 && first["runs"].size() == 1,
+          "the fixed demo failed to delegate with the user's provisional criteria");
+    {
+        Runtime routing(store,changes,*t3,notes);
+        changes.route = {{"kind","append_instruction"},{"taskId",task}};
+        store.receive(intake,"follow-up","Include the exact sample count");
+        routing.routeConversation();
+    }
+    {
+        Runtime runtime(store,*demo,*t3,notes);
+        tickUntil(runtime,[&] { return store.task(task)["state"] == "completed"; },
+                  "the fixed demo did not finish its continuation");
+    }
+    const auto runs = store.task(task).at("runs");
+    check(runs.size() == 2 && runs[0]["threadId"] == runs[1]["threadId"] && runs[0]["runId"] != runs[1]["runId"],
+          "the fixed demo follow-up started another Session");
+    Command followUp;
+    followUp.tool = "follow_up";
+    followUp.actionId = "persisted-demo-action";
+    followUp.target = {runs[0]["threadId"],runs[0]["runId"],""};
+    const auto sent = t3->send(followUp);
+    const auto reconciled = t3->reconcile(followUp);
+    check(sent.run.threadId == followUp.target.threadId && sent.run.runId == reconciled.run.runId &&
+          sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
+}
 } // namespace
 
 int main() {
@@ -319,6 +383,7 @@ int main() {
         notesAndRoutingOnRestart();
         responseContract();
         acceptanceRunner();
+        fixedDemoWithUserCriteriaAndContinuation();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

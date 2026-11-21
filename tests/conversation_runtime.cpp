@@ -166,6 +166,11 @@ struct Fixture {
         const auto found = std::find_if(timeline.begin(),timeline.end(),[&](const Json& row) { return row["id"] == id; });
         return found == timeline.end() ? Json(nullptr) : (*found)["data"];
     }
+    Json response(const Json& receipt) {
+        for (const auto& row : store->conversation("alpha"))
+            if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == receipt["messageId"]) return row["data"];
+        return nullptr;
+    }
     Json event(Id id,std::string_view kind) {
         const auto history = store->history(id,0,200);
         const auto found = std::find_if(history.rbegin(),history.rend(),[&](const Json& row) { return row["kind"] == Json(kind); });
@@ -173,28 +178,35 @@ struct Fixture {
     }
 };
 
-void durableInboxSurvivesRestartAndBlocksCompletion() {
+void durableInboxAndTargetedRevision() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
+    const auto other = f.store->submit(f.routing("Unrelated work","alpha","cloud"));
     f.reach(id,"running");
-    f.t3.finish("run-1","Old report");
+    f.reach(other,"running");
+    f.t3.finish(f.task(id)["activeRun"]["runId"].get<std::string>(),"Old report");
+    f.t3.finish(f.task(other)["activeRun"]["runId"].get<std::string>(),"Unrelated report");
     f.reach(id,"deciding");
     constexpr auto criteria = "完了条件は CPU 時間を計測";
     f.script(criteria,revision(id,"doneWhen","CPU 時間を計測"));
-    f.model.beforeComplete = [&](const ModelInput&) { f.enqueue("raw",criteria); };
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] != id) return;
+        f.enqueue("raw",criteria);
+        f.runtime->routeConversation();
+    };
     f.tick();
-    check(f.event(id,"completed").is_null() && f.t3.sent.size() == 1,
-          "the unclassified message allowed stale completion or new work");
+    check(f.event(id,"completed").is_null() && f.t3.sent.size() == 2 &&
+          f.task(other)["state"] == "completed","a saved revision accepted a stale completion or held another task");
     const auto receipt = f.store->receipt("alpha","raw",criteria);
-    check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "received",
-          "the saved message was not visible before routing");
+    check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "stopping",
+          "the accepted revision was not recorded");
     f.model.beforeComplete = {};
     f.restart();
     f.reach(id,"running");
-    check(f.task(id)["doneWhen"] == "CPU 時間を計測" && f.t3.sent.size() == 2 &&
+    check(f.task(id)["doneWhen"] == "CPU 時間を計測" && f.t3.sent.size() == 3 &&
           f.t3.sent.back().instruction.find("CPU 時間を計測") != std::string::npos &&
           f.conversationMessage((*receipt)["messageId"])["deliveredToT3"] == true,
-          "restart did not route and deliver the received message");
+          "restart did not deliver the accepted revision");
 }
 
 void linkedResultStartsANewSession() {
@@ -291,6 +303,120 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
           f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           f.conversationMessage(added["messageId"])["deliveredToT3"] == true,
           "continuation lost the Bot's requested answer or the additional instruction");
+}
+
+void omittedDestinationAndWrongNamedTaskAreBlocked() {
+    Fixture f;
+    f.script("クラウドMacで計測して",{{"kind","create_task"}});
+    const auto proposed = f.response(f.receive("omitted-destination","クラウドMacで計測して"));
+    check(proposed["route"] == "clarify" && proposed["destinations"].is_array() &&
+          f.store->tasks("alpha").empty(),"an omitted destination was silently replaced with the default");
+    f.tick(3);
+    check(f.t3.sent.empty(),"a Run already reached the default destination");
+    f.receive("confirmed-destination","クラウドMac",proposed.at("messageId"));
+    const auto created = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(created,"running");
+    check(f.t3.sent.size() == 1 && f.t3.sent.front().environmentId == "cloud" &&
+          f.store->clarifications("alpha").empty(),"confirmed execution did not reach the named environment");
+
+    const auto release = f.store->submit(f.routing("Release notes"));
+    const auto inventory = f.store->submit(f.routing("Inventory review"));
+    const auto releaseBefore = f.task(release);
+    const auto inventoryBefore = f.task(inventory);
+    const auto request = "Change acceptance criteria for Release notes to export a CSV";
+    f.script(request,revision(inventory,"doneWhen","export a CSV"));
+    const auto mismatch = f.response(f.receive("wrong-target",request));
+    check(mismatch["route"] == "clarify" && f.task(inventory) == inventoryBefore && f.task(release) == releaseBefore,
+          "the model's different Task ID changed the wrong acceptance criteria");
+}
+
+void lastConfiguredDestinationIsAvailable() {
+    Fixture f;
+    auto routing = f.routing();
+    auto& aliases = routing.config["conversationEnvironments"] = Json::object();
+    for (int i = 0; i < 15; ++i)
+        aliases["alias" + std::to_string(i)] = "executor-" + std::to_string(i);
+    aliases["z-final"] = "executor-final";
+    const auto request = "Run the measurement on z-final";
+    f.model.beforeRoute = [&](const ModelInput& input) {
+        const auto& destinations = input.event.at("environments");
+        check(std::find(destinations.begin(),destinations.end(),Json("z-final")) != destinations.end() &&
+              std::find(destinations.begin(),destinations.end(),Json("executor-final")) != destinations.end(),
+              "the configured destination list truncated the last alias or canonical ID");
+    };
+    f.script(request,{{"kind","create_task"},{"environment","executor-final"}});
+    f.store->receive(routing,"last-destination",request);
+    f.runtime->routeConversation();
+    const auto id = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(id,"running");
+    check(f.t3.sent.size() == 1 && f.t3.sent[0].environmentId == "executor-final",
+          "the last allowed destination did not receive the Run");
+}
+
+void independentRequestsAndPartialStop() {
+    Fixture f;
+    const auto notes = f.store->submit(f.routing("Release notes"));
+    const auto named = f.store->submit(f.routing("Checklist without a wait","alpha","cloud"));
+    f.model.questions[notes] = {{"question","Which template?"},{"choices",{"Status","Approve"}}};
+    f.reach(notes,"waiting");
+    f.reach(named,"running");
+    const auto wait = f.task(notes).at("wait");
+    f.script("Checklist without a wait: choose blue",target("answer_wait",notes));
+    f.receive("wrong-question","Checklist without a wait: choose blue");
+    f.script("Stop using the old template for Release notes",target("cancel_task",notes));
+    f.receive("partial-stop","Stop using the old template for Release notes");
+    for (const auto* request : {"Also check the changes in the next version", "次の版の変更点も調べて"}) {
+        const auto count = f.store->tasks("alpha").size();
+        f.script(request,{{"kind","create_task"}});
+        const auto receipt = f.receive(request,request);
+        check(f.response(receipt)["route"] == "create_task" && f.store->tasks("alpha").size() == count + 1,
+              "a distinct request was lost while a question was open");
+    }
+    check(f.task(notes)["wait"] == wait && f.t3.interrupted.empty() &&
+          f.event(notes,"cancel_requested").is_null() && f.event(notes,"user_answer").is_null(),
+          "unrelated instructions or partial stop affected the current question");
+}
+
+void explanationDoesNotHoldCompletion() {
+    Fixture f;
+    const auto first = f.store->submit(f.routing("Prepare evidence"));
+    f.reach(first,"running");
+    f.script("What does the evidence show?",{{"kind","clarify"},{"text","Which evidence should I explain?"},
+                                              {"candidates",{first}}});
+    const auto read = f.response(f.receive("describe","What does the evidence show?"));
+    check(read["route"] == "clarify","the read-only request did not ask for its evidence");
+    f.t3.finish("run-1","Evidence");
+    f.reach(first,"completed");
+    check(f.store->clarifications("alpha").size() == 1 && f.t3.sent.size() == 1,
+          "a read-only clarification held task completion or sent another Run");
+}
+
+void restartRestoresCancelledTaskDirections() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing("Measure the reference dataset"));
+    f.script("Use a pinned regression fixture",target("append_instruction",old));
+    f.receive("past-direction","Use a pinned regression fixture");
+    f.reach(old,"running");
+    f.script("Keep the raw timing file",target("append_instruction",old));
+    f.receive("pending-direction","Keep the raw timing file");
+    f.store->operate(old,0,"cancel");
+    f.t3.finish("run-1","Cancelled work settled");
+    f.reach(old,"cancelled");
+    Id cancellation = 0;
+    for (const auto& row : f.store->history(old))
+        if (row["kind"] == "cancelled") cancellation = row["id"];
+    check(cancellation > 0,"the cancelled task had no resume anchor");
+    f.script("Restart this work",{{"kind","create_task"},{"resultMessageId",cancellation}});
+    f.receive("restart-work","Restart this work",cancellation);
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(next,"running");
+    const auto& instruction = f.t3.sent.back().instruction;
+    check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
+          instruction.find("Measure the reference dataset") != std::string::npos &&
+          instruction.find("Report baseline latency") != std::string::npos &&
+          instruction.find("Use a pinned regression fixture") != std::string::npos &&
+          instruction.find("Keep the raw timing file") != std::string::npos && f.t3.sent.back().tool == "delegate",
+          "restart omitted the original intent, criteria, or accepted directions");
 }
 
 void appendWaitsForSafeBoundary() {
@@ -485,7 +611,7 @@ void unresolvedStopHoldsOnlyItsCandidates() {
     const auto b = f.store->submit(f.routing("リリース作業","alpha","cloud"));
     const auto other = f.store->submit(f.routing("Separate task","beta","third"));
     for (auto id : {a,b,other}) f.reach(id,"running");
-    f.script("それ止めて",{{"kind","clarify"},{"text","どの作業を停止しますか？"},{"candidates",{a,b}}});
+    f.script("それ止めて",{{"kind","clarify"},{"text","どの作業を停止しますか？"},{"operation","cancel_task"},{"candidates",{a,b}}});
     f.receive("ambiguous-stop","それ止めて");
     const auto clarifications = f.store->clarifications("alpha");
     check(clarifications.size() == 1 && clarifications[0]["candidates"].size() == 2 && f.t3.interrupted.empty(),
@@ -579,6 +705,26 @@ void cloudDestinationWaitsForItsProject() {
           "the transferred Task still held the desktop queue after moving");
 }
 
+void queuedMoveWaitsForTheNewerDestinationOwner() {
+    Fixture f;
+    const auto local = f.store->submit(f.routing("Existing local work","beta"));
+    const auto moving = f.store->submit(f.routing("Transfer this task"));
+    const auto remote = f.store->submit(f.routing("Newer destination owner","beta","cloud"));
+    f.reach(local,"running");
+    f.reach(remote,"running");
+    f.script("Transfer this task to cloud",revision(moving,"environment","cloud"));
+    f.receive("move-queued","Transfer this task to cloud");
+    f.restart();
+    f.advanceUntil([&] { return f.task(moving).value("environmentReleased",false); },
+                   "the queued transfer stayed behind unrelated work in its old queue");
+    check(f.task(moving)["blockedBy"]["id"] == remote && f.t3.sent.size() == 2 && f.t3.interrupted.empty(),
+          "the transferred Task bypassed the newer active destination owner");
+    f.t3.finish(f.task(remote)["activeRun"]["runId"].get<std::string>(),"Destination settled");
+    f.reach(moving,"running");
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" && f.task(local)["state"] == "running",
+          "the queued Task did not retain its route through restart");
+}
+
 void latestTargetPrecedesABatchedBacklog() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -644,8 +790,7 @@ void continuationUsesTheCurrentBudget() {
     check(f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
           f.store->tasks("alpha").size() == 1 && f.event(id,"budget_granted").is_null(),
           "a declined grant or duplicate request reset the active budget");
-    f.script("追加1回",target("resolve_wait",id));
-    f.receive("budget","追加1回");
+    f.store->operate(id,wait["id"],"approve");
     f.reach(id,"running");
     check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 0 && f.task(id)["additionalUsed"] == 4 &&
           f.store->tasks("alpha").size() == 1,"explicit budget reply did not permit precisely one extra Run");
@@ -695,12 +840,18 @@ int main() {
         inFlightAnswerCannotMoveToAnUnrelatedWait();
         unresolvedStopHoldsOnlyItsCandidates();
         cancellationReleasesOnlyAfterStopConfirmation();
-        durableInboxSurvivesRestartAndBlocksCompletion();
+        durableInboxAndTargetedRevision();
         linkedResultStartsANewSession();
+        omittedDestinationAndWrongNamedTaskAreBlocked();
+        lastConfiguredDestinationIsAvailable();
+        independentRequestsAndPartialStop();
+        restartRestoresCancelledTaskDirections();
+        explanationDoesNotHoldCompletion();
         independentRequestQueuesSeparately();
         followUpCarriesTheRepliedToReport();
         questionAnswerReachesTheBotBeforeContinuingWork();
         cloudDestinationWaitsForItsProject();
+        queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();
         revisionOfProvablyUnsentAction();

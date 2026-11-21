@@ -371,7 +371,7 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto question = firstWait.at("messageId").get<Id>();
     const auto otherQuestion = secondWait.at("messageId").get<Id>();
     check(question > 0 && otherQuestion > 0 && question != otherQuestion,"pending questions did not have distinct reply anchors");
-    const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","利用者向けのみ"},{"replyToMessageId",question}};
+    const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","Status\n\nApprove\n\nseparately: keep this answer together"},{"replyToMessageId",question}};
     const auto answerReceipt = browser.post("/api/messages",reply,201);
     tick(runtime,2);
     check(browser.post("/api/messages",reply,201) == answerReceipt,"exact answer retry lost its receipt");
