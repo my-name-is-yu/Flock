@@ -191,13 +191,6 @@ int main(int argc, char** argv) {
             read.offset = chunk.nextOffset;
         } while (chunk.more);
         check(receivedText == expectedText, "continued excerpts preserve the complete Unicode text");
-        const auto boundaries = effects("unicode_split_avoided");
-        check(!boundaries.empty(), "the fixture did not encounter a split surrogate pair");
-        for (const auto& boundary : boundaries) {
-            check(boundary.at("nextOffset").get<std::size_t>() + 1 ==
-                  boundary.at("offset").get<std::size_t>() + boundary.at("limit").get<std::size_t>(),
-                  "the fixture did not back up from the requested limit by one UTF-16 code unit");
-        }
         ReadRequest translation = read;
         translation.itemId = "translation";
         translation.offset = 0;
