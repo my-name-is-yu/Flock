@@ -11,12 +11,31 @@
 #include <set>
 #include <thread>
 #include <utility>
+#include <sqlite3.h>
 #include <unistd.h>
 
 using namespace flockv0;
 
 namespace {
 void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
+void createSessionReadJournalFailure(const std::filesystem::path& databaseFile) {
+    sqlite3* database = nullptr;
+    const auto opened = sqlite3_open(databaseFile.c_str(),&database);
+    if (opened != SQLITE_OK) {
+        const std::string message = database ? sqlite3_errmsg(database) : "Could not open the test database";
+        if (database) sqlite3_close(database);
+        throw std::runtime_error(message);
+    }
+    char* error = nullptr;
+    const auto result = sqlite3_exec(database,
+        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
+        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END",
+        nullptr,nullptr,&error);
+    const std::string message = error ? error : sqlite3_errmsg(database);
+    sqlite3_free(error);
+    sqlite3_close(database);
+    if (result != SQLITE_OK) throw std::runtime_error(message);
+}
 constexpr auto Evidence = "report and independent verification";
 
 Decision work(const char* tool = "delegate", bool initial = true) {
@@ -600,48 +619,6 @@ void peerWorkAndRestart() {
     }
 }
 
-void revisionWaitsForPeerClarification() {
-    Fixture f;
-    f.allowBeta();
-    const Intake routing{"alpha","Release check","e","p",
-                         {{"conversationEnvironments",{{"cloud","cloud"}}}}};
-    const auto root = f.store->submit(routing);
-    bool answeredPeer = false;
-    f.model.script = [&](const ModelInput& input) -> Decision {
-        const auto& kind = input.event.at("kind");
-        if (kind == "route_conversation") {
-            return {"route_conversation",{{"routes",Json::array({
-                {{"kind","revise_task"},{"taskId",root},{"environment","cloud"}}
-            })}},{}};
-        }
-        if (input.task.at("botId") == "beta") {
-            if (kind == "bot_request") return botReply("question","Which branch?");
-            check(kind == "bot_answer" && input.event.at("text") == "Use main",
-                  "The recipient did not receive its clarification");
-            return botReply("result","Verified main");
-        }
-        if (kind == "bot_question") {
-            check(f.task(root).at("environmentId") == "e" && f.t3.launches == 0,
-                  "Replanning ran before the Bot exchange finished");
-            answeredPeer = true;
-            return botReply("answer","Use main");
-        }
-        check(kind == "intake","Unexpected event for the sender");
-        return answeredPeer ? work() : botRequest("beta","consult","Check the release");
-    };
-
-    f.reach(root,"peer_waiting");
-    f.store->receive(routing,"move-release-check","Run Release check on cloud");
-    f.runtime->routeConversation();
-    check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
-          "The requested destination change did not reach the task");
-    f.reach(root,"running");
-    const auto messages = f.botMessages("alpha");
-    check(answeredPeer && messages.size() == 4 && messages.back().at("messageType") == "result" &&
-          f.t3.launches == 1 && f.t3.seen.front().environmentId == "cloud",
-          "The task did not finish the Bot exchange before launching once in the new environment");
-}
-
 void checkPeerClarificationAfterRun(std::string_view readMode) {
     Fixture f;
     f.read = readMode;
@@ -882,6 +859,48 @@ void freshResultStillRequiresPrefill() {
     check(f.model.calls == 1 && f.logs(task,"completed") == 0,"failed prefill completed or judged a fresh result");
 }
 
+void prefillPersistenceFailureDoesNotProceed() {
+    Fixture f;
+    f.read = "prefill";
+    f.allowBeta();
+    f.restart();
+    const auto source = f.submit("Verify with a Session and consult");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.task["id"] == source) {
+            if (input.event["kind"] == "intake") return work();
+            if (input.event["kind"] == "result") return botRequest("beta","consult","Confirm policy");
+            check(input.event["kind"] == "bot_result","unexpected source event before persistence failure");
+            return complete();
+        }
+        check(input.event["kind"] == "bot_request","unexpected recipient event before persistence failure");
+        return botReply("result","Policy confirmed");
+    };
+    f.reach(source,"running");
+    f.t3.finish("run-1");
+    for (int step = 0; step < 12; ++step) {
+        f.runtime->tick();
+        if (f.t3.reads == 1 && f.task(source)["state"] == "peer_waiting") break;
+    }
+    check(f.t3.reads == 1 && f.task(source)["state"] == "peer_waiting",
+          "test did not finish the initial prefill before consulting");
+    for (int step = 0; step < 12; ++step) {
+        f.runtime->tick();
+        const auto messages = f.botMessages("alpha");
+        if (messages.size() == 2 && messages.back()["messageType"] == "result" &&
+            f.task(source)["state"] == "deciding") break;
+    }
+    const auto messages = f.botMessages("alpha");
+    check(messages.size() == 2 && messages.back()["messageType"] == "result" &&
+          f.t3.reads == 1 && f.logs(source,"report") == 1,
+          "test did not reach a settled report with an incoming peer result");
+    createSessionReadJournalFailure(f.directory/"state.db");
+    f.runtime->tick();
+    check(f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
+          f.logs(source,"model_failure") == 1 && f.logs(source,"completed") == 0 &&
+          f.task(source)["state"] == "deciding",
+          "the model proceeded with a prefill excerpt that SQLite did not durably save");
+}
+
 void peerCancelWithLateSessionResult() {
     Fixture f;
     f.allowBeta();
@@ -1038,11 +1057,11 @@ int main() {
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
             {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
-            {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
             {"Bot consultation and permission",peerConsultationAndPermission},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
             {"Fresh result prefill failure",freshResultStillRequiresPrefill},
+            {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},

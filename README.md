@@ -23,9 +23,6 @@ ctest --test-dir build --output-on-failure
   "model": "gpt-6.2-sol",
   "environmentId": "<T3 の環境 ID>",
   "projectId": "<T3 のプロジェクト ID>",
-  "conversationEnvironments": {
-    "クラウドMac": "<接続済み T3 環境の ID>"
-  },
   "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
   "session": {
@@ -44,8 +41,6 @@ ctest --test-dir build --output-on-failure
 
 同じディレクトリの `SOUL.md` に役割と判断基準、`MEMORY.md` にタスクをまたぐ前提を書きます。Session のモデルとプロバイダを指定する場合は、`session.model` と `session.providerInstanceId` を設定します。作業場所の指定には `session.workspaceStrategy` を使います。
 
-`conversationEnvironments` は任意です。「計測はクラウドMacで」のような切り替えに使う名前を、同じ `projectId` を利用できる T3 環境に割り当てます。対象環境にも T3 接続と実行権限が必要です。 設定済みの名前または正規 ID を指定できます。実行先の判定が曖昧な場合は、送信前に確認します。
-
 `allowedBots` には依頼できる Bot のディレクトリ名を指定します。この例では、`bots/verifier/` に Verifier を設定すると Release から依頼できます。Verifier は同じやり取りに質問や結果を返せます。Verifier から Release に新しく依頼する場合は、Verifier 側の設定にも `release` を追加します。
 
 ## 実モデルと T3 に接続する
@@ -59,9 +54,7 @@ build/app/flock run
 
 それぞれの OAuth をブラウザで承認します。ChatGPT では Flock にプランの利用を許可します。T3 では Flock の Session 設定をカバーする権限を選びます。CLI が表示したローカル URL から Web UI を開けます。会話画面を閉じても、起動中の Runtime は cron と Session を監視します。
 
-Web では Bot の入力欄に、新しい依頼、進捗の質問、作業への補足を送れます。対象を特定できないときは作業名で確認します。進行中の作業への補足は保存と実行側への送信を別々に扱います。完了した結果をもとに実装を頼むと、元の結果にリンクした新しい作業を開始します。
-
-認証なしで試すときはテスト用の状態ディレクトリに Bot を設定し、`run --fixed` を使います。2体の Bot に異なる `projectId` を設定すると独立して進みます。`flock submit release 'ask:対象ブランチは？'` で、最初の委譲前に確認待ちになる例を試せます。
+認証なしで試すときはテスト用の状態ディレクトリに Bot を設定し、`run --fixed` を使います。2体の Bot に異なる `projectId` を設定すると独立して進みます。`ask:対象ブランチは？` と依頼すると、最初の委譲前に確認待ちになります。
 
 ```sh
 build/app/flock --help

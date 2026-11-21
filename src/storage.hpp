@@ -2,10 +2,8 @@
 #include "flock/core.hpp"
 #include <mutex>
 #include <sqlite3.h>
-#include <utility>
 
 namespace flockv0 {
-namespace conversation { struct Context; struct Message; struct Plan; }
 class Statement {
 public:
     Statement(sqlite3*, const char*, const Json& values);
@@ -39,25 +37,13 @@ struct Store::Impl {
     void exec(const char*, const Json& args = Json::array()) const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
-    Json queueBlocker(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
-    void restoreWaitAnchor(Json& task) const;
     void save(Json&);
-    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr, bool peerRequest = false);
-    void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
+    Id submit(const Intake&, std::string_view peerKind = {});
     std::optional<PeerExchange> peerExchange(Id) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
-    void migrateConversation();
-    std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool routeMessage(Id, Model&);
-    void applyRoutes(const conversation::Message&, const conversation::Context&, const conversation::Plan&);
-    conversation::Context routeContext(std::string_view bot, Id message, std::string_view text,
-                                       Id replyTo, const Json& routing);
-    Json captureConversationWaits(std::string_view bot) const;
-    Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
-    bool completionHeld(const Json&) const;
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;
     void wait(Json&, std::string_view reason, Json data = Json::object());
@@ -69,10 +55,7 @@ struct Store::Impl {
 
 class Transaction {
 public:
-    enum class Mode { write, read };
-    explicit Transaction(sqlite3* db, Mode mode = Mode::write) : db_(db) {
-        Statement(db_, mode == Mode::write ? "BEGIN IMMEDIATE" : "BEGIN", Json::array()).next();
-    }
+    explicit Transaction(sqlite3* db) : db_(db) { Statement(db_, "BEGIN IMMEDIATE", Json::array()).next(); }
     ~Transaction() { if (!done_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr); }
     void commit() { Statement(db_, "COMMIT", Json::array()).next(); done_ = true; }
 private:
