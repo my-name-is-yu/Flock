@@ -272,7 +272,19 @@ void notesAcrossConversationAndWork() {
     Store store(temp.path / "tasks.db");
     NotesT3 t3;
     t3.finished = true;
-    Runtime runtime(store,model,t3,[&](std::string_view botId) { return bots.notes(botId); });
+    Runtime runtime(store,model,t3,[&](std::string_view botId) {
+        auto notes = bots.notes(botId);
+        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
+        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
+        return notes;
+    });
+    const auto expectedNotes = [](BotNotes notes) {
+        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
+        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
+        notes.soul = bounded(notes.soul,8192);
+        notes.memory = bounded(notes.memory,8192);
+        return notes;
+    };
 
     const auto checkRequest = [](const Json& request, const Intake& bot, const BotNotes& notes, std::string_view kind) {
         const auto context = requestContext(request);
@@ -322,18 +334,18 @@ void notesAcrossConversationAndWork() {
     };
 
     const auto firstIntake = bots.get("first").intake("");
-    const auto firstTask = completeTask(firstIntake,first,std::string(conclusion) + " The Session returned the required evidence.");
+    const auto firstTask = completeTask(firstIntake,expectedNotes(first),std::string(conclusion) + " The Session returned the required evidence.");
     checkResultAnswer(firstIntake,firstTask,askAboutResult(firstIntake,firstTask,"original-notes"),
-                      first,std::string(conclusion) + " " + explanation);
+                      expectedNotes(first),std::string(conclusion) + " " + explanation);
     const auto secondIntake = bots.get("second").intake("");
-    const auto secondTask = completeTask(secondIntake,second,"The Session returned the required evidence.");
-    checkResultAnswer(secondIntake,secondTask,askAboutResult(secondIntake,secondTask,"second-bot"),second,explanation);
+    const auto secondTask = completeTask(secondIntake,expectedNotes(second),"The Session returned the required evidence.");
+    checkResultAnswer(secondIntake,secondTask,askAboutResult(secondIntake,secondTask,"second-bot"),expectedNotes(second),explanation);
 
     const auto edited = askAboutResult(firstIntake,firstTask,"edited-notes");
     first = {"Use the verified report.","Lead with the evidence."};
     write(folder / "first" / "SOUL.md",first.soul);
     write(folder / "first" / "MEMORY.md",first.memory);
-    checkResultAnswer(firstIntake,firstTask,edited,first,std::string(explanation) + " " + conclusion);
+    checkResultAnswer(firstIntake,firstTask,edited,expectedNotes(first),std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake,firstTask,"deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
     std::filesystem::remove(folder / "first" / "MEMORY.md");

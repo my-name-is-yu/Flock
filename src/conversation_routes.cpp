@@ -137,7 +137,20 @@ AND NOT EXISTS (
         } else {
             try {
                 if (auto route = conversation::shortcut(message->text,context)) plan = std::move(*route);
-                else plan = conversation::decide(message->text,context,model,notes(message->bot),message->routing.at("config"));
+                else {
+                    BotNotes botNotes;
+                    try {
+                        botNotes = notes(message->bot);
+                    } catch (const std::exception& error) {
+                        plan = routingQuestion(message->text,
+                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                                 ")。ファイルを修正してから返信してください。"
+                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                                 "). Fix the file and reply to try again.");
+                    }
+                    if (plan.routes.empty())
+                        plan = conversation::decide(message->text,context,model,botNotes,message->routing.at("config"));
+                }
             } catch (const std::exception&) {
                 plan = routingQuestion(message->text,ja ? "このメッセージを判断できませんでした。ここに返信して再試行してください。"
                                                         : "I couldn't route this message. Reply here to try again.");
