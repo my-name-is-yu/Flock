@@ -2,6 +2,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -251,22 +252,71 @@ void exercise(const std::filesystem::path& path) {
           hasEvent(older["events"],"request","下書きの掲載範囲を確認する") &&
           !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
     check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
+}
 
+void sessionPagesKeepOpenActivity(const std::filesystem::path& path) {
+    Store store(path);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+
+    const auto waiting = browser.request("release","Old request awaiting a scope decision");
+    browser.request("triage","Session in a different Bot");
+    std::vector<Id> wanted{waiting};
     for (int i = 0; i < 8; ++i) {
-        const auto id = std::to_string(i);
-        cli.submit({"release","Session " + id,"local-env","separate-" + id});
+        const auto project = "separate-" + std::to_string(i);
+        wanted.push_back(store.submit({"release","Session in " + project,"local-env",project}));
     }
-    tick(*runtime,3);
-    const auto sessionPage = reopened.get("/api/view?bot=release");
-    const auto sessionCursor = sessionPage.at("sessionsBefore").get<Id>();
-    check(sessionPage["sessionTasks"].size() == 6 && sessionCursor > 0,"missing session pagination");
-    const auto olderSessions = reopened.get("/api/sessions?bot=release&before=" + std::to_string(sessionCursor));
-    check(!olderSessions["sessionTasks"].empty() && olderSessions["sessionTasks"].front()["id"].get<Id>() < sessionCursor,
-          "session page duplicated newer tasks");
+    tick(runtime,3);
+    auto& question = t3.observations["thread-release"];
+    question.kind = Observation::Kind::Question;
+    question.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
+    for (int i = 0; i < 8; ++i) {
+        auto& finished = t3.observations["thread-separate-" + std::to_string(i)];
+        finished.kind = Observation::Kind::Finished;
+        finished.status = "completed";
+        finished.report = "Existing session finished";
+        finished.settled = true;
+    }
+    tick(runtime,2);
+
+    for (int i = 0; i < 120; ++i) {
+        const auto id = browser.request("release","Cancelled before a Session started");
+        store.operate(id,0,"cancel");
+    }
+    const auto queued = browser.request("release","Queued behind the unanswered question");
+    auto page = browser.get("/api/view?bot=release");
+    check(page["waits"].size() == 1 && page["waits"][0]["id"] == waiting &&
+          page["waits"][0]["wait"]["reason"] == "user_question",
+          "recent closed tasks hid an older open wait");
+    check(page["queued"].size() == 1 && page["queued"][0]["id"] == queued &&
+          page["queued"][0]["blockedBy"]["id"] == waiting,
+          "the page lost a queued task or its blocker");
+
+    std::reverse(wanted.begin(),wanted.end());
+    std::vector<Id> actual;
+    check(page["sessionsBefore"].get<Id>() > 0,"session history did not paginate");
+    for (;;) {
+        const auto& groups = page.at("sessionTasks");
+        check(!groups.empty(),"session cursor led to an empty page");
+        for (const auto& group : groups) actual.push_back(group.at("id"));
+        check(actual.size() <= wanted.size(),"duplicate or unrelated session tasks appeared");
+        const auto cursor = page.at("sessionsBefore").get<Id>();
+        if (cursor == 0) break;
+        check(cursor == actual.back(),"session cursor did not reference the last listed task");
+        page = browser.get("/api/sessions?bot=release&before=" + std::to_string(cursor));
+    }
+    check(actual == wanted,"session history dropped, duplicated, reordered, or mixed Bot tasks");
 }
 }
 
 int main() {
-    try { TestDirectory directory; exercise(directory.path / "state.db"); }
+    try {
+        TestDirectory directory;
+        exercise(directory.path / "state.db");
+        sessionPagesKeepOpenActivity(directory.path / "session-pages.db");
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

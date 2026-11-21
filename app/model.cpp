@@ -96,6 +96,7 @@ void checkPrivate(int fd, bool directory) {
 }
 
 std::string invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input) {
+    const bool showLoginInstructions = operation == "login" && fcntl(STDERR_FILENO,F_GETFD) != -1;
     std::filesystem::create_directories(directory.parent_path());
     if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST)
         throw ModelError("Unable to create Flock's private ChatGPT directory", false);
@@ -144,6 +145,8 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     actions.duplicate(transport.get(), STDIN_FILENO);
     actions.duplicate(transport.get(), STDOUT_FILENO);
     actions.duplicate(childLock.get(), childCredentialLock);
+    if (showLoginInstructions)
+        actions.duplicate(STDERR_FILENO, STDERR_FILENO);
     std::string node = "node", script = FLOCK_CHATGPT_BRIDGE, action(operation), path = directory.string();
     auto lockArgument = std::to_string(childCredentialLock);
     char* args[] = {node.data(), script.data(), action.data(), path.data(), lockArgument.data(), nullptr};
