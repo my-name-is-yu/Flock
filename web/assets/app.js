@@ -7,7 +7,7 @@ const elements = Object.fromEntries([
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'theme-switch',
+  'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -71,6 +71,7 @@ let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let scopeKey = '';
 let connection = 'loading';
 
 function node(tag, className, text) {
@@ -103,7 +104,7 @@ function runHref(run) {
 function linkToRun(run, label = 'Open in T3') {
   const href = runHref(run);
   if (!href) return null;
-  const link = node('a', 'link', `${label} ↗`);
+  const link = node('a', 'link', label);
   link.href = href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
@@ -375,6 +376,13 @@ function renderHeader() {
   profile.hidden = !bot;
   elements['settings-button'].hidden = !bot;
   elements['profile-placeholder'].hidden = !!bot;
+  elements['bot-activity'].hidden = !bot;
+  const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
+  if (bot && nextScopeKey !== scopeKey) {
+    showAvatar(elements['activity-scope-avatar'], bot);
+    elements['activity-scope-name'].textContent = bot.name;
+  }
+  scopeKey = nextScopeKey;
   if (!bot) {
     profileAvatar?.destroy();
     profileAvatar = null;
@@ -431,7 +439,6 @@ function renderActivity() {
   const clarifications = data?.clarifications ?? [];
   if (changed('waits', view?.id, loading, waits, clarifications)) {
     elements['wait-count'].textContent = waits.length + clarifications.length;
-    elements['wait-count'].classList.toggle('has-waits', waits.length + clarifications.length > 0);
     elements['wait-count'].hidden = !(waits.length + clarifications.length);
     elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = waits.map((task) => {
@@ -445,15 +452,13 @@ function renderActivity() {
       return row;
     });
     for (const clarification of clarifications) {
-      const row = button(null, 'activity wait-select', () => {
+      const row = activityRow('button', 'wait-row', clarification.text, 'Clarification requested', 'waiting');
+      row.type = 'button';
+      row.title = clarification.text;
+      row.addEventListener('click', () => {
         openNavigation(false);
         openDetail({ kind: 'clarification', messageId: clarification.messageId });
       });
-      const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Clarification requested'));
-      const subtitle = node('span', 'activity-subtitle', clarification.text);
-      subtitle.title = clarification.text;
-      row.append(line, subtitle);
       rows.push(row);
     }
     elements['wait-list'].replaceChildren(...rows);
@@ -483,8 +488,10 @@ function renderActivity() {
     }
   }
   const rows = [];
+  const grouped = live.length > 0 && ended.length > 0;
   for (const [label, items] of [['Active', live], ['Ended', ended]]) {
     if (!items.length) continue;
+    if (!grouped) { rows.push(...items); continue; }
     const heading = node('h3', 'activity-group');
     heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
     rows.push(heading, ...items);
@@ -618,13 +625,14 @@ function sourceAction(source, label = 'Open source') {
     renderDetail();
   });
 }
-function resultActions(event, text, run) {
-  const actions = node('div', 'event-actions');
+function runIcon(run) {
   const link = linkToRun(run);
-  if (link) actions.append(link);
-  if (text) actions.append(button('Reply to this result', 'text-button', () =>
-    beginReply({ kind: 'result', messageId: event.id, summary: text })));
-  return actions;
+  if (!link) return null;
+  link.className = 'run-link';
+  link.title = 'Open in T3';
+  link.setAttribute('aria-label', 'Open in T3');
+  link.replaceChildren(icon('open'));
+  return link;
 }
 function eventCard(event, context, place) {
   const data = event.data;
@@ -664,6 +672,7 @@ function eventCard(event, context, place) {
     actions.append(hoverTime);
   }
   const extras = [];
+  let replyTarget = null;
   let copy = data.text ?? '';
   const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
 
@@ -690,32 +699,27 @@ function eventCard(event, context, place) {
     if (data.source?.messageId) {
       const links = node('div', 'event-actions');
       links.append(sourceAction(data.source));
-      if (data.route === 'respond') links.append(button('Reply to this answer', 'text-button', () =>
-        beginReply({ kind: 'result', messageId: event.id, summary: data.text })));
       extras.push(links);
+      if (data.route === 'respond') replyTarget = ['Reply to this answer', { kind: 'result', messageId: event.id, summary: data.text }];
     }
   } else if (event.kind === 'report') {
-    extras.push(resultActions(event, data.report));
     copy = data.report || 'The session submitted a report.';
     text.textContent = copy;
-    const link = linkToRun(data.run);
-    if (link) {
-      link.className = 'run-link';
-      link.title = 'Open in T3';
-      link.setAttribute('aria-label', 'Open in T3');
-      link.replaceChildren(icon('open'));
-      text.append(link);
-    }
+    const link = runIcon(data.run);
+    if (link) text.append(link);
     bubble.append(text);
+    if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.status && data.status !== 'completed') {
       bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
     }
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
-    extras.push(resultActions(event, data.text, data.run));
     bubble.classList.add('completed');
     text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', 'Complete: '), document.createTextNode(data.text ?? ''));
+    const link = runIcon(data.run);
+    if (link) text.append(link);
     bubble.append(text);
+    if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
     if (data.reason) bubble.append(reasonText(data.reason));
   } else {
     if (cron) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Recurring request: '));
@@ -745,6 +749,10 @@ function eventCard(event, context, place) {
   if (copy) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
+  }
+  if (replyTarget) {
+    const [label, target] = replyTarget;
+    actions.append(iconButton('reply', label, () => beginReply(target)));
   }
   if (openTask?.wait.reason === 'user_question') {
     const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
@@ -823,7 +831,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !view?.olderBefore;
   older.disabled = !!view?.loadingOlder;
-  older.textContent = view?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
+  older.textContent = view?.loadingOlder ? 'Loading…' : 'Show earlier messages';
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
     data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
   const scroller = elements.conversation;
@@ -1178,9 +1186,7 @@ function generalContent(bot) {
   const hero = node('div', 'settings-hero');
   const face = node('span', 'settings-avatar');
   detailAvatar = { state: presence, mount: () => {
-    const handle = showAvatar(face, bot, { still: false, state: presence });
-    hero.style.setProperty('--hero-tint', accentColor(bot));
-    return handle;
+    return showAvatar(face, bot, { still: false, state: presence });
   } };
   hero.append(face, node('p', 'settings-name', bot.name));
   const role = node('section', 'settings-card');

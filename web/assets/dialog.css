@@ -51,7 +51,7 @@
 .detail-tab svg { width: 1.05rem; height: 1.05rem; flex: none; }
 
 .dialog-head { grid-area: head; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); padding: 1.15rem .9rem .6rem var(--detail-pad); min-width: 0; }
-.dialog-head h2 { font-size: var(--text-lg); font-weight: 650; overflow-wrap: anywhere; }
+.dialog-head h2 { font-size: var(--text-lg); font-weight: 600; overflow-wrap: anywhere; }
 .dialog-close { margin-left: auto; color: var(--text-3); }
 .dialog-body {
   grid-area: body; min-height: 0; overflow: auto; overscroll-behavior: contain;
@@ -60,16 +60,10 @@
 }
 .dialog-body > * { flex-shrink: 0; min-width: 0; }
 
-.settings-hero {
-  --hero-glow: light-dark(color-mix(in srgb, var(--hero-tint, transparent) 70%, transparent), rgb(255 255 255 / .045));
-  display: grid; justify-items: center; gap: .85rem; padding: 2.1rem 1rem 1.7rem; border-radius: var(--radius-lg);
-  background:
-    radial-gradient(55% 70% at 50% 38%, var(--hero-glow), transparent 72%),
-    var(--detail-card);
-}
+.settings-hero { display: grid; justify-items: center; gap: .85rem; padding: 2.1rem 1rem 1.7rem; border-radius: var(--radius-lg); background: var(--detail-card); }
 .settings-avatar { display: grid; place-items: center; width: 6.5rem; height: 6.5rem; }
 .settings-avatar > svg, .settings-avatar > canvas { width: 100%; height: 100%; }
-.settings-name { font-size: var(--text-xl); font-weight: 650; overflow-wrap: anywhere; text-align: center; }
+.settings-name { font-size: var(--text-xl); font-weight: 600; overflow-wrap: anywhere; text-align: center; }
 .settings-card { display: grid; min-width: 0; padding: .95rem 1.1rem; border-radius: var(--radius-lg); background: var(--detail-card); overflow: hidden; }
 .settings-soul { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.7; }
 .settings-empty { color: var(--text-3); font-size: var(--text-md); }
