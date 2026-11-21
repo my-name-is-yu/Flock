@@ -76,6 +76,7 @@ let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -91,9 +92,24 @@ function button(text, className, click) {
   if (click) el.addEventListener('click', click);
   return el;
 }
-function avatar(bot, className = '') {
-  const host = node('span', `avatar ${className}`.trim());
-  showAvatar(host, bot);
+// Rows and timeline entries are rebuilt as data changes. Tie each avatar's
+// animation subscription to the lifetime of its host.
+customElements.define('flock-avatar', class extends HTMLElement {
+  #handle;
+
+  connectedCallback() {
+    this.#handle = showAvatar(this, this.bot, { still: false, state: this.avatarState });
+  }
+
+  disconnectedCallback() {
+    this.#handle?.destroy();
+  }
+});
+
+function avatar(bot, className = '', state = 'idle') {
+  const host = node('flock-avatar', `avatar ${className}`.trim());
+  host.bot = bot;
+  host.avatarState = state;
   return host;
 }
 function runHref(run) {
@@ -345,6 +361,17 @@ function menuPopover(bot) {
 function presenceText(bot) {
   return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
 }
+function sidebarAvatarState(presence) {
+  switch (presence) {
+    case 'queued':
+    case 'peer_waiting':
+      return 'waiting';
+    case 'stopping':
+      return 'thinking';
+    default:
+      return presence;
+  }
+}
 function botRow(bot) {
   const row = node('div', 'bot-row');
   const active = view?.id === bot.id;
@@ -366,7 +393,7 @@ function botRow(bot) {
   preview.append(bot.preview || 'No conversation yet');
   const text = node('span', 'bot-text');
   text.append(name, preview);
-  select.append(avatar(bot, 'bot-avatar'), text);
+  select.append(avatar(bot, 'bot-avatar', sidebarAvatarState(bot.presence)), text);
   const status = presenceText(bot);
   if (status) select.append(status);
   row.append(select, menuButton(bot));
@@ -384,7 +411,7 @@ function pinTile(bot, index) {
   const shortcut = index < 9 ? index + 1 : null;
   if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
   const face = node('span', 'pin-face');
-  face.append(avatar(bot, 'pin-avatar'));
+  face.append(avatar(bot, 'pin-avatar', sidebarAvatarState(bot.presence)));
   if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
   select.append(face, node('span', 'pin-name', bot.name));
   const status = presenceText(bot);
@@ -468,9 +495,10 @@ function renderHeader() {
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
-  if (bot && nextScopeKey !== scopeKey) {
-    showAvatar(elements['activity-scope-avatar'], bot);
-    elements['activity-scope-name'].textContent = bot.name;
+  if (nextScopeKey !== scopeKey) {
+    scopeAvatar?.destroy();
+    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
+    if (bot) elements['activity-scope-name'].textContent = bot.name;
   }
   scopeKey = nextScopeKey;
   if (!bot || dm) {
@@ -481,15 +509,13 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' :
-    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, followPointer: true });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
+  }
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -1315,12 +1341,9 @@ function openEditAppearance(bot) {
 }
 
 function generalContent(bot) {
-  const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
   const face = node('span', 'settings-avatar');
-  detailAvatar = { state: presence, mount: () => {
-    return showAvatar(face, bot, { still: false, state: presence });
-  } };
+  detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
   hero.append(
     face,
     node('p', 'settings-name', bot.name),
@@ -1460,11 +1483,6 @@ function renderDetail() {
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
     if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
-    const presence = view.data.presence ?? 'idle';
-    if (detailAvatar && detailAvatar.state !== presence) {
-      detailAvatar.handle?.update({ state: presence });
-      detailAvatar.state = presence;
-    }
     return;
   }
   labelDetail(null);
