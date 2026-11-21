@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <random>
+#include <set>
 #include <system_error>
 
 namespace flockv0 {
@@ -288,6 +290,113 @@ void Store::Impl::unlockQuestion(Json& task, std::string_view reason) {
     if (task["question"].is_null()) return;
     journal(task["id"], "session_question_closed", {{"requestId", task["question"]["requestId"]}, {"resolution", reason}});
     task["question"] = nullptr;
+}
+
+std::string replacementKey(const Json& item) {
+    if (!item.value("conflicting",false)) return {};
+    const auto key = field(item,"replaceKey");
+    if (!key.empty()) return key;
+    return field(item,"environmentId").empty() ? "target" : "environment";
+}
+
+std::string Store::Impl::taskIntent(const Json& task) const {
+    std::lock_guard lock(mutex);
+    const Json* current = &task;
+    Json prior;
+    for (;;) {
+        const auto request = field(*current,"request");
+        const auto intent = current->value("intent",request);
+        const auto restart = current->find("restartContext");
+        // Older tasks used the resume request as their initial revision's intent.
+        if (restart == current->end() || !restart->contains("intent") || intent != request) return intent;
+        if (current->contains("intent") && query(R"SQL(
+SELECT 1 FROM task_revisions WHERE task_id=? AND intent<>?
+UNION ALL SELECT 1 FROM journal WHERE task_id=? AND kind='instruction_accepted'
+    AND json_extract(data,'$.replaceKey')='intent' LIMIT 1
+)SQL",{current->at("id"),request,current->at("id")}).next()) return intent;
+        const auto parent = restart->at("taskId").get<Id>();
+        if (parent >= current->at("id").get<Id>()) throw Conflict("Invalid cancelled task reference");
+        prior = load(parent);
+        current = &prior;
+    }
+}
+
+Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending) const {
+    std::lock_guard lock(mutex);
+    std::map<std::pair<Id,int>,Json> byMessage;
+    std::size_t sourceBytes = 8192;
+    std::set<std::string> replaced{"environment"};
+    for (const auto& item : pending) replaced.insert(replacementKey(item));
+    const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
+
+    // Newest first, so a later change supersedes earlier directions with the same replacement key.
+    const auto remember = [&](Id owner, Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
+        const auto key = replacementKey(item);
+        if (!key.empty() && !replaced.insert(key).second) return;
+        if (key == "intent" || key == "criteria") {
+            auto contract = query(R"SQL(
+SELECT coalesce(r.intent,json_extract(t.data,'$.intent'),json_extract(t.data,'$.request')),
+       coalesce(r.done_when,json_extract(t.data,'$.requestedDoneWhen'),json_extract(t.data,'$.doneWhen')),
+       p.intent<>r.intent,p.done_when<>r.done_when
+FROM tasks t LEFT JOIN task_revisions r ON r.task_id=t.id AND r.id=?
+LEFT JOIN task_revisions p ON p.task_id=r.task_id AND p.number=r.number-1
+WHERE t.id=?
+)SQL",{item.value("revisionId",Json(nullptr)),owner});
+            if (!contract.next() || ((key == "intent" || contract.number(2)) && contract.string(0) != intent) ||
+                ((key == "criteria" || contract.number(3)) && contract.string(1) != criteria)) return;
+        }
+        const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
+        if (byMessage.contains(id) || bytes <= separatorBytes) return;
+        const auto text = bounded(field(item,"text"),bytes-separatorBytes);
+        if (text.empty()) return;
+        bytes -= text.size() + separatorBytes;
+        item["text"] = text;
+        if (auto source = item.find("source"); source != item.end()) {
+            const auto excerpt = bounded(field(*source,"text"),sourceBytes);
+            sourceBytes -= excerpt.size();
+            (*source)["text"] = excerpt;
+        }
+        byMessage.emplace(id,std::move(item));
+    };
+    const auto delivered = [&](Id owner, int& count, std::size_t& bytes) {
+        if (!count || !bytes) return;
+        auto rows = query(R"SQL(
+SELECT entry.value FROM outbox JOIN runs ON runs.action_id=outbox.id, json_each(outbox.data,'$.instructions') entry
+WHERE runs.task_id=? AND outbox.phase='accepted'
+ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
+)SQL",{owner,count});
+        while (bytes && rows.next()) {
+            --count;
+            remember(owner,rows.json(0),bytes);
+        }
+    };
+
+    if (!task.at("lastRun").is_null()) {
+        int count = 20;
+        std::size_t bytes = 4000;
+        delivered(task.at("id"),count,bytes);
+    }
+
+    int deliveredCount = 20;
+    std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes;
+    const auto restart = task.find("restartContext");
+    Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
+    Id child = task.at("id");
+    while (parent) {
+        auto row = query("SELECT json_extract(data,'$.restartContext.taskId'),"
+                         "coalesce(json_extract(data,'$.cancelledInstructions'),'[]') FROM tasks WHERE id=? AND id<?",
+                         {parent,child});
+        if (!row.next()) throw Conflict("Invalid cancelled task reference");
+        const auto cancelled = row.json(1);
+        for (auto item = cancelled.rbegin(); item != cancelled.rend() && pendingBytes > 4; ++item)
+            remember(parent,*item,pendingBytes,4);
+        delivered(parent,deliveredCount,deliveredBytes);
+        child = parent;
+        parent = row.number(0);
+    }
+    Json directions = Json::array();
+    for (auto& [id,item] : byMessage) directions.push_back(std::move(item));
+    return directions;
 }
 
 Store::Store(std::filesystem::path db) : p_(std::make_unique<Impl>(std::move(db))) {}

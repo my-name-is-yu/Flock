@@ -477,25 +477,8 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
                         auto task = load(linkedTask);
                         if (const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen")); !criteria.empty())
                             task["requestedDoneWhen"] = criteria;
-                        task["restartContext"] = {{"intent",prior.value("intent",prior.at("request"))},
-                                                  {"taskId",item.source->taskId},
-                                                  {"pendingInstructions",prior.value("cancelledInstructions",Json::array())}};
-                        auto rows = query(R"SQL(
-SELECT entry.value FROM outbox, json_each(outbox.data,'$.instructions') entry
-WHERE outbox.task_id=? AND outbox.phase='accepted'
-ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
-)SQL",{item.source->taskId});
-                        auto earlier = Json::array();
-                        std::size_t remaining = 8000;
-                        while (remaining && rows.next()) {
-                            auto instruction = rows.json(0);
-                            instruction["text"] = bounded(field(instruction,"text"),remaining);
-                            remaining -= field(instruction,"text").size();
-                            earlier.push_back(std::move(instruction));
-                        }
-                        std::reverse(earlier.begin(),earlier.end());
-                        auto& instructions = task["restartContext"]["pendingInstructions"];
-                        instructions.insert(instructions.begin(),earlier.begin(),earlier.end());
+                        task["intent"] = taskIntent(prior);
+                        task["restartContext"] = {{"taskId",item.source->taskId}};
                         save(task);
                     }
                     segments[index]["effectTaskId"] = linkedTask;

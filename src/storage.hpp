@@ -21,6 +21,8 @@ private:
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
 std::string actionId();
+inline constexpr std::size_t instructionBatchBytes = 64000;
+std::string replacementKey(const Json& instruction);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 
@@ -77,6 +79,8 @@ struct Store::Impl {
     void clearWait(Json&, std::string_view resolution);
     void consumeEvent(const Json&);
     Json outbox(const Json&) const;
+    std::string taskIntent(const Json&) const;
+    Json sessionInstructions(const Json& task, std::string_view intent, const Json& pending) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
 
