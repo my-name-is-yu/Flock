@@ -1,5 +1,5 @@
 // Opt-in evaluation of conversation turns with a live model. It is not part of ctest.
-// Usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials]
+// Usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]
 #include "flock/core.hpp"
 #include "model.hpp"
 
@@ -171,15 +171,17 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 4) {
-        std::cerr << "usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials]\n";
+    if (argc < 3 || argc > 5) {
+        std::cerr << "usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n";
         return 2;
     }
     try {
         app::ChatGPTModel model(std::filesystem::path(argv[1]) / "credentials" / "chatgpt");
-        const int trials = argc == 4 ? std::stoi(argv[3]) : 3;
+        const int trials = argc >= 4 ? std::stoi(argv[3]) : 3;
+        const std::string filter = argc == 5 ? argv[4] : "";
         bool passed = true;
         for (const auto& [name,scenario] : scenarios) {
+            if (name.find(filter) == std::string::npos) continue;
             int passes = 0;
             for (int trial = 1; trial <= trials; ++trial) {
                 std::string failure;
