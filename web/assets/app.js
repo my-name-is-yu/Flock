@@ -19,6 +19,7 @@ const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
   queued: '受付済み', deciding: '判定中', sending: '送信中', running: '作業中', waiting: '確認待ち',
   cancelling: '中止処理中', completed: '完了', cancelled: '中止', ended: '実行終了',
+  failed: '失敗', interrupted: '中断', rolled_back: 'ロールバック',
   idle: '待機中', thinking: '判断中', working: 'セッション作業中',
 };
 const waitLabels = {
@@ -421,6 +422,9 @@ function eventCard(event, context, place) {
       text.append(link);
     }
     bubble.append(text);
+    if (data.status && data.status !== 'completed') {
+      bubble.append(node('p', 'event-reason', `Run の状態：${stateLabels[data.status] ?? data.status}`));
+    }
     if (data.truncated) bubble.append(node('p', 'event-reason', '続きは T3 で確認できます。'));
   } else if (event.kind === 'completed') {
     bubble.classList.add('completed');
