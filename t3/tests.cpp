@@ -212,6 +212,23 @@ int main(int argc, char** argv) {
             translation.offset = chunk.nextOffset;
         } while (chunk.more);
         check(receivedTranslation == expectedTranslation,"English fixture translation was not preserved");
+        ReadRequest denseBmp = read;
+        denseBmp.runId = "root";
+        denseBmp.itemId = "dense-bmp";
+        denseBmp.offset = 0;
+        std::string expectedBmp;
+        for (int i = 0; i < 7000; ++i) expectedBmp += "界";
+        std::string receivedBmp;
+        do {
+            chunk = adapter->read(denseBmp);
+            check(chunk.itemId == "dense-bmp" && !chunk.text.empty() && chunk.text.size() <= 8192,
+                  "dense BMP excerpts stay within the byte limit");
+            receivedBmp += chunk.text;
+            check(receivedBmp.size() <= expectedBmp.size(), "dense BMP continuation does not repeat text");
+            check(!chunk.more || chunk.nextOffset > denseBmp.offset, "dense BMP continuation advances its cursor");
+            denseBmp.offset = chunk.nextOffset;
+        } while (chunk.more);
+        check(receivedBmp == expectedBmp, "dense BMP excerpts preserve the complete text");
         read.offset = 0;
         read.runId = "wrong";
         bool rejected = false;
