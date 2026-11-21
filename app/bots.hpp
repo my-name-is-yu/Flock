@@ -19,7 +19,7 @@ private:
 };
 
 struct Schedule {
-    std::string id, expression, timezone, request;
+    std::string id, request;
     Cron cron;
 };
 

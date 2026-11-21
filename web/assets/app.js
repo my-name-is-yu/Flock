@@ -1342,17 +1342,13 @@ function generalContent(bot) {
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
-  for (const item of bot.cron) {
-    const expression = String(item.schedule ?? item.expression ?? item.cron ?? '');
-    const timezone = item.timezone ?? item.timeZone;
-    const readable = describeCron(expression);
-    const row = node('div', `cron-row${item.enabled === false ? ' disabled' : ''}`);
+  for (const { schedule, timezone, request } of bot.cron) {
+    const readable = describeCron(schedule);
+    const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
-    if (timezone) when.append(node('span', 'cron-zone', timezone));
-    if (readable) when.append(node('code', 'cron-expression', expression));
-    row.append(when, node('span', 'cron-state', item.enabled === false ? 'Paused' : 'Enabled'),
-      node('p', 'cron-request', item.request));
+    if (readable) when.append(readable);
+    when.append(node('code', 'cron-expression', schedule), node('span', 'cron-zone', timezone));
+    row.append(when, node('p', 'cron-request', request));
     list.append(row);
   }
   return [list];

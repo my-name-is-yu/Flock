@@ -490,8 +490,8 @@ void exercise(const std::filesystem::path& path) {
           triagePage["bot"]["soul"] == "報告された問題を整理する。" && triagePage["bot"]["cron"].empty(),
           "selected Bots showed incorrect settings");
     const auto& schedule = releasePage.at("bot").at("cron").at(0);
-    check(schedule.at("schedule") == "0 9 * * *" && schedule.at("timezone") == "Asia/Tokyo" &&
-          schedule.at("request") == "前日の変更を確認する","Release's scheduled request was incorrect");
+    check(schedule == Json{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},{"request","前日の変更を確認する"}},
+          "Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
           triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",

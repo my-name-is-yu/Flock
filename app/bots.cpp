@@ -432,7 +432,7 @@ Bot Bots::get(std::string_view id) const {
         const auto request = validatedString(schedule,"request");
         if (!validId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
             throw Conflict("Cron IDs must be valid and unique, and requests must fit in 16,000 bytes");
-        bot.schedules.push_back({scheduleId,expression,timezone,request,Cron(expression,timezone)});
+        bot.schedules.push_back({scheduleId,request,Cron(expression,timezone)});
     }
     return bot;
 }

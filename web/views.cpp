@@ -111,7 +111,7 @@ Json settingsView(const Json& bot) {
         for (const auto& schedule : bot["cron"]) {
             if (!schedule.is_object()) continue;
             Json row = Json::object();
-            copyFields(row,schedule,{"id","schedule","expression","cron","timezone","timeZone","request","enabled"});
+            copyFields(row,schedule,{"id","schedule","timezone","request"});
             cron.push_back(std::move(row));
         }
     }
