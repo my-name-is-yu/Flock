@@ -2,6 +2,7 @@
 
 #include <httplib.h>
 
+#include <atomic>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -9,6 +10,7 @@
 using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
+constexpr auto proposedOptions = "1. Reconcile manually\n2. Summarize the differences first\n3. Review after publication";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -34,8 +36,10 @@ struct FixedModel : Model {
                 return {"answer_session_question",{{"requestId","scope-question"},
                     {"answers",{{"scope",input.event["userAnswer"]}}}},"The user selected the scope"};
             }
-            return {"ask_user",{{"question","利用者向けの変更だけを載せますか？"},{"choices",{"利用者向けのみ","すべて"}}},"掲載範囲の指定が必要"};
+            return {"ask_user",{{"question","Should I include only user-facing changes?"},{"choices",{"User-facing only","All changes"}}},"The publication scope needs to be specified"};
         }
+        if (input.task["request"] == "Compare the three options")
+            return {"complete",{{"report",proposedOptions}},"The Session compared all three options"};
         return {"complete",{{"report","Draft complete"}},"The Session report matches the criterion"};
     }
 };
@@ -64,21 +68,21 @@ struct FixedT3 : T3 {
     void interrupt(const std::string&, const Json&, const RunRef&) override {}
 };
 
-WebCallbacks callbacks() {
+WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
     return {
         [] {
             return Json::array({
-                {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
+                {{"id","release"},{"name","Release"},{"soul","Write release notes for users."},
                     {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
+                        {"request","Review yesterday's changes"},{"token",privateValue}}})},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
-                {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
+                {{"id","triage"},{"name","Triage"},{"soul","Triage reported issues."},{"cron",Json::array()},{"avatar","sprout"}},
+                {{"id","settings"},{"name","Settings"},{"soul","Investigate configuration errors."}},
                 {{"id","broken"},{"name","Broken"}},
             });
         },
-        [](std::string_view bot, std::string_view request) -> Intake {
-            if (bot == "broken") throw std::runtime_error(privateValue);
+        [intakeDisabled](std::string_view bot, std::string_view request) -> Intake {
+            if (bot == "broken" || (intakeDisabled && intakeDisabled->load())) throw std::runtime_error(privateValue);
             return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
                 std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
         }
@@ -126,6 +130,7 @@ void boundary(Browser& browser) {
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Sec-Fetch-Site","same-site"}}),403);
     Browser::checked(browser.client.Post("/api/requests",draft,"application/json"),403);
+    Browser::checked(browser.client.Post("/api/messages",draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/requests",{{"Origin",browser.origin}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/requests",{{"Origin","null"},{"X-Flock-Action","1"}},draft,"application/json"),403);
     Browser::checked(browser.client.Post("/api/requests",browser.headers(),draft,"text/plain"),415);
@@ -149,6 +154,91 @@ bool hasEvent(const Json& events, std::string_view kind, std::string_view text) 
     return false;
 }
 
+void conversationEntry(const std::filesystem::path& path) {
+    Store store(path);
+    FixedModel model;
+    FixedT3 t3;
+    std::atomic_bool disableIntake = false;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto server = startWeb(store,0,callbacks(&disableIntake));
+    Browser browser(*server);
+    const auto taskId = browser.request("release","Compare the three options");
+    tick(runtime,3);
+    t3.observations["thread-release"] = {
+        .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions, .settled = true
+    };
+    tick(runtime,2);
+    check(store.task(taskId)["state"] == "completed","fixture did not produce a completed comparison");
+
+    const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","Explain option 2 in more detail"}};
+    const auto receipt = browser.post("/api/messages",message,201);
+    check(receipt["status"] == "received" && receipt["messageId"].is_number_integer(),"conversation receipt was missing");
+    disableIntake = true;
+    check(browser.post("/api/messages",message,201) == receipt,"retry did not recover its receipt with changed Bot settings");
+    auto changed = message;
+    changed["text"] = "Explain option 3 in more detail";
+    browser.post("/api/messages",changed,409);
+    changed = message;
+    changed["replyToMessageId"] = 1;
+    browser.post("/api/messages",changed,409);
+    browser.post("/api/messages",{{"botId","release"},{"text","Additional clarification"}},400);
+
+    const auto page = browser.get("/api/view?bot=release");
+    unsigned questions = 0, answers = 0;
+    for (const auto& event : page["events"]) {
+        const auto& data = event["data"];
+        if (event["kind"] == "conversation_message" && data["messageId"] == receipt["messageId"]) ++questions;
+        if (event["kind"] == "conversation_reply" && data["replyToMessageId"] == receipt["messageId"]) {
+            ++answers;
+            check(data["route"] == "respond" && data["text"].get<std::string>().find("Summarize the differences first") != std::string::npos,
+                  "answer did not reference the second option");
+            check(data["source"]["taskId"] == taskId && data["source"]["messageId"].is_number_integer(),
+                  "answer source was not visible in the conversation");
+        }
+    }
+    check(questions == 1 && answers == 1 && store.tasks().size() == 1 && store.task(taskId)["runs"].size() == 1 && t3.launches == 1,
+          "read-only conversation or retry created extra messages, Tasks or Runs");
+    const auto task = browser.get("/api/task?bot=release&taskId=" + std::to_string(taskId));
+    check(task["id"] == taskId && task["runs"].size() == 1 && !task.contains("config"),"task details omitted a Run or exposed config");
+    check(task["result"]["kind"] == "completed" && task["result"]["data"]["text"] == proposedOptions &&
+        task["result"]["data"]["run"]["runId"] == task["runs"][0]["runId"],
+        "task details lost its completion or source Run");
+    Browser::checked(browser.client.Get("/api/task?bot=triage&taskId=" + std::to_string(taskId)),404);
+
+    const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","What's the status?"}};
+    browser.post("/api/messages",status,201);
+    check(store.tasks().size() == 1,"read-only request with changed settings created work");
+    disableIntake = false;
+    const auto firstWaitTask = browser.request("triage","Decide what to publish");
+    const auto secondWaitTask = store.submit({"triage","Decide what to publish next time","linked env","next-scope"});
+    tick(runtime,3);
+    t3.observations["thread-triage"] = {
+        .kind = Observation::Kind::Question,
+        .question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})}
+    };
+    t3.observations["thread-next-scope"] = t3.observations.at("thread-triage");
+    tick(runtime,2);
+    const auto waitPage = browser.get("/api/view?bot=triage");
+    Id question = 0;
+    for (const auto& row : waitPage["waits"]) {
+        if (row["id"] == firstWaitTask) question = row["wait"]["messageId"];
+    }
+    check(question > 0 && waitPage["waits"].size() == 2,"HTTP projection lacks a stable question anchor");
+    const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","User-facing only"},{"replyToMessageId",question}};
+    const auto answerReceipt = browser.post("/api/messages",reply,201);
+    tick(runtime,2);
+    check(browser.post("/api/messages",reply,201) == answerReceipt,"exact answer retry lost its receipt");
+    auto delayed = reply;
+    delayed["clientMessageId"] = "delayed-answer-first";
+    delayed["text"] = "All changes";
+    const auto delayedResponse = browser.client.Post("/api/messages",browser.headers(),delayed.dump(),"application/json");
+    check(delayedResponse && (delayedResponse->status == 201 || delayedResponse->status == 409),"stale answer was not handled");
+    tick(runtime,2);
+    check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-triage" &&
+        store.task(secondWaitTask)["wait"]["reason"] == "user_question" && store.tasks().size() == 3,
+        "exact or stale answer changed another wait or created a Task");
+}
+
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
@@ -161,14 +251,14 @@ void exercise(const std::filesystem::path& path) {
     Browser browser(*server);
     boundary(browser);
     check(store.tasks().empty(),"rejected requests changed SQLite");
-    const auto release = browser.request("release","下書きの掲載範囲を確認する");
-    const auto triage = browser.request("triage","昨日届いた不具合を確認する");
-    const auto settings = browser.request("settings","接続設定を確認する");
+    const auto release = browser.request("release","Check what to include in the draft");
+    const auto triage = browser.request("triage","Review the bugs reported yesterday");
+    const auto settings = browser.request("settings","Check the connection settings");
     tick(*runtime,3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     t3.observations["thread-triage"].kind = Observation::Kind::ExternalInput;
-    t3.observations["thread-triage"].status = "権限の承認が必要";
+    t3.observations["thread-triage"].status = "Permission approval required";
     tick(*runtime,2);
 
     const auto releasePage = browser.get("/api/view?bot=release");
@@ -185,22 +275,22 @@ void exercise(const std::filesystem::path& path) {
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
-    check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
+    check(list[0]["preview"] == "Should I include only user-facing changes?","Bot list does not show its latest question");
     const Id waitId = waits[0]["wait"]["id"];
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
+    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","Look into the changes for the next release"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
-    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
+    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","All changes"}};
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
-    cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
+    cli.operate(release,waitId,"answer",{{"text","User-facing only"}});
     browser.post("/api/operations",reply,409);
     tick(*runtime,2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&
-          t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
+          t3.replies[0].answers["scope"] == "User-facing only" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
 
@@ -233,12 +323,12 @@ void exercise(const std::filesystem::path& path) {
     triageQuestion.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     tick(*runtime,2);
     const auto questionId = reopened.get("/api/view?bot=triage")["waits"][0]["wait"]["id"];
-    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","すべて"}};
+    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","All changes"}};
     reopened.post("/api/operations",answer);
     reopened.post("/api/operations",answer,409);
     tick(*runtime,2);
     check(t3.replies.size() == 2 && t3.replies.back().target.threadId == "thread-triage" &&
-          t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
+          t3.replies.back().answers["scope"] == "All changes","a Web answer did not resume its own question exactly once");
 
     for (int i = 0; i < 43; ++i) {
         cli.submit({"release","Paged request " + std::to_string(i),"local-env","release",Json::object(),"daily",1700000000 + i});
@@ -248,8 +338,8 @@ void exercise(const std::filesystem::path& path) {
     check(cursor > 0 && newest["events"].front()["id"] == cursor,"missing exclusive older cursor");
     const auto older = reopened.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
     check(older["events"].back()["id"].get<Id>() < cursor &&
-          hasEvent(older["events"],"request","下書きの掲載範囲を確認する") &&
-          !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
+          hasEvent(older["events"],"request","Check what to include in the draft") &&
+          !hasEvent(older["events"],"request","Review the bugs reported yesterday"),"older page was out of scope or lost events");
     check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
 
     for (int i = 0; i < 8; ++i) {
@@ -267,6 +357,10 @@ void exercise(const std::filesystem::path& path) {
 } // namespace
 
 int main() {
-    try { TestDirectory directory; exercise(directory.path / "state.db"); }
+    try {
+        TestDirectory directory;
+        exercise(directory.path / "state.db");
+        conversationEntry(directory.path / "conversation.db");
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

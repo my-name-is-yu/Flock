@@ -7,4 +7,5 @@ Json botList(Store&, const Json&);
 Json botView(Store&, const Json&);
 Json conversation(Store&, std::string_view bot, Id before);
 Json sessions(Store&, std::string_view bot, Id before);
+Json taskDetail(const Json& task, const Json& latestResult);
 } // namespace flockv0::web
