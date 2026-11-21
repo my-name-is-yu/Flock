@@ -600,6 +600,48 @@ void peerWorkAndRestart() {
     }
 }
 
+void revisionWaitsForPeerClarification() {
+    Fixture f;
+    f.allowBeta();
+    const Intake routing{"alpha","Release check","e","p",
+                         {{"conversationEnvironments",{{"cloud","cloud"}}}}};
+    const auto root = f.store->submit(routing);
+    bool answeredPeer = false;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& kind = input.event.at("kind");
+        if (kind == "route_conversation") {
+            return {"route_conversation",{{"routes",Json::array({
+                {{"kind","revise_task"},{"taskId",root},{"environment","cloud"}}
+            })}},{}};
+        }
+        if (input.task.at("botId") == "beta") {
+            if (kind == "bot_request") return botReply("question","Which branch?");
+            check(kind == "bot_answer" && input.event.at("text") == "Use main",
+                  "The recipient did not receive its clarification");
+            return botReply("result","Verified main");
+        }
+        if (kind == "bot_question") {
+            check(f.task(root).at("environmentId") == "e" && f.t3.launches == 0,
+                  "Replanning ran before the Bot exchange finished");
+            answeredPeer = true;
+            return botReply("answer","Use main");
+        }
+        check(kind == "intake","Unexpected event for the sender");
+        return answeredPeer ? work() : botRequest("beta","consult","Check the release");
+    };
+
+    f.reach(root,"peer_waiting");
+    f.store->receive(routing,"move-release-check","Run Release check on cloud");
+    f.runtime->routeConversation();
+    check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
+          "The requested destination change did not reach the task");
+    f.reach(root,"running");
+    const auto messages = f.botMessages("alpha");
+    check(answeredPeer && messages.size() == 4 && messages.back().at("messageType") == "result" &&
+          f.t3.launches == 1 && f.t3.seen.front().environmentId == "cloud",
+          "The task did not finish the Bot exchange before launching once in the new environment");
+}
+
 void checkPeerClarificationAfterRun(std::string_view readMode) {
     Fixture f;
     f.read = readMode;
@@ -996,6 +1038,7 @@ int main() {
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
             {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
+            {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
             {"Bot consultation and permission",peerConsultationAndPermission},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},

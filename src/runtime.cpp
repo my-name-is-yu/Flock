@@ -1250,11 +1250,16 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
     }
 
+    bool hasOpenPeerExchange(Id id) {
+        std::lock_guard lock(db.mutex);
+        return db.peerExchange(id).has_value();
+    }
+
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
-        else if (task.value("replanning",false)) replan(task);
+        else if (task.value("replanning",false) && !hasOpenPeerExchange(id)) replan(task);
         else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;

@@ -463,6 +463,7 @@ ORDER BY task.id DESC)SQL", {bot});
         task["id"] = rows.number(0);
         task["state"] = rows.string(1);
         task["blockedBy"] = nullptr;
+        p_->restoreWaitAnchor(task);
         if (rows.number(3)) task["blockedBy"] = {{"id",rows.number(3)},{"botId",rows.string(4)},
                                                 {"state",rows.string(5)},{"request",rows.string(6)}};
         result.push_back(std::move(task));

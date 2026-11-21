@@ -771,6 +771,30 @@ void boundedBotContextAndNamedHistory() {
           "Reading an older named result failed or changed work");
 }
 
+void legacyActiveWaitAnchor() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto id = task(store,"Choose a release name");
+    execution.question(store,id,"choose-name");
+    const auto anchor = store.task(id).at("wait").at("messageId").get<Id>();
+    check(anchor > 0,"The fixture did not record a wait journal entry");
+
+    sqlite3* db = nullptr;
+    check(sqlite3_open_v2(fixture.database().c_str(),&db,SQLITE_OPEN_READWRITE,nullptr) == SQLITE_OK,
+          "Cannot prepare a legacy active wait");
+    const auto rc = sqlite3_exec(db,"UPDATE tasks SET data=json_remove(data,'$.wait.messageId') WHERE state='waiting'",
+                                 nullptr,nullptr,nullptr);
+    const auto changed = sqlite3_changes(db);
+    sqlite3_close(db);
+    check(rc == SQLITE_OK && changed == 1,"The fixture did not remove exactly one stored wait anchor");
+
+    const auto active = store.activeTasks("alpha");
+    check(active.size() == 1 && active.front().at("id") == id &&
+          active.front().at("wait").value("messageId",Id{}) == anchor,
+          "The active task list lost the legacy question's journal anchor");
+}
+
 void legacyHistory() {
     Fixture fixture;
     sqlite3* db = nullptr;
@@ -865,6 +889,7 @@ int main() {
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
         legacyHistory();
+        legacyActiveWaitAnchor();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
