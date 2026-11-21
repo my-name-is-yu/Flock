@@ -456,10 +456,9 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (target.empty()) target = old;
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
-            const bool workingRecipient = peer && peer->recipient == id && peer->kind == "work" && peer->phase == "working";
-            if (peer && !workingRecipient) return false;
+            if (peer && !peer->allowsReplan(id)) return false;
             const auto event = db.currentEvent(current);
-            const bool preservePeerAnswer = workingRecipient && !event.is_null() && event["consumed"] != true &&
+            const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
@@ -468,7 +467,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (target != old || current.value("environmentReleased",false) || current["state"] == "queued") {
                 const auto blocker = db.queueBlocker(id);
                 if (!blocker.is_null()) {
-                    const bool waitingSender = workingRecipient && blocker["id"] == peer->sender &&
+                    const bool waitingSender = peer && blocker["id"] == peer->sender &&
                         blocker["state"] == "peer_waiting";
                     if (!waitingSender) return false;
                 }
@@ -1435,17 +1434,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
     }
 
-    bool peerExchangeDefersReplan(Id id) {
-        std::lock_guard lock(db.mutex);
-        const auto peer = db.peerExchange(id);
-        return peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working");
-    }
-
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
-        else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
+        else if (db.replanReady(task)) replan(task);
         else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;

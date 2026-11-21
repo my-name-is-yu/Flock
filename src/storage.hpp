@@ -27,6 +27,7 @@ RunRef runRef(const Json&);
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
+    bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
 struct TaskChange { std::string intent, doneWhen, environment; };
@@ -54,7 +55,10 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
-    std::optional<conversation::Message> turnMessage(Id messageId) const;
+    bool turnPending(Id messageId) const;
+    conversation::Message loadTurnMessage(Id messageId) const;
+    const char* questionAnswerError(const Json& task, const conversation::Message&) const;
+    Json taskState(const Json& task, const conversation::Message&) const;
     Json turnInput(const conversation::Message&, int step) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
@@ -74,6 +78,7 @@ struct Store::Impl {
     Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
+    bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);

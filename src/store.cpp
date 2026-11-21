@@ -195,6 +195,14 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
 
+bool Store::Impl::replanReady(const Json& task) const {
+    if (!task.value("replanning",false)) return false;
+    std::lock_guard lock(mutex);
+    const Id id = task.at("id");
+    const auto peer = peerExchange(id);
+    return !peer || peer->allowsReplan(id);
+}
+
 void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message) {
     journal(exchange.sender,"bot_message",message);
     journal(exchange.recipient,"bot_message",message);

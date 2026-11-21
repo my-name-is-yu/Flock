@@ -164,26 +164,6 @@ struct SimulatedT3 : T3 {
     }
 };
 
-Id askAgain(const std::filesystem::path& path, Id task, const std::string& question) {
-    sqlite3* raw = nullptr;
-    check(sqlite3_open(path.c_str(),&raw) == SQLITE_OK,"could not open the question fixture");
-    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-    const auto run = [&](const std::string& sql) {
-        check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"the question fixture failed");
-    };
-    const auto id = std::to_string(task);
-    const auto text = Json(question).dump();
-    run("INSERT INTO waits(task_id,data) VALUES(" + id + ",json_object('reason','user_question','text'," + text + "))");
-    const auto wait = std::to_string(sqlite3_last_insert_rowid(db.get()));
-    run("INSERT INTO journal(task_id,time,kind,data) VALUES(" + id + ",0,'waiting',json_object('id'," + wait +
-        ",'reason','user_question','text'," + text + "))");
-    const auto anchor = std::to_string(sqlite3_last_insert_rowid(db.get()));
-    run("UPDATE tasks SET state='waiting',generation=generation+1,data=json_set(data,'$.wait',json_object('id'," + wait +
-        ",'reason','user_question','text'," + text + ",'messageId'," + anchor +
-        ",'eventId',json_extract(data,'$.eventId'),'run',json_extract(data,'$.activeRun'))) WHERE id=" + id);
-    return std::stoll(wait);
-}
-
 struct Fixture {
     std::filesystem::path dir;
     std::unique_ptr<Store> store;
@@ -250,8 +230,8 @@ struct Fixture {
         const auto found = std::find_if(timeline.begin(),timeline.end(),[&](const Json& row) { return row["id"] == id; });
         return found == timeline.end() ? Json(nullptr) : (*found)["data"];
     }
-    Json response(const Json& receipt) {
-        for (const auto& row : store->conversation("alpha"))
+    Json response(const Json& receipt, std::string_view bot = "alpha") {
+        for (const auto& row : store->conversation(bot))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == receipt["messageId"]) return row["data"];
         return nullptr;
     }
@@ -382,8 +362,16 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.reach(id,"waiting");
     f.script("Include the table as CSV",{send(id)});
     const auto added = f.receive("format","Include the table as CSV");
+    f.script("Which accounts can I use?",{say("Choose an account for the measurement.")});
+    const auto clarification = f.response(f.receive("clarify","Which accounts can I use?",f.task(id)["wait"].at("messageId")));
+    f.script("Which one is for testing?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}}},
+                        "Offer the test account"};
+    }});
+    const auto explanation = f.response(f.receive("explain","Which one is for testing?",clarification.at("messageId")));
+    for (int i = 0; i < 16; ++i) f.store->submit(f.routing("Later queued task " + std::to_string(i)));
     f.script("Use account Quartz-717",{answer(id)});
-    f.receive("account","Use account Quartz-717",f.task(id)["wait"]["messageId"].get<Id>());
+    f.receive("account",explanation.at("suggestions").at(0).get<std::string>(),explanation.at("messageId"));
     check(f.event(id,"user_answer")["text"] == "Use account Quartz-717","the answer did not reach the question");
     f.restart();
     f.reach(id,"running");
@@ -410,23 +398,29 @@ void answersStayOnTheirQuestion() {
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == colorWait &&
           f.event(color,"user_answer").is_null(),"a reply to one question answered another");
 
-    Id reopened = 0;
     f.model.beforeTurn = [&](const ModelInput& input) {
-        if (input.event["text"] != "Flock" || !input.event["turn"].empty()) return;
-        {
-            Store writer(f.dir/"state.db");
-            writer.operate(naming,namingWait.at("id"),"answer",{{"text","別の名前"}});
-        }
-        reopened = askAgain(f.dir/"state.db",naming,"もう一度、名前を確認させてください");
+        if (!input.event.at("turn").empty()) return;
+        Store writer(f.dir/"state.db");
+        writer.operate(naming,namingWait.at("id"),"answer",{{"text","別の名前"}});
     };
-    f.script("Flock",{answer(naming),answer(naming)});
+    f.script("Flock",{answer(naming)});
     f.receive("late-answer","Flock");
     f.model.beforeTurn = {};
-    const auto turn = f.lastTurn();
-    check(turn[0]["result"]["ok"] == false && turn[1]["result"]["ok"] == false &&
-          turn[1]["result"]["error"].get<std::string>().find("opened after") != std::string::npos &&
-          f.event(naming,"user_answer")["text"] == "別の名前" && f.task(naming)["wait"]["id"] == reopened,
-          "an in-flight answer overwrote an answered question or answered one that opened later");
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.event(naming,"user_answer")["text"] == "別の名前",
+          "an in-flight reply overwrote the answer that already reached the task");
+
+    f.reach(naming,"running");
+    f.model.onResult = [&](const ModelInput&) {
+        f.enqueue("early-answer","Confirmed");
+        return Decision{"ask_user",{{"question","Confirm the name?"}},"The result needs confirmation"};
+    };
+    f.script("Confirmed",{answer(naming)});
+    f.t3.finish(f.task(naming).at("activeRun").at("runId").get<std::string>(),"Name selected");
+    f.reach(naming,"waiting");
+    const auto reopened = f.task(naming).at("wait");
+    f.runtime->runConversations();
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(naming).at("wait") == reopened &&
+          f.event(naming,"user_answer")["text"] == "別の名前","a message answered a question that opened later");
 }
 
 void answersNeedTheirOwnReplyTargetAndAStableTask() {
@@ -436,19 +430,40 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     f.reach(color,"waiting");
     const auto wait = f.task(color)["wait"];
     f.script("どちらだっけ",{say("青か赤です。")});
-    f.receive("ask-back","どちらだっけ",wait.at("messageId").get<Id>());
+    const auto explanation = f.response(f.receive("ask-back","どちらだっけ",wait.at("messageId").get<Id>()));
     check(f.model.turnInputs.back().event["replyTo"]["choices"] == Json::array({"青","赤"}),
           "a reply to a question did not show the question's choices");
     f.script("hello",{say("Hi.")});
     const auto greeting = f.receive("hello","hello");
     f.script("yes",{answer(color)});
     f.receive("unrelated-yes","yes",f.response(greeting)["messageId"].get<Id>());
-    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
+    check(!listed(f.model.turnInputs.back(),color).at("wait").at("answerable").get<bool>() &&
+          f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
           "a reply to an unrelated message answered a task question");
+    const auto foreign = f.store->receive(f.routing("","beta"),"foreign-greeting","hello",wait.at("messageId"));
+    f.runtime->runConversations();
+    f.receive("foreign-yes","yes",f.response(foreign,"beta").at("messageId"));
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
+          "a reply in another Bot's conversation gave access to this question");
     f.script("青。完了条件も色見本を付けることに",{change(color,{{"doneWhen","Attach a color sample"}}),answer(color)});
     f.receive("change-then-answer","青。完了条件も色見本を付けることに");
     check(f.lastTurn()[0]["result"]["ok"] == true && f.lastTurn()[1]["result"]["ok"] == false &&
           f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
+    f.advanceUntil([&] {
+        const auto current = f.task(color).at("wait");
+        return current.is_object() && current.at("id") != wait.at("id");
+    },"the revised task did not ask its new question");
+    f.receive("old-explanation","yes",explanation.at("messageId"));
+    f.receive("old-question","yes",wait.at("messageId"));
+    check(f.task(color).at("state") == "waiting" && f.event(color,"user_answer").is_null(),
+          "an old question or its explanation answered the replacement question");
+    const auto replacement = f.task(color).at("wait");
+    f.model.beforeTurn = [&](const ModelInput& input) {
+        if (input.event.at("turn").empty()) f.store->operate(color,replacement.at("id"),"cancel");
+    };
+    f.receive("answer-after-cancel","yes",replacement.at("messageId"));
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.event(color,"user_answer").is_null(),
+          "an in-flight reply recorded an answer after cancellation");
 }
 
 void pausedTurnHoldsCompletion() {
