@@ -456,18 +456,23 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (target.empty()) target = old;
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
-            if (peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working"))
-                return false;
+            const bool workingRecipient = peer && peer->recipient == id && peer->kind == "work" && peer->phase == "working";
+            if (peer && !workingRecipient) return false;
             const auto event = db.currentEvent(current);
-            const bool preservePeerAnswer = peer && peer->recipient == id && peer->kind == "work" &&
-                peer->phase == "working" && !event.is_null() && event["consumed"] != true &&
+            const bool preservePeerAnswer = workingRecipient && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
                 return true;
             }
-            if ((target != old || current.value("environmentReleased",false) || current["state"] == "queued") &&
-                !db.queueBlocker(current["id"].get<Id>()).is_null()) return false;
+            if (target != old || current.value("environmentReleased",false) || current["state"] == "queued") {
+                const auto blocker = db.queueBlocker(id);
+                if (!blocker.is_null()) {
+                    const bool waitingSender = workingRecipient && blocker["id"] == peer->sender &&
+                        blocker["state"] == "peer_waiting";
+                    if (!waitingSender) return false;
+                }
+            }
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;
@@ -1053,6 +1058,10 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         const bool receiving = peer->recipient == task["id"] && peer->phase == "working";
         if (!answering && !(receiving && (type == "question" || type == "result" || type == "failed")))
             throw Conflict("This reply does not match the current Bot exchange");
+        if (type == "result" && peer->kind == "work" &&
+            (hasPending(task) || task.value("replanning",false) ||
+             (event["kind"] == "result" && revision(task) != event.value("revisionId",Json(nullptr)))))
+            throw Conflict("Apply the pending revision and complete revised work before returning a result");
         const auto otherId = answering ? peer->recipient : peer->sender;
         auto other = db.load(otherId);
         if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
@@ -1179,10 +1188,6 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             if (!present(field(args,"text"))) throw Conflict("A Bot message requires text");
             if (tool == "reply_to_bot") {
                 change(snapshot,[&](Json& current) {
-                    if (field(args,"kind") == "result" &&
-                        (hasPending(current) || current.value("replanning",false) ||
-                         (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))))
-                        throw Conflict("Apply the pending revision and complete revised work before returning a result");
                     replyPeer(current,event,decision,actionId());
                     return true;
                 });
@@ -1226,6 +1231,8 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         }
         change(snapshot,[&](Json& current) {
             const auto id = current["id"].get<Id>();
+            if (tool == "follow_up" && current.value("newSessionRequired",false))
+                throw Conflict("Start a new Session in the current environment");
             const bool charge = work && (!current["lastRun"].is_null() || db.query(
                 "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
             if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
@@ -1251,6 +1258,13 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 const auto userAnswer = field(event,"userAnswer");
                 if (work && !userAnswer.empty() && workInstruction.find(userAnswer) == std::string::npos)
                     workInstruction += "\n\nUser answer:\n" + userAnswer;
+                if (tool == "delegate" && current.value("newSessionRequired",false) && event["kind"] == "bot_answer") {
+                    workInstruction += "\n\nTask intent:\n" + intent(current) +
+                        "\n\nCompletion criteria:\n" + field(current,"doneWhen") + priorInstructions(current);
+                    workInstruction += "\n\nAnswer from the requesting Bot:\n" + field(event,"text");
+                    const auto report = field(event.value("sessionResult",Json(nullptr)),"report");
+                    if (!report.empty()) workInstruction += "\n\nPrevious Session report (reference only):\n" + report;
+                }
                 queueAction(current,action,tool,std::move(workInstruction),args,pending.instructions,charge);
             }
             return true;
@@ -1313,6 +1327,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 }
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
+            if (task.value("newSessionRequired",false)) std::erase(tools,"follow_up");
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
             const auto bot = notes(field(task,"botId"));
@@ -1323,7 +1338,16 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
             if (hasPending(task)) {
                 const auto pending = pendingBatch(task);
-                summary["userInstructions"] = bounded(pending.instructions.dump(),16000);
+                Json applicable = Json::array();
+                std::size_t bytes = 2, omitted = 0;
+                for (const auto& item : pending.instructions) {
+                    const auto size = item.dump().size() + 1;
+                    if (!applicable.empty() && bytes + size > 32000) { ++omitted; continue; }
+                    applicable.push_back(item);
+                    bytes += size;
+                }
+                if (omitted) applicable.push_back({{"omittedInstructions",omitted}});
+                summary["userInstructions"] = applicable.dump();
             }
             if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
             if (!choices.empty()) summary["peers"] = std::move(choices);
