@@ -864,6 +864,171 @@ void revisionWaitsForPeerClarification() {
           "The task did not finish the Bot exchange before launching once in the new environment");
 }
 
+void recipientRevisionContinuesTheOpenWorkExchange() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit("Release verification");
+    Id recipient = 0;
+    constexpr auto revisedCriteria = "Confirm the rollback plan with the revised evidence";
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        const auto kind = event.at("kind").get<std::string>();
+        if (kind == "route_conversation") {
+            return {"route_conversation",{{"routes",Json::array({
+                {{"kind","revise_task"},{"taskId",recipient},{"doneWhen",revisedCriteria}}
+            })}},"Revise the receiving task's completion criteria"};
+        }
+        if (input.task["id"] == sender) {
+            if (kind == "intake") return botRequest("beta","work","Verify release");
+            check(kind == "bot_result" && event["text"] == "Verified under revised criteria" &&
+                  event["references"].size() == 1 && event["references"][0]["runId"] == "run-2-result",
+                  "the sender resumed from old or unrelated peer evidence");
+            return complete();
+        }
+        if (kind == "bot_request") return work();
+        check(kind == "result" && input.task["doneWhen"] == revisedCriteria &&
+              event["run"]["runId"] == "run-2",
+              "the old Run result was exposed as the receiving Bot's revised evidence");
+        return botReply("result","Verified under revised criteria");
+    };
+
+    f.reach(sender,"peer_waiting");
+    recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
+    const Intake betaRouting{"beta",revisionText,"e","p",{{"runTimeoutSeconds",10},{"model","beta-model"}}};
+    f.store->receive(betaRouting,"recipient-revision",revisionText);
+    f.runtime->routeConversation();
+    check(f.task(recipient).value("replanning",false) && f.task(recipient)["doneWhen"] == revisedCriteria &&
+          f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
+          "the recipient revision did not remain in the existing work exchange");
+
+    f.restart();
+    for (int step = 0; step < 4; ++step) f.runtime->tick();
+    check(f.t3.seen.size() == 1 && f.task(recipient)["activeRun"]["runId"] == "run-1" &&
+          f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
+          "restart dispatched revised work or returned old evidence before the prior Run settled");
+    f.t3.finish("run-1","completed",false);
+    for (int step = 0; step < 4; ++step) f.runtime->tick();
+    check(f.t3.seen.size() == 1 && f.task(recipient)["activeRun"]["runId"] == "run-1" &&
+          f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
+          "revised work started before the old Run was settled");
+
+    f.t3.finish("run-1");
+    for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
+    check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" &&
+          f.t3.seen.back().target.runId == "run-1" &&
+          f.t3.seen.back().instruction.find(revisedCriteria) != std::string::npos &&
+          f.task(recipient)["activeRun"]["runId"] == "run-2" && f.botMessages("alpha").size() == 1,
+          "settling the old Run did not continue the same exchange under revised criteria");
+
+    f.t3.finish("run-2");
+    f.reach(recipient,"completed");
+    f.reach(sender,"completed");
+    const auto messages = f.botMessages("alpha");
+    check(messages.size() == 2 && messages[1]["messageType"] == "result" &&
+          messages[1]["text"] == "Verified under revised criteria" &&
+          messages[1]["evidence"][0]["runId"] == "run-2-result" &&
+          messages[0]["exchangeId"] == messages[1]["exchangeId"] &&
+          f.botMessages("beta").size() == 2 && f.logs(recipient,"report") == 2 &&
+          f.logs(recipient,"peer_completed") == 1 && f.logs(sender,"completed") == 1 &&
+          f.t3.launches == 1 && f.t3.follows == 1,
+          "the revised result did not close the exchange once and resume its sender");
+}
+
+void recipientRevisionDuringPeerQuestionPreservesTheAnswer() {
+    Fixture f;
+    f.peers["alpha"] = {{"Verifier",{"beta","","e","beta-project",
+        {{"runTimeoutSeconds",10},{"model","beta-model"}}}}};
+    const auto sender = f.submit("Verify the release");
+    Id recipient = 0;
+    constexpr auto revisedCriteria = "Confirm the rollback plan with the revised evidence";
+    bool attemptedPrematureResult = false;
+    bool sawAnswer = false;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        const auto kind = event.at("kind").get<std::string>();
+        if (kind == "route_conversation") {
+            return {"route_conversation",{{"routes",Json::array({
+                {{"kind","revise_task"},{"taskId",recipient},{"doneWhen",revisedCriteria}}
+            })}},"Revise the recipient task's completion criteria"};
+        }
+        if (input.task["id"] == sender) {
+            if (kind == "intake") return botRequest("beta","work","Verify the release");
+            if (kind == "bot_question") {
+                if (!event.contains("userAnswer")) return ask();
+                check(event["userAnswer"] == "Use main","the sender lost the human's answer to its question");
+                return botReply("answer","Use main");
+            }
+            check(kind == "bot_result" && event["text"] == "Retested main under revised criteria" &&
+                  event["references"].size() == 1 && event["references"][0]["runId"] == "run-2-result",
+                  "the sender resumed from the wrong peer evidence");
+            return complete();
+        }
+        if (kind == "bot_request") return work();
+        if (kind == "result") {
+            if (event["run"]["runId"] == "run-1") return botReply("question","Which branch?");
+            check(event["run"]["runId"] == "run-2" && input.task["doneWhen"] == revisedCriteria,
+                  "the revised result did not use the new completion criteria");
+            return botReply("result","Retested main under revised criteria");
+        }
+        check(kind == "bot_answer" && event["text"] == "Use main" &&
+              input.task["doneWhen"] == revisedCriteria &&
+              input.task.value("userInstructions",std::string{}).find(revisedCriteria) != std::string::npos,
+              "the sender answer or revised instructions did not reach the recipient model");
+        if (!attemptedPrematureResult) {
+            attemptedPrematureResult = true;
+            return botReply("result","Result from the old criteria");
+        }
+        sawAnswer = true;
+        return {"follow_up",{{"instruction","Retest main after the sender answered: Use main"}},
+                "Continue under the revised completion criteria"};
+    };
+
+    f.reach(sender,"peer_waiting");
+    recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    f.t3.finish("run-1");
+    const auto waitId = f.wait(sender,"user_question");
+    check(f.task(recipient)["state"] == "peer_waiting" && f.botMessages("beta").size() == 2 &&
+          f.botMessages("beta").back()["messageType"] == "question",
+          "the recipient did not leave its settled Run in a peer question");
+
+    const std::string revisionText = "Revise Verify the release completion criteria to " + std::string(revisedCriteria);
+    const Intake betaRouting{"beta",revisionText,"e","beta-project",{{"runTimeoutSeconds",10},{"model","beta-model"}}};
+    f.store->receive(betaRouting,"recipient-question-revision",revisionText);
+    f.runtime->routeConversation();
+    for (int step = 0; step < 3; ++step) f.runtime->tick();
+    check(f.task(recipient).value("replanning",false) && f.task(recipient)["state"] == "peer_waiting" &&
+          f.task(recipient)["doneWhen"] == revisedCriteria && f.task(sender)["wait"]["reason"] == "user_question",
+          "the recipient replanned during the pending peer question");
+
+    f.store->operate(sender,waitId,"answer",{{"text","Use main"}});
+    f.reach(recipient,"running");
+    const auto command = f.t3.seen.back();
+    check(attemptedPrematureResult && sawAnswer && f.t3.follows == 1 && f.t3.seen.size() == 2 &&
+          command.tool == "follow_up" && command.target.runId == "run-1" &&
+          command.instruction.find("Use main") != std::string::npos &&
+          command.instruction.find(revisedCriteria) != std::string::npos &&
+          f.botMessages("alpha").size() == 3 && f.botMessages("beta").back()["messageType"] == "answer" &&
+          f.task(sender)["wait"].is_null() && f.task(recipient)["wait"].is_null(),
+          "the answer did not reach revised work or an old-evidence result closed the exchange");
+
+    f.t3.finish("run-2");
+    f.reach(recipient,"completed");
+    f.reach(sender,"completed");
+    const auto alphaMessages = f.botMessages("alpha");
+    const auto betaMessages = f.botMessages("beta");
+    check(alphaMessages.size() == 4 && betaMessages.size() == 4 &&
+          alphaMessages.back()["messageType"] == "result" &&
+          alphaMessages.back()["text"] == "Retested main under revised criteria" &&
+          alphaMessages.back()["evidence"][0]["runId"] == "run-2-result" &&
+          f.logs(recipient,"peer_completed") == 1 && f.logs(sender,"completed") == 1 &&
+          f.logs(recipient,"model_failure") == 1 && f.logs(sender,"model_failure") == 0 &&
+          f.task(sender)["wait"].is_null() && f.task(recipient)["wait"].is_null(),
+          "the revised result did not close the same exchange once without model-failure waits");
+}
+
 void peerConsultationAndPermission() {
     Fixture f;
     f.allowBeta();
@@ -1219,6 +1384,8 @@ int main() {
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
+            {"recipient revision continues its work exchange",recipientRevisionContinuesTheOpenWorkExchange},
+            {"recipient revision during peer question preserves answer",recipientRevisionDuringPeerQuestionPreservesTheAnswer},
             {"Bot consultation and permission",peerConsultationAndPermission},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},

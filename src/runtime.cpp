@@ -148,6 +148,35 @@ struct Runtime::Impl {
         });
     }
 
+    bool deferHeldCompletion(const Json& snapshot, const Json& event) {
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        const auto id = snapshot["id"].get<Id>();
+        const auto eventId = event["id"].get<Id>();
+        auto current = db.load(id);
+        if (current["generation"] != snapshot["generation"] || current.value("eventId",Id{0}) != eventId)
+            return false;
+        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,id});
+        if (!row.next() || hasPending(current) || current.value("replanning",false) ||
+            (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr))) ||
+            !db.completionHeld(current)) return false;
+        auto data = row.json(0);
+        data["_flockDeferredCompletion"] = true;
+        db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,id});
+        if (!sqlite3_changes(db.db)) return false;
+        transaction.commit();
+        return true;
+    }
+
+    void clearDeferredCompletionMarker(Id taskId, Id eventId) {
+        if (!eventId) return;
+        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,taskId});
+        if (!row.next()) return;
+        auto data = row.json(0);
+        if (data.erase("_flockDeferredCompletion"))
+            db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,taskId});
+    }
+
     std::vector<Id> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
@@ -188,6 +217,7 @@ ORDER BY id)SQL");
     }
 
     void cancelDone(Json& task) {
+        clearDeferredCompletionMarker(task["id"].get<Id>(),task.value("eventId",Id{0}));
         db.clearWait(task,"cancelled");
         db.unlockQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
@@ -436,7 +466,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto old = field(current,"environmentId");
             auto target = field(current,"pendingEnvironmentId");
             if (target.empty()) target = old;
-            if (db.peerExchange(current["id"])) return false;
+            const auto id = current["id"].get<Id>();
+            const auto peer = db.peerExchange(id);
+            if (peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working"))
+                return false;
+            const auto event = db.currentEvent(current);
+            const bool preservePeerAnswer = peer && peer->recipient == id && peer->kind == "work" &&
+                peer->phase == "working" && !event.is_null() && event["consumed"] != true &&
+                event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
                 return true;
@@ -450,9 +487,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             db.clearWait(current,"user_instruction");
             db.unlockQuestion(current,"user_instruction");
-            db.consumeEvent(current);
-            if (current["lastRun"].is_null())
-                db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            if (!preservePeerAnswer) {
+                clearDeferredCompletionMarker(id,current.value("eventId",Id{0}));
+                db.consumeEvent(current);
+                if (current["lastRun"].is_null())
+                    db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
+            }
             current["state"] = "deciding";
             for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","environmentReleased","replanReconcileAt","feedback"})
                 current.erase(key);
@@ -1111,7 +1151,14 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         if (tool == "send_bot_message" || tool == "reply_to_bot") {
             if (!present(field(args,"text"))) throw Conflict("A Bot message requires text");
             if (tool == "reply_to_bot") {
-                change(snapshot,[&](Json& current) { replyPeer(current,event,decision,actionId()); return true; });
+                change(snapshot,[&](Json& current) {
+                    if (field(args,"kind") == "result" &&
+                        (hasPending(current) || current.value("replanning",false) ||
+                         (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))))
+                        throw Conflict("Apply the pending revision and complete revised work before returning a result");
+                    replyPeer(current,event,decision,actionId());
+                    return true;
+                });
                 return;
             }
             const auto kind = field(args,"kind");
@@ -1147,17 +1194,14 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 throw Conflict("The Session question no longer matches");
             validateAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
         }
-        change(snapshot,[&](Json& current) {
+        const bool changed = change(snapshot,[&](Json& current) {
             const auto id = current["id"].get<Id>();
             if (tool == "complete") {
                 if (hasPending(current) || current.value("replanning",false) ||
                     (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))) {
                     return false;
                 }
-                if (db.completionHeld(current)) {
-                    current["deferredCompletionEventId"] = event["id"];
-                    return true;
-                }
+                if (db.completionHeld(current)) return false;
             }
             const bool charge = work && (!current["lastRun"].is_null() || db.query(
                 "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
@@ -1168,6 +1212,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
                 current.erase("requestedDoneWhen");
                 current.erase("criteriaSourceMessageId");
             }
+            clearDeferredCompletionMarker(id,event["id"].get<Id>());
             db.consumeEvent(current);
             current.erase("deferredCompletionEventId");
             const auto action = actionId();
@@ -1194,6 +1239,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             }
             return true;
         });
+        if (!changed && tool == "complete") deferHeldCompletion(snapshot,event);
     }
 
     void decide(const Json& task) {
@@ -1207,7 +1253,9 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
-            if (task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>() && db.completionHeld(task)) return;
+            if ((event.value("_flockDeferredCompletion",false) ||
+                 task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>()) && db.completionHeld(task)) return;
+            event.erase("_flockDeferredCompletion");
             peer = db.peerExchange(task["id"]);
             if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
                 auto report = settledSessionReport(task);
@@ -1279,16 +1327,17 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
     }
 
-    bool hasOpenPeerExchange(Id id) {
+    bool peerExchangeDefersReplan(Id id) {
         std::lock_guard lock(db.mutex);
-        return db.peerExchange(id).has_value();
+        const auto peer = db.peerExchange(id);
+        return peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working");
     }
 
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
-        else if (task.value("replanning",false) && !hasOpenPeerExchange(id)) replan(task);
+        else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
         else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;
