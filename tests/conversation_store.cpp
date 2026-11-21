@@ -851,7 +851,6 @@ CREATE TABLE peer_exchanges(
   sender_task INTEGER NOT NULL REFERENCES tasks(id),
   recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
 CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-CREATE VIEW project_task_order AS SELECT recipient_task AS id FROM peer_exchanges;
 INSERT INTO tasks VALUES
   (1,'alpha','env','p',NULL,0,'completed',2,
      '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Previous work","doneWhen":"Check all cases","wait":null}'),

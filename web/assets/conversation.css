@@ -165,21 +165,14 @@
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
 .system-note .msg-time { opacity: 1; }
-.peer-exchange-entry { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 0 .35rem; min-width: 0; margin-top: .8rem; }
-.peer-exchange { min-width: 0; max-width: min(100%, 42rem); }
-.peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--text-2); cursor: pointer; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
-.peer-exchange > summary:hover { color: var(--text); }
-.peer-exchange-task { margin-inline-start: .6rem; font-size: var(--text-xs); }
-.peer-exchange-open { padding: .35rem .25rem; line-height: 1.5; }
-.peer-message-list { list-style: none; display: grid; gap: .8rem; margin: .35rem 0 0 .55rem; border-inline-start: 1px solid var(--hairline); padding: .1rem 0 .1rem .8rem; }
-.peer-message { display: grid; gap: .22rem; min-width: 0; }
-.peer-message > .link { justify-self: start; }
-.event-meta { display: flex; flex-wrap: wrap; gap: .4rem; color: var(--text-2); font-size: var(--text-xs); }
-
+.peer-exchange-link {
+  display: flex; align-items: center; gap: .4rem; justify-self: start; width: fit-content; max-width: 100%;
+  margin-top: .8rem; padding: .35rem .45rem; border-radius: var(--radius-sm); color: var(--text-2);
+  font-size: var(--text-sm); text-decoration: none; overflow-wrap: anywhere;
+}
+.peer-exchange-link:hover { color: var(--text); background: var(--hover); }
+.peer-exchange-avatar { width: 1.25rem; height: 1.25rem; }
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
 .peer-dm-message .msg-time { opacity: 1; }
-.peer-dm-sources { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; padding-inline-start: var(--avatar-col); }
-.peer-dm-sources .text-button, .peer-dm-sources .link { font-size: var(--text-xs); padding: 0; }
-.peer-dm-message.user .peer-dm-sources { padding-inline: 0 .2rem; }
-.peer-read-only { padding: .7rem 1rem 1.1rem; text-align: center; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }

@@ -17,7 +17,7 @@ using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
-enum class Mutation { Message, PeerMessage, Request, Operation };
+enum class Mutation { Message, Request, Operation };
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -148,7 +148,6 @@ public:
             });
         }
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
-        server_.Post("/api/peer-messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::PeerMessage); });
         server_.Post("/api/requests",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Request); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
@@ -213,31 +212,28 @@ private:
         return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{};
     }
 
-    std::optional<Intake> peerIntake(std::string_view bot, std::string_view peer) const {
-        for (auto& entry : peers(bot))
-            if (entry.intake.botId == peer) return std::move(entry.intake);
-        return std::nullopt;
+    bool grantsPeer(std::string_view bot, std::string_view peer) const {
+        return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
     Json botList() const {
         auto list = web::botList(store_,bots());
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::map<std::string,bool>> connections;
+        std::map<std::string,std::set<std::string>> connections;
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
                 if (id == peer || !known.contains(peer)) continue;
-                connections[id][peer] = true;
-                connections[peer].try_emplace(id,false);
+                connections[id].insert(peer);
+                connections[peer].insert(id);
             }
             for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].try_emplace(peer,false);
+                if (id != peer) connections[id].insert(peer);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
-            for (const auto& [id,canSend] : connections[web::field(bot,"id")])
-                entries.push_back({{"id",id},{"canSend",canSend}});
+            for (const auto& id : connections[web::field(bot,"id")]) entries.push_back({{"id",id}});
         }
         return list;
     }
@@ -248,25 +244,12 @@ private:
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
         const bool configured = botById(known,peer) != nullptr;
-        const bool canSend = configured && peerIntake(bot,peer).has_value();
-        if (!canSend && (!configured || !peerIntake(peer,bot))) {
+        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
             const auto partners = store_.peerPartners(bot);
             if (std::ranges::find(partners,peer) == partners.end())
                 return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         }
-        json(res,200,web::peerConversation(store_,bot,peer,before,canSend));
-    }
-
-    void sendPeerMessage(Response& res, const Json& body, const Json& known, std::string_view bot) {
-        const auto peer = requiredText(body,"peerId",1024);
-        if (bot == peer) return error(res,400,"invalid_peer");
-        if (!botById(known,peer)) return error(res,404,"peer_not_found");
-        const auto text = requiredText(body,"text",16000);
-        const auto key = requiredText(body,"clientMessageId",256);
-        if (const auto previous = store_.peerReceipt(bot,peer,key,text)) return json(res,201,*previous);
-        const auto intake = peerIntake(bot,peer);
-        if (!intake) return error(res,403,"peer_not_allowed");
-        json(res,201,store_.receivePeer(bot,*intake,key,text));
+        json(res,200,web::peerConversation(store_,bot,peer,before));
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {
@@ -276,7 +259,6 @@ private:
             const auto bot = requiredText(body,"botId",1024);
             const auto known = bots();
             if (!botById(known,bot)) return error(res,404,"bot_not_found");
-            if (mutation == Mutation::PeerMessage) return sendPeerMessage(res,body,known,bot);
             if (mutation != Mutation::Operation) {
                 const auto message = mutation == Mutation::Message;
                 const auto request = requiredText(body,message ? "text" : "request",16000);
@@ -308,7 +290,7 @@ private:
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const Conflict&) {
-            const auto code = mutation == Mutation::Message || mutation == Mutation::PeerMessage ? "message_conflict" :
+            const auto code = mutation == Mutation::Message ? "message_conflict" :
                 mutation == Mutation::Request ? "request_conflict" : "operation_conflict";
             error(res,409,code);
         }

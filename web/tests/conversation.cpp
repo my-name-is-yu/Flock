@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
 
@@ -362,12 +363,97 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
+void botMediatedConversation(const std::filesystem::path& path) {
+    constexpr auto request = "出荷前に、署名付きビルドの確認手順を教えてください。";
+    constexpr auto greeting = "こんにちは。";
+    constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
+    constexpr auto review = "前のバージョンから更新し、署名が有効であることを確認してください。";
+    constexpr auto response = "Reviewer に確認しました。前のバージョンから更新し、署名が有効であることを確認してください。";
+    const auto quote = std::string("ユーザーからの質問です。\n\n> ") + request;
+    struct ForwardingModel final : Model {
+        std::function<Decision(const ModelInput&)> script;
+        Decision decide(const ModelInput& input) override { return script(input); }
+    } model;
+    model.script = [&](const ModelInput& input) -> Decision {
+        const auto kind = input.event.at("kind");
+        if (kind == "route_conversation") {
+            if (input.event.at("text") == greeting)
+                return {"route_conversation",{{"routes",Json::array({{{"kind","respond"},{"text",greetingReply}}})}}, {}};
+            check(input.event.at("text") == request,"the responsible Bot did not receive the user's original message");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","create_task"}}})}}, {}};
+        }
+        if (kind == "intake") {
+            check(input.task.at("botId") == "ernest" && input.task.at("request") == request &&
+                  input.task.at("peers") == Json::array({{{"botId","reviewer"},{"name","Reviewer"}}}) &&
+                  std::ranges::find(input.tools,"send_bot_message") != input.tools.end(),
+                  "only Ernest should see the request and choose its permitted peer");
+            return {"send_bot_message",{{"botId","reviewer"},{"kind","consult"},{"text",quote}},
+                "Reviewer knows the release procedure"};
+        }
+        if (kind == "bot_request") {
+            check(input.task.at("botId") == "reviewer" && input.event.at("fromBotId") == "ernest" &&
+                  input.event.at("toBotId") == "reviewer" && input.event.at("text") == quote,
+                  "Reviewer did not receive the quoted user text as a message authored by Ernest");
+            return {"reply_to_bot",{{"kind","result"},{"text",review}},"Answer Ernest's consultation"};
+        }
+        check(kind == "bot_result" && input.task.at("botId") == "ernest" && input.event.at("fromBotId") == "reviewer" &&
+              input.event.at("text") == review,"the peer reply did not return to the responsible Bot");
+        return {"complete",{{"report",response}},"Relay the answer in Ernest's chat"};
+    };
+
+    Store store(path);
+    FixedT3 t3;
+    const auto peers = [](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot != "ernest") return {};
+        return {{"Reviewer",{"reviewer","","local-env","ernest"}}};
+    };
+    auto web = callbacks();
+    web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
+    web.peers = peers;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },RuntimeOptions{.peers=peers});
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
+
+    const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=ernest"),hello.at("messageId")).at("text") == greetingReply &&
+          store.tasks().empty() && browser.get(dm).at("messages").empty(),"ordinary user chat forwarded without a Bot decision");
+
+    const auto receipt = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","rollout"},{"text",request}},201);
+    check(store.tasks().empty() && browser.get(dm).at("messages").empty(),"HTTP intake started a Bot-to-Bot exchange");
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=ernest"),receipt.at("messageId")).at("route") == "create_task" &&
+          store.tasks("ernest").size() == 1 && store.tasks("reviewer").empty() && browser.get(dm).at("messages").empty(),
+          "routing the user's request bypassed Ernest's decision and contacted Reviewer");
+
+    tick(runtime,8);
+    const auto ernest = browser.get("/api/view?bot=ernest");
+    const auto& events = ernest.at("events");
+    check(ernest.at("bot").at("id") == "ernest" && hasEvent(events,"conversation_message",request) &&
+          (hasEvent(events,"completed",response) || hasEvent(events,"conversation_reply",response)),
+          "Ernest's normal conversation did not receive the answer to the user's request");
+    const auto messages = browser.get(dm).at("messages");
+    check(messages.size() == 2 && messages == browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages"),
+          "the exchange was not the same two-message thread from both Bots");
+    const auto& forwarded = messages.front().at("data");
+    const auto& answered = messages.back().at("data");
+    check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" && forwarded.at("text") == quote &&
+          answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
+          !forwarded.contains("initiator") && !answered.contains("recipient") && t3.launches == 0,
+          "the Bot exchange attributed the user as a participant or created a Session");
+    check(std::ranges::none_of(messages,[](const Json& row) {
+        return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
+    }),"the DM exposed task or evidence details");
+}
+
 }
 
 int main() {
     try {
         TestDirectory directory;
         conversationEntry(directory.path / "conversation.sqlite");
+        botMediatedConversation(directory.path / "bot-mediated.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

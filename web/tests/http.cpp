@@ -277,20 +277,8 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
     check(expectedTasks.empty(),"session pagination skipped tasks");
 }
 
-constexpr auto followUp = "判定基準の詳しい説明を教えて";
-constexpr auto followUpReply = "再現手順、期待結果、実際の結果を比べてください";
-constexpr auto unrelatedMessage = "設定担当との別の相談";
-
 struct PeerModel final : Model {
-    std::vector<ModelInput> followUps;
-
     Decision decide(const ModelInput& input) override {
-        if (input.event.value("text","") == followUp) {
-            followUps.push_back(input);
-            return {"reply_to_bot",{{"kind","result"},{"text",followUpReply}},"Explain the previous answer"};
-        }
-        if (input.event.value("text","") == unrelatedMessage)
-            return {"reply_to_bot",{{"kind","result"},{"text","設定を確認しました"}},"Answer the settings question"};
         if (input.event["kind"] == "intake")
             return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
                 "Triage owns the criteria"};
@@ -388,14 +376,9 @@ void peerHistory(const std::filesystem::path& path) {
 }
 
 void peerConversation(const std::filesystem::path& path) {
-    const auto primary = "/api/peer-conversation?bot=release&peer=triage";
-    const auto reverse = "/api/peer-conversation?bot=triage&peer=release";
-    const auto separate = "/api/peer-conversation?bot=release&peer=settings";
-    const auto endpoint = "/api/peer-messages";
-    const Json message = {{"botId","release"},{"peerId","triage"},{"clientMessageId","pair-message"},{"text",followUp}};
-    auto changed = message;
-    changed["text"] = "Different question with the same receipt key";
-
+    constexpr auto primary = "/api/peer-conversation?bot=release&peer=triage";
+    constexpr auto reverse = "/api/peer-conversation?bot=triage&peer=release";
+    constexpr auto separate = "/api/peer-conversation?bot=release&peer=settings";
     std::atomic_bool allowed = true, configured = true;
     RuntimeOptions options;
     options.peers = [&](std::string_view sender) -> std::vector<PeerBot> {
@@ -414,103 +397,62 @@ void peerConversation(const std::filesystem::path& path) {
         return bots;
     };
     web.peers = options.peers;
-    const auto notes = [](std::string_view) { return BotNotes{}; };
     PeerModel model;
     FixedT3 t3;
-    Json receipt, pendingMessages;
+    Json history;
     {
         Store store(path);
-        Runtime runtime(store,model,t3,notes,options);
+        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
         const auto empty = browser.get(primary);
-        check(empty.at("messages").empty() && empty.at("canSend") == true && empty.at("hasOlder") == false,
-              "an unused permitted pair did not open as an empty conversation");
-        check(browser.get(reverse).at("canSend") == false,"the reverse view ignored the directional grant");
+        check(empty.at("messages").empty() && empty.at("hasOlder") == false &&
+              !empty.contains("canSend") && browser.get(reverse) == empty,
+              "an unused permitted pair did not open as the same read-only history");
+        browser.post("/api/peer-messages",{{"botId","release"},{"peerId","triage"},
+            {"clientMessageId","direct-send"},{"text","Send directly to the peer"}},404);
         runtime.tick();
-        check(store.tasks().empty() && t3.launches.empty(),"opening an empty DM started work");
+        check(store.tasks().empty() && t3.launches.empty(),"opening a DM or posting to the old route started work");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
 
-        const auto origin = seedPeerHistory(browser,runtime,t3);
-        const auto legacy = browser.get(primary).at("messages");
-        check(legacy.size() == 2 && legacy == browser.get(reverse).at("messages"),
-              "old exchange was missing, duplicated, or different from the opposite Bot page");
-        check(legacy.at(0).at("taskId") == origin && legacy.at(0).at("taskBotId") == "release" &&
-              legacy.at(0).at("data").at("text") == "判定基準を教えて" &&
-              legacy.at(1).at("data").at("text") == "再現条件を確認してください" &&
-              legacy.at(0).at("id").get<Id>() < legacy.at(1).at("id").get<Id>(),
-              "the existing exchange lost its originating task or message order");
-        const auto taskPath = "/api/task?bot=" + legacy.at(0).at("taskBotId").get<std::string>() +
-                              "&taskId=" + std::to_string(legacy.at(0).at("taskId").get<Id>());
-        check(browser.get(taskPath).at("request") == "判定基準の確認","the originating task link could not resolve");
-        check(browser.get(separate).at("messages").empty(),"old exchange leaked to another allowed pair");
-        browser.post(endpoint,{{"botId","triage"},{"peerId","release"},
-            {"clientMessageId","reverse-message"},{"text","Send without a grant"}},403);
-        browser.post(endpoint,{{"botId","release"},{"peerId","settings"},
-            {"clientMessageId","separate-message"},{"text",unrelatedMessage}},201);
-        for (unsigned attempt = 0; attempt < 12 && browser.get(separate).at("messages").size() < 2; ++attempt)
-            runtime.tick();
-        check(browser.get(separate).at("messages").size() == 2,"the separate DM never received a reply");
+        seedPeerHistory(browser,runtime,t3);
+        history = browser.get(primary).at("messages");
+        check(history.size() == 2 && history == browser.get(reverse).at("messages"),
+              "an exchange was missing, duplicated, or different from the opposite Bot page");
+        check(history.at(0).at("data").at("text") == "判定基準を教えて" &&
+              history.at(1).at("data").at("text") == "再現条件を確認してください" &&
+              history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
+              "the conversation lost its messages or order");
+        check(browser.get(separate).at("messages").empty(),"an exchange leaked to another allowed pair");
+        const auto before = std::to_string(history.back().at("id").get<Id>());
+        check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == Json::array({history.front()}),
+              "the peer history cursor repeated the anchor or skipped older messages");
 
-        const auto tasksBefore = store.tasks().size();
-        receipt = browser.post(endpoint,message,201);
-        check(browser.post(endpoint,message,201) == receipt,"retry changed the send receipt");
-        browser.post(endpoint,changed,409);
-        check(store.tasks().size() == tasksBefore + 1,"sending queued anything other than one recipient task");
-        pendingMessages = browser.get(primary).at("messages");
-        check(pendingMessages.size() == 3 && pendingMessages.at(0) == legacy.at(0) && pendingMessages.at(1) == legacy.at(1),
-              "sending did not append one message to the existing pair history");
-        const auto& user = pendingMessages.back().at("data");
-        check(user.at("initiator") == "user" && user.at("contextBotId") == "release" &&
-              !user.contains("fromBotId") && user.at("toBotId") == "triage" && user.at("text") == followUp,
-              "human input was attributed to a Bot or sent to the wrong recipient");
+        const auto checkProjection = [](const Json& messages) {
+            for (const auto& message : messages) {
+                if (message.at("kind") != "bot_message") continue;
+                check(!message.contains("taskId") && !message.contains("taskBotId") &&
+                      !message.at("data").contains("evidence"),"peer chat leaked internal task information");
+            }
+        };
+        checkProjection(history);
+        checkProjection(browser.get("/api/view?bot=release").at("events"));
+        checkProjection(browser.get("/api/view?bot=triage").at("events"));
     }
     {
         Store store(path);
-        Runtime runtime(store,model,t3,notes,options);
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
-        check(browser.get(reverse).at("messages") == pendingMessages && browser.post(endpoint,message,201) == receipt,
-              "restart lost the conversation, pending message or send receipt");
-        for (unsigned attempt = 0; attempt < 12 && browser.get(primary).at("messages").size() < 4; ++attempt)
-            runtime.tick();
-        const auto completed = browser.get(primary).at("messages");
-        check(completed.size() == 4 && completed == browser.get(reverse).at("messages"),
-              "one Bot reply did not reach both views of the same pair");
-        const auto& last = completed.back();
-        const auto& reply = last.at("data");
-        check(reply.at("fromBotId") == "triage" && reply.at("toBotId") == "release" &&
-              reply.at("recipient") == "user" && reply.at("text") == followUpReply,
-              "the reply did not identify its Bot author and human recipient");
-        const auto before = std::to_string(last.at("id").get<Id>());
-        check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == pendingMessages,
-              "the peer history cursor repeated the anchor or skipped older messages");
-        check(browser.post(endpoint,message,201) == receipt,"retry changed the completed send receipt");
-        tick(runtime,6);
-        check(model.followUps.size() == 1 && t3.launches.empty(),"retry caused a duplicate delivery or launched a Session");
-        const auto& input = model.followUps.front();
-        const auto context = input.task.at("pairHistory").dump(-1,' ',false);
-        check(input.task.at("botId") == "triage" && context.find("再現条件を確認してください") != std::string::npos &&
-              context.find(unrelatedMessage) == std::string::npos,
-              "the receiving model lost the previous answer or read an unrelated pair");
-
+        check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
         allowed = false;
-        const auto revoked = browser.get(primary);
-        check(revoked.at("messages") == completed && revoked.at("canSend") == false,
-              "removing a grant lost existing history or left sending enabled");
-        changed["clientMessageId"] = "revoked-message";
-        browser.post(endpoint,changed,403);
-        allowed = true;
+        check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
         configured = false;
-        const auto archived = browser.get(primary);
-        check(archived.at("messages") == completed && archived.at("canSend") == false,
-              "removing a peer's configuration lost history or allowed sending");
+        check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
         const auto list = browser.get("/api/bots");
         const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
         check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
-            return peer.at("id") == "triage" && peer.at("canSend") == false;
-        }),"the picker lost the archived conversation");
-        browser.post(endpoint,changed,404);
+            return peer == Json{{"id","triage"}};
+        }),"the picker lost the archived conversation or exposed a send action");
     }
 }
 

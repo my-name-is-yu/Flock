@@ -27,7 +27,6 @@ RunRef runRef(const Json&);
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
-    std::string contextBot;
 };
 
 struct Store::Impl {
@@ -43,7 +42,6 @@ struct Store::Impl {
     Json taskDetails(Id, bool includeBlocker) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
-    void migratePeers();
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool routeMessage(Id, Model&);
     void applyRoutes(const conversation::Message&, const conversation::Context&, const conversation::Plan&);
@@ -59,9 +57,7 @@ struct Store::Impl {
     Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
-    Id peerMessage(const PeerExchange&, const Json&);
-    void peerEvent(Json&, Json message, std::string_view kind);
-    Json peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const;
+    void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
     Id event(Json&, std::string_view key, Json data);

@@ -142,8 +142,9 @@ Json sourceView(const Json& source, bool includeText = false) {
 
 Json eventView(const Json& event) {
     auto view = Json::object();
-    copyFields(view,event,{"id","taskId","taskBotId","time","kind"});
     const auto kind = field(event,"kind");
+    copyFields(view,event,{"id","time","kind"});
+    if (kind != "bot_message") copyFields(view,event,{"taskId"});
     const auto& data = event.at("data");
     Json details = Json::object();
     if (kind == "waiting") details = waitView(data);
@@ -161,18 +162,7 @@ Json eventView(const Json& event) {
             }
         }
     } else if (kind == "bot_message") {
-        copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind",
-                                  "text","replyTo","initiator","contextBotId","recipient"});
-        const auto evidence = data.find("evidence");
-        if (evidence != data.end() && evidence->is_array()) {
-            auto& references = details["evidence"] = Json::array();
-            for (const auto& reference : *evidence) {
-                auto run = runView(reference,field(reference,"environmentId"));
-                if (run.is_null()) continue;
-                copyFields(run,reference,{"itemId"});
-                references.push_back(std::move(run));
-            }
-        }
+        copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind","text","replyTo"});
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
@@ -301,10 +291,10 @@ Json conversation(Store& store, std::string_view bot, Id before) {
     return result;
 }
 
-Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, bool canSend) {
+Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before) {
     const auto events = store.peerConversation(bot,peer,before,conversationSize + 1);
     const bool more = events.size() > conversationSize;
-    Json result = {{"messages",Json::array()},{"hasOlder",more},{"canSend",canSend}};
+    Json result = {{"messages",Json::array()},{"hasOlder",more}};
     auto& page = result["messages"];
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
         page.push_back(eventView(*event));

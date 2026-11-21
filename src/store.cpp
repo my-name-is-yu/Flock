@@ -1,5 +1,4 @@
 #include "storage.hpp"
-#include "conversation_storage.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -111,43 +110,10 @@ CREATE TABLE IF NOT EXISTS runs(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,
   UNIQUE(environment_id,thread_id,run_id));
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
-)SQL";
-        if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-        migrateConversation();
-        migratePeers();
-        exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
-             " WHERE environment_id<>json_extract(data,'$.environmentId')");
-    } catch (...) { sqlite3_close(db); throw; }
-}
-
-void Store::Impl::migratePeers() {
-    Transaction transaction(db);
-    const auto schema = [&](const char* sql) {
-        if (sqlite3_exec(db,sql,nullptr,nullptr,nullptr) != SQLITE_OK) sqlError(db);
-    };
-    bool legacy;
-    {
-        auto columns = query("SELECT 1 FROM pragma_table_info('peer_exchanges') WHERE name='sender_task' AND \"notnull\"=1");
-        legacy = columns.next();
-    }
-    if (legacy) schema(R"SQL(
-DROP VIEW IF EXISTS project_execution_queue;
-DROP VIEW IF EXISTS project_task_order;
-ALTER TABLE peer_exchanges RENAME TO legacy_peer_exchanges;
-)SQL");
-    // Human messages have a contextual Bot and a recipient task. Only a Bot sender needs a task of its own.
-    schema(R"SQL(
 CREATE TABLE IF NOT EXISTS peer_exchanges(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
-  sender_task INTEGER REFERENCES tasks(id), recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
-  context_bot_id TEXT, CHECK((sender_task IS NULL) = (context_bot_id IS NOT NULL)));
-)SQL");
-    if (legacy) schema(R"SQL(
-INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task)
-SELECT id,kind,phase,last_message,sender_task,recipient_task FROM legacy_peer_exchanges;
-DROP TABLE legacy_peer_exchanges;
-)SQL");
-    schema(R"SQL(
+  sender_task INTEGER NOT NULL REFERENCES tasks(id),
+  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
@@ -185,17 +151,17 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
   AND sender.project_id=task.project_id AND sender.state NOT IN ('completed','cancelled')
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
-CREATE VIEW IF NOT EXISTS peer_exchange_bots AS
-SELECT p.id,coalesce(s.bot_id,p.context_bot_id) AS source_bot,r.bot_id AS target_bot,
-       coalesce(p.sender_task,p.recipient_task) AS task_id,coalesce(s.bot_id,r.bot_id) AS task_bot
-FROM peer_exchanges p LEFT JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task;
-CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)
-  WHERE kind='bot_message';
-CREATE UNIQUE INDEX IF NOT EXISTS journal_peer_receipt ON journal(
-  json_extract(data,'$.contextBotId'),json_extract(data,'$.toBotId'),json_extract(data,'$.clientMessageId'))
-  WHERE kind='bot_message' AND json_extract(data,'$.initiator')='user';
-)SQL");
-    transaction.commit();
+)SQL";
+        if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        migrateConversation();
+        exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
+             " WHERE kind='bot_message'");
+        // Databases from the DM preview may contain queued messages without a sending Bot task.
+        exec("UPDATE tasks SET state='cancelled',generation=generation+1 WHERE state NOT IN ('completed','cancelled')"
+             " AND id IN (SELECT recipient_task FROM peer_exchanges WHERE sender_task IS NULL)");
+        exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
+             " WHERE environment_id<>json_extract(data,'$.environmentId')");
+    } catch (...) { sqlite3_close(db); throw; }
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
 void Store::Impl::exec(const char* sql, const Json& args) const { query(sql, args).next(); }
@@ -226,28 +192,15 @@ Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     return last();
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
-    auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task,context_bot_id FROM peer_exchanges"
-                      " WHERE phase<>'closed' AND (sender_task=? OR recipient_task=?)", {id,id});
+    auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
+                      " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
-    return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5),rows.string(6)};
+    return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
 
-Id Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message) {
-    if (exchange.sender) journal(exchange.sender,"bot_message",message);
-    return journal(exchange.recipient,"bot_message",message);
-}
-
-void Store::Impl::peerEvent(Json& task, Json message, std::string_view kind) {
-    consumeEvent(task);
-    task.erase("feedback");
-    if (message.contains("evidence")) {
-        message["references"] = std::move(message["evidence"]);
-        message.erase("evidence");
-    }
-    message["kind"] = kind;
-    const auto key = "bot/" + field(message,"messageId");
-    event(task,key,std::move(message));
-    if (task["state"] != "queued") task["state"] = "deciding";
+void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message) {
+    journal(exchange.sender,"bot_message",message);
+    journal(exchange.recipient,"bot_message",message);
 }
 
 void Store::Impl::requestCancellation(Json& task) {
@@ -614,6 +567,8 @@ FROM (
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
+    AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
+      AND json_extract(j.data,'$.recipient') IS NOT 'user'))
   UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN route_decisions decision ON decision.message_id=m.id
@@ -627,88 +582,31 @@ WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
     return result;
 }
 
-Json Store::Impl::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
-    auto rows = query(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data,p.task_bot
-FROM peer_exchange_bots p JOIN journal j ON j.task_id=p.task_id
-  AND j.kind='bot_message' AND json_extract(j.data,'$.exchangeId')=p.id
-WHERE ((p.source_bot=? AND p.target_bot=?) OR (p.source_bot=? AND p.target_bot=?))
+Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT j.id,j.task_id,j.time,j.kind,j.data
+FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message' AND json_extract(j.data,'$.exchangeId')=p.id
+WHERE ((sender.bot_id=? AND recipient.bot_id=?) OR (sender.bot_id=? AND recipient.bot_id=?))
   AND (?=0 OR j.id<?)
 ORDER BY j.id DESC LIMIT ?
 )SQL",{bot,peer,peer,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) {
-        auto row = journalRow(rows);
-        row["taskBotId"] = rows.string(5);
-        row["data"].erase("clientMessageId");
-        result.push_back(std::move(row));
-    }
+    while (rows.next()) result.push_back(journalRow(rows));
     std::reverse(result.begin(),result.end());
     return result;
-}
-
-Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
-    std::lock_guard lock(p_->mutex);
-    return p_->peerConversation(bot,peer,before,limit);
 }
 
 std::vector<std::string> Store::peerPartners(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT target_bot FROM peer_exchange_bots WHERE source_bot=?
-UNION SELECT source_bot FROM peer_exchange_bots WHERE target_bot=?
-)SQL",{bot,bot});
+SELECT DISTINCT CASE WHEN sender.bot_id=? THEN recipient.bot_id ELSE sender.bot_id END
+FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+WHERE sender.bot_id=? OR recipient.bot_id=?
+)SQL",{bot,bot,bot});
     std::vector<std::string> result;
     while (rows.next()) result.push_back(rows.string(0));
     return result;
-}
-
-std::optional<Json> Store::peerReceipt(std::string_view bot, std::string_view peer,
-                                      std::string_view clientId, std::string_view text) const {
-    std::lock_guard lock(p_->mutex);
-    auto row = p_->query(R"SQL(
-SELECT id,json_extract(data,'$.text') FROM journal
-WHERE kind='bot_message' AND json_extract(data,'$.initiator')='user'
- AND json_extract(data,'$.contextBotId')=? AND json_extract(data,'$.toBotId')=?
- AND json_extract(data,'$.clientMessageId')=?
-)SQL",{bot,peer,clientId});
-    if (!row.next()) return std::nullopt;
-    if (row.string(1) != text) throw Conflict("This client message ID already has different content");
-    return Json{{"messageId",row.number(0)},{"status","received"}};
-}
-
-Json Store::receivePeer(std::string_view bot, const Intake& target, std::string_view clientId, std::string_view text) {
-    using conversation_storage::hasText;
-    if (bot.empty() || target.botId == bot || !hasText(clientId) || clientId.size() > 256 ||
-        !hasText(text) || text.size() > conversation_storage::messageSize)
-        throw Conflict("Two distinct Bots, a client message ID and nonempty text are required");
-    std::lock_guard lock(p_->mutex);
-    Transaction transaction(p_->db);
-    if (auto existing = peerReceipt(bot,target.botId,clientId,text)) {
-        transaction.commit();
-        return std::move(*existing);
-    }
-    Intake intake = target;
-    intake.request = text;
-    intake.scheduleId.clear();
-    intake.scheduledAt = 0;
-    const auto taskId = p_->submit(intake,0,nullptr,true);
-    auto task = p_->load(taskId);
-    const auto action = actionId();
-    const PeerExchange exchange{action,"consult","working",action,0,taskId,std::string(bot)};
-    p_->exec(R"SQL(
-INSERT INTO peer_exchanges(id,kind,phase,last_message,recipient_task,context_bot_id)
-VALUES(?,'consult','working',?,?,?)
-)SQL",{action,action,taskId,bot});
-    Json message = {{"exchangeId",action},{"messageId",action},{"initiator","user"},{"contextBotId",bot},
-        {"toBotId",target.botId},{"messageType","request"},{"requestKind","consult"},{"text",text},
-        {"clientMessageId",clientId}};
-    const auto messageId = p_->peerMessage(exchange,message);
-    message.erase("clientMessageId");
-    message["pairHistoryBefore"] = messageId;
-    p_->peerEvent(task,std::move(message),"bot_request");
-    p_->save(task);
-    transaction.commit();
-    return {{"messageId",messageId},{"status","received"}};
 }
 } // namespace flockv0

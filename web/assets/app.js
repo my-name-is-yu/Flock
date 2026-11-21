@@ -8,7 +8,7 @@ const elements = Object.fromEntries([
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'theme-switch',
-  'peer-heading', 'peer-back', 'peer-picker', 'peer-read-only',
+  'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -21,9 +21,6 @@ const stateLabels = {
   cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
   failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
-};
-const peerMessageLabels = {
-  request: 'Request', question: 'Question', answer: 'Answer', result: 'Result', cancelled: 'Cancelled', failed: 'Failed',
 };
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
@@ -46,7 +43,7 @@ const errors = {
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
-  peer_not_allowed: 'Messaging this Bot from this page is restricted.',
+  peer_not_allowed: 'This Bot DM is unavailable.',
   peer_not_found: 'This Bot DM is unavailable.',
 };
 
@@ -136,29 +133,25 @@ async function api(path, body) {
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
 const peerQuery = ({ id: bot, peerId: peer }, before) =>
   `peer-conversation?${new URLSearchParams(before ? { bot, peer, before } : { bot, peer })}`;
-const composerContext = () => view?.dm ?? view;
-const composerKey = ({ id, peerId }) => peerId ? JSON.stringify([id, peerId]) : id;
-const showingComposer = (key) => view && composerKey(composerContext()) === key;
-const messageStorageKey = (key) => `flock-pending-message:${key}`;
+const timelineContext = () => view?.dm ?? view;
+const showingComposer = (bot) => view?.id === bot && !view?.dm;
+const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
 
-function pendingMessage(context) {
-  const key = composerKey(context);
-  if (!pendingMessages.has(key)) {
+function pendingMessage(bot) {
+  if (!pendingMessages.has(bot)) {
     try {
-      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(key)));
-      if (pending?.payload?.botId === context.id && pending.payload.peerId === context.peerId)
-        pendingMessages.set(key, pending);
+      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
+      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
     } catch {}
   }
-  return pendingMessages.get(key);
+  return pendingMessages.get(bot);
 }
-function rememberMessage(context, pending) {
-  const key = composerKey(context);
-  if (pending) pendingMessages.set(key, pending);
-  else pendingMessages.delete(key);
+function rememberMessage(bot, pending) {
+  if (pending) pendingMessages.set(bot, pending);
+  else pendingMessages.delete(bot);
   try {
-    if (pending) sessionStorage.setItem(messageStorageKey(key), JSON.stringify(pending));
-    else sessionStorage.removeItem(messageStorageKey(key));
+    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
+    else sessionStorage.removeItem(messageStorageKey(bot));
   } catch {}
 }
 
@@ -203,13 +196,9 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
-  if (view) {
-    const context = composerContext();
-    const key = composerKey(context);
-    const pending = pendingMessage(context);
-    if (pending?.reply && !replies.has(key)) replies.set(key, pending.reply);
-    else if (pending && !pending.reply && !drafts.has(key)) drafts.set(key, pending.payload.text);
-  }
+  const pending = botId && pendingMessage(botId);
+  if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
+  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
     if (updateHistory) history.pushState(null, '', url);
@@ -662,23 +651,24 @@ function eventTime(event, extra) {
   time.title = [event.taskId ? `#${event.taskId}` : null, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
-function sourceAction(source, label = 'Open source', botId = view?.id) {
+function sourceAction(source, label = 'Open source') {
   return button(label, 'text-button', async () => {
     if (!source.messageId && source.taskId) {
-      await openTask(source.taskId, botId);
+      await openTask(source.taskId);
       return;
     }
-    const target = botId === view.id ? byId(`event-${source.messageId}`) : null;
+    const target = byId(`event-${source.messageId}`);
     if (target) {
       closeDetail();
       target.focus();
       target.scrollIntoView({ block: 'center' });
       return;
     }
-    const selection = { kind: 'source', botId };
+    const context = view;
+    const selection = { kind: 'source' };
     openDetail(selection);
     try {
-      const page = await api(botQuery('conversation', botId, source.messageId + 1));
+      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
       if (detail !== selection) return;
       selection.event = page.events.find((event) => event.id === source.messageId);
       selection.failed = !selection.event;
@@ -850,50 +840,15 @@ function dayLabel(seconds) {
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
 }
 
-function peerAuthors(data) {
-  const from = data.initiator === 'user' ? 'You' : participant(data.fromBotId).name;
-  const to = data.recipient === 'user' ? 'You' : participant(data.toBotId).name;
-  return `${from} → ${to}`;
-}
-function peerConversation(messages, activeBot) {
+function peerExchangeLink(messages, activeBot) {
   const first = messages[0];
   const { fromBotId, toBotId } = first.data;
-  const senderBot = fromBotId ?? first.data.contextBotId;
-  const peerId = senderBot === activeBot ? toBotId : senderBot;
-  const peerName = participant(peerId).name;
-  const entry = node('div', 'peer-exchange-entry');
-  const group = node('details', 'peer-exchange');
-  group.dataset.firstMessage = first.id;
-  const summary = node('summary');
+  const peer = participant(fromBotId === activeBot ? toBotId : fromBotId);
   const count = messages.length === 1 ? '1 message' : `${messages.length} messages`;
-  summary.append(node('span', null, `${count} with ${peerName}`));
-  if (first.taskId) summary.append(node('span', 'peer-exchange-task', `#${first.taskId}`));
-  const list = node('ol', 'peer-message-list');
-  list.setAttribute('role', 'list');
-  for (const message of messages) {
-    const { messageType, requestKind, text, evidence } = message.data;
-    const item = node('li', 'peer-message');
-    const metadata = node('div', 'event-meta');
-    const label = messageType === 'request' && requestKind === 'consult'
-      ? 'Consultation' : peerMessageLabels[messageType] ?? 'Message';
-    metadata.append(node('strong', null, peerAuthors(message.data)),
-      node('span', null, label), eventTime(message));
-    item.append(metadata, node('p', 'event-text', text));
-    for (const reference of evidence ?? []) {
-      const link = linkToRun(reference, 'View evidence in T3');
-      if (link) item.append(link);
-    }
-    list.append(item);
-  }
-  group.append(summary, list);
-  entry.append(group);
-  if (peerId) {
-    const link = peerLink(activeBot, peerId, 'Open DM', 'link peer-exchange-open');
-    link.setAttribute('aria-label', `Open DM with ${peerName}`);
-    link.dataset.peerFocus = `exchange:${first.id}`;
-    entry.append(link);
-  }
-  return entry;
+  const link = peerLink(activeBot, peer.id, null, 'peer-exchange-link');
+  link.append(avatar(peer, 'peer-exchange-avatar'), node('span', null, `${count} with ${peer.name}`));
+  link.dataset.peerFocus = first.id;
+  return link;
 }
 
 function peerThread(events, dm) {
@@ -903,7 +858,6 @@ function peerThread(events, dm) {
     const title = dm.error ? 'DM unavailable' : dm.loaded ? 'No messages yet' : 'Loading…';
     empty.append(node('h2', null, title));
     if (dm.error) empty.append(node('p', null, dm.error));
-    else if (dm.canSend) empty.append(node('p', null, `Send a message to ${participant(dm.peerId).name}.`));
     fragment.append(empty);
   }
   let day = '';
@@ -913,34 +867,17 @@ function peerThread(events, dm) {
       fragment.append(node('p', 'day', nextDay));
       day = nextDay;
     }
-    const data = event.data;
-    const fromUser = data.initiator === 'user';
-    const row = node('article', `msg group-start peer-dm-message ${fromUser ? 'user' : 'bot'}`);
+    const { fromBotId, toBotId, text } = event.data;
+    const from = participant(fromBotId);
+    const to = participant(toBotId);
+    const row = node('article', 'msg group-start peer-dm-message');
     const metadata = node('div', 'msg-meta');
-    metadata.append(node('span', 'msg-name', peerAuthors(data)), eventTime(event));
-    if (['question', 'failed', 'cancelled'].includes(data.messageType))
-      metadata.append(node('span', null, peerMessageLabels[data.messageType]));
+    metadata.append(node('span', 'msg-name', `${from.name} → ${to.name}`), eventTime({ time: event.time }));
     const line = node('div', 'msg-line');
-    if (!fromUser) line.append(avatar(participant(data.fromBotId), 'msg-avatar'));
     const bubble = node('div', 'bubble');
-    bubble.append(node('p', 'event-text', data.text));
-    const actions = node('div', 'peer-dm-sources');
-    if (event.taskId && bots.some((bot) => bot.id === event.taskBotId)) {
-      const link = button(`Task #${event.taskId}`, 'text-button',
-        () => void openTask(event.taskId, event.taskBotId));
-      link.dataset.peerFocus = `task:${event.id}`;
-      actions.append(link);
-    }
-    for (const [index, reference] of (data.evidence ?? []).entries()) {
-      const link = linkToRun(reference, 'Evidence');
-      if (link) {
-        link.dataset.peerFocus = `evidence:${event.id}:${index}`;
-        actions.append(link);
-      }
-    }
-    line.append(bubble);
+    bubble.append(node('p', 'event-text', text));
+    line.append(avatar(from, 'msg-avatar'), bubble);
     row.append(metadata, line);
-    if (actions.childElementCount) row.append(actions);
     fragment.append(row);
   }
   return fragment;
@@ -956,11 +893,15 @@ function timelineScrollPosition() {
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
   const data = view?.data;
-  const context = composerContext();
+  const context = timelineContext();
   const events = [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
   older.hidden = !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
+  const peerStatus = elements['peer-status'];
+  const olderFailed = view?.dm?.olderFailed;
+  peerStatus.hidden = !olderFailed;
+  peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
   const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
   const focusedLink = focused?.dataset.peerFocus;
@@ -976,7 +917,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   if (view?.dm) {
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
-    if (!changed('timeline', composerKey(dm), events, dm.loaded, dm.canSend, dm.error, participants, dayFormat.format(Date.now()))) return;
+    if (!changed('timeline', dm.id, dm.peerId, events, dm.loaded, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
     elements.timeline.replaceChildren(peerThread(events, dm));
     moveScroll();
@@ -985,9 +926,6 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
     data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
   scroller.setAttribute('aria-label', 'Conversation history');
-  const expanded = new Set([...elements.timeline.querySelectorAll('.peer-exchange[open]')].map(group => group.dataset.firstMessage));
-  const focusedExchange = focused?.closest('.peer-exchange > summary')?.parentElement.dataset.firstMessage;
-  let focusTarget = null;
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
     clarifications: new Map((data?.clarifications ?? []).map(item => [item.messageId, item])),
@@ -1000,11 +938,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   let peerMessages = [];
   const appendPeerMessages = () => {
     if (!peerMessages.length) return;
-    const entry = peerConversation(peerMessages, view.id);
-    const group = entry.querySelector('.peer-exchange');
-    group.open = expanded.has(group.dataset.firstMessage);
-    if (focusedExchange === group.dataset.firstMessage) focusTarget = group.querySelector('summary');
-    fragment.append(entry);
+    fragment.append(peerExchangeLink(peerMessages, view.id));
     peerMessages = [];
   };
   let day = '';
@@ -1040,30 +974,28 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
   elements.timeline.replaceChildren(fragment);
-  focusTarget?.focus({ preventScroll: true });
   moveScroll();
 }
 
 const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
-  const key = composerKey(context);
-  notices.set(key, { text, isError });
-  if (showingComposer(key)) renderComposer();
+  notices.set(context.id, { text, isError });
+  if (showingComposer(context.id)) renderComposer();
 }
 const replyLabels = { wait: 'Reply to a question', clarification: 'Reply to a clarification', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 function scheduleNoticeFade(context, notice) {
-  const key = composerKey(context);
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(key) || [...pendingWaits.values()].includes(key)) return;
+  const bot = context.id;
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(bot) || [...pendingWaits.values()].includes(bot)) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
-    if (notices.get(key) !== notice || !showingComposer(key)) return;
+    if (notices.get(bot) !== notice || !showingComposer(bot)) return;
     notice.fading = true;
     renderComposer();
     setTimeout(() => {
-      if (notices.get(key) !== notice) return;
-      notices.delete(key);
-      if (showingComposer(key)) renderComposer();
+      if (notices.get(bot) !== notice) return;
+      notices.delete(bot);
+      if (showingComposer(bot)) renderComposer();
     }, 400);
   }, 3600);
 }
@@ -1074,27 +1006,20 @@ function fitMessage() {
   field.style.height = `${field.scrollHeight}px`;
 }
 function renderComposer() {
-  const context = composerContext();
-  const dm = view?.dm;
-  const key = context && composerKey(context);
-  const notice = notices.get(key);
-  const readOnly = elements['peer-read-only'];
-  const peerName = dm && participant(dm.peerId).name;
-  const readOnlyText = dm?.loaded && !dm.canSend ? `Read only · Messaging ${peerName} from this Bot is restricted.` : '';
-  readOnly.hidden = !readOnlyText;
-  readOnly.textContent = readOnlyText && (notice?.isError ? notice.text : readOnlyText);
-  const available = dm ? dm.canSend : !!context?.data;
+  const context = view;
+  const available = context?.data && !context.dm;
   elements['composer-container'].hidden = !available;
   if (!available) return;
-  const reply = replies.get(key);
-  const body = reply ? reply.text : drafts.get(key) ?? '';
-  const busy = sendingMessages.has(key);
+  const reply = replies.get(context.id);
+  const notice = notices.get(context.id);
+  const body = reply ? reply.text : drafts.get(context.id) ?? '';
+  const busy = sendingMessages.has(context.id);
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
-  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : dm ? `Message ${peerName}` : 'Message';
+  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  elements.message.placeholder = reply ? 'Write a reply' : `Message ${peerName || context.data.bot.name}`;
+  elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
   if (elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
@@ -1103,7 +1028,7 @@ function renderComposer() {
   elements.composer.setAttribute('aria-busy', String(busy));
   elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  elements.send.setAttribute('aria-label', reply ? 'Send reply' : dm ? `Send message to ${peerName}` : 'Send message');
+  elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
   elements.notice.textContent = notice?.text ?? '';
   elements.notice.classList.toggle('error', !!notice?.isError);
@@ -1130,7 +1055,7 @@ function closeDetail() {
   if (elements.detail.open) elements.detail.close();
 }
 function openDetail(selection) {
-  if (!view || (!view.data && selection.kind !== 'task' && selection.kind !== 'source')) return;
+  if (!view?.data) return;
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -1139,12 +1064,13 @@ function openDetail(selection) {
   elements.detail.showModal();
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
-async function openTask(taskId, botId = view?.id) {
-  if (!view || !botId) return;
-  const selection = { kind: 'task', taskId, botId };
+async function openTask(taskId) {
+  const context = view;
+  if (!context?.data) return;
+  const selection = { kind: 'task', taskId };
   openDetail(selection);
   try {
-    const task = await api(`task?${new URLSearchParams({ bot: botId, taskId })}`);
+    const task = await api(`task?${new URLSearchParams({ bot: context.id, taskId })}`);
     if (detail !== selection) return;
     selection.task = task;
   } catch {
@@ -1153,7 +1079,7 @@ async function openTask(taskId, botId = view?.id) {
   }
   renderDetail();
 }
-function taskContent(task, botId) {
+function taskContent(task) {
   const purpose = node('section', 'dialog-section');
   purpose.append(badge(task.state), node('h3', null, 'Goal'), node('p', 'prose', task.intent || task.request));
   const parts = [purpose];
@@ -1166,7 +1092,7 @@ function taskContent(task, botId) {
       const label = revision.id === task.currentRevision ? `Revision ${revision.number} (current)` : `Revision ${revision.number}`;
       row.append(node('p', 'dialog-meta', label), node('p', 'prose', revision.doneWhen));
       if (revision.intent && revision.intent !== (task.intent || task.request)) row.append(detailText('Goal in this revision', revision.intent));
-      if (revision.sourceMessageId) row.append(sourceAction({ messageId: revision.sourceMessageId }, 'Open change request', botId));
+      if (revision.sourceMessageId) row.append(sourceAction({ messageId: revision.sourceMessageId }, 'Open change request'));
       revisions.append(row);
     }
     parts.push(revisions);
@@ -1183,7 +1109,7 @@ function taskContent(task, botId) {
     const label = task.result.kind === 'completed' ? 'Completion report' : 'Latest session report';
     result.append(node('h3', null, label), node('p', 'prose', data.text ?? data.report));
     const actions = node('div', 'event-actions');
-    actions.append(sourceAction({ messageId: task.result.id }, 'Open report in conversation', botId));
+    actions.append(sourceAction({ messageId: task.result.id }, 'Open report in conversation'));
     const link = linkToRun(data.run);
     if (link) actions.append(link);
     result.append(actions);
@@ -1194,10 +1120,10 @@ function taskContent(task, botId) {
     sources.append(node('h3', null, 'Original task'));
     for (const source of task.sourceResultRefs) {
       if (source.text) sources.append(node('p', 'prose', source.text));
-      sources.append(sourceAction(source, source.messageId ? 'Open original result' : 'Open original task', botId));
+      sources.append(sourceAction(source, source.messageId ? 'Open original result' : 'Open original task'));
     }
     if (!task.sourceResultRefs.length)
-      sources.append(button('Open original task', 'text-button', () => void openTask(task.sourceTaskId, botId)));
+      sources.append(button('Open original task', 'text-button', () => void openTask(task.sourceTaskId)));
     parts.push(sources);
   }
   if (task.runs.length) {
@@ -1493,17 +1419,16 @@ function renderDetail() {
   labelDetail(null);
   renderDetailNav([], null);
   if (detail.kind === 'peers') {
-    const peers = botPeers(view.id).map(({ id, canSend }) => ({ bot: participant(id), canSend }));
-    if (changed('detail', detail, peers.map(({ bot, canSend }) => [bot.id, bot.name, bot.avatar, canSend]))) {
+    const peers = botPeers(view.id).map(({ id }) => participant(id));
+    if (changed('detail', detail, peers.map(({ id, name, avatar }) => [id, name, avatar]))) {
       const active = document.activeElement?.dataset.peerChoice;
       elements['detail-title'].textContent = 'Bot DMs';
       const list = node('ul', 'peer-picker-list');
-      for (const { bot, canSend } of peers) {
+      for (const bot of peers) {
         const item = node('li');
         const link = peerLink(view.id, bot.id, null, 'peer-choice');
         link.dataset.peerChoice = bot.id;
         link.append(avatar(bot, 'peer-choice-avatar'), node('span', 'peer-choice-name', bot.name));
-        if (!canSend) link.append(node('span', 'peer-choice-status', 'Read only'));
         item.append(link);
         list.append(item);
       }
@@ -1515,7 +1440,7 @@ function renderDetail() {
   if (detail.kind === 'task') {
     if (changed('detail', detail)) {
       elements['detail-title'].textContent = 'Task details';
-      elements['detail-body'].replaceChildren(...(detail.task ? taskContent(detail.task, detail.botId) :
+      elements['detail-body'].replaceChildren(...(detail.task ? taskContent(detail.task) :
         [node('p', 'prose', detail.failed ? 'Could not load task details.' : 'Loading…')]));
     }
     return;
@@ -1529,7 +1454,7 @@ function renderDetail() {
       const body = node('p', 'prose', text);
       elements['detail-body'].replaceChildren(body);
       if (detail.event?.taskId) elements['detail-body'].append(
-        button('Task details', 'text-button', () => void openTask(detail.event.taskId, detail.botId)));
+        button('Task details', 'text-button', () => void openTask(detail.event.taskId)));
     }
     return;
   }
@@ -1595,12 +1520,10 @@ async function refreshPeerConversation(context, scroll) {
     for (const event of page.messages) dm.events.set(event.id, event);
     dm.newestEvent = page.messages.at(-1)?.id ?? dm.newestEvent;
     dm.loaded = true;
-    dm.canSend = page.canSend;
     dm.error = null;
   } catch (error) {
     if (context !== view || generation !== dm.generation) return;
-    if (error.status >= 400 && error.status < 500) dm.canSend = false;
-    if (!dm.loaded || !dm.canSend) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    if (!dm.loaded) dm.error = errors[error.message] ?? 'Could not load this conversation.';
   }
   render(scroll);
 }
@@ -1641,22 +1564,27 @@ async function refreshBots() {
   }
 }
 async function loadOlder() {
-  const context = composerContext();
+  const context = timelineContext();
   const cursor = context?.olderBefore;
   if (!cursor || context.loadingOlder) return;
   context.loadingOlder = true;
+  if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
     const page = await api(context.peerId ? peerQuery(context, cursor) : botQuery('conversation', context.id, cursor));
-    if (context !== composerContext() || context.olderBefore !== cursor) return;
+    if (context !== timelineContext() || context.olderBefore !== cursor) return;
     const events = context.peerId ? page.messages : page.events;
     context.olderBefore = context.peerId ? (page.hasOlder ? events[0]?.id : 0) : page.olderBefore;
     for (const event of events) context.events.set(event.id, event);
     renderTimeline('older');
-  } catch { if (context === composerContext()) setNotice(context, 'Could not load earlier messages.', true); }
+  } catch {
+    if (context !== timelineContext()) return;
+    if (context.peerId) context.olderFailed = true;
+    else setNotice(context, 'Could not load earlier messages.', true);
+  }
   finally {
     context.loadingOlder = false;
-    if (context === composerContext()) renderTimeline();
+    if (context === timelineContext()) renderTimeline();
   }
 }
 async function loadSessions() {
@@ -1699,36 +1627,34 @@ async function operate(context, task, operation, fields = {}) {
 }
 async function submit(event) {
   event.preventDefault();
-  const context = composerContext();
-  if (!context || elements['composer-container'].hidden || elements.send.disabled) return;
-  const key = composerKey(context);
-  const reply = replies.get(key);
-  const text = reply ? reply.text : drafts.get(key);
+  const context = view;
+  if (!context?.data || context.dm || elements.send.disabled) return;
+  const reply = replies.get(context.id);
+  const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
-  const previous = pendingMessage(context)?.payload;
+  const previous = pendingMessage(context.id)?.payload;
   const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
     ? previous.clientMessageId : crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  if (context.peerId) payload.peerId = context.peerId;
-  rememberMessage(context, { payload, reply });
-  sendingMessages.add(key);
+  rememberMessage(context.id, { payload, reply });
+  sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
   try {
-    await api(context.peerId ? 'peer-messages' : 'messages', payload);
-    rememberMessage(context, null);
-    if (reply) replies.delete(key);
-    else drafts.delete(key);
+    await api('messages', payload);
+    rememberMessage(context.id, null);
+    if (reply) replies.delete(context.id);
+    else drafts.delete(context.id);
     setNotice(context, 'Message received.');
-    if (showingComposer(key)) await refreshView(view, 'bottom');
+    if (showingComposer(context.id)) await refreshView(view, 'bottom');
     void refreshBots();
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context, null);
+    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
-    sendingMessages.delete(key);
-    if (showingComposer(key)) renderComposer();
+    sendingMessages.delete(context.id);
+    if (showingComposer(context.id)) renderComposer();
   }
 }
 
@@ -1760,21 +1686,19 @@ elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
-  replies.delete(composerKey(composerContext()));
+  replies.delete(view.id);
   renderComposer();
   elements.message.focus();
 });
 elements.message.addEventListener('input', () => {
-  const context = composerContext();
-  if (!context) return;
-  const key = composerKey(context);
-  const reply = replies.get(key);
+  if (!view || view.dm) return;
+  const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
-  else drafts.set(key, elements.message.value);
+  else drafts.set(view.id, elements.message.value);
   fitMessage();
-  notices.delete(key);
+  notices.delete(view.id);
   const limit = composerLimit(reply);
-  if (byteLength(elements.message.value) > limit) setNotice(context, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
+  if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
 });
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
