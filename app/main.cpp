@@ -177,6 +177,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, co
     (void)home;
 #endif
     const auto startedAt = unixTime();
+    options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
 #ifdef FLOCK_WITH_WEB
     std::unique_ptr<WebServer> server;

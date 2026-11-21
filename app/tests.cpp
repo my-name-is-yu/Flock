@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <unistd.h>
 
@@ -223,6 +224,36 @@ void notesAndRoutingOnRestart() {
     rejects<Conflict>([&] { bots.get("../first"); },"path traversal accepted as Bot ID");
 }
 
+void directionalPeerConfiguration() {
+    Sandbox temp;
+    const Bots bots(temp.path);
+    auto release = botConfig();
+    release["allowedBots"] = Json::array({"verifier","missing"});
+    createBot(temp.path / "release",release,"Own releases","Release-only memory");
+    auto verifier = botConfig("verification-model");
+    verifier["name"] = "Verifier";
+    verifier["environmentId"] = "verification-environment";
+    verifier["projectId"] = "verification-project";
+    verifier["session"]["runtimeMode"] = "approval-required";
+    createBot(temp.path / "verifier",verifier,"Verify changes","Verifier-only memory");
+
+    const auto peers = bots.peers("release");
+    check(peers.size() == 1 && peers[0].name == "Verifier" && peers[0].intake.botId == "verifier",
+        "allowed peers must resolve to configured destinations");
+    const auto& intake = peers[0].intake;
+    check(intake.environmentId == "verification-environment" && intake.projectId == "verification-project" &&
+        intake.config["model"] == "verification-model" && intake.config["session"]["runtimeMode"] == "approval-required",
+        "receiver must use its own route and settings");
+    check(bots.peers("verifier").empty(),"grant must be directional and default to empty");
+
+    release["allowedBots"] = Json::array();
+    write(temp.path / "release" / "config.json",release.dump());
+    check(bots.peers("release").empty(),"resolver must observe changes to grants");
+    release["allowedBots"] = Json::array({"../verifier"});
+    write(temp.path / "release" / "config.json",release.dump());
+    rejects<Conflict>([&] { bots.get("release"); },"invalid peer ID accepted");
+}
+
 void responseContract() {
     ModelInput input{
         {{"doneWhen","An existing requirement"}},
@@ -246,6 +277,39 @@ void responseContract() {
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
         Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+
+    input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
+    const auto peerRequest = responseRequest(input);
+    const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
+    const auto& destinations = peerContext.at("task").at("peers");
+    check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
+        destinations.at(0).at("name") == "Verifier",
+        "the model did not receive the allowed peer destination");
+    check(peerRequest.at("tools").at(0).at("tools").size() == 3,"unavailable tools entered the peer request");
+    const auto parameters = [](const Json& request, std::string_view name) -> const Json& {
+        for (const auto& function : request.at("tools").at(0).at("tools"))
+            if (function.at("name") == name) return function.at("parameters");
+        throw std::runtime_error("Missing model tool: " + std::string(name));
+    };
+    using Names = std::multiset<std::string>;
+    const auto& send = parameters(peerRequest,"send_bot_message");
+    check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
+        send["properties"]["doneWhen"]["type"] == "string" &&
+        send["required"].get<Names>() == Names{"reason","botId","kind","text"},
+        "first peer work may set a criterion while consultation only needs a question");
+    const auto& reply = parameters(peerRequest,"reply_to_bot");
+    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","answer","result","failed"} &&
+        reply["required"].get<Names>() == Names{"reason","kind","text"},
+        "peer replies must specify their kind and text");
+    const auto& evidence = parameters(peerRequest,"read_bot_evidence");
+    check(evidence["properties"]["messageId"]["type"] == "string" &&
+        evidence["required"].get<Names>() == Names{"reason","messageId"},
+        "peer evidence must identify the message that carries it");
+    input.task["doneWhen"] = "Saved work acceptance";
+    const auto nextPeerRequest = responseRequest(input);
+    check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
+        "later peer work must keep the saved criterion");
 
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
@@ -293,6 +357,7 @@ int main() {
         cronSyntaxAndTimeZones();
         cronIntakeAndRestart();
         notesAndRoutingOnRestart();
+        directionalPeerConfiguration();
         responseContract();
         acceptanceRunner();
     } catch (const std::exception& error) {

@@ -14,7 +14,6 @@ std::string field(const Json& object, std::string_view key) {
 namespace {
 constexpr unsigned conversationSize = 36;
 constexpr unsigned sessionsSize = 6;
-constexpr unsigned taskBatch = 100;
 
 void copyFields(Json& output, const Json& source, std::initializer_list<const char*> keys) {
     if (!source.is_object()) return;
@@ -132,6 +131,19 @@ Json eventView(const Json& event) {
     else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId"});
     else if (kind == "completed") copyFields(details,data,{"text","reason","doneWhen"});
+    else if (kind == "bot_message") {
+        copyFields(details,data,{"exchangeId","messageId","fromBotId","toBotId","messageType","requestKind","text","replyTo"});
+        const auto evidence = data.find("evidence");
+        if (evidence != data.end() && evidence->is_array()) {
+            auto& references = details["evidence"] = Json::array();
+            for (const auto& reference : *evidence) {
+                auto run = runView(reference,field(reference,"environmentId"));
+                if (run.is_null()) continue;
+                copyFields(run,reference,{"itemId"});
+                references.push_back(std::move(run));
+            }
+        }
+    }
     else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
@@ -150,7 +162,7 @@ std::string preview(Store& store, std::string_view bot) {
         if ((kind == "report" || kind == "completed" ||
              (kind == "waiting" && field(data,"reason") == "user_question")) && !text.empty())
             return bounded(text,240);
-        if (request.empty() && kind == "request") request = bounded(text,240);
+        if (request.empty() && (kind == "request" || kind == "bot_message")) request = bounded(text,240);
     }
     return request;
 }
@@ -190,57 +202,29 @@ Json taskSessions(const Json& task) {
     return sessions;
 }
 
-// Store exposes a task cursor rather than separate queries for waits or Sessions.
-// Scan bounded batches to keep older, still-open waits visible behind newer requests.
-Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
-    Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
-    if (overview) {
-        result["waits"] = Json::array();
-        result["queued"] = Json::array();
-        result["activeSessions"] = Json::array();
-        result["presence"] = "idle";
-    }
-    auto& sessionTasks = result["sessionTasks"];
-    bool moreSessions = false;
-    for (;;) {
-        const auto tasks = store.tasks(bot,cursor,taskBatch);
-        for (const auto& task : tasks) {
-            const auto id = task.at("id").get<Id>();
-            const auto state = field(task,"state");
-            if (overview) {
-                auto& presence = result["presence"];
-                if (state == "waiting") {
-                    result["waits"].push_back(currentWait(task));
-                    if (presence != "working" && presence != "thinking") presence = "waiting";
-                } else if (state == "running" || state == "cancelling") presence = "working";
-                else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
-                if (state == "queued" && !task.at("blockedBy").is_null()) {
-                    auto queued = taskSummary(task);
-                    queued["blockedBy"] = taskSummary(task.at("blockedBy"));
-                    copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
-                    result["queued"].push_back(std::move(queued));
-                }
-                const auto& active = task.at("activeRun");
-                if (!active.is_null()) {
-                    result["activeSessions"].push_back({{"taskId",id},{"threadId",field(active,"threadId")},
-                        {"runId",field(active,"runId")},{"state",state}});
-                }
-            }
-            if (task.at("runs").empty()) continue;
-            if (sessionTasks.size() < sessionsSize) {
-                auto group = taskSummary(task);
-                group["sessions"] = taskSessions(task);
-                sessionTasks.push_back(std::move(group));
-                result["sessionsBefore"] = id;
-            } else {
-                moreSessions = true;
-                if (!overview) return result;
-            }
+Json activity(Store& store, std::string_view bot) {
+    Json result = {{"waits",Json::array()},{"queued",Json::array()},{"activeSessions",Json::array()},{"presence","idle"}};
+    for (const auto& task : store.activeTasks(bot)) {
+        const auto state = field(task,"state");
+        auto& presence = result["presence"];
+        if (state == "waiting") {
+            result["waits"].push_back(currentWait(task));
+            if (presence != "working" && presence != "thinking") presence = "waiting";
+        } else if (state == "running" || state == "cancelling") presence = "working";
+        else if ((state == "deciding" || state == "sending") && presence != "working") presence = "thinking";
+        else if (state == "peer_waiting" && presence == "idle") presence = "peer_waiting";
+        if (state == "queued" && !task.at("blockedBy").is_null()) {
+            auto queued = taskSummary(task);
+            queued["blockedBy"] = taskSummary(task.at("blockedBy"));
+            copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
+            result["queued"].push_back(std::move(queued));
         }
-        if (tasks.size() < taskBatch) break;
-        cursor = tasks.back().at("id").get<Id>();
+        const auto& active = task.at("activeRun");
+        if (!active.is_null()) {
+            result["activeSessions"].push_back({{"taskId",task.at("id")},{"threadId",field(active,"threadId")},
+                {"runId",field(active,"runId")},{"state",state}});
+        }
     }
-    if (!moreSessions) result["sessionsBefore"] = 0;
     return result;
 }
 } // namespace
@@ -269,13 +253,26 @@ Json conversation(Store& store, std::string_view bot, Id before) {
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
-    return activity(store,bot,before,false);
+    const auto tasks = store.sessionTasks(bot,before,sessionsSize + 1);
+    Json result = {{"sessionTasks",Json::array()},{"sessionsBefore",0}};
+    auto& page = result["sessionTasks"];
+    for (const auto& task : tasks) {
+        if (page.size() == sessionsSize) {
+            result["sessionsBefore"] = page.back()["id"];
+            break;
+        }
+        auto group = taskSummary(task);
+        group["sessions"] = taskSessions(task);
+        page.push_back(std::move(group));
+    }
+    return result;
 }
 
 Json botView(Store& store, const Json& bot) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0);
-    result.update(activity(store,id,0,true));
+    result.update(activity(store,id));
+    result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
     return result;
 }

@@ -25,7 +25,7 @@ button, input, textarea { font: inherit; color: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { cursor: pointer; }
 button:disabled { opacity: .56; cursor: default; }
-button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, .conversation:focus-visible {
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible, .conversation:focus-visible {
   outline: 2px solid #7453bb;
   outline-offset: 3px;
 }
@@ -121,6 +121,13 @@ svg { display: block; }
 .event-detail strong { color: var(--ink); margin-right: .35em; }
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .event-note { color: var(--muted); font-size: .76rem; margin-top: .48rem; overflow-wrap: anywhere; }
+.peer-exchange { min-width: 0; max-width: 42rem; }
+.peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--muted); cursor: pointer; font-size: .82rem; line-height: 1.5; overflow-wrap: anywhere; }
+.peer-exchange > summary:hover { color: var(--ink); }
+.peer-exchange-task { margin-inline-start: .6rem; font-size: .73rem; }
+.peer-message-list { list-style: none; display: grid; gap: .8rem; margin: .35rem 0 0 .55rem; border-inline-start: 1px solid var(--line); padding: .1rem 0 .1rem .8rem; }
+.peer-message { display: grid; gap: .22rem; min-width: 0; }
+.peer-message > .link { justify-self: start; }
 .badge { display: inline-block; border-radius: 1rem; padding: .14rem .45rem; font-size: .7rem; font-weight: 640; color: var(--muted); background: #eeeae4; }
 .badge.waiting { color: var(--amber); background: var(--amber-bg); }
 .badge.running, .badge.completed, .badge.working { color: var(--green); background: var(--green-bg); }

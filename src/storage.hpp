@@ -22,6 +22,11 @@ std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 
+struct PeerExchange {
+    std::string id, kind, phase, lastMessage;
+    Id sender = 0, recipient = 0;
+};
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
@@ -32,7 +37,12 @@ struct Store::Impl {
     void exec(const char*, const Json& args = Json::array()) const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
+    Json taskDetails(Id, bool includeBlocker) const;
     void save(Json&);
+    Id submit(const Intake&, std::string_view peerKind = {});
+    std::optional<PeerExchange> peerExchange(Id) const;
+    void peerMessage(const PeerExchange&, const Json&);
+    void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
     Id event(Json&, std::string_view key, Json data);
     Json currentEvent(const Json&) const;

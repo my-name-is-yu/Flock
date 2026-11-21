@@ -2,10 +2,12 @@
 import base64
 import hashlib
 import json
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,6 +107,11 @@ class Fixture(BaseHTTPRequestHandler):
             content = self.tool(tool["name"], tool["arguments"])
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": "code" in content}
+            if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
+                self.server.launch_accepted.set()
+                assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
+                self.close_connection = True
+                return
             self.reply(envelope)
         else:
             self.reply(code=404)
@@ -122,12 +129,18 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["projectId"] == "project"
             return {"id": "project", "defaultModelSelection": None}
         if name == "t3_thread_launch":
-            assert args["projectId"] == "project" and args["clientRequestId"] == "flock-action-0123"
+            assert args["projectId"] == "project"
             assert "modelSelection" not in args and "workspaceStrategy" not in args
-            assert args["message"].startswith("[Flock action flock-action-0123]\n\n  preserve")
+            if self.server.peer_recovery:
+                state["launches"].append(args["clientRequestId"])
+                assert len(state["launches"]) == 1, "Runtime sent a second launch"
+                assert "Verify the fixture" in args["message"]
+            else:
+                assert args["clientRequestId"] == "flock-action-0123"
+                assert args["message"].startswith("[Flock action flock-action-0123]\n\n  preserve")
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
-                    "runId": None if state["delayRunId"] else "root"}
+                    "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
@@ -242,12 +255,40 @@ class Fixture(BaseHTTPRequestHandler):
                 "status": status, "updatedAt": "2026-01-01T00:00:00.000Z"}
 
 
+def test_peer_recovery(server, runner, temp):
+    server.launch_accepted = threading.Event()
+    server.allow_launch_disconnect = threading.Event()
+    server.state["launches"] = []
+    db_path = temp + "/state.db"
+    command = [runner, server.origin, temp + "/creds", db_path]
+    with subprocess.Popen(command + ["start"]) as process:
+        try:
+            deadline = time.monotonic() + 10
+            while not server.launch_accepted.wait(0.05):
+                assert process.poll() is None, f"Runtime exited before T3 accepted the launch: {process.returncode}"
+                assert time.monotonic() < deadline, "T3 did not accept the launch"
+            action_id, = server.state["launches"]
+            process.kill()
+            assert process.wait(timeout=5) == -signal.SIGKILL, "Runtime was not killed by SIGKILL"
+        finally:
+            if process.poll() is None:
+                process.kill()
+            server.allow_launch_disconnect.set()
+    subprocess.run(command + ["recover"], timeout=15, check=True)
+    assert server.state["launches"] == [action_id], "recovery resent the launch"
+
+
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
+    server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        completed = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False)
+        if server.peer_recovery:
+            test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        else:
+            code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode
     finally:
         server.shutdown()
-    sys.exit(completed.returncode)
+    sys.exit(code)

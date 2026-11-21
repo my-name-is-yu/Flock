@@ -23,6 +23,7 @@ ctest --test-dir build --output-on-failure
   "model": "gpt-6.2-sol",
   "environmentId": "<T3 の環境 ID>",
   "projectId": "<T3 のプロジェクト ID>",
+  "allowedBots": ["verifier"],
   "runTimeoutSeconds": 1800,
   "session": {
     "runtimeMode": "approval-required"
@@ -39,6 +40,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 同じディレクトリの `SOUL.md` に役割と判断基準、`MEMORY.md` にタスクをまたぐ前提を書きます。Session のモデルとプロバイダを指定する場合は、`session.model` と `session.providerInstanceId` を設定します。作業場所の指定には `session.workspaceStrategy` を使います。
+
+`allowedBots` には依頼できる Bot のディレクトリ名を指定します。この例では、`bots/verifier/` に Verifier を設定すると Release から依頼できます。Verifier は同じやり取りに質問や結果を返せます。Verifier から Release に新しく依頼する場合は、Verifier 側の設定にも `release` を追加します。
 
 ## 実モデルと T3 に接続する
 
@@ -63,4 +66,4 @@ build/app/flock answer <task-id> <wait-id> 'main'
 
 実モデルが異なる完了条件を使い分けるかは、同意した ChatGPT 接続で `build/app/flock model acceptance <model-slug>` を実行すると確認できます。各試行の判断と理由を JSON Lines に出力します。
 
-通常は Session の最終報告で判断します。作業記録を根拠にする比較では `run --session-read on_demand` で Bot に履歴参照を許可できます。1イベントにつき3回、各回8 KiBまでの抜粋をSQLiteに保存します。
+通常は Session の最終報告で判断します。`--session-read` は Bot が担当する Session の履歴を制御します。`on_demand` は判断に必要な箇所を読み、`prefill` は判断の前に履歴を取得し、`off` は担当 Session の履歴取得を無効にします。別の Bot が共有した Run は、`off` でも `read_bot_evidence` から権限を照合して読めます。抜粋は1イベントにつき3回、各回8 KiBまでSQLiteに保存します。
