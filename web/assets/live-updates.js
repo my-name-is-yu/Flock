@@ -1,6 +1,25 @@
 const pollDelay = 2500;
 const streamTimeout = 6000;
 
+// Each endpoint gets its own queue. Changes during a read need just one more read.
+export function coalescedRefresh(refresh) {
+  let last = Promise.resolve();
+  let pending;
+  return (scroll) => {
+    if (!pending) {
+      pending = {};
+      const run = () => {
+        const { scroll } = pending;
+        pending = null;
+        return refresh(scroll);
+      };
+      last = last.then(run, run);
+    }
+    pending.scroll ??= scroll;
+    return last;
+  };
+}
+
 export function createLiveUpdates(refresh, changed) {
   let path;
   let stream;

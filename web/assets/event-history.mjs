@@ -1,20 +1,20 @@
-export async function collectEventPages(latest, newestEvent, readOlder, isCurrent) {
+export async function refreshEventHistory(history, latest, readOlder, isCurrent) {
   const pages = [latest];
   let before = latest.olderBefore;
-  while (isCurrent() && newestEvent != null && before > newestEvent) {
+  while (history.newestEvent != null && before > history.newestEvent) {
+    if (!isCurrent()) return;
     const page = await readOlder(before);
     if (page.olderBefore >= before) throw new Error('Invalid conversation cursor');
     pages.push(page);
     before = page.olderBefore;
   }
-  return isCurrent() ? pages : null;
-}
+  if (!isCurrent()) return;
 
-export function mergeEventPages(history, pages) {
-  if (!history.events.size) history.olderBefore = pages[0].olderBefore;
-  else if (pages.length > 1) history.olderBefore = Math.min(history.olderBefore, pages.at(-1).olderBefore);
+  // Commit only after closing the gap. The user may have loaded older history in the meantime.
+  history.olderBefore = history.newestEvent == null ? before : Math.min(history.olderBefore, before);
   for (const page of pages) {
     for (const event of page.events) history.events.set(event.id, event);
   }
-  history.newestEvent = pages[0].events.at(-1)?.id ?? history.newestEvent;
+  // Zero marks a loaded empty conversation so reconnect can catch up to its beginning.
+  history.newestEvent = latest.events.at(-1)?.id ?? history.newestEvent ?? 0;
 }

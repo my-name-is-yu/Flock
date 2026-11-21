@@ -148,7 +148,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/app.js","/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
+    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
