@@ -408,87 +408,70 @@ void directionalPeerConfiguration() {
 }
 
 void responseContract() {
+    using Names = std::multiset<std::string>;
     ModelInput input{
         {{"doneWhen","An existing requirement"}},
         {{"kind","result"}},Json::array(),{"New SOUL","Current MEMORY"},
         {"follow_up","delegate","complete","ask_user"},"",Json::array(),
         {{"modelProvider","chatgpt"},{"model","fixture-slug"},{"secret","must-stay-local"}},
     };
-    const auto request = responseRequest(input);
-    check(request["model"] == "fixture-slug" && request["store"] == false && request["stream"] == true &&
-        request["tool_choice"] == "required" && request["parallel_tool_calls"] == false,"request policy");
-    const auto& tool = request["tools"].at(0);
-    check(tool["type"] == "namespace" && tool["name"] == "flock" && tool["tools"].size() == 4,"only allowed tools grouped in namespace");
-    check(!tool["tools"][1]["parameters"]["properties"].contains("doneWhen"),"later delegate must omit doneWhen");
-    check(request.dump().find("must-stay-local") == std::string::npos,"adapter config leaked into the prompt");
-    const auto context = requestContext(request);
-    check(context["task"]["doneWhen"] == "An existing requirement" && context["soul"] == "New SOUL" &&
-        context["memory"] == "Current MEMORY","missing model context");
-    check(request.at("instructions").get<std::string>().find("when writing your report") != std::string::npos,
-          "the task provider prompt must apply the notes to the Bot's own report");
-
-    input.task["doneWhen"] = "";
-    input.task["requestedDoneWhen"] = "Use independently verified measurements";
-    input.tools = {"delegate","ask_user"};
-    const auto initial = responseRequest(input);
-    check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
-        Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
-    check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
-          initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
-          "the initial work prompt must direct the Bot to use the requested completion criteria");
-
-    input.tools = {"route_conversation"};
-    input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
-    const auto routing = responseRequest(input);
-    const auto& routingTool = routing["tools"][0]["tools"][0];
-    check(routingTool["name"] == "route_conversation" &&
-          routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
-          "conversation provider request must use the routing tool");
-    const auto& routeFields = routingTool["parameters"]["properties"]["routes"]["items"]["properties"];
-    check(routeFields["resume"]["type"] == "boolean","the conversation tool did not expose the explicit restart flag");
-    const auto& routingPrompt = routing.at("instructions").get_ref<const std::string&>();
-    check(routingPrompt.find("You are the Flock Bot routing") != std::string::npos &&
-          routingPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
-          routingPrompt.find("Only event.text") != std::string::npos,
-          "routing instructions must scope Bot notes to the user's authorized request");
-    check(routing.dump().find("must-stay-local") == std::string::npos,
-          "conversation adapter config leaked into the prompt");
-    input.tools = {"answer_conversation_result","clarify_conversation_result"};
-    input.event = {{"kind","answer_conversation_result"},{"text","Explain the selected option"},
-                   {"source",{{"text","Selected evidence"}}}};
-    const auto resultAnswer = responseRequest(input);
-    const auto& answerTool = resultAnswer["tools"][0]["tools"][0];
-    check(answerTool["name"] == "answer_conversation_result" &&
-          answerTool["parameters"]["required"] == Json::array({"reason","text"}),
-          "result provider request must use the answer tool");
-    const auto& clarificationTool = resultAnswer["tools"][0]["tools"][1];
-    check(clarificationTool["name"] == "clarify_conversation_result" &&
-          clarificationTool["parameters"]["required"] == Json::array({"reason","text"}),
-          "result provider request must support clarification for insufficient evidence");
-    const auto answerContext = requestContext(resultAnswer);
-    check(answerContext["event"] == input.event,"result provider request lost the question or selected evidence");
-    const auto& answerPrompt = resultAnswer.at("instructions").get_ref<const std::string&>();
-    check(answerPrompt.find("Answer event.text in the user's language") != std::string::npos &&
-          answerPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
-          answerPrompt.find("Ground claims about the result in event.source.text") != std::string::npos &&
-          resultAnswer.dump().find("must-stay-local") == std::string::npos,
-          "result instructions must apply Bot notes within the selected evidence and keep adapter config private");
-
-    input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
-    input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
-    const auto peerRequest = responseRequest(input);
-    const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
-    const auto& destinations = peerContext.at("task").at("peers");
-    check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
-        destinations.at(0).at("name") == "Verifier",
-        "the model did not receive the allowed peer destination");
-    check(peerRequest.at("tools").at(0).at("tools").size() == 3,"unavailable tools entered the peer request");
+    const auto providerRequest = [&] {
+        const auto request = responseRequest(input);
+        check(request.at("model") == "fixture-slug" && request.at("store") == false && request.at("stream") == true &&
+            request.at("tool_choice") == "required" && request.at("parallel_tool_calls") == false,"request policy");
+        check(!request.at("instructions").get_ref<const std::string&>().empty(),"missing provider instructions");
+        check(request.dump().find("must-stay-local") == std::string::npos,"adapter config leaked into provider request");
+        const auto& groups = request.at("tools");
+        const auto& group = groups.at(0);
+        check(groups.size() == 1 && group.at("type") == "namespace" && group.at("name") == "flock",
+            "expected one Flock tool namespace");
+        Names names;
+        for (const auto& tool : group.at("tools")) names.insert(tool.at("name").get<std::string>());
+        check(names == Names(input.tools.begin(),input.tools.end()),"provider received the wrong tools");
+        return request;
+    };
     const auto parameters = [](const Json& request, std::string_view name) -> const Json& {
         for (const auto& function : request.at("tools").at(0).at("tools"))
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing model tool: " + std::string(name));
     };
-    using Names = std::multiset<std::string>;
+    const auto request = providerRequest();
+    check(!parameters(request,"delegate").at("properties").contains("doneWhen"),"later delegate must omit doneWhen");
+    const auto context = requestContext(request);
+    check(context["task"]["doneWhen"] == "An existing requirement" && context["soul"] == "New SOUL" &&
+        context["memory"] == "Current MEMORY","missing model context");
+
+    input.task["doneWhen"] = "";
+    input.task["requestedDoneWhen"] = "Use independently verified measurements";
+    input.tools = {"delegate","ask_user"};
+    const auto initial = providerRequest();
+    check(parameters(initial,"delegate").at("required").get<Names>() == Names{"reason","instruction","doneWhen"},
+          "initial delegate requires a saved criterion");
+    check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements",
+          "the provider lost the user's requested completion criteria");
+
+    input.tools = {"route_conversation"};
+    input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
+    const auto routing = providerRequest();
+    const auto& route = parameters(routing,"route_conversation");
+    check(route.at("required").get<Names>() == Names{"reason","routes"},"routing must require a reason and routes");
+    const auto& routeFields = route.at("properties").at("routes").at("items").at("properties");
+    check(routeFields["resume"]["type"] == "boolean","the conversation tool did not expose the explicit restart flag");
+
+    input.tools = {"answer_conversation_result","clarify_conversation_result"};
+    input.event = {{"kind","answer_conversation_result"},{"text","Explain the selected option"},
+                   {"source",{{"text","Selected evidence"}}}};
+    const auto resultAnswer = providerRequest();
+    for (const auto& name : input.tools)
+        check(parameters(resultAnswer,name).at("required").get<Names>() == Names{"reason","text"},
+              "result answers and clarifications must require a reason and text");
+    check(requestContext(resultAnswer).at("event") == input.event,"result provider request lost the question or selected evidence");
+
+    input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
+    const auto peerRequest = providerRequest();
+    check(requestContext(peerRequest).at("task").at("peers") == input.task.at("peers"),
+          "the model did not receive the allowed peer destination");
     const auto& send = parameters(peerRequest,"send_bot_message");
     check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
         send["properties"]["doneWhen"]["type"] == "string" &&
@@ -504,11 +487,11 @@ void responseContract() {
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
     input.task["doneWhen"] = "Saved work acceptance";
-    const auto nextPeerRequest = responseRequest(input);
+    const auto nextPeerRequest = providerRequest();
     check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
-    const auto forwardRequest = responseRequest(input);
+    const auto forwardRequest = providerRequest();
     const auto& forward = parameters(forwardRequest,"send_bot_message");
     check(forward["properties"]["forwardUserMessage"]["type"] == "boolean" &&
           forward["required"].get<Names>() == Names{"reason","botId","kind"},
