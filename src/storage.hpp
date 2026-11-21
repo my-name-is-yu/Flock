@@ -41,8 +41,6 @@ struct Store::Impl {
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
     Json queueBlocker(Id) const;
-    void migrateConversation();
-    void migrateModelBudget();
     std::string messageModelBudget(Id messageId, Id clarificationReplyId = 0);
     void inheritModelBudget(Id messageId, Id clarificationReplyId);
     std::string taskModelBudget(const Json& task);

@@ -78,6 +78,7 @@ Store::Impl::Impl(std::filesystem::path file) : path(std::move(file)) {
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 PRAGMA synchronous=FULL;
+BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
   project_id TEXT NOT NULL, schedule_id TEXT, scheduled_at INTEGER,
@@ -86,10 +87,25 @@ CREATE TABLE IF NOT EXISTS tasks(
 CREATE INDEX IF NOT EXISTS tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS tasks_bot ON tasks(bot_id,id DESC);
+CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
+  WHERE state NOT IN ('completed','cancelled');
+CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
+  WHERE state IN ('completed','cancelled');
+CREATE INDEX IF NOT EXISTS conversation_waiting_tasks ON tasks(bot_id,id DESC)
+  WHERE state='waiting' AND json_extract(data,'$.wait.reason') IN ('user_question','budget');
+CREATE INDEX IF NOT EXISTS conversation_task_name ON tasks(bot_id,lower(json_extract(data,'$.request')),id DESC);
 CREATE TABLE IF NOT EXISTS journal(
-  id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
+  id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
+  time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
+  CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX IF NOT EXISTS journal_task ON journal(task_id,id);
+CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS journal_pending_route ON journal(conversation_bot_id,id)
+  WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
+CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
+  WHERE kind IN ('completed','report','cancelled');
+CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)
+  WHERE kind='bot_message';
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   dedupe TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
@@ -110,6 +126,38 @@ CREATE TABLE IF NOT EXISTS runs(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,
   UNIQUE(environment_id,thread_id,run_id));
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL,
+  client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+  reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
+  UNIQUE(bot_id,client_message_id), UNIQUE(bot_id,sequence));
+CREATE TABLE IF NOT EXISTS route_decisions(
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+  reply_id INTEGER NOT NULL UNIQUE REFERENCES journal(id),
+  status TEXT NOT NULL, data TEXT NOT NULL, resolution_id INTEGER REFERENCES messages(id));
+CREATE INDEX IF NOT EXISTS route_decisions_awaiting ON route_decisions(message_id)
+  WHERE status='awaiting_resolution';
+CREATE TABLE IF NOT EXISTS route_candidates(
+  message_id INTEGER NOT NULL REFERENCES route_decisions(message_id),
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  PRIMARY KEY(message_id,task_id));
+CREATE INDEX IF NOT EXISTS route_candidates_task ON route_candidates(task_id,message_id);
+CREATE TABLE IF NOT EXISTS task_revisions(
+  id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
+  number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
+  source_message_id INTEGER REFERENCES messages(id),
+  UNIQUE(task_id,number));
+CREATE TABLE IF NOT EXISTS model_budgets(
+  id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  CHECK(attempts>=0 AND attempts<=call_limit));
+CREATE TABLE IF NOT EXISTS model_attempts(
+  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
+  purpose TEXT NOT NULL, time INTEGER NOT NULL,
+  message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
+  event_id INTEGER REFERENCES events(id), usage TEXT,
+  route_step INTEGER, route_input TEXT, route_decision TEXT);
+CREATE INDEX IF NOT EXISTS model_route_calls ON model_attempts(message_id,route_step,id)
+  WHERE route_decision IS NOT NULL;
 CREATE TABLE IF NOT EXISTS peer_exchanges(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
   sender_task INTEGER NOT NULL REFERENCES tasks(id),
@@ -138,30 +186,9 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN candidates sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
   AND sender.project_id=task.project_id AND peer.phase<>'closed'
 WHERE COALESCE(peer.kind,'')<>'consult';
-CREATE VIEW IF NOT EXISTS project_task_order AS
-SELECT task.id, task.environment_id, task.project_id, task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM tasks task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
-  AND sender.project_id=task.project_id AND sender.state NOT IN ('completed','cancelled')
-WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
+COMMIT;
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-        migrateConversation();
-        migrateModelBudget();
-        exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
-             " WHERE kind='bot_message'");
-        // Databases from the DM preview may contain queued messages without a sending Bot task.
-        exec("UPDATE tasks SET state='cancelled',generation=generation+1 WHERE state NOT IN ('completed','cancelled')"
-             " AND id IN (SELECT recipient_task FROM peer_exchanges WHERE sender_task IS NULL)");
-        exec("UPDATE tasks SET environment_id=json_extract(data,'$.environmentId')"
-             " WHERE environment_id<>json_extract(data,'$.environmentId')");
     } catch (...) { sqlite3_close(db); throw; }
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
@@ -194,7 +221,7 @@ Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
-                      " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
+                      " WHERE phase<>'closed' AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
@@ -436,18 +463,8 @@ bool Store::hasTask(Id id) const {
     return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
 }
 
-template<class StoreImpl>
-static void restoreWaitAnchor(const StoreImpl& store, Json& task) {
-    auto& wait = task["wait"];
-    if (wait.is_null() || wait.contains("messageId")) return;
-    auto row = store.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
-                           " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {task["id"],wait["id"]});
-    if (row.next()) wait["messageId"] = row.number(0);
-}
-
 Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     auto result = load(id);
-    restoreWaitAnchor(*this,result);
     result["blockedBy"] = nullptr;
     auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
@@ -507,7 +524,6 @@ ORDER BY task.id DESC)SQL", {bot});
         task["id"] = rows.number(0);
         task["state"] = rows.string(1);
         task["blockedBy"] = nullptr;
-        restoreWaitAnchor(*p_,task);
         if (rows.number(3)) task["blockedBy"] = {{"id",rows.number(3)},{"botId",rows.string(4)},
                                                 {"state",rows.string(5)},{"request",rows.string(6)}};
         result.push_back(std::move(task));
@@ -575,8 +591,6 @@ FROM (
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
-    AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
-      AND json_extract(j.data,'$.recipient') IS NOT 'user'))
   UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN route_decisions decision ON decision.message_id=m.id

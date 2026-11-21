@@ -1,7 +1,5 @@
 #include "flock/core.hpp"
 
-#include <sqlite3.h>
-
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
@@ -1038,126 +1036,6 @@ void boundedBotContextAndNamedHistory() {
           "Reading an older named result failed or changed work");
 }
 
-void legacyActiveWaitAnchor() {
-    Fixture fixture;
-    Store store(fixture.database());
-    RuntimeFixture execution(store);
-    const auto id = task(store,"Choose a release name");
-    execution.question(store,id,"choose-name");
-    const auto anchor = store.task(id).at("wait").at("messageId").get<Id>();
-    check(anchor > 0,"The fixture did not record a wait journal entry");
-
-    sqlite3* db = nullptr;
-    check(sqlite3_open_v2(fixture.database().c_str(),&db,SQLITE_OPEN_READWRITE,nullptr) == SQLITE_OK,
-          "Cannot prepare a legacy active wait");
-    const auto rc = sqlite3_exec(db,"UPDATE tasks SET data=json_remove(data,'$.wait.messageId') WHERE state='waiting'",
-                                 nullptr,nullptr,nullptr);
-    const auto changed = sqlite3_changes(db);
-    sqlite3_close(db);
-    check(rc == SQLITE_OK && changed == 1,"The fixture did not remove exactly one stored wait anchor");
-
-    const auto active = store.activeTasks("alpha");
-    check(active.size() == 1 && active.front().at("id") == id &&
-          active.front().at("wait").value("messageId",Id{}) == anchor,
-          "The active task list lost the legacy question's journal anchor");
-}
-
-void legacyHistory() {
-    Fixture fixture;
-    sqlite3* db = nullptr;
-    check(sqlite3_open(fixture.database().c_str(),&db) == SQLITE_OK,"Cannot create legacy DB");
-    const auto rc = sqlite3_exec(db,R"SQL(
-CREATE TABLE tasks(
-  id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
-  project_id TEXT NOT NULL, schedule_id TEXT, scheduled_at INTEGER,
-  state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL,
-  UNIQUE(bot_id,schedule_id,scheduled_at));
-CREATE TABLE journal(id INTEGER PRIMARY KEY,task_id INTEGER NOT NULL REFERENCES tasks(id),
-  time INTEGER NOT NULL,kind TEXT NOT NULL,data TEXT NOT NULL);
-CREATE INDEX journal_task ON journal(task_id,id);
-CREATE TABLE peer_exchanges(
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
-  sender_task INTEGER NOT NULL REFERENCES tasks(id),
-  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
-CREATE UNIQUE INDEX peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
-INSERT INTO tasks VALUES
-  (1,'alpha','env','p',NULL,0,'completed',2,
-     '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Previous work","doneWhen":"Check all cases","wait":null}'),
-  (2,'alpha','env','p',NULL,0,'queued',0,
-     '{"botId":"alpha","environmentId":"env","projectId":"p","request":"Pending legacy work","doneWhen":"","wait":null}'),
-  (3,'beta','env','p',NULL,0,'completed',2,
-     '{"botId":"beta","environmentId":"env","projectId":"p","request":"Review the previous work","doneWhen":"","wait":null}');
-INSERT INTO journal VALUES(8,1,99,'report',json_object('report','1. First approach'||char(10)||'2. Chosen approach'));
-INSERT INTO journal VALUES(9,1,100,'completed',json_object('text','Proposed two approaches'));
-INSERT INTO journal VALUES(10,2,101,'request','{"text":"Pending legacy work","source":"manual"}');
-INSERT INTO peer_exchanges VALUES('legacy-exchange','consult','closed','legacy-reply',1,3);
-INSERT INTO journal SELECT NULL,id,100,'bot_message',
-  '{"exchangeId":"legacy-exchange","messageId":"legacy-request","fromBotId":"alpha","toBotId":"beta","messageType":"request","requestKind":"consult","text":"Review the previous work"}'
-FROM tasks WHERE id IN (1,3);
-INSERT INTO journal SELECT NULL,id,100,'bot_message',
-  '{"exchangeId":"legacy-exchange","messageId":"legacy-reply","fromBotId":"beta","toBotId":"alpha","messageType":"result","requestKind":"consult","text":"The previous work is ready"}'
-FROM tasks WHERE id IN (1,3);
-)SQL",nullptr,nullptr,nullptr);
-    sqlite3_close(db);
-    check(rc == SQLITE_OK,"Legacy schema fixture failed");
-    Store store(fixture.database());
-    const auto completed = store.task(1);
-    const auto& revisions = completed.at("revisions");
-    check(completed.at("state") == "completed" && revisions.size() == 1 &&
-          completed.at("currentRevision") == revisions.at(0).at("id") &&
-          revisions.at(0).at("intent") == "Previous work" && revisions.at(0).at("doneWhen") == "Check all cases",
-          "Legacy work lost its completion criteria or original request");
-    const auto queued = store.task(2);
-    check(queued.at("revisions").empty() && queued.at("state") == "queued",
-          "Migration changed queued legacy work before its criteria were set");
-    const auto dm = store.peerConversation("alpha","beta");
-    check(dm.size() == 2 && dm == store.peerConversation("beta","alpha") &&
-          dm.front().at("data").at("messageId") == "legacy-request" &&
-          dm.back().at("data").at("messageId") == "legacy-reply" && dm.back().at("taskId") == 1,
-          "The original peer exchange did not migrate to one chronological pair history");
-    {
-        sqlite3* oldReader = nullptr;
-        check(sqlite3_open_v2(fixture.database().c_str(),&oldReader,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,
-              "Could not open migrated data with the legacy reader");
-        unsigned rows = 0;
-        const int oldQuery = sqlite3_exec(oldReader,
-            "SELECT journal.id FROM journal JOIN tasks ON tasks.id=task_id WHERE bot_id='alpha' "
-            "AND kind IN ('request','report','completed') ORDER BY journal.id DESC",
-            [](void* count,int,char**,char**) { ++*static_cast<unsigned*>(count); return 0; },
-            &rows,nullptr);
-        sqlite3_close(oldReader);
-        check(oldQuery == SQLITE_OK && rows == 3,"Migration broke the old unqualified Bot conversation query");
-    }
-    const auto latest = store.latestTaskResult(1);
-    check(latest.at("id") == 9 && latest.at("data").at("text") == "Proposed two approaches",
-          "The original completion disappeared from the migrated task");
-    RuntimeFixture execution(store);
-    execution.model.conversation = [](const ModelInput& input) {
-        if (input.tools.front() == "route_conversation") {
-            const auto& results = input.event.at("results");
-            const auto source = std::ranges::find_if(results,[](const Json& result) {
-                return result.at("messageId") == 8;
-            });
-            check(source != results.end(),"The migrated Session report was absent from routing evidence");
-            return route("answer_result",{{"resultMessageId",source->at("messageId")},{"resultOption",2}});
-        }
-        check(input.event.at("source").at("text") == "2. Chosen approach","The model received the wrong legacy option");
-        return Decision{"answer_conversation_result",{{"text","Chosen approach is the second recorded option. The old report gives no further details."}},{}};
-    };
-    const auto detailId = receive(store,"result","2案目を詳しく");
-    execution.runtime.routeConversation();
-    const auto detail = reply(store,detailId);
-    const auto& explanation = detail.at("text").get_ref<const std::string&>();
-    check(detail.at("route") == "respond" && detail.at("source").at("taskId") == 1 &&
-          detail.at("source").at("messageId") == 8 && explanation.find("Chosen approach") != std::string::npos &&
-          explanation.find("First approach") == std::string::npos && store.tasks("alpha").size() == 2,
-          "The answer did not explain only the selected legacy option with its original source");
-    Store refreshed(fixture.database());
-    const auto reopened = refreshed.task(1);
-    check(reopened.at("currentRevision") == completed.at("currentRevision") &&
-          reopened.at("revisions").size() == 1 && refreshed.tasks("alpha").size() == 2,
-          "Opening a migrated DB changed its current revision or duplicated legacy work");
-}
 }
 
 int main() {
@@ -1178,8 +1056,6 @@ int main() {
         resultTargetMustComeFromTheCandidatesOrReply();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
-        legacyHistory();
-        legacyActiveWaitAnchor();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

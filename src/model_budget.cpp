@@ -12,26 +12,6 @@ Id modelCallLimit(const Json& config) {
     return limit->get<Id>();
 }
 
-void Store::Impl::migrateModelBudget() {
-    Transaction transaction(db);
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS model_budgets(
-  id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-  CHECK(attempts>=0 AND attempts<=call_limit))
-)SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS model_attempts(
-  id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
-  purpose TEXT NOT NULL, time INTEGER NOT NULL,
-  message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
-  event_id INTEGER REFERENCES events(id), usage TEXT,
-  route_step INTEGER, route_input TEXT, route_decision TEXT)
-)SQL");
-    exec("CREATE INDEX IF NOT EXISTS model_route_calls ON model_attempts(message_id,route_step,id)"
-         " WHERE route_decision IS NOT NULL");
-    transaction.commit();
-}
-
 std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) {
     exec("INSERT OR IGNORE INTO model_budgets(id,call_limit) VALUES(?,?)",{key,modelCallLimit(config)});
     return key;
