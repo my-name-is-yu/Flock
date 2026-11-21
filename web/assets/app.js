@@ -64,7 +64,7 @@ const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const drafts = new Map();
 const replies = new Map();
 const sendingMessages = new Set();
-const pendingMessages = new Map();
+const pendingSubmissions = new Map();
 const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
@@ -149,32 +149,50 @@ const timelineContext = () => view?.dm ?? view;
 const showingComposer = (bot) => view?.id === bot && !view?.dm;
 const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
 
-function pendingMessage(bot) {
-  if (!pendingMessages.has(bot)) {
+function readSubmission(key) {
+  if (!pendingSubmissions.has(key)) {
     try {
-      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
-      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
+      const stored = JSON.parse(sessionStorage.getItem(key));
+      if (stored) pendingSubmissions.set(key, stored);
     } catch {}
   }
-  return pendingMessages.get(bot);
+  return pendingSubmissions.get(key);
 }
-// The composer keeps the ordinary draft underneath a reply, including its retry ID.
+function writeSubmission(key, value) {
+  if (value) pendingSubmissions.set(key, value);
+  else pendingSubmissions.delete(key);
+  try {
+    if (value) sessionStorage.setItem(key, JSON.stringify(value));
+    else sessionStorage.removeItem(key);
+  } catch {}
+}
+function pendingMessage(bot) {
+  const pending = readSubmission(messageStorageKey(bot));
+  return pending?.payload?.botId === bot ? pending : null;
+}
+function retryKey({ botId, text, replyToMessageId, candidateTaskId }) {
+  return 'flock-message-retry:' + JSON.stringify([botId, replyToMessageId, candidateTaskId, text]);
+}
+// The ordinary draft stays underneath a reply while the composer is open.
 function ordinarySubmission(pending) {
   return pending?.reply ? pending.underlyingMessage : pending;
 }
-function rememberMessage(bot, pending) {
-  if (pending) pendingMessages.set(bot, pending);
-  else pendingMessages.delete(bot);
-  try {
-    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
-    else sessionStorage.removeItem(messageStorageKey(bot));
-  } catch {}
-}
 
+// Keep an unconfirmed ID when its draft leaves the composer.
+function archiveSubmission(payload) {
+  writeSubmission(retryKey(payload), payload.clientMessageId);
+}
+function settleSubmission(payload, underlyingMessage) {
+  writeSubmission(messageStorageKey(payload.botId), underlyingMessage);
+  writeSubmission(retryKey(payload), null);
+}
 function discardReply(bot) {
   replies.delete(bot);
   const pending = pendingMessage(bot);
-  if (pending?.reply) rememberMessage(bot, pending.underlyingMessage);
+  if (pending?.reply) {
+    archiveSubmission(pending.payload);
+    writeSubmission(messageStorageKey(bot), pending.underlyingMessage);
+  }
 }
 
 function setConnection(state) {
@@ -1710,26 +1728,25 @@ async function submit(event) {
   const replyToMessageId = reply?.messageId;
   const candidateTaskId = reply?.candidateTaskId;
   const pending = pendingMessage(context.id);
-  const previous = pending?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId &&
-    previous.candidateTaskId === candidateTaskId ? previous.clientMessageId : crypto.randomUUID();
-  const payload = { botId: context.id, clientMessageId, text };
+  const payload = { botId: context.id, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
   if (replyToMessageId && candidateTaskId) payload.candidateTaskId = candidateTaskId;
+  if (pending) archiveSubmission(pending.payload);
+  payload.clientMessageId = readSubmission(retryKey(payload)) ?? crypto.randomUUID();
   const underlyingMessage = reply && ordinarySubmission(pending);
-  rememberMessage(context.id, { payload, reply, underlyingMessage });
+  writeSubmission(messageStorageKey(context.id), { payload, reply, underlyingMessage });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
   try {
     await api('messages', payload);
-    rememberMessage(context.id, underlyingMessage);
+    settleSubmission(payload, underlyingMessage);
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) await refreshView(view, 'bottom');
     void refreshBots();
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, underlyingMessage);
+    if (error.status >= 400 && error.status < 500) settleSubmission(payload, underlyingMessage);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
