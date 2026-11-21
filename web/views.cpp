@@ -391,7 +391,13 @@ Json botView(Store& store, const Json& bot) {
     auto& clarifications = result["clarifications"] = Json::array();
     for (const auto& clarification : store.clarifications(id)) {
         Json view = Json::object();
-        copyFields(view,clarification,{"messageId","text","destinations","route"});
+        copyFields(view,clarification,{"messageId","text","route"});
+        if (const auto destinations = clarification.find("destinations");
+            destinations != clarification.end() && destinations->is_array()) {
+            view["destinations"] = Json::array();
+            for (const auto& destination : *destinations)
+                if (destination.is_string()) view["destinations"].push_back(destination);
+        }
         if (clarification.contains("candidates"))
             view["candidates"] = candidateViews(clarification.at("candidates"),&active);
         clarifications.push_back(std::move(view));

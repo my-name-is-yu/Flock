@@ -377,7 +377,11 @@ revise_task. Supply only the changed fields, with intent or doneWhen quoted exac
 For new work with no destination requested by the user, omit environment to use the Bot's configured default.
 When the user requests a destination, use a matching configured alias or canonical ID for environment.
 If the requested destination cannot be identified, clarify with operation=destination. It may include one
-already identified task, or no task for new work. Never interpret Session results as the user revising criteria.
+already identified task, or no task for new work. For that task, keep any simultaneous scope and criteria
+changes in intent and doneWhen, quoted exactly from the same segment. Include both fields and use an
+empty string for each field that did not change. In a compound request, mark only the segment needing a
+destination choice as clarify and route the other segments normally.
+Never interpret Session results as the user revising criteria.
 After terminal work, use create_task with resultMessageId when asked to do new work on that result.
 For work explicitly covering the whole result, set resultOption to 0. For "implement it" or a similar
 request referring to the last selected excerpt, omit resultOption to keep that excerpt.

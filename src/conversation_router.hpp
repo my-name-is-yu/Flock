@@ -34,6 +34,45 @@ struct RevisionDraft {
     bool operator==(const RevisionDraft&) const = default;
 };
 
+struct Respond { std::string text; std::optional<Result> source; bool operator==(const Respond&) const = default; };
+struct Status { std::string text; std::optional<Target> target; bool operator==(const Status&) const = default; };
+struct CreateTask {
+    std::string request;
+    std::optional<Result> source;
+    std::string environment;
+    bool operator==(const CreateTask&) const = default;
+};
+struct AppendInstruction {
+    Target target;
+    std::string instruction;
+    std::optional<Result> source;
+    bool operator==(const AppendInstruction&) const = default;
+};
+struct ReviseTask {
+    Target target;
+    std::string instruction, intent, doneWhen, environment;
+    std::optional<Result> source;
+    bool operator==(const ReviseTask&) const = default;
+};
+struct AnswerWait { Target target; std::string answer; bool operator==(const AnswerWait&) const = default; };
+struct CancelTask { Target target; bool operator==(const CancelTask&) const = default; };
+struct Clarify {
+    std::string question;
+    std::vector<Id> candidates;
+    std::optional<Result> source = std::nullopt;
+    std::string operation{};
+    std::optional<RevisionDraft> revisionDraft = std::nullopt;
+    bool operator==(const Clarify&) const = default;
+};
+using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
+                            AnswerWait, CancelTask, Clarify>;
+
+struct Route {
+    std::string segment;
+    Action action;
+    bool operator==(const Route&) const = default;
+};
+
 struct Reply {
     enum class Kind { none, invalid, wait, result, clarification } kind = Kind::none;
     Id id = 0, taskId = 0, waitId = 0;
@@ -41,6 +80,7 @@ struct Reply {
     std::vector<Id> candidates;
     std::optional<Result> result;
     std::optional<RevisionDraft> revisionDraft;
+    std::vector<Route> destinationPlan;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
     bool operator==(const Reply&) const = default;
@@ -59,32 +99,6 @@ struct Context {
     bool moreTasks = false, moreWaits = false, staleWaits = false, multiplePendingClarifications = false;
     const Reply* clarification(Id replyId) const;
     bool operator==(const Context&) const = default;
-};
-
-struct Respond { std::string text; std::optional<Result> source; };
-struct Status { std::string text; std::optional<Target> target; };
-struct CreateTask { std::string request; std::optional<Result> source; std::string environment; };
-struct AppendInstruction { Target target; std::string instruction; std::optional<Result> source; };
-struct ReviseTask {
-    Target target;
-    std::string instruction, intent, doneWhen, environment;
-    std::optional<Result> source;
-};
-struct AnswerWait { Target target; std::string answer; };
-struct CancelTask { Target target; };
-struct Clarify {
-    std::string question;
-    std::vector<Id> candidates;
-    std::optional<Result> source = std::nullopt;
-    std::string operation{};
-    std::optional<RevisionDraft> revisionDraft = std::nullopt;
-};
-using Action = std::variant<Respond, Status, CreateTask, AppendInstruction, ReviseTask,
-                            AnswerWait, CancelTask, Clarify>;
-
-struct Route {
-    std::string segment;
-    Action action;
 };
 
 struct Resolution {

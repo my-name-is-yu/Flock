@@ -701,7 +701,8 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
         return Respond{{}, std::move(source)};
     }
     if (kind == "clarify") {
-        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId","resultOption"});
+        checkFields(route, {"kind","segment","text","candidates","operation","resultMessageId","resultOption",
+                            "intent","doneWhen"});
         auto question = readText(route, "text", 2000);
         require(!question.empty());
         std::vector<Id> choices;
@@ -730,8 +731,21 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
             source = selectWorkResult(resultId,selection,context,anchor,segment);
         }
         std::optional<RevisionDraft> draft;
-        if (operation == "destination" && choices.size() == 1)
-            draft = RevisionDraft{target(*taskById(context,choices.front())),{},{}};
+        if (operation == "destination" && choices.size() == 1) {
+            const auto revisionField = [&](std::string_view key) {
+                const auto value = route.find(key);
+                require(value != route.end() && value->is_string());
+                return *value == "" ? std::string{} : readText(route,key,4000);
+            };
+            const auto& selectedTask = *taskById(context,choices.front());
+            auto intent = revisionField("intent");
+            auto done = revisionField("doneWhen");
+            require(active(selectedTask) && namedTargetMatches(segment,context,selectedTask.id));
+            require(!source || (source->taskId == selectedTask.id && source->revision == selectedTask.revision));
+            require((intent.empty() || segment.find(intent) != segment.npos) &&
+                    (done.empty() || segment.find(done) != segment.npos));
+            draft = RevisionDraft{target(selectedTask),std::move(intent),std::move(done)};
+        } else require(!route.contains("intent") && !route.contains("doneWhen"));
         return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation),
                        std::move(draft)};
     }
@@ -835,6 +849,37 @@ Id actionTask(const Action& action) {
     }, action);
 }
 
+Plan replayDestinationPlan(std::string_view text, std::string_view destination,
+                           const Reply& reply, const Context& context) {
+    const bool ja = japanese(text);
+    const auto supersede = [&](std::string_view en,std::string_view jp) {
+        auto plan = single(text,Respond{translate(ja,en,jp),std::nullopt});
+        plan.resolution = Resolution{reply.id,Resolution::Kind::superseded};
+        return plan;
+    };
+    if (reply.destinationPlan.empty())
+        return supersede("The pending request could not be restored. Send the original request again.",
+                         "確認中の依頼を復元できません。元の依頼をもう一度送ってください。");
+    Plan plan{reply.destinationPlan,Resolution{reply.id,Resolution::Kind::resolved}};
+    for (auto& route : plan.routes) {
+        const auto* question = std::get_if<Clarify>(&route.action);
+        if (!question) continue;
+        auto instruction = route.segment + "\n\nExecution destination: " + std::string(destination);
+        if (!question->revisionDraft) {
+            route.action = CreateTask{std::move(instruction),question->source,std::string(destination)};
+            continue;
+        }
+        const auto& draft = *question->revisionDraft;
+        const auto* selected = taskById(context,draft.target.taskId);
+        if (!selected || !active(*selected) || target(*selected) != draft.target)
+            return supersede("The task changed while its destination was pending. Send the original request again.",
+                             "実行先の確認中に作業が更新されました。元の依頼をもう一度送ってください。");
+        route.action = ReviseTask{draft.target,std::move(instruction),draft.intent,draft.doneWhen,
+                                  std::string(destination),question->source};
+    }
+    return plan;
+}
+
 Plan parsePlan(const Json& args, std::string_view text, const Context& context, std::set<Id>& targets) {
     checkFields(args, {"routes","resolution","clarificationMessageId"});
     require(args.contains("routes"));
@@ -852,7 +897,16 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
             require(context.reply.kind == Reply::Kind::clarification && dismissesClarification(text));
             plan.resolution = Resolution{pending->id, Resolution::Kind::superseded};
         } else {
-            require(resolution == "resolved" && !trim(pending->originalText).empty());
+            require(resolution == "resolved");
+            if (pending->operation == "destination" && !pending->destinationPlan.empty()) {
+                const auto destination = trim(text);
+                if (std::ranges::find(context.environments,destination) == context.environments.end())
+                    return single(text,Respond{translate(japanese(text),
+                        "Choose a configured destination in the original confirmation.",
+                        "元の確認から設定済みの実行先を選んでください。"),std::nullopt});
+                return replayDestinationPlan(text,destination,*pending,context);
+            }
+            require(!trim(pending->originalText).empty());
             resolved = pending;
             plan.resolution = Resolution{pending->id, Resolution::Kind::resolved};
             if (context.selection) {
@@ -869,6 +923,7 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
     require(!resolved || parts.size() == 1);
     bool selectedCandidate = !resolved || resolved->candidates.empty();
     bool invalid = false;
+    unsigned questions = 0;
     std::optional<Clarify> clarification;
     const Reply noReply;
     const auto& firstAnchor = resolved ? *resolved : context.reply;
@@ -879,7 +934,10 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
             auto action = parseAction(args.at("routes").at(index),parts[index],context,anchor,selected,correction,resolved);
             if (auto* question = std::get_if<Clarify>(&action)) {
                 targets.insert(question->candidates.begin(),question->candidates.end());
-                if (!clarification) clarification = std::move(*question);
+                ++questions;
+                if (!clarification) clarification = *question;
+                if (question->operation == "destination")
+                    plan.routes.push_back({parts[index],std::move(action)});
                 continue;
             }
             const auto taskId = actionTask(action);
@@ -907,6 +965,11 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
         }
     }
     if (clarification) {
+        if (clarification->operation == "destination") {
+            if (invalid || questions != 1) return unclear(text,targets);
+            if (!(resolved && resolved->result && clarification->source)) plan.resolution.reset();
+            return plan;
+        }
         clarification->candidates.assign(targets.begin(),targets.end());
         auto result = single(text,std::move(*clarification));
         if (resolved && resolved->result && std::get<Clarify>(result.routes.front().action).source)
@@ -1032,40 +1095,11 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     }
     if (reply.kind == Reply::Kind::clarification && reply.operation == "destination") {
         const auto destination = trim(text);
-        const auto defer = [&](std::string_view en,std::string_view jp) {
-            return single(text,Respond{translate(ja,en,jp),std::nullopt});
-        };
-        const auto supersede = [&](std::string_view en,std::string_view jp) {
-            auto plan = defer(en,jp);
-            plan.resolution = Resolution{reply.id,Resolution::Kind::superseded};
-            return plan;
-        };
         if (std::ranges::find(context.environments,destination) == context.environments.end())
-            return defer("Choose a configured destination in the original confirmation.",
-                         "元の確認から設定済みの実行先を選んでください。");
-        auto instruction = reply.originalText + "\n\nExecution destination: " + std::string(destination);
-        Plan plan;
-        if (reply.candidates.empty())
-            plan = single(reply.originalText,CreateTask{std::move(instruction),reply.result,std::string(destination)});
-        else {
-            const auto* selected = taskById(context,reply.candidates.front());
-            if (reply.candidates.size() != 1 || !selected || !active(*selected)) {
-                return supersede("The request for this destination is no longer active.",
-                                 "実行先を変更する依頼は終了しました。");
-            }
-            if (!reply.revisionDraft)
-                return supersede("The change details are no longer available. Please send the change again.",
-                                 "変更内容を復元できません。変更をもう一度送ってください。");
-            const auto& draft = *reply.revisionDraft;
-            if (draft.target.taskId != selected->id || draft.target.generation != selected->generation ||
-                draft.target.revision != selected->revision || draft.target.waitId != selected->waitId)
-                return supersede("The request changed while its destination was pending. Please send the change again.",
-                                 "実行先の確認中に依頼が更新されました。変更をもう一度送ってください。");
-            plan = single(reply.originalText,ReviseTask{draft.target,std::move(instruction),draft.intent,draft.doneWhen,
-                                                        std::string(destination),reply.result});
-        }
-        plan.resolution = Resolution{reply.id,Resolution::Kind::resolved};
-        return plan;
+            return single(text,Respond{translate(ja,
+                "Choose a configured destination in the original confirmation.",
+                "元の確認から設定済みの実行先を選んでください。"),std::nullopt});
+        return replayDestinationPlan(text,destination,reply,context);
     }
     if (reply.kind == Reply::Kind::clarification && context.selection && reply.operation == "cancel_task") {
         const auto* chosen = taskById(context, context.selection);
