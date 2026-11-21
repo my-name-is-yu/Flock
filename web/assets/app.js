@@ -225,7 +225,6 @@ function renderHeader() {
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
   } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
-  // The moving face and the small dot carry the state; the same words stay available to assistive tech.
   const offline = connection === 'offline';
   const status = offline ? 'Runtime に未接続' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -302,7 +301,6 @@ const icons = {
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
 };
 function icon(name, className = 'glyph') {
-  // Static markup from the table above; message text never goes through innerHTML.
   const host = node('span', className);
   host.setAttribute('aria-hidden', 'true');
   host.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg>`;
@@ -350,7 +348,6 @@ function messageSide(event) {
   return event.kind === 'user_answer' || (event.kind === 'request' && event.data.source !== 'cron') ? 'user' : 'bot';
 }
 function reasonText(text) {
-  // Secondary text under the message; the label is only spoken, the wording explains itself.
   const reason = node('p', 'event-reason');
   reason.append(node('span', 'sr-only', '判断理由: '), document.createTextNode(text));
   return reason;
@@ -362,8 +359,6 @@ function eventTime(event, extra) {
   time.title = [`#${event.taskId}`, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
-// One timeline row. `place` says where the row sits in its run of same-side messages and same-task messages,
-// so the name, task number and avatar appear once per run instead of on every bubble.
 function eventCard(event, context, place) {
   const data = event.data;
   const bot = context.bot;
@@ -491,7 +486,14 @@ function dayLabel(seconds) {
   return days === 0 ? '今日' : days === 1 ? '昨日' : dayFormat.format(seconds * 1000);
 }
 
-function renderTimeline(scroll = 'auto') {
+function timelineScrollPosition() {
+  const scroller = elements.conversation;
+  const height = scroller.scrollHeight;
+  const top = scroller.scrollTop;
+  return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
+}
+
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
   const data = view?.data;
   const events = [...(view?.events.values() ?? [])].sort((a, b) => a.id - b.id);
@@ -501,9 +503,6 @@ function renderTimeline(scroll = 'auto') {
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
     data?.presence, data?.activeSessions, data?.sessionTasks, dayFormat.format(Date.now()))) return;
   const scroller = elements.conversation;
-  const previousHeight = scroller.scrollHeight;
-  const previousTop = scroller.scrollTop;
-  const atBottom = previousHeight - previousTop - scroller.clientHeight < 65;
   const context = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
@@ -543,12 +542,9 @@ function renderTimeline(scroll = 'auto') {
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
   elements.timeline.replaceChildren(fragment);
-  if (scroll === 'older') scroller.scrollTop = previousTop + scroller.scrollHeight - previousHeight;
-  else if (scroll === 'bottom' || atBottom) {
-    scroller.scrollTop = scroller.scrollHeight;
-    // The composer can appear in the same render and shorten the scroller; stay pinned to the end.
-    requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
-  } else scroller.scrollTop = previousTop;
+  if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
+  else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+  else scroller.scrollTop = previousScroll.top;
 }
 
 function setNotice(context, text, isError = false) {
@@ -700,8 +696,9 @@ function render(scroll) {
   renderBots();
   renderHeader();
   renderActivity();
-  renderTimeline(scroll);
+  const previousScroll = timelineScrollPosition();
   renderComposer();
+  renderTimeline(scroll, previousScroll);
   renderDetail();
 }
 
