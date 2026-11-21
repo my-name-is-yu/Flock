@@ -35,6 +35,7 @@ struct Decision {
     std::string tool;
     Json args = Json::object();
     std::string reason;
+    Json usage = Json::object(); // Optional numeric measurements from the adapter.
 };
 struct ModelInput {
     Json task, event, history;
@@ -117,7 +118,7 @@ public:
 
     Id submit(const Intake&);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
-    // {threadId?,runId?,questionId?}, cancel. All except cancel require a matching waitId.
+    // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
     Json task(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.

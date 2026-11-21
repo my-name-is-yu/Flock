@@ -399,7 +399,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
         });
     }
 
-    bool readEvidence(const Json& task, const Json& event, const Json& args) {
+    bool readEvidence(const Json& task, const Json& event, const Json& args, const Json& usage = Json::object()) {
         ReadRequest req;
         req.environmentId = field(task,"environmentId");
         req.config = task["config"];
@@ -431,7 +431,9 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
                 {"itemId",excerpt.itemId},{"text",text},{"more",excerpt.more || text.size() < excerpt.text.size()},
                 {"nextCursor",excerpt.nextCursor},{"nextOffset",excerpt.nextOffset}});
             db.exec("UPDATE events SET evidence=? WHERE id=?", {evidence,event["id"]});
-            db.journal(current["id"],"session_read",evidence.back());
+            auto entry = evidence.back();
+            if (!usage.empty()) entry["usage"] = usage;
+            db.journal(current["id"],"session_read",entry);
             return true;
         });
     }
@@ -451,7 +453,7 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             if (!arguments.at(tool).contains(item.key())) throw Conflict("Unknown action argument");
         }
         if (tool == "session_read") {
-            readEvidence(snapshot,event,args);
+            readEvidence(snapshot,event,args,decision.usage);
             return;
         }
         const bool work = tool == "delegate" || tool == "follow_up";
@@ -481,13 +483,13 @@ WHERE state NOT IN ('completed','cancelled') AND NOT EXISTS (
             const auto id = current["id"].get<Id>();
             if (work && !initial && current["remaining"] == 0) {
                 db.wait(current,"budget",{{"text","The additional work allowance is exhausted"},{"attempted",tool},
-                                          {"decisionReason",decision.reason}});
+                                          {"decisionReason",decision.reason},{"usage",decision.usage}});
                 return true;
             }
             db.consumeEvent(current);
             const auto action = actionId();
             db.journal(id,"decision",{{"actionId",action},{"tool",tool},{"args",args},{"reason",decision.reason},
-                                      {"eventId",event["id"]},{"evidence",event["evidence"]}});
+                                      {"eventId",event["id"]},{"evidence",event["evidence"]},{"usage",decision.usage}});
             current.erase("feedback");
             if (tool == "ask_user") {
                 db.wait(current,"user_question",{{"text",field(args,"question")},{"decisionReason",decision.reason},
