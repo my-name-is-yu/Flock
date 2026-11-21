@@ -2,6 +2,7 @@
 #include "demo.hpp"
 #include "model.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -580,6 +581,26 @@ void fixedDemoWithUserCriteriaAndContinuation() {
           sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
 }
 
+void fixedDemoCancelsAnAnchoredQuestion() {
+    Sandbox fixture;
+    Store store(fixture.path / "state.db");
+    const auto demo = makeDemoModel();
+    const auto t3 = makeDemoT3();
+    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    const Intake intake{"demo","ask: Which dataset should I use?","local","project"};
+    const auto task = store.submit(intake);
+    for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
+    const auto question = store.task(task).at("wait").at("messageId").get<Id>();
+
+    store.receive(intake,"cancel-answer","Cancel this task",question);
+    runtime.routeConversation();
+    for (int i = 0; i < 12 && store.task(task)["state"] != "cancelled"; ++i) runtime.tick();
+    const auto history = store.history(task);
+    check(store.task(task)["state"] == "cancelled" && store.task(task)["runs"].empty() &&
+          std::ranges::none_of(history,[](const Json& event) { return event["kind"] == "user_answer"; }),
+          "the fixed demo answered its question instead of cancelling the task");
+}
+
 void botProfilesAndAvatars() {
     Sandbox temp;
     Bots bots(temp.path / "bots");
@@ -733,6 +754,7 @@ int main() {
         responseContract();
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
+        fixedDemoCancelsAnAnchoredQuestion();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

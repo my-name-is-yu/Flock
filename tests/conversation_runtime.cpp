@@ -529,6 +529,95 @@ void independentRequestsAndPartialStop() {
           "unrelated instructions or partial stop affected the current question");
 }
 
+void questionReplyKeepsItsTargetAndOfferedAnswer() {
+    Fixture f;
+    const auto offered = f.store->submit(f.routing("Release notes"));
+    const auto other = f.store->submit(f.routing("Build audit","alpha","cloud"));
+    f.model.questions[offered] = {{"question","Which label should I use?"},{"choices",{"Cancel this task","Status"}}};
+    f.reach(offered,"waiting");
+    f.reach(other,"running");
+    const auto wait = f.task(offered).at("wait");
+    const auto otherBefore = f.task(other);
+
+    const auto wrong = f.response(f.receive("wrong-stop","Cancel Build audit",wait.at("messageId")));
+    check(wrong["route"] == "respond" && f.task(offered)["wait"] == wait &&
+          f.event(offered,"user_answer").is_null() && f.task(other) == otherBefore,
+          "a stop targeting another task answered the question or changed work");
+
+    const auto answer = f.response(f.receive("offered-stop-label","Cancel this task",wait.at("messageId")));
+    check(answer["route"] == "answer_wait" && f.event(offered,"user_answer")["text"] == "Cancel this task" &&
+          f.event(offered,"cancel_requested").is_null(),"an offered answer was treated as a cancellation");
+    const auto afterAnswer = f.task(offered);
+    const auto stale = f.response(f.receive("stale-question-stop","Cancel Release notes",wait.at("messageId")));
+    check(stale["route"] == "respond" && f.task(offered) == afterAnswer && f.task(other) == otherBefore,
+          "a cancellation sent to a closed question changed work");
+}
+
+void reportReplyCancelsOnlyItsActiveTask() {
+    Fixture f;
+    const auto measured = f.store->submit(f.routing("Measure startup"));
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Measure again"}},"Collect another sample"};
+    };
+    f.reach(measured,"running");
+    f.t3.finish("run-1","Startup took 100ms");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2 && f.task(measured)["state"] == "running"; },
+                   "the report fixture did not start its follow-up");
+    const auto history = f.store->history(measured);
+    const auto report = std::ranges::find_if(history,[](const Json& event) { return event["kind"] == "report"; });
+    check(report != history.end(),"the active task did not produce a report anchor");
+    const auto anchor = report->at("id").get<Id>();
+    const auto other = f.store->submit(f.routing("Prepare release notes","alpha","cloud"));
+    f.reach(other,"running");
+    const auto measuredBefore = f.task(measured), otherBefore = f.task(other);
+
+    constexpr auto partial = "Stop using the old timer for Measure startup";
+    constexpr auto mismatched = "Cancel Prepare release notes";
+    constexpr auto named = "Cancel Measure startup";
+    f.script(partial,target("cancel_task",measured));
+    f.script(mismatched,target("cancel_task",other));
+    f.script(named,target("cancel_task",measured));
+    const auto notAStop = f.response(f.receive("partial-report-stop",partial,anchor));
+    const auto wrong = f.response(f.receive("wrong-report-stop",mismatched,anchor));
+    check(notAStop["route"] == "clarify" && (wrong["route"] == "clarify" || wrong["route"] == "respond") &&
+          f.task(measured) == measuredBefore && f.task(other) == otherBefore && f.t3.interrupted.empty(),
+          "a report reply cancelled a partial instruction or a differently named task");
+
+    const auto stop = f.response(f.receive("report-stop",named,anchor));
+    check(stop["route"] == "cancel_task" && f.task(measured)["state"] == "cancelling" && f.task(other) == otherBefore,
+          "the report did not cancel its named active task");
+    f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"the report stop did not reach the follow-up Run");
+    check(f.t3.interrupted == std::vector{std::pair<std::string,std::string>{"desktop","run-2"}},
+          "the report stop interrupted the wrong Run");
+}
+
+void closedNamesakeDoesNotBlockUpdates() {
+    Fixture f;
+    const auto closed = f.store->submit(f.routing("Release notes"));
+    const auto unrelated = f.store->submit(f.routing("Deployment checklist","alpha","cloud"));
+    f.store->operate(closed,0,"cancel");
+    f.store->operate(unrelated,0,"cancel");
+    const auto active = f.store->submit(f.routing("Release notes"));
+    constexpr auto instruction = "Add a changelog link to Release notes";
+
+    f.script(instruction,target("append_instruction",active));
+    const auto accepted = f.response(f.receive("namesake-update",instruction));
+    check(accepted["route"] == "append_instruction" && f.event(active,"instruction_accepted")["text"] == instruction &&
+          f.event(closed,"instruction_accepted").is_null(),"a closed namesake blocked the active task's update");
+
+    const auto before = f.task(active);
+    constexpr auto mismatched = "Add a changelog link to Deployment checklist";
+    f.script(mismatched,target("append_instruction",active));
+    const auto rejected = f.response(f.receive("closed-task-update",mismatched));
+    check(rejected["route"] == "clarify" && f.task(active) == before,
+          "an update naming a different closed task was applied to active work");
+
+    const auto competing = f.store->submit(f.routing("Release notes","alpha","cloud"));
+    const auto ambiguous = f.response(f.receive("two-active-namesakes",instruction));
+    check(ambiguous["route"] == "clarify" && f.task(active) == before &&
+          f.event(competing,"instruction_accepted").is_null(),"an update selected between two active namesakes");
+}
+
 void explanationDoesNotHoldCompletion() {
     Fixture f;
     const auto first = f.store->submit(f.routing("Prepare evidence"));
@@ -666,6 +755,12 @@ void unknownSendThenScopeChange() {
           response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
           f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
           "the model's stale result ID escaped the current revision's candidates or changed work");
+    constexpr auto oldStop = "Cancel this task";
+    f.script(oldStop,target("cancel_task",id));
+    const auto staleStop = f.response(f.receive("stop-from-superseded-report",oldStop,oldReport->at("id")));
+    check((staleStop["route"] == "respond" || staleStop["route"] == "clarify") &&
+          f.task(id) == revised && f.t3.interrupted.size() == 1,
+          "a report from a superseded revision stopped the current work");
     f.t3.finish("run-2","New p95 evidence");
     f.reach(id,"completed");
     const auto result = f.event(id,"completed");
@@ -1149,6 +1244,9 @@ int main() {
         modelDestinationClarificationKeepsRevision();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
+        questionReplyKeepsItsTargetAndOfferedAnswer();
+        reportReplyCancelsOnlyItsActiveTask();
+        closedNamesakeDoesNotBlockUpdates();
         restartRestoresCancelledTaskDirections();
         explanationDoesNotHoldCompletion();
         independentRequestQueuesSeparately();

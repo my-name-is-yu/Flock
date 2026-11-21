@@ -960,23 +960,26 @@ function renderComposer() {
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
+  const closed = !!reply?.closed;
+  const label = closed ? 'Unsent reply to a closed question' : replyLabels[reply?.kind];
   elements['reply-context'].hidden = !reply;
-  elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
+  elements['reply-label'].textContent = label ?? '';
   elements['reply-question'].textContent = reply?.summary ?? '';
-  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
+  elements['compose-label'].textContent = label ?? 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
   if (elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
   }
-  elements.message.readOnly = busy;
+  elements.message.readOnly = busy || closed;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || closed || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.textContent = notice?.text ??
+    (closed ? 'That question has closed. You can copy your unsent reply before discarding it.' : '');
   elements.notice.classList.toggle('error', !!notice?.isError);
   elements.notice.classList.toggle('fading', !!notice?.fading);
   scheduleNoticeFade(context, notice);
@@ -1481,9 +1484,12 @@ function mergeLatest(context, latest) {
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
   const reply = replies.get(context.id);
-  if (reply?.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    replies.delete(context.id);
-    setNotice(context, 'That question is no longer open.');
+  if (reply?.kind === 'wait' && !reply.closed && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That question is no longer open.');
+    }
   }
 }
 async function refreshView(context, scroll) {
