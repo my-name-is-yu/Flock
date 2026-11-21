@@ -304,8 +304,14 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
-                    if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
-                    else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
+                    if (req.path == "/api/view") {
+                        const auto after = req.has_param("sessionsAfter")
+                            ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
+                        const auto [through, tasks] = store_.sessionChangesSince(id,after);
+                        auto view = web::botView(store_,*bot,after ? &tasks : nullptr);
+                        view["sessionCursor"] = through;
+                        json(res,200,view);
+                    } else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }

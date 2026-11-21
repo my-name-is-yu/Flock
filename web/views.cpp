@@ -245,7 +245,7 @@ Json currentWait(const Json& task) {
     return result;
 }
 
-Json taskSessions(const Json& task) {
+Json sessionGroup(const Json& task) {
     auto sessions = Json::array();
     const auto env = field(task,"environmentId");
     const auto& activeRun = task.at("activeRun");
@@ -261,7 +261,10 @@ Json taskSessions(const Json& task) {
         session["state"] = active ? displayState(task) : "ended";
         sessions.push_back(std::move(session));
     }
-    return sessions;
+    auto group = taskSummary(task);
+    group["sessions"] = std::move(sessions);
+    group["runCount"] = runs.size();
+    return group;
 }
 
 Json activity(Store& store, std::string_view bot) {
@@ -347,9 +350,7 @@ Json sessions(Store& store, std::string_view bot, Id before) {
             result["sessionsBefore"] = page.back()["id"];
             break;
         }
-        auto group = taskSummary(task);
-        group["sessions"] = taskSessions(task);
-        page.push_back(std::move(group));
+        page.push_back(sessionGroup(task));
     }
     return result;
 }
@@ -388,11 +389,16 @@ Json taskDetail(const Json& task, const Json& latestResult) {
     return result;
 }
 
-Json botView(Store& store, const Json& bot) {
+Json botView(Store& store, const Json& bot, const Json* changedSessionTasks) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0);
     result.update(activity(store,id));
-    result.update(sessions(store,id,0));
+    if (changedSessionTasks) {
+        auto& groups = result["sessionTasks"] = Json::array();
+        for (const auto& task : *changedSessionTasks) groups.push_back(sessionGroup(task));
+    } else {
+        result.update(sessions(store,id,0));
+    }
     result["bot"] = settingsView(bot);
     const auto activeTasks = store.activeTasks(id);
     std::map<Id,const Json*> active;
