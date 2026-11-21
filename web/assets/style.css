@@ -90,6 +90,13 @@ svg { display: block; }
 
 .avatar { display: grid; place-items: center; overflow: visible; width: 2.25rem; height: 2.25rem; flex: none; background: none; }
 .avatar > svg, .avatar > canvas { width: 100%; height: 100%; }
+.avatar-photo { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 26%; }
+.avatar-icon-glyph {
+  display: grid; place-items: center; width: 82%; height: 82%; border-radius: 30%;
+  background: var(--avatar-color, #69c9ac); color: var(--avatar-ink, #14121c);
+  box-shadow: inset 0 -2px 0 rgb(0 0 0 / .14);
+}
+.avatar-icon-glyph > svg { width: 54%; height: 54%; }
 .mug-outline > :is(svg, canvas) { filter: drop-shadow(0 0 .55px light-dark(rgb(28 20 40 / .36), transparent)); }
 .icon-button { background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm); width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center; font-size: 1.25rem; flex: none; }
 .icon-button:hover { background: var(--hover); color: var(--text); }

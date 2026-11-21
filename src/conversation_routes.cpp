@@ -103,7 +103,7 @@ Plan routingQuestion(const std::string& text, std::string question) {
 }
 }
 
-bool Store::Impl::routeMessage(Id id, Model& model) {
+bool Store::Impl::routeMessage(Id id, Model& model, const Runtime::NotesLoader& notes) {
     const auto readMessage = [&]() -> std::optional<Message> {
         auto row = query(R"SQL(
 SELECT m.reply_to,m.sequence,m.bot_id,m.text,m.routing,
@@ -175,13 +175,28 @@ AND NOT EXISTS (
                 return callModel(model,input,modelAttempt,routeStep,checkpoint);
             };
             try {
-                plan = conversation::decide(message->text,context,decideModel,message->routing.at("config"),
-                    [&](Id resolvedId) {
-                        std::lock_guard lock(mutex);
-                        Transaction transaction(db);
-                        inheritModelBudget(id,resolvedId);
-                        transaction.commit();
-                    });
+                if (auto route = conversation::shortcut(message->text,context)) plan = std::move(*route);
+                else {
+                    BotNotes botNotes;
+                    try {
+                        botNotes = notes(message->bot);
+                    } catch (const std::exception& error) {
+                        plan = routingQuestion(message->text,
+                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                                 ")。ファイルを修正してから返信してください。"
+                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                                 "). Fix the file and reply to try again.");
+                    }
+                    if (plan.routes.empty())
+                        plan = conversation::decide(message->text,context,decideModel,botNotes,
+                            message->routing.at("config"),
+                            [&](Id resolvedId) {
+                                std::lock_guard lock(mutex);
+                                Transaction transaction(db);
+                                inheritModelBudget(id,resolvedId);
+                                transaction.commit();
+                            });
+                }
             } catch (const ModelBudgetPaused&) {
                 return true;
             } catch (const std::exception&) {

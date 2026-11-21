@@ -1,13 +1,14 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'theme-switch',
+  'bot-editor', 'theme-switch',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -201,8 +202,13 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 
-function pinnedBotsInShortcutOrder() {
-  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+let botDraft = null;
+function sidebarBots() {
+  if (botDraft?.mode !== 'edit') return bots;
+  return bots.map((bot) => (bot.id === botDraft.botId ? { ...bot, name: botDraft.name, avatar: botDraft.avatar } : bot));
+}
+function pinnedBotsInShortcutOrder(source = bots) {
+  return [...pins].map((id) => source.find((bot) => bot.id === id)).filter(Boolean);
 }
 function focusKey(key) {
   sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
@@ -353,19 +359,33 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
+function draftRow(draft) {
+  const row = node('div', 'bot-row draft');
+  row.setAttribute('aria-hidden', 'true');
+  const select = node('span', 'bot-select');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', draft.name));
+  const text = node('span', 'bot-text');
+  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  select.append(avatar(draft, 'bot-avatar'), text);
+  row.append(select);
+  return row;
+}
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const pinned = pinnedBotsInShortcutOrder();
+  const source = sidebarBots();
+  const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
   elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
   list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
   if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length) list.append(node('p', 'activity-empty', 'No Bots configured'));
+  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
   if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -392,7 +412,7 @@ function renderHeader() {
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -891,6 +911,10 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
     if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
+    else if (loaded && !bots.length) {
+      empty.append(node('p', null, 'Create a Bot to get started.'));
+      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+    }
     fragment.append(empty);
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
@@ -1186,6 +1210,49 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+let reopenSettingsOnClose = false;
+const botEditor = createBotEditor(elements['bot-editor'], {
+  api,
+  onDraft(draft) {
+    botDraft = draft;
+    renderBots();
+  },
+  async onSaved(savedBot, savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    await refreshBots();
+    if (savedMode === 'create') {
+      selectBot(savedBot.id);
+      return;
+    }
+    if (view?.id === savedBot.id) await refreshView(view);
+    if (returnToSettings && view?.id === savedBot.id && view.data) {
+      openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
+    }
+  },
+  onCancel(savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    if (savedMode === 'edit' && returnToSettings && view?.data) {
+      openDetail({ kind: 'settings', section: 'general' });
+    }
+  },
+});
+
+function openNewBot(origin = elements['new-bot-button']) {
+  reopenSettingsOnClose = false;
+  closeMenu(false);
+  openNavigation(false, false);
+  closeDetail();
+  botEditor.openCreate({ bots, origin });
+}
+
+function openEditAppearance(bot) {
+  reopenSettingsOnClose = true;
+  closeDetail();
+  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+}
+
 function generalContent(bot) {
   const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
@@ -1195,7 +1262,16 @@ function generalContent(bot) {
     hero.style.setProperty('--hero-tint', accentColor(bot));
     return handle;
   } };
-  hero.append(face, node('p', 'settings-name', bot.name));
+  hero.append(
+    face,
+    node('p', 'settings-name', bot.name),
+    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
+  );
+  if (detail?.status) {
+    const note = node('p', 'settings-status', detail.status);
+    note.setAttribute('role', 'status');
+    hero.append(note);
+  }
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
   role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
@@ -1547,6 +1623,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);
 });
+elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
@@ -1607,7 +1684,7 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
-  if (digit && !event.isComposing && !elements.detail.open &&
+  if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
     const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
     if (bot) {
@@ -1618,7 +1695,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'Escape') return;
   if (menu) closeMenu();
-  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
 function refresh() {

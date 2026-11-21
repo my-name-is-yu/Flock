@@ -402,6 +402,59 @@ void destinationClarificationPreservesAndValidatesRevisionDraft() {
           "a destination reply rebound a stale revision draft to the changed task");
 }
 
+void deferredCompletionPreservesDestinationRevisionDraft() {
+    Fixture f;
+    auto routing = f.routing("Release notes");
+    routing.config["conversationEnvironments"]["mock"] = "mock-executor";
+    const auto id = f.store->submit(routing);
+    int completionCalls = 0;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] == id) {
+            ++completionCalls;
+            check(!input.event.contains("_flockDeferredCompletion"),
+                  "private completion deferral metadata reached the model");
+        }
+    };
+    f.reach(id,"running");
+    f.t3.finish("run-1","Evidence");
+    f.tick();
+    check(f.task(id)["state"] == "deciding" && f.task(id)["activeRun"].is_null(),
+          "the settled Run did not leave a result to defer");
+
+    constexpr auto intent = "Measure acceptance on the release branch";
+    constexpr auto doneWhen = "all tests pass";
+    constexpr auto request = "Revise Release notes intent to Measure acceptance on the release branch, "
+                             "completion criteria to all tests pass, and move to mock";
+    auto route = revision(id,"doneWhen",doneWhen);
+    route["intent"] = intent;
+    f.script(request,std::move(route));
+    const auto message = f.store->receive(routing,"pending-revision",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify",
+          "the settled-task revision did not ask for its missing destination");
+    check(f.store->clarifications("alpha").size() == 1 && f.t3.sent.size() == 1,
+          "the destination clarification draft was not held against the settled task");
+
+    f.tick();
+    check(completionCalls == 1 && f.task(id)["state"] == "deciding",
+          "the held completion was not deferred exactly once");
+    f.restart();
+    f.tick(4);
+    check(completionCalls == 1 && f.store->clarifications("alpha").size() == 1,
+          "restart repeated the held completion or lost its destination clarification");
+
+    const auto destination = f.store->receive(routing,"mock-destination","mock",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto response = f.response(destination);
+    const auto revised = f.task(id);
+    check(response["route"] == "revise_task" && revised["intent"] == intent && revised["doneWhen"] == doneWhen &&
+          revised["pendingEnvironmentId"] == "mock-executor" && revised["environmentId"] == "desktop" &&
+          revised["revisions"].back()["intent"] == intent && revised["revisions"].back()["doneWhen"] == doneWhen &&
+          f.store->clarifications("alpha").empty() && f.t3.sent.size() == 1 && completionCalls == 1,
+          "the deferred completion invalidated the pending revision draft or dispatched work before confirmation");
+}
+
 void lastConfiguredDestinationIsAvailable() {
     Fixture f;
     auto routing = f.routing();
@@ -575,6 +628,17 @@ void unknownSendThenScopeChange() {
           runs[1]["revisionId"] == f.task(id)["currentRevision"] &&
           f.event(id,"report")["revisionId"] == before["currentRevision"],
           "the prior report or Run was silently attributed to the new revision");
+    const auto history = f.store->history(id,0,200);
+    const auto oldReport = std::ranges::find_if(history,[](const Json& row) { return row["kind"] == "report"; });
+    check(oldReport != history.end(),"the stale result fixture is missing its earlier report");
+    constexpr auto explain = "Explain the result from the earlier run";
+    f.script(explain,{{"kind","answer_result"},{"resultMessageId",oldReport->at("id")}});
+    const auto revised = f.task(id);
+    const auto response = f.response(f.receive("explain-superseded-result",explain));
+    check(response["route"] == "clarify" && !response.contains("source") &&
+          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
+          "the model's stale result ID escaped the current revision's candidates or changed work");
     f.t3.finish("run-2","New p95 evidence");
     f.reach(id,"completed");
     const auto result = f.event(id,"completed");
@@ -1056,6 +1120,7 @@ int main() {
         linkedResultStartsANewSession();
         omittedDestinationAndWrongNamedTaskAreBlocked();
         destinationClarificationPreservesAndValidatesRevisionDraft();
+        deferredCompletionPreservesDestinationRevisionDraft();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
         restartRestoresCancelledTaskDirections();
