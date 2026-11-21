@@ -225,12 +225,15 @@ void linkedResultStartsANewSession() {
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
     const auto resultId = f.store->latestTaskResult(original).at("id");
-    f.script("2案目で実装して",{{"kind","create_task"},{"resultMessageId",resultId},{"resultOption",2}});
-    f.receive("implement","2案目で実装して");
+    f.script("2案目を説明して",{{"kind","answer_result"},{"resultMessageId",resultId},{"resultOption",2}});
+    f.receive("explain","2案目を説明して",resultId.get<Id>());
+    f.script("それを実装して",{{"kind","create_task"}});
+    f.receive("implement","それを実装して");
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
     check(id != original && task["sourceTaskId"] == original &&
           task["sourceResultRefs"].size() == 1 &&
+          task["sourceResultRefs"][0]["messageId"] == resultId && task["sourceResultRefs"][0]["option"] == 2 &&
           task["sourceResultRefs"][0]["text"] == "2. Capture a fixture trace",
           "implementation was not linked to the selected earlier result");
     f.reach(id,"running");
@@ -238,8 +241,10 @@ void linkedResultStartsANewSession() {
           f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
           f.event(original,"completed") == earlier,"linked implementation changed prior work or reused its Thread");
     const auto& instruction = f.t3.sent.back().instruction;
-    check(instruction.find("Capture a fixture trace") != std::string::npos &&
-          instruction.find("Measure by hand") == std::string::npos,
+    check(instruction.find("それを実装して") != std::string::npos &&
+          instruction.find(", option 2 (reference only):\n2. Capture a fixture trace") != std::string::npos &&
+          instruction.find("Measure by hand") == std::string::npos &&
+          instruction.find("Measure after release") == std::string::npos,
           "the new Session did not receive the selected option");
 }
 
@@ -272,6 +277,11 @@ void followUpCarriesTheRepliedToReport() {
     route["resultOption"] = 2;
     f.script("案2を実装",route);
     const auto message = f.receive("selected-option","案2を実装",report);
+    const auto source = f.response(message).at("source");
+    check(source["messageId"] == report && source["option"] == 2 && source["text"] == "2. Capture a fixture trace" &&
+          f.task(id)["pendingInstructions"][0]["source"] == source &&
+          f.task(id)["sourceResultRefs"] == Json::array({source}),
+          "the active task did not save the selected result with the pending instruction");
     f.restart();
     f.t3.finish("run-2","Separate baseline checked");
     f.reach(id,"deciding");
@@ -550,6 +560,83 @@ void destinationChoiceCannotApplyPartOfAStaleCompoundRequest() {
           "a stale companion route did not prevent the entire pending compound request from being applied");
 }
 
+void typedDestinationChoiceRestoresACompoundRequest() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on desktop";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","desktop"}}
+    })}};
+    const auto message = f.store->receive(routing,"typed-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && f.store->tasks("alpha").empty(),
+          "a compound request applied work before destination confirmation");
+
+    f.model.routes["backup"] = {
+        {"routes",Json::array({{{"kind","create_task"},{"segment",benchmark},{"environment","backup"}}})},
+        {"resolution","resolved"},{"clarificationMessageId",clarification.at("messageId")}};
+        const auto reply = f.store->receive(routing,"typed-backup","backup");
+        f.runtime->routeConversation();
+        const auto tasks = f.store->tasks("alpha");
+    check(f.response(reply)["route"] == "compound" && tasks.size() == 2 &&
+          f.store->clarifications("alpha").empty(),
+          "a typed destination choice dropped the original compound routes");
+    for (const auto& summary : tasks) f.reach(summary["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark))
+            check(task["runs"].back()["environmentId"] == "backup-executor",
+                  "the typed destination did not reach the pending work");
+        else
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "the typed destination moved the companion work");
+    }
+}
+
+void destinationConfirmationKeepsCompanionsOnTheirSavedEnvironment() {
+    Fixture f;
+    auto routing = f.routing();
+    routing.config["conversationEnvironments"]["backup"] = "backup-executor";
+    const std::string benchmark = "Run the benchmark on cloud or backup";
+    const std::string archive = "Archive the logs on ローカルMac";
+    const auto request = benchmark + "; " + archive;
+    f.model.routes[request] = {{"routes",Json::array({
+        {{"kind","create_task"},{"segment",benchmark}},
+        {{"kind","create_task"},{"segment",archive},{"environment","ローカルMac"}}
+    })}};
+    const auto message = f.store->receive(routing,"remap-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && f.store->tasks("alpha").empty(),
+          "a compound request applied work before destination confirmation");
+
+    auto remapped = f.routing();
+    remapped.config["conversationEnvironments"]["backup"] = "backup-executor";
+    remapped.config["conversationEnvironments"]["ローカルMac"] = "desktop-east";
+    const auto reply = f.store->receive(remapped,"confirm-backup","backup",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto tasks = f.store->tasks("alpha");
+    check(tasks.size() == 2 && f.store->clarifications("alpha").empty(),
+          "confirming a destination after an alias remap did not apply the pending routes");
+    for (const auto& summary : tasks) f.reach(summary["id"],"running");
+    for (const auto& summary : tasks) {
+        const auto task = f.task(summary["id"]);
+        const auto saved = task.at("request").get<std::string>();
+        if (saved.starts_with(benchmark))
+            check(task["runs"].back()["environmentId"] == "backup-executor",
+                  "the confirmed destination did not reach the pending work");
+        else
+            check(saved == archive && task["runs"].back()["environmentId"] == "desktop",
+                  "an alias remap redirected the companion to a different environment");
+    }
+}
+
 void canonicalDestinationWinsOverAlias() {
     Fixture f;
     auto routing = f.routing();
@@ -760,7 +847,7 @@ void unknownSendThenScopeChange() {
     const auto revised = f.task(id);
     const auto response = f.response(f.receive("explain-superseded-result",explain));
     check(response["route"] == "clarify" && !response.contains("source") &&
-          response["text"] == "Please clarify which task, result, or question you mean and what you want me to do." &&
+          response["text"] == "Please tell me which request, result, or question you mean and what you'd like me to do." &&
           f.task(id) == revised && f.t3.sent.size() == 2 && f.t3.interrupted.size() == 1,
           "the model's stale result ID escaped the current revision's candidates or changed work");
     f.t3.finish("run-2","New p95 evidence");
@@ -1246,6 +1333,8 @@ int main() {
         modelDestinationClarificationKeepsRevision();
         compoundDestinationKeepsRequestsOnTheirOwnEnvironments();
         destinationChoiceCannotApplyPartOfAStaleCompoundRequest();
+        typedDestinationChoiceRestoresACompoundRequest();
+        destinationConfirmationKeepsCompanionsOnTheirSavedEnvironment();
         canonicalDestinationWinsOverAlias();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();

@@ -6,8 +6,8 @@ using conversation_storage::hasText;
 using conversation_storage::messageSize;
 
 namespace {
-Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
-    if (row.string(1) != text || row.number(2) != replyTo)
+Json receiptRow(const Statement& row, std::string_view text, Id replyTo, Id candidate) {
+    if (row.string(1) != text || row.number(2) != replyTo || row.number(3) != candidate)
         throw Conflict("This client message ID already has different content");
     return {{"messageId",row.number(0)},{"status","received"}};
 }
@@ -144,36 +144,42 @@ AND json_extract(r.data,'$.operation') IN ('cancel_task','revise_task','destinat
 }
 
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
-                                   std::string_view text, Id replyTo) const {
+                                   std::string_view text, Id replyTo, Id candidate) const {
     std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT id,text,reply_to FROM messages WHERE bot_id=? AND client_message_id=?",
-                         {bot,clientId});
+    auto row = p_->query(R"SQL(
+SELECT id,text,reply_to,coalesce(json_extract(routing,'$.candidateTaskId'),0)
+FROM messages WHERE bot_id=? AND client_message_id=?
+)SQL",{bot,clientId});
     if (!row.next()) return std::nullopt;
-    return receiptRow(row,text,replyTo);
+    return receiptRow(row,text,replyTo,candidate);
 }
 
-Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
+Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                    Id candidate) {
     if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
         !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
         throw Conflict("Bot, client message ID and nonempty text are required");
+    if (candidate < 0 || (candidate && !replyTo))
+        throw Conflict("A selected candidate must reply to its clarification");
     Json receipt;
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        const auto existing = this->receipt(routing.botId,clientId,text,replyTo,candidate);
         if (existing) receipt = *existing;
         else {
             modelCallLimit(routing.config);
             const auto now = unixTime();
+            Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config},
+                          {"waitsAtIntake",p_->captureConversationWaits(routing.botId)}};
+            if (candidate) saved["candidateTaskId"] = candidate;
             p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {now,routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,
-                Json{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config},
-                     {"waitsAtIntake",p_->captureConversationWaits(routing.botId)}},
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,saved,
                 routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }

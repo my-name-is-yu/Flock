@@ -95,6 +95,7 @@ struct Context {
     std::vector<std::string> environments;
     Json destinationIds = Json::object();
     Json history = Json::array(), expiredWaits = Json::array();
+    Id selection = 0;
     bool moreTasks = false, moreWaits = false, staleWaits = false, multiplePendingClarifications = false;
     const Reply* clarification(Id replyId) const;
     bool operator==(const Context&) const = default;
