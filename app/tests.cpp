@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <unistd.h>
 
@@ -280,17 +281,34 @@ void responseContract() {
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
-    const auto& peerTools = peerRequest["tools"][0]["tools"];
-    check(peerTools[0]["parameters"]["properties"]["kind"]["enum"] == Json::array({"consult","work"}) &&
-        peerTools[0]["parameters"]["properties"].contains("doneWhen") &&
-        peerTools[0]["parameters"]["required"] == Json::array({"reason","botId","kind","text"}),
+    const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
+    const auto& destinations = peerContext.at("task").at("peers");
+    check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
+        destinations.at(0).at("name") == "Verifier",
+        "the model did not receive the allowed peer destination");
+    check(peerRequest.at("tools").at(0).at("tools").size() == 3,"unavailable tools entered the peer request");
+    const auto parameters = [](const Json& request, std::string_view name) -> const Json& {
+        for (const auto& function : request.at("tools").at(0).at("tools"))
+            if (function.at("name") == name) return function.at("parameters");
+        throw std::runtime_error("Missing model tool: " + std::string(name));
+    };
+    using Names = std::multiset<std::string>;
+    const auto& send = parameters(peerRequest,"send_bot_message");
+    check(send["properties"]["kind"]["enum"].get<Names>() == Names{"consult","work"} &&
+        send["properties"]["doneWhen"]["type"] == "string" &&
+        send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
-    check(peerTools[1]["parameters"]["properties"]["kind"]["enum"] == Json::array({"question","answer","result","failed"}) &&
-        peerTools[2]["parameters"]["properties"]["messageId"]["type"] == "string",
-        "peer reply and evidence tools must use the runtime contract");
+    const auto& reply = parameters(peerRequest,"reply_to_bot");
+    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","answer","result","failed"} &&
+        reply["required"].get<Names>() == Names{"reason","kind","text"},
+        "peer replies must specify their kind and text");
+    const auto& evidence = parameters(peerRequest,"read_bot_evidence");
+    check(evidence["properties"]["messageId"]["type"] == "string" &&
+        evidence["required"].get<Names>() == Names{"reason","messageId"},
+        "peer evidence must identify the message that carries it");
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
-    check(!nextPeerRequest["tools"][0]["tools"][0]["parameters"]["properties"].contains("doneWhen"),
+    check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
 
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},

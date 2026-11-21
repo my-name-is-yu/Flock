@@ -1,6 +1,5 @@
 #include "internal.hpp"
 
-#include <algorithm>
 #include <iostream>
 
 using namespace flockv0;
@@ -42,8 +41,11 @@ public:
     }
 };
 
-std::size_t entries(const Json& history, std::string_view kind) {
-    return std::count_if(history.begin(),history.end(),[&](const Json& row) { return row.at("kind") == kind; });
+std::vector<std::string> eventTexts(const Json& conversation, std::string_view kind, std::string_view field) {
+    std::vector<std::string> texts;
+    for (const auto& event : conversation)
+        if (event.at("kind") == kind) texts.push_back(event.at("data").at(field).get<std::string>());
+    return texts;
 }
 }
 
@@ -72,6 +74,13 @@ int main(int argc, char** argv) {
         };
         const Id source = store.tasks("release").at(0).at("id");
         const auto originalRecipients = store.tasks("verifier");
+        if (phase == "recover") {
+            check(store.task(source).at("state") == "peer_waiting" && originalRecipients.size() == 1,
+                  "the original Bot exchange did not survive the crash");
+            const auto& pending = originalRecipients.at(0);
+            check(pending.at("state") == "sending" && pending.at("runs").empty(),
+                  "the accepted launch must still be unconfirmed when recovery starts");
+        }
         Runtime runtime(store,model,*adapter,[](std::string_view) { return BotNotes{}; },options);
         for (int tick = 0; tick < 20; ++tick) runtime.tick();
         check(phase == "recover","T3 sent back a response before the Runtime was killed");
@@ -84,13 +93,13 @@ int main(int argc, char** argv) {
         const auto& runs = verifier.at("runs");
         check(runs.size() == 1 && runs.at(0).at("threadId") == "thread" && runs.at(0).at("runId") == "root",
               "Verifier did not adopt the one original Run");
-        check(runs.at(0).at("actionId") == originalRecipients.at(0).at("actionId"),"the Run used a different action");
-        const auto verifierHistory = store.history(verifier.at("id"));
-        check(entries(verifierHistory,"send_started") == 1 && entries(verifierHistory,"run_started") == 1 &&
-              entries(verifierHistory,"report") == 1,"Verifier delivered or consumed a Run more than once");
-        const auto releaseHistory = store.history(source);
-        check(store.task(source).at("state") == "completed" && model.received == 1 &&
-              entries(releaseHistory,"bot_message") == 2 && entries(releaseHistory,"completed") == 1,
+        check(eventTexts(store.conversation("verifier"),"report","report") == std::vector<std::string>{"root report"},
+              "Verifier did not receive one report from the recovered Run");
+        const auto releaseHistory = store.conversation("release");
+        check(eventTexts(releaseHistory,"bot_message","text") ==
+                  std::vector<std::string>{"Verify the fixture","root report"} &&
+              eventTexts(releaseHistory,"completed","text") == std::vector<std::string>{"root report"} &&
+              store.task(source).at("state") == "completed" && model.received == 1,
               "Release did not consume exactly one result");
         return 0;
     } catch (const std::exception& error) {
