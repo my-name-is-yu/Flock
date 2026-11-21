@@ -21,6 +21,9 @@ const stateLabels = {
   failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
+const peerMessageLabels = {
+  request: 'Request', question: 'Question', answer: 'Answer', result: 'Result', cancelled: 'Cancelled', failed: 'Failed',
+};
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for more work', 'The task reached its additional run limit. You can approve one more run.'],
@@ -448,7 +451,9 @@ function renderActivity() {
       });
       const line = node('span', 'activity-line');
       line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Clarification requested'));
-      row.append(line, activityTitle(clarification.text, 'activity-subtitle'));
+      const subtitle = node('span', 'activity-subtitle', clarification.text);
+      subtitle.title = clarification.text;
+      row.append(line, subtitle);
       rows.push(row);
     }
     elements['wait-list'].replaceChildren(...rows);
@@ -1376,9 +1381,8 @@ function render(scroll) {
 function mergeLatest(context, latest) {
   const { events, olderBefore } = latest;
   const first = events[0]?.id;
-  // A long disconnection can leave a gap larger than the newest page.
-  // Re-anchor pagination at the newest page so the next older page fills it.
-  if (!context.events.size || (first && first > context.newestEvent)) {
+  const missedPage = first && first > context.newestEvent;
+  if (!context.events.size || missedPage) {
     context.events.clear();
     context.olderBefore = olderBefore;
   }
