@@ -331,8 +331,12 @@ function questionActions(task) {
 function clarificationActions(clarification) {
   const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   const actions = node('div', 'event-actions');
-  for (const candidate of clarification.candidates ?? []) {
-    actions.append(button(candidate.request, 'button', () => beginReply(target, candidate.request)));
+  if (clarification.destinations) {
+    for (const destination of clarification.destinations)
+      actions.append(button(destination, 'button', () => beginReply(target, destination)));
+  } else {
+    for (const candidate of clarification.candidates ?? [])
+      actions.append(button(candidate.request, 'button', () => beginReply(target, `#${candidate.taskId}`)));
   }
   actions.append(button('Write a reply', 'text-button', () => beginReply(target)));
   return actions;
@@ -767,6 +771,11 @@ function mergeLatest(context, latest) {
   context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
+  const reply = replies.get(context.id);
+  if (reply?.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
+    replies.delete(context.id);
+    setNotice(context, 'That question is no longer open.');
+  }
 }
 async function refreshView(context, scroll) {
   const generation = ++context.generation;
