@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <set>
 
 using namespace flockv0;
 namespace {
@@ -275,14 +276,26 @@ void exercise(const std::filesystem::path& path) {
           !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
     check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
 
+    std::set<Id> fixtureSessions;
     for (int i = 0; i < 8; ++i) {
         const auto id = std::to_string(i);
-        cli.submit({"release","Session " + id,"local-env","separate-" + id});
+        fixtureSessions.insert(cli.submit({"release","Session " + id,"local-env","separate-" + id}));
     }
     tick(*runtime,3);
     const auto sessionPage = reopened.get("/api/view?bot=release");
     const auto sessionCursor = sessionPage.at("sessionsBefore").get<Id>();
     check(sessionPage["sessionTasks"].size() == 6 && sessionCursor > 0,"missing session pagination");
+    std::set<Id> activeFixtures;
+    unsigned liveOutsidePage = 0;
+    for (const auto& row : sessionPage.at("activeSessions")) {
+        const auto task = row.at("taskId").get<Id>();
+        if (!fixtureSessions.contains(task)) continue;
+        check(activeFixtures.insert(task).second && row.at("request") == cli.task(task).at("request") &&
+              row.at("environmentId") == "local-env" && row.at("link").is_string(),
+              "active Session metadata was incomplete or repeated");
+        if (task < sessionCursor) ++liveOutsidePage;
+    }
+    check(activeFixtures == fixtureSessions && liveOutsidePage == 2,"active Session data was limited to the history page");
     const auto olderSessions = reopened.get("/api/sessions?bot=release&before=" + std::to_string(sessionCursor));
     check(!olderSessions["sessionTasks"].empty() && olderSessions["sessionTasks"].front()["id"].get<Id>() < sessionCursor,
           "session page duplicated newer tasks");

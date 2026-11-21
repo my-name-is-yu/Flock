@@ -66,7 +66,7 @@ Json runView(const Json& run, std::string_view environment) {
         return nullptr;
     const auto path = "/" + threadSegment(environment) + "/" + threadSegment(thread);
     const auto saved = field(run,"link");
-    return {{"threadId",thread},{"runId",field(run,"runId")},
+    return {{"threadId",thread},{"runId",field(run,"runId")},{"environmentId",environment},
             {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
 }
 
@@ -249,10 +249,12 @@ Json activity(Store& store, std::string_view bot, Id cursor, bool overview) {
                     copyFields(queued["blockedBy"],task.at("blockedBy"),{"botId"});
                     result["queued"].push_back(std::move(queued));
                 }
-                const auto& active = task.at("activeRun");
+                auto active = runView(task.at("activeRun"),field(task,"environmentId"));
                 if (!active.is_null()) {
-                    result["activeSessions"].push_back({{"taskId",id},{"threadId",field(active,"threadId")},
-                        {"runId",field(active,"runId")},{"state",state}});
+                    active["taskId"] = id;
+                    active["request"] = task.at("request");
+                    active["state"] = state;
+                    result["activeSessions"].push_back(std::move(active));
                 }
             }
             if (task.at("runs").empty()) continue;

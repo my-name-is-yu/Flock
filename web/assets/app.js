@@ -197,12 +197,17 @@ function togglePin(bot) {
   save('flock-pins', [...pins]);
   setMenu(null, `menu:${bot.id}`);
 }
+let settingsReturnFocus = null;
+function openSettingsFromMenu(botId) {
+  settingsReturnFocus = botId;
+  openDetail({ kind: 'settings' });
+}
 function openBotSettings(bot) {
   menu = null;
   if (view?.id !== bot.id) selectBot(bot.id);
   else renderBots();
-  if (view?.data) openDetail({ kind: 'settings' });
-  else if (view) view.openSettingsOnLoad = true;
+  if (view?.data) openSettingsFromMenu(bot.id);
+  else if (view) view.openSettingsOnLoad = bot.id;
 }
 function menuButton(bot) {
   const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
@@ -248,7 +253,7 @@ function menuPopover(bot) {
       event.preventDefault();
       event.stopPropagation();
       closeMenu();
-    } else if (event.key === 'Tab') closeMenu(false);
+    } else if (event.key === 'Tab') closeMenu();
   });
   return list;
 }
@@ -411,16 +416,19 @@ function renderActivity() {
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
   if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
+  const activeKeys = new Set();
   const live = [];
+  for (const run of active) {
+    const identity = key(run.taskId, run);
+    if (activeKeys.has(identity)) continue;
+    activeKeys.add(identity);
+    live.push(sessionRow({ id: run.taskId, request: run.request }, run, stateLabels[run.state] ?? run.state, true));
+  }
   const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      const state = active.find((run) => run.taskId === task.id && run.threadId === session.threadId)?.state ?? 'ended';
-      if (state !== 'ended') live.push(sessionRow(task, session, stateLabels[state] ?? state, true));
-      else {
-        const result = { completed: '完了', cancelled: '中止' }[task.state] ?? '終了';
-        ended.push(sessionRow(task, session, result, false));
-      }
+      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, '終了', false));
     }
   }
   const rows = [];
@@ -737,8 +745,9 @@ async function refreshView(context, scroll) {
     setConnection('ready');
     render(scroll);
     if (context.openSettingsOnLoad) {
-      context.openSettingsOnLoad = false;
-      openDetail({ kind: 'settings' });
+      const botId = context.openSettingsOnLoad;
+      context.openSettingsOnLoad = null;
+      openSettingsFromMenu(botId);
     }
   } catch (error) {
     if (context !== view || generation !== context.generation) return;
@@ -859,6 +868,12 @@ narrow.addEventListener('change', () => openNavigation(false, false));
 for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
+elements.detail.addEventListener('close', () => {
+  if (elements.detail.open || !settingsReturnFocus) return;
+  if (narrow.matches) openNavigation(true, false);
+  focusKey(`menu:${settingsReturnFocus}`);
+  settingsReturnFocus = null;
+});
 elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
