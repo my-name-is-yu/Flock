@@ -868,9 +868,8 @@ function peerThread(events, dm) {
       fragment.append(node('p', 'day', nextDay));
       day = nextDay;
     }
-    const { fromBotId, toBotId, text, forwardedMessage } = event.data;
+    const { fromBotId, text, forwardedMessage } = event.data;
     const from = participant(fromBotId);
-    const to = participant(toBotId);
     const row = node('article', 'msg group-start peer-dm-message');
     if (forwardedMessage) {
       const content = node('div', 'peer-forward-content');
@@ -883,7 +882,7 @@ function peerThread(events, dm) {
     }
     if (text || !forwardedMessage) {
       const metadata = node('div', 'msg-meta');
-      metadata.append(node('span', 'msg-name', `${from.name} → ${to.name}`), eventTime({ time: event.time }));
+      metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
       const line = node('div', 'msg-line');
       const bubble = node('div', 'bubble');
       bubble.append(node('p', 'event-text', text));
