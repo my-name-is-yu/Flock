@@ -1,5 +1,4 @@
 // Loaded as a blocking classic script so a saved theme applies before the first paint.
-// app.js saves the choice and dispatches a `flock-theme` event to switch at runtime.
 'use strict';
 (() => {
   const root = document.documentElement;
@@ -16,7 +15,7 @@
   }
   let stored = null;
   try { stored = JSON.parse(localStorage.getItem('flock-theme')); }
-  catch { /* Fall back to the system theme. */ }
+  catch {}
   apply(stored);
   dark.addEventListener('change', () => apply(mode));
   document.addEventListener('flock-theme', (event) => apply(event.detail));
