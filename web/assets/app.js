@@ -397,10 +397,8 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (view?.id === context.id) renderComposer();
 }
-// Info and success notices fade once nothing is in flight and the Bot is on screen.
-// Errors stay until the next edit replaces them.
-function fadeNotice(context, notice) {
-  if (notice.timer) return;
+function scheduleNoticeFade(context, notice) {
+  if (!notice || notice.isError || notice.timer || pendingRequests.has(context.id) || pendingWaits.size) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
     if (notices.get(context.id) !== notice || view?.id !== context.id) return;
@@ -413,7 +411,6 @@ function fadeNotice(context, notice) {
     }, 400);
   }, 3600);
 }
-// Grow the input with its content up to the CSS max-height.
 function fitMessage() {
   const field = elements.message;
   if (!field.offsetParent) return;
@@ -447,7 +444,7 @@ function renderComposer() {
   elements.notice.textContent = notice?.text ?? '';
   elements.notice.classList.toggle('error', !!notice?.isError);
   elements.notice.classList.toggle('fading', !!notice?.fading);
-  if (notice && !notice.isError && !pendingRequests.has(context.id) && !pendingWaits.size) fadeNotice(context, notice);
+  scheduleNoticeFade(context, notice);
 }
 
 function closeDetail() {
@@ -742,8 +739,7 @@ elements.message.addEventListener('input', () => {
   if (byteLength(elements.message.value) > limit) setNotice(view, `入力は ${limit.toLocaleString('ja-JP')} バイトまでです。`, true);
   else renderComposer();
 });
-// Enter inserts a newline; ⌘/Ctrl+Enter sends; Escape leaves reply mode. Never act mid IME composition
-// (Safari reports the composition-committing Enter with keyCode 229 and isComposing false).
+// Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
   if (event.isComposing || event.keyCode === 229) return;
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
@@ -756,17 +752,17 @@ elements.composer.addEventListener('keydown', (event) => {
   }
 });
 byId('send-hint').textContent = `${sendKey} ↵`;
-// Refit when the composer reappears (bot switch, narrow navigation closing) or its width changes.
-// When it grows (longer draft, reply bar), keep the timeline pinned if it was at the bottom.
 let composerHeight = 0;
-new ResizeObserver(() => {
+function resizeComposerAndKeepTimelineAtBottom() {
   const height = elements['composer-container'].offsetHeight;
-  const grew = height - composerHeight;
+  const composerGrowth = height - composerHeight;
   composerHeight = height;
   const scroller = elements.conversation;
-  if (grew > 0 && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= grew + 4) scroller.scrollTop = scroller.scrollHeight;
+  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
+  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
   fitMessage();
-}).observe(elements['composer-container']);
+}
+new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.pin-menu, .pin-popover')) { menu = null; renderBots(); }
 });
