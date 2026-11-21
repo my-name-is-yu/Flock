@@ -1,41 +1,152 @@
-/* Conversation: header, scrolling timeline and events. */
-.conversation-header { background: var(--canvas); }
-.header-inner { height: var(--header-height); display: flex; gap: .65rem; align-items: center; padding: 0 clamp(1rem, 4vw, 3rem); }
-.profile { display: flex; align-items: center; min-width: 0; text-align: left; background: none; border: 0; border-radius: var(--radius-lg); padding: .18rem .28rem .18rem 0; gap: .68rem; }
-.profile:hover .profile-arrow { color: var(--accent); }
-.profile-info { display: grid; gap: .08rem; min-width: 0; }
-.profile-name { font-size: var(--text-lg); font-weight: 700; letter-spacing: -.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.profile-status { font-size: var(--text-xs); color: var(--text-2); }
-.profile-status[data-state="working"], .profile-status[data-state="thinking"] { color: var(--success); }
-.profile-status[data-state="waiting"] { color: var(--warning); }
-.profile-arrow { color: var(--text-3); width: 1rem; height: 1rem; flex: none; }
-.avatar-profile { width: 2.7rem; height: 2.7rem; border-radius: var(--radius-lg); }
-.settings-button { margin-left: auto; }
-.conversation { overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0; }
-.conversation-inner { max-width: var(--content-width); margin-inline: auto; padding: 1.3rem clamp(1rem, 4vw, 2rem) 1.65rem; }
-.older { display: block; margin: 0 auto var(--space-4); }
-.timeline { display: grid; gap: 1.16rem; }
-.empty-state { min-height: min(24rem, 50vh); display: grid; place-content: center; justify-items: center; gap: .55rem; text-align: center; }
-.empty-state .avatar { width: 3.8rem; height: 3.8rem; border-radius: var(--radius-xl); margin-bottom: .4rem; }
-.empty-state h2 { font-size: var(--text-xl); letter-spacing: -.02em; }
-.empty-state p { font-size: var(--text-md); color: var(--text-2); }
-.day { display: flex; align-items: center; gap: .75rem; color: var(--text-3); font-size: var(--text-xs); margin-block: .1rem; }
-.day::before, .day::after { content: ""; height: 1px; flex: 1; background: var(--hairline); }
-.event { display: grid; justify-items: start; gap: .35rem; min-width: 0; }
-.event.outbound { justify-items: end; }
-.event-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem .56rem; font-size: var(--text-xs); color: var(--text-3); overflow-wrap: anywhere; }
-.event-meta strong { font-size: var(--text-sm); color: var(--text-2); font-weight: 600; }
-.event-card { padding: .78rem 1rem; background: var(--raised); border-radius: var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-lg); max-width: min(100%, 42rem); min-width: 0; }
-.outbound .event-card { background: var(--accent-soft); border-radius: var(--radius-lg) var(--radius-sm) var(--radius-lg) var(--radius-lg); }
-.event-card.question-card { background: var(--warning-soft); }
-.event-card.finished-card { box-shadow: inset 3px 0 0 var(--success); }
-.event-text, .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
+/* Conversation: floating header, scrolling timeline and messages. */
+.main { --conversation-top: 6rem; }
+
+/* Header: the Bot's face and name float centered over the timeline, which scrolls underneath a fade. */
+.conversation-header { position: relative; z-index: 3; height: 0; }
+.header-inner {
+  position: absolute; inset: 0 0 auto; height: var(--conversation-top);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding: .7rem clamp(.75rem, 2vw, 1.25rem) 0;
+  background: linear-gradient(to bottom, var(--canvas) 0%, var(--canvas) 62%, transparent 100%);
+  pointer-events: none;
+}
+.header-inner > * { pointer-events: auto; }
+.header-menu { position: absolute; left: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
+.settings-button { position: absolute; right: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
+.profile { display: grid; justify-items: center; background: none; border: 0; padding: 0; border-radius: var(--radius-lg); max-width: min(18rem, 60vw); }
+.profile-face { position: relative; display: block; }
+.avatar-profile { width: 3.2rem; height: 3.2rem; border-radius: var(--radius-lg); transition: transform .2s ease; }
+.profile:hover .avatar-profile { transform: translateY(-1px); }
+.status-indicator {
+  position: absolute; right: -.2rem; top: -.2rem; width: .72rem; height: .72rem; border-radius: var(--radius-full);
+  border: 2px solid var(--canvas); background: var(--text-3); display: none;
+}
+.profile[data-state="working"] .status-indicator, .profile[data-state="thinking"] .status-indicator { display: block; background: var(--success); }
+.profile[data-state="waiting"] .status-indicator { display: block; background: var(--warning); }
+.profile[data-state="offline"] .status-indicator { display: block; background: var(--danger); }
+.profile-pill {
+  position: relative; margin-top: -.5rem; display: flex; align-items: baseline; gap: .4rem; max-width: 100%;
+  padding: .2rem .7rem; border-radius: var(--radius-full); background: light-dark(#ffffff, #262626);
+  box-shadow: 0 1px 2px var(--shadow-color), 0 0 0 1px light-dark(rgb(0 0 0 / .05), transparent);
+  font-size: var(--text-sm); font-weight: 600;
+}
+.profile:hover .profile-pill { background: light-dark(#f4f4f2, #2e2e2e); }
+.profile-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-offline { display: none; color: var(--danger); font-size: var(--text-xs); font-weight: 600; white-space: nowrap; }
+.profile[data-state="offline"] .profile-offline { display: inline; }
+.profile-placeholder { margin-top: .85rem; font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
+
+/* Scrolling area. --bot-accent is set from the Bot's avatar color; user bubbles keep a fixed lightness so
+   white text stays readable whatever the hue. */
+.conversation {
+  --bot-accent: var(--accent-fill);
+  --user-bubble: light-dark(oklch(from var(--bot-accent) .5 min(c, .15) h), oklch(from var(--bot-accent) .42 min(c, .12) h));
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
+}
+.conversation-inner { max-width: var(--content-width); margin-inline: auto; padding: calc(var(--conversation-top) + .2rem) clamp(1rem, 4vw, 2rem) 1.4rem; }
+.older {
+  display: block; margin: 0 auto var(--space-4); padding: .32rem .85rem; border-radius: var(--radius-full);
+  background: var(--raised); color: var(--text-2); font-weight: 500;
+}
+.older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
+
+.timeline { --avatar-size: 1.75rem; --avatar-gap: .6rem; --avatar-col: calc(var(--avatar-size) + var(--avatar-gap)); display: flex; flex-direction: column; }
+.day { text-align: center; color: var(--text-3); font-size: var(--text-xs); font-weight: 500; margin: 1.6rem 0 .3rem; }
+.timeline > .day:first-child { margin-top: .2rem; }
+.system-note { text-align: center; color: var(--text-3); font-size: var(--text-xs); margin: 1.1rem 0 .2rem; }
+
+/* Messages */
+.msg { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: .28rem; min-width: 0; margin-top: .3rem; }
+.msg.task-start { margin-top: .85rem; }
+.msg.group-start { margin-top: 1.15rem; }
+.day + .msg { margin-top: .6rem; }
+.msg.user { justify-items: end; }
+.msg-meta { display: flex; align-items: baseline; gap: .45rem; min-height: 1rem; padding-left: var(--avatar-col); font-size: var(--text-xs); color: var(--text-3); }
+.msg.user .msg-meta { padding-left: 0; padding-right: .2rem; }
+.msg-name { color: var(--text-2); font-weight: 500; }
+.msg-task { font-variant-numeric: tabular-nums; }
+.msg-time { opacity: 0; transition: opacity .15s ease; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.msg:hover .msg-time, .msg:focus-within .msg-time { opacity: 1; }
+.msg-line { display: flex; align-items: flex-end; gap: var(--avatar-gap); min-width: 0; max-width: 100%; }
+.msg.user .msg-line { flex-direction: row-reverse; }
+.msg-avatar, .msg-avatar-space { width: var(--avatar-size); height: var(--avatar-size); flex: none; }
+.msg-avatar { border-radius: var(--radius-sm); }
+.bubble { min-width: 0; max-width: min(100%, 36rem); padding: .6rem .95rem; border-radius: 18px; background: var(--raised); }
+.msg.user .bubble { background: var(--user-bubble); color: #fff; }
+.msg.user .bubble ::selection { background: rgb(255 255 255 / .3); }
+.event-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
+.event-reason { margin-top: .4rem; color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.glyph { display: inline-grid; place-items: center; }
+.glyph svg { width: 1rem; height: 1rem; }
+.kind-icon { margin-right: .4em; vertical-align: -.17em; color: var(--text-3); }
+.kind-icon svg { width: 1.05em; height: 1.05em; }
+.completed .kind-icon { color: var(--success); }
+.run-link { display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .3rem; vertical-align: -.35em; border-radius: var(--radius-sm); color: var(--text-3); }
+.run-link:hover { color: var(--accent); background: var(--hover); }
+.run-link .glyph svg { width: .95rem; height: .95rem; }
+
+/* Hover actions sit beside the bubble and appear on hover or keyboard focus. */
+.msg-actions { display: flex; align-items: center; gap: .05rem; align-self: center; opacity: 0; transition: opacity .15s ease; }
+.msg.user .msg-actions { flex-direction: row-reverse; }
+.msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; }
+.msg-actions .msg-time { opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem; }
+.msg-action { width: 1.85rem; height: 1.85rem; color: var(--text-3); }
+.msg-action svg { width: 1rem; height: 1rem; }
+
+/* Bot questions: quiet pill choices under the bubble, the reply as a text action. */
+.timeline .question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .15rem 0 0; padding-left: var(--avatar-col); }
+.timeline .question-actions .button {
+  background: transparent; color: var(--text); font-weight: 500; border-radius: var(--radius-full);
+  padding: .34rem .85rem; box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.timeline .question-actions .button:hover:not(:disabled) { background: var(--hover); }
+.timeline .question-actions .text-button { color: var(--text-2); font-weight: 500; }
+.timeline .question-actions .text-button:hover:not(:disabled) { color: var(--text); }
+.msg-resolution { display: flex; align-items: center; gap: .3rem; padding-left: var(--avatar-col); color: var(--text-3); font-size: var(--text-xs); }
+.msg-resolution .glyph svg { width: .85rem; height: .85rem; }
+.msg-quote, .msg-note {
+  max-width: min(100%, 30rem); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-3); font-size: var(--text-xs); padding-right: .2rem;
+}
+.msg-quote { display: flex; align-items: center; gap: .3rem; }
+.msg-quote span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.msg-quote .glyph svg { width: .8rem; height: .8rem; }
+
+/* Working line at the end of the timeline. */
+.msg.working .msg-line { align-items: center; }
+.typing { display: inline-flex; gap: .2rem; padding-inline: .2rem .1rem; flex: none; }
+.typing span { width: .36rem; height: .36rem; border-radius: var(--radius-full); background: var(--text-3); animation: typing 1.3s ease-in-out infinite; }
+.typing span:nth-child(2) { animation-delay: .16s; }
+.typing span:nth-child(3) { animation-delay: .32s; }
+.working-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); color: var(--text-2);
+  background: linear-gradient(90deg, var(--text-3) 0%, var(--text-3) 40%, var(--text) 50%, var(--text-3) 60%, var(--text-3) 100%) 0 0 / 250% 100%;
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  animation: shimmer 2.6s linear infinite;
+}
+@keyframes typing { 0%, 70%, 100% { opacity: .3; transform: scale(.8); } 35% { opacity: 1; transform: none; } }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
+.empty-state { min-height: min(24rem, 50vh); display: grid; place-content: center; justify-items: center; gap: .4rem; text-align: center; }
+.empty-state .avatar { width: 4.25rem; height: 4.25rem; border-radius: var(--radius-xl); margin-bottom: .55rem; }
+.empty-state h2 { font-size: var(--text-lg); font-weight: 600; letter-spacing: -.01em; }
+.empty-state p { font-size: var(--text-sm); color: var(--text-2); }
+
+/* Shared with the wait and settings dialog. */
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
 .event-detail { border-top: 1px solid var(--hairline); padding-top: .52rem; margin-top: .55rem; color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .event-detail strong { color: var(--text); margin-right: .35em; }
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
-.event-note { color: var(--text-2); font-size: var(--text-xs); margin-top: .48rem; overflow-wrap: anywhere; }
 
 @media (max-width: 700px) {
-  .conversation-inner { padding-top: .95rem; }
+  .main { --conversation-top: 5.6rem; }
   .conversation { scrollbar-gutter: auto; }
+  .timeline { --avatar-size: 1.5rem; --avatar-gap: .45rem; }
+  .bubble { max-width: calc(100% - 2.2rem); }
+  .msg.user .bubble { max-width: 88%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .typing span { animation: none; opacity: .55; }
+  .working-label { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  .msg-time, .msg-actions, .avatar-profile { transition: none; }
 }
