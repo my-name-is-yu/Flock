@@ -312,12 +312,14 @@ Json botSettings(const Json& bot) {
 
 Json botList(Store& store, const Json& bots) {
     auto result = Json::array();
+    if (bots.empty()) return result;
+    const auto statesByBot = store.activeTaskStatesByBot();
     for (const auto& bot : bots) {
         const auto id = field(bot,"id");
         if (id.empty()) continue;
         auto row = botSummary(bot);
         row["preview"] = preview(store,id);
-        row["presence"] = botPresence(store.activeTasks(id));
+        row["presence"] = botPresence(statesByBot.value(id,Json::array()));
         result.push_back(std::move(row));
     }
     return result;
