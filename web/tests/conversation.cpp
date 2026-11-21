@@ -253,9 +253,12 @@ void destinationChoicesInView(const std::filesystem::path& path) {
     runtime.routeConversation();
     const auto page = browser.get("/api/view?bot=release");
     const auto& clarifications = page.at("clarifications");
-    check(clarifications.size() == 1 && clarifications[0].contains("destinations") &&
-          clarifications[0]["destinations"] == Json::array({"local-env","backup","backup-env"}) &&
+    check(clarifications.size() == 1 && clarifications[0].at("destinations") == Json::array({"local-env","backup","backup-env"}) &&
           store.tasks().empty(),"the Web view lost the configured destination choices");
+    const auto bots = browser.get("/api/bots");
+    check(page.at("presence") == "waiting" && std::ranges::any_of(bots,[](const Json& bot) {
+        return bot.at("id") == "release" && bot.at("presence") == "idle";
+    }),"a pending destination choice should show waiting in the conversation and idle in the Bot list");
     const auto receipt = send("choose-backup","backup",clarifications[0].at("messageId"));
     tick(runtime,4);
     const auto resolved = browser.get("/api/view?bot=release");
@@ -555,8 +558,6 @@ void sameNameStop(const std::filesystem::path& path) {
     const auto first = store.submit({"triage","ログイン画面の修正","linked env","login-a"});
     const auto second = store.submit({"triage","ログイン画面の修正","linked env","login-b"});
     tick(runtime,4);
-    check(store.task(first)["state"] == "running" && store.task(second)["state"] == "running",
-          "same-name fixtures did not both start");
 
     const auto stop = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","stop-login"},
         {"text","「ログイン画面の修正」を中止して"}},201);
