@@ -401,13 +401,14 @@ Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
 Json Store::activeTasks(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-WITH queue AS MATERIALIZED (SELECT * FROM project_task_order)
+WITH queue AS (
+  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
+  FROM project_task_order
+)
 SELECT task.id,task.state,task.data,owner.id,owner.bot_id,owner.state,json_extract(owner.data,'$.request')
 FROM tasks task
 LEFT JOIN queue target ON task.state='queued' AND target.id=task.id
-LEFT JOIN queue head ON head.environment_id=target.environment_id AND head.project_id=target.project_id
-  AND head.position=1 AND head.id<>task.id
-LEFT JOIN tasks owner ON owner.id=head.id
+LEFT JOIN tasks owner ON owner.id=target.head_id AND owner.id<>task.id
 WHERE task.bot_id=? AND task.state NOT IN ('completed','cancelled')
 ORDER BY task.id DESC)SQL", {bot});
     Json result = Json::array();

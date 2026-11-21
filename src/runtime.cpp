@@ -835,8 +835,13 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 (event["kind"] == "result" || event.contains("sessionResult"))) {
                 const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
                 const auto run = runRef(report["run"]);
-                readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
-                return;
+                try {
+                    readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
+                    return;
+                } catch (const std::exception&) {
+                    if (!event.contains("sessionResult")) throw;
+                    // Peer replies already carry a settled report and can proceed without a fresh excerpt.
+                }
             }
             auto bot = notes(field(task,"botId"));
             bot.soul = bounded(bot.soul,8192);

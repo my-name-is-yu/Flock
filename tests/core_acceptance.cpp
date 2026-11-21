@@ -57,6 +57,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
+    std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
     std::string authGeneration(const std::string&,const Json&) override { return generation; }
@@ -113,6 +114,7 @@ struct SimulatedT3 : T3 {
         check(!req.runId.empty() && (runs.contains(req.runId) || reported),"read unrelated Run");
         readRequests.push_back(req);
         ++reads;
+        if (beforeRead) beforeRead();
         return {reads == 1 ? "commit wanted, updates enabled" : "RSS 25 MiB",
                 req.threadId,req.runId,"item-"+std::to_string(reads),"next",100,reads==1};
     }
@@ -791,9 +793,13 @@ void concurrentPeerHandoff() {
 }
 
 void consultationRestoresOwnEvidence() {
-    for (const auto mode : {"on_demand","prefill","off"}) {
+    for (const auto mode : {"on_demand","prefill","off","prefill-unavailable"}) {
         Fixture f;
-        f.read = mode;
+        const bool unavailable = std::string_view(mode) == "prefill-unavailable";
+        f.read = unavailable ? "prefill" : mode;
+        if (unavailable) f.t3.beforeRead = [&] {
+            if (f.t3.reads == 2) throw std::runtime_error("Fixture T3 history unavailable after the consultation");
+        };
         f.allowBeta();
         f.restart();
         const auto source = f.submit("Verify with a Session and consult");
@@ -807,7 +813,7 @@ void consultationRestoresOwnEvidence() {
                   "the source Bot's history ignored its selected read mode");
             if (f.read == "on_demand" && input.evidence.empty())
                 return {"session_read",{{"threadId","thread-1"},{"runId","run-1-result"}},"Read original evidence"};
-            check(input.evidence.size() == (f.read == "off" ? 0 : 1),"own Session evidence did not match its selected mode");
+            check(input.evidence.size() == (f.read == "off" || unavailable ? 0 : 1),"own Session evidence did not match its selected mode");
             return complete();
         };
         f.reach(source,"running");
@@ -816,6 +822,22 @@ void consultationRestoresOwnEvidence() {
         const auto expected = f.read == "off" ? 0 : f.read == "prefill" ? 2 : 1;
         check(f.t3.reads == expected && f.t3.launches == 1,"the consultation changed read or Run counts");
     }
+}
+
+void freshResultStillRequiresPrefill() {
+    Fixture f;
+    f.read = "prefill";
+    f.restart();
+    f.t3.beforeRead = [] { throw std::runtime_error("Fixture T3 history unavailable"); };
+    const auto task = f.submit("Verify fresh evidence");
+    f.model.script = [&](const ModelInput& input) {
+        check(input.event["kind"] == "intake","fresh result reached the model without required prefill");
+        return work();
+    };
+    f.reach(task,"running");
+    f.t3.finish("run-1");
+    f.wait(task,"model_failure");
+    check(f.model.calls == 1 && f.logs(task,"completed") == 0,"failed prefill completed or judged a fresh result");
 }
 
 void peerCancelWithLateSessionResult() {
@@ -977,6 +999,7 @@ int main() {
             {"Bot consultation and permission",peerConsultationAndPermission},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
+            {"Fresh result prefill failure",freshResultStillRequiresPrefill},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
