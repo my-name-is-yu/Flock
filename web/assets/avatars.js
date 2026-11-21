@@ -88,12 +88,12 @@ function safeImageUrl(url) {
 
 export function resolveAvatar(bot) {
   const id = typeof bot?.id === 'string' ? bot.id : '';
-  const key = JSON.stringify([id, bot?.avatar]);
+  const avatar = bot?.avatar;
+  const key = JSON.stringify([id, avatar]);
   if (cached.has(key)) return cached.get(key);
 
   let hash = 2166136261;
   for (const char of id) hash = Math.imul(hash ^ char.codePointAt(0), 16777619) >>> 0;
-  const avatar = typeof bot?.avatar === 'string' ? { example: bot.avatar } : (bot?.avatar ?? {});
   const example = getExample(avatar?.example) ?? getExample(defaultShapeOrder[hash % defaultShapeOrder.length]);
   const definition = avatar?.definition;
   let validated;
