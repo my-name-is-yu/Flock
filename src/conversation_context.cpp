@@ -223,11 +223,12 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
             const auto instruction = field(segment,"instruction");
             const auto environment = field(segment,"environment");
             Action action;
-            if (kind == "clarify")
+            if (kind == "clarify") {
+                const auto resume = segment.find("resume");
+                if (resume == segment.end() || !resume->is_boolean()) return std::vector<Route>{};
                 action = Clarify{question,{},std::move(source),"destination",
-                                 savedRevision(segment.value("revisionDraft",Json(nullptr))),
-                                 segment.at("resume").get<bool>()};
-            else if (kind == "create_task")
+                                 savedRevision(segment.value("revisionDraft",Json(nullptr))),resume->get<bool>()};
+            } else if (kind == "create_task")
                 action = CreateTask{instruction,std::move(source),environment,segment.value("resume",false)};
             else if (kind == "append_instruction") action = AppendInstruction{target,instruction,std::move(source)};
             else if (kind == "revise_task")
