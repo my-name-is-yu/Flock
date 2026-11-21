@@ -53,7 +53,9 @@ struct FixedT3 : T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
         if (command.tool == "delegate") {
-            if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
+            if (command.projectId == "settings" &&
+                command.config.value("session",Json::object()).value("runtimeMode","") != "approval-required")
+                return {Delivery::Kind::Settings,{},privateValue,true};
             const auto& project = command.projectId;
             const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
             return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + project + "-" + std::to_string(++launches[project]),link},{}};
@@ -550,8 +552,20 @@ void exercise(const std::filesystem::path& path) {
     finished.settled = true;
     runtime = std::make_unique<Runtime>(store,model,t3,notes);
     tick(*runtime,2);
-    server = startWeb(store,port,callbacks());
+    auto updatedBots = callbacks();
+    updatedBots.intake = [read = updatedBots.intake](std::string_view bot, std::string_view request) {
+        auto routing = read(bot,request);
+        if (bot == "settings") routing.config["session"] = {{"runtimeMode","approval-required"}};
+        return routing;
+    };
+    server = startWeb(store,port,std::move(updatedBots));
     Browser reopened(*server);
+    reopened.post("/api/operations",{{"botId","settings"},{"taskId",settings},
+        {"waitId",settingsPage["waits"][0]["wait"]["id"]},{"operation","reconcile"},
+        {"session",{{"runtimeMode","invalid-client-setting"}}}});
+    tick(*runtime,2);
+    check(cli.task(settings)["state"] == "running" && t3.launches["settings"] == 1,
+          "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
           hasEvent(page["events"],"completed","text","Draft complete"),

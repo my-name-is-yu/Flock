@@ -14,7 +14,7 @@ struct AvatarImage {
 struct WebCallbacks {
     // Array of objects with id, name, soul, cron, and optional avatar/role.
     std::function<Json()> bots;
-    std::function<Intake(std::string_view botId, std::string_view request)> intake;
+    IntakeResolver intake;
     // Optional Bot profile management callbacks.
     std::function<Json(const Json& profile, const std::optional<AvatarImage>& image)> createBot;
     std::function<Json(std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)> updateBot;

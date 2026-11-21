@@ -498,8 +498,10 @@ private:
             }
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
-            const auto data = operationData(body,operation);
-            if (web::field(store_.task(id),"botId") != bot) return error(res,404,"task_not_found");
+            auto data = operationData(body,operation);
+            const auto task = store_.task(id);
+            if (web::field(task,"botId") != bot) return error(res,404,"task_not_found");
+            if (operation == "reconcile") data = reconciliationData(task,wait,std::move(data),callbacks_.intake);
             store_.operate(id,wait,operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }

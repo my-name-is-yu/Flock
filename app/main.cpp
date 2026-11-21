@@ -9,7 +9,6 @@
 #include "flock/web.hpp"
 #endif
 
-#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -229,17 +228,9 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
             else throw Conflict("Unknown reconciliation option: " + flag);
         }
         const auto status = store.task(task);
-        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
-            (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
-            const auto bot = bots.get(status["botId"].get<std::string>());
-            const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
-            const auto& environment = status.at("environmentId");
-            const bool allowed = environment == bot.environmentId ||
-                std::ranges::find(destinations,environment) != destinations.end();
-            if (!allowed || status["projectId"] != Json(bot.projectId))
-                throw Conflict("The project route changed. Cancel this task and submit a new request.");
-            details["session"] = bot.settings.value("session",Json::object());
-        }
+        details = reconciliationData(status,wait,std::move(details),[&](std::string_view id, std::string_view request) {
+            return bots.get(id).intake(request);
+        });
     }
     args.end();
     store.operate(task,wait,operation,details);

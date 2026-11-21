@@ -33,6 +33,10 @@ struct Intake {
     std::string scheduleId;
     Seconds scheduledAt = 0;
 };
+using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
+// Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
+Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
+
 struct BotNotes { std::string soul, memory; };
 struct PeerBot { std::string name; Intake intake; };
 
