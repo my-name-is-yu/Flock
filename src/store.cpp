@@ -201,10 +201,14 @@ void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message)
 void Store::Impl::requestCancellation(Json& task) {
     const Id id = task["id"];
     const auto peer = peerExchange(id);
+    if (!task.value("pendingInstructions",Json::array()).empty())
+        task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
     consumeEvent(task);
     journal(id,"cancel_requested",Json::object());
     if (task["state"] == "queued" && !peer) {
+        for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
+            task.erase(key);
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
     } else task["state"] = "cancelling";
@@ -251,9 +255,9 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     if (task.contains("actionId")) data["actionId"] = task["actionId"];
     exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task["id"], data});
     data["id"] = last();
+    data["messageId"] = journal(task["id"], "waiting", data);
     task["wait"] = data;
     task["state"] = "waiting";
-    journal(task["id"], "waiting", data);
 }
 void Store::Impl::clearWait(Json& task, std::string_view resolution) {
     const auto wait = task.find("wait");
@@ -346,11 +350,6 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     const auto wait = task["wait"];
     if (operation == "cancel") {
         if (waitId && (wait.is_null() || wait["id"] != waitId)) throw Conflict("Waiting item is no longer current");
-        if (!task.value("pendingInstructions",Json::array()).empty())
-            task["cancelledInstructions"] = task.at("pendingInstructions");
-        if (task["state"] == "queued")
-            for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
-                task.erase(key);
         requestCancellation(task);
         return;
     }
@@ -545,7 +544,9 @@ Json Store::conversation(std::string_view bot, Id before, unsigned limit) const 
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT page.id,page.task_id,page.time,page.kind,
-  CASE WHEN m.id IS NULL THEN page.data
+  CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
+       THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
+  WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',
             coalesce(json_extract(page.data,'$.status'),'received'),
@@ -563,6 +564,8 @@ FROM (
   UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN route_decisions decision ON decision.message_id=m.id
+LEFT JOIN waits w ON page.kind='user_answer'
+  AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
 WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
         {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();

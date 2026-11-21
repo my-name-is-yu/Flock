@@ -189,11 +189,13 @@ bool hasEvent(const Json& events, std::string_view kind, std::string_view field,
     return false;
 }
 
-void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id triage) {
+void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id triage,
+                       const std::map<Id,std::string>& earlierRequests) {
     std::map<Id,std::string> expectedRequests = {
         {release,"下書きの掲載範囲を確認する"},
         {next,"次の版の変更点を調べる"},
     };
+    expectedRequests.insert(earlierRequests.begin(),earlierRequests.end());
     for (int i = 0; i < 43; ++i) {
         const auto text = "Paged request " + std::to_string(i);
         const auto id = cli.submit({"release",text,"local-env","release",Json::object(),"daily",1700000000 + i});
@@ -229,7 +231,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
             const auto& data = event.at("data");
             check(request != expectedRequests.end() && data.at("text") == request->second,
                   "conversation returned an unexpected or repeated request");
-            if (task != release && task != next)
+            if (task != release && task != next && !earlierRequests.contains(task))
                 check(data.at("source") == "cron" && data.at("scheduleId") == "daily","scheduled request lost its origin");
             expectedRequests.erase(request);
         }
@@ -414,8 +416,11 @@ void exercise(const std::filesystem::path& path) {
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
     const Id waitId = waits[0]["wait"]["id"];
-    for (int i = 0; i < 45; ++i)
-        cli.submit({"release","Earlier request " + std::to_string(i),"local-env","release"});
+    std::map<Id,std::string> earlierRequests;
+    for (int i = 0; i < 45; ++i) {
+        const auto text = "Earlier request " + std::to_string(i);
+        earlierRequests.emplace(cli.submit({"release",text,"local-env","release"}),text);
+    }
     const auto beforeAnswer = browser.get("/api/view?bot=release");
     check(std::none_of(beforeAnswer["events"].begin(),beforeAnswer["events"].end(),[&](const Json& row) {
         return row["kind"] == "waiting" && row["data"]["id"] == waitId;
@@ -486,7 +491,7 @@ void exercise(const std::filesystem::path& path) {
           t3.replies.back().target.runId == "run-triage-1" && t3.replies.back().questionId == "scope-question" &&
           t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
 
-    conversationPages(reopened,cli,release,next,triage);
+    conversationPages(reopened,cli,release,next,triage,earlierRequests);
     sessionPages(reopened,cli,*runtime,triage);
 }
 } // namespace
