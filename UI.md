@@ -29,7 +29,7 @@ Each answer is tied to the same wait ID used by the CLI and is accepted only onc
 
 ## Avatars
 
-Give each Bot a distinct appearance and color with Open Bot Avatar. Use the same avatar in the list, pinned shortcuts, conversation, and settings. The list uses static avatars. The conversation header avatar can animate to reflect states such as the Bot making a decision or its Session working. Show each state in text as well and respect the device's reduced-motion setting. [Open Bot Avatar demo](https://dominikscholz.github.io/open-bot-avatar/) · [Rendering and state specification](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
+Give each Bot a shape from the official Open Bot Avatar gallery and that shape's default color. Use the same avatar in the list, pinned shortcuts, conversation, and settings. The list uses static avatars. The conversation header avatar can animate to reflect states such as the Bot making a decision or its Session working. Show each state in text as well and respect the device's reduced-motion setting. [Open Bot Avatar demo](https://dominikscholz.github.io/open-bot-avatar/) · [Rendering and state specification](https://github.com/DominikScholz/open-bot-avatar#mount-an-avatar)
 
 ## Acceptance criteria
 

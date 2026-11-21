@@ -28,7 +28,6 @@
   --danger-soft: light-dark(#fcedf0, #301a1f);
   --danger-soft-hover: light-dark(#f8e0e5, #3b2026);
   --focus: light-dark(#6a4fc4, #a08bef);
-  --avatar-fallback: light-dark(#ece8f4, #2a2733);
   --shadow-color: light-dark(rgb(32 28 44 / .12), rgb(0 0 0 / .55));
   --shadow-sm: 0 4px 16px var(--shadow-color);
   --shadow-lg: 0 20px 56px var(--shadow-color);
@@ -89,8 +88,9 @@ svg { display: block; }
 }
 .main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
 
-.avatar { display: grid; place-items: center; overflow: hidden; width: 2.25rem; height: 2.25rem; border-radius: var(--radius-md); flex: none; background: var(--avatar-bg, var(--avatar-fallback)); }
+.avatar { display: grid; place-items: center; overflow: visible; width: 2.25rem; height: 2.25rem; flex: none; background: none; }
 .avatar > svg, .avatar > canvas { width: 100%; height: 100%; }
+.mug-outline > :is(svg, canvas) { filter: drop-shadow(0 0 .55px light-dark(rgb(28 20 40 / .36), transparent)); }
 .icon-button { background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm); width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center; font-size: 1.25rem; flex: none; }
 .icon-button:hover { background: var(--hover); color: var(--text); }
 .icon-button svg { width: 1.18rem; height: 1.18rem; }
