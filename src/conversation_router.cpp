@@ -856,11 +856,11 @@ std::string quoteText(std::string_view text) {
     return result;
 }
 
-Action answerResult(Model& model, std::string_view question, Result source, const Json& config) {
+Action answerResult(Model& model, std::string_view question, Result source, const BotNotes& notes, const Json& config) {
     const auto decision = model.decide({
         .task = Json::object(),
         .event = {{"kind","answer_conversation_result"},{"text",question},{"source",resultData(source, 8192)}},
-        .history = Json::array(), .notes = {}, .tools = {"answer_conversation_result","clarify_conversation_result"},
+        .history = Json::array(), .notes = notes, .tools = {"answer_conversation_result","clarify_conversation_result"},
         .feedback = {}, .config = config
     });
     checkFields(decision.args, {"text"});
@@ -982,11 +982,10 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     return std::nullopt;
 }
 
-Plan decide(std::string_view text, const Context& context, Model& model, const Json& config) {
-    if (auto result = shortcut(text, context)) return std::move(*result);
+Plan decide(std::string_view text, const Context& context, Model& model, const BotNotes& notes, const Json& config) {
     const auto decision = model.decide({
         .task = Json::object(), .event = decisionContext(text, context), .history = context.history,
-        .notes = {}, .tools = {"route_conversation"}, .feedback = {}, .config = config
+        .notes = notes, .tools = {"route_conversation"}, .feedback = {}, .config = config
     });
     std::set<Id> targets;
     try {
@@ -995,7 +994,7 @@ Plan decide(std::string_view text, const Context& context, Model& model, const J
         for (auto& route : plan.routes) {
             auto* response = std::get_if<Respond>(&route.action);
             if (!response || !response->source) continue;
-            auto answer = answerResult(model, route.segment, std::move(*response->source), config);
+            auto answer = answerResult(model, route.segment, std::move(*response->source), notes, config);
             if (std::holds_alternative<Clarify>(answer) && plan.routes.size() != 1)
                 return unclear(text,targets);
             route.action = std::move(answer);

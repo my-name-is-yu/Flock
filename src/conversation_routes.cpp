@@ -102,7 +102,7 @@ Plan routingQuestion(const std::string& text, std::string question) {
 }
 }
 
-bool Store::Impl::routeMessage(Id id, Model& model) {
+bool Store::Impl::routeMessage(Id id, Model& model, const Runtime::NotesLoader& notes) {
     const auto readMessage = [&]() -> std::optional<Message> {
         auto row = query(R"SQL(
 SELECT m.reply_to,m.sequence,m.bot_id,m.text,m.routing,
@@ -136,7 +136,21 @@ AND NOT EXISTS (
                                                     : "That question has closed. Please check the current question.");
         } else {
             try {
-                plan = conversation::decide(message->text,context,model,message->routing.at("config"));
+                if (auto route = conversation::shortcut(message->text,context)) plan = std::move(*route);
+                else {
+                    BotNotes botNotes;
+                    try {
+                        botNotes = notes(message->bot);
+                    } catch (const std::exception& error) {
+                        plan = routingQuestion(message->text,
+                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                                 ")。ファイルを修正してから返信してください。"
+                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                                 "). Fix the file and reply to try again.");
+                    }
+                    if (plan.routes.empty())
+                        plan = conversation::decide(message->text,context,model,botNotes,message->routing.at("config"));
+                }
             } catch (const std::exception&) {
                 plan = routingQuestion(message->text,ja ? "このメッセージを判断できませんでした。ここに返信して再試行してください。"
                                                         : "I couldn't route this message. Reply here to try again.");

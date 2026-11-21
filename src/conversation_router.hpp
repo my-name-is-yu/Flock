@@ -97,7 +97,7 @@ struct Plan {
 };
 
 std::optional<Plan> shortcut(std::string_view text, const Context&);
-Plan decide(std::string_view text, const Context&, Model&, const Json& config);
+Plan decide(std::string_view text, const Context&, Model&, const BotNotes&, const Json& config);
 bool explicitBudgetGrant(std::string_view text);
 bool explicitCancellation(std::string_view text);
 bool namedTargetMatches(std::string_view text, const Context&, Id target);
