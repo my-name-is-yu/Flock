@@ -1382,6 +1382,10 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
                    "the queued transfer stayed behind unrelated work in its old queue");
     check(f.task(moving)["blockedBy"]["id"] == remote && f.t3.sent.size() == 2 && f.t3.interrupted.empty(),
           "the transferred Task bypassed the newer active destination owner");
+    const auto page = f.store->tasks("alpha",0,1);
+    const Json owner = {{"id",remote},{"botId","beta"},{"request","Newer destination owner"},{"state","running"}};
+    check(page.size() == 1 && page[0].at("id") == moving && page[0].at("blockedBy") == owner,
+          "the queued transfer's task page still pointed to its old environment");
     f.t3.finish(f.task(remote)["activeRun"]["runId"].get<std::string>(),"Destination settled");
     f.reach(moving,"running");
     check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" && f.task(local)["state"] == "running",

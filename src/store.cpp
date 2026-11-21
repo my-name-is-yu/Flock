@@ -180,13 +180,52 @@ void Store::Impl::save(Json& task) {
     exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
          {task["state"], task["generation"], task, task["environmentId"], task["id"]});
 }
-Json Store::Impl::queueBlocker(Id id) const {
-    auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
-                     " FROM project_execution_queue head JOIN project_execution_queue task"
-                     " USING(environment_id,project_id) JOIN tasks owner ON owner.id=head.id"
-                     " WHERE task.id=? AND head.position=1 AND head.id<>task.id", {id});
-    if (!row.next()) return nullptr;
+
+namespace {
+// Rank the whole queue so a task's owner can be off-page or belong to another Bot.
+// CROSS JOIN visits the requested IDs first. An empty request set never opens the queue.
+const std::string queueBlockers = R"SQL(
+queue AS (
+  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
+  FROM project_execution_queue
+), blockers AS (
+  SELECT requested.id,owner.id AS owner_id,owner.bot_id,
+         json_extract(owner.data,'$.request') AS request,owner.state
+  FROM requested
+  CROSS JOIN queue ON queue.id=requested.id
+  JOIN tasks owner ON owner.id=queue.head_id AND owner.id<>queue.id
+)
+)SQL";
+
+std::string taskPageSql(const char* filter) {
+    return std::string("WITH page AS (SELECT id,state FROM tasks WHERE ") + filter +
+        "), requested AS (SELECT id FROM page WHERE state='queued'), " + queueBlockers + R"SQL(
+SELECT blockers.owner_id,blockers.bot_id,blockers.request,blockers.state,
+       task.id,task.state,task.data,task.generation
+FROM page JOIN tasks task ON task.id=page.id
+LEFT JOIN blockers ON blockers.id=page.id
+ORDER BY task.id DESC)SQL";
+}
+
+Json blockerJson(const Statement& row) {
+    if (!row.number(0)) return nullptr;
     return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
+}
+
+Json pageTask(const Statement& row) {
+    auto task = row.json(6);
+    task["id"] = row.number(4);
+    task["state"] = row.string(5);
+    task["blockedBy"] = blockerJson(row);
+    return task;
+}
+}
+
+Json Store::Impl::queueBlocker(Id id) const {
+    static const auto sql = "WITH requested(id) AS (VALUES(?)), " + queueBlockers +
+        "SELECT owner_id,bot_id,request,state FROM blockers";
+    auto row = query(sql.c_str(), {id});
+    return row.next() ? blockerJson(row) : Json(nullptr);
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
@@ -428,7 +467,10 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
 
 Json Store::task(Id id) const {
     std::lock_guard lock(p_->mutex);
-    return p_->taskDetails(id,true);
+    auto task = p_->load(id);
+    task["blockedBy"] = task["state"] == "queued" ? p_->queueBlocker(id) : Json(nullptr);
+    p_->addTaskDetails(task);
+    return task;
 }
 
 bool Store::hasTask(Id id) const {
@@ -445,22 +487,12 @@ static void restoreWaitAnchor(const StoreImpl& store, Json& task) {
     if (row.next()) wait["messageId"] = row.number(0);
 }
 
-Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
-    auto result = load(id);
+void Store::Impl::addTaskDetails(Json& result) const {
+    const Id id = result.at("id");
     restoreWaitAnchor(*this,result);
-    result["blockedBy"] = nullptr;
     auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
     result["pendingAction"] = pending;
-    if (includeBlocker && result["state"] == "queued") {
-        auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
-                             " FROM project_execution_queue head JOIN project_execution_queue task"
-                             " USING(environment_id,project_id) JOIN tasks owner ON owner.id=head.id"
-                             " WHERE task.id=? AND head.position=1 AND head.id<>task.id",
-                             {id});
-        if (row.next()) result["blockedBy"] = {{"id",row.number(0)},{"botId",row.string(1)},
-                                              {"request",row.string(2)},{"state",row.string(3)}};
-    }
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number", {id});
     result["revisions"] = Json::array();
@@ -476,40 +508,30 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
                                   {"link",runs.string(2)},{"actionId",runs.string(3)},
                                   {"environmentId",runs.string(4)},{"revisionId",runs.number(5)}});
-    return result;
 }
 
 Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query("SELECT id FROM tasks WHERE (?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?",
-                          {bot,bot,before,before,std::clamp(limit,1u,200u)});
+    static const auto sql = taskPageSql("(?='' OR bot_id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?");
+    auto rows = p_->query(sql.c_str(), {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(task(rows.number(0)));
+    while (rows.next()) {
+        auto task = pageTask(rows);
+        task["generation"] = rows.number(7);
+        p_->addTaskDetails(task);
+        result.push_back(std::move(task));
+    }
     return result;
 }
 
 Json Store::activeTasks(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
-WITH queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-)
-SELECT task.id,task.state,task.data,owner.id,owner.bot_id,owner.state,json_extract(owner.data,'$.request')
-FROM tasks task
-LEFT JOIN queue target ON task.state='queued' AND target.id=task.id
-LEFT JOIN tasks owner ON owner.id=target.head_id AND owner.id<>task.id
-WHERE task.bot_id=? AND task.state NOT IN ('completed','cancelled')
-ORDER BY task.id DESC)SQL", {bot});
+    static const auto sql = taskPageSql("bot_id=? AND state NOT IN ('completed','cancelled')");
+    auto rows = p_->query(sql.c_str(), {bot});
     Json result = Json::array();
     while (rows.next()) {
-        auto task = rows.json(2);
-        task["id"] = rows.number(0);
-        task["state"] = rows.string(1);
-        task["blockedBy"] = nullptr;
+        auto task = pageTask(rows);
         restoreWaitAnchor(*p_,task);
-        if (rows.number(3)) task["blockedBy"] = {{"id",rows.number(3)},{"botId",rows.string(4)},
-                                                {"state",rows.string(5)},{"request",rows.string(6)}};
         result.push_back(std::move(task));
     }
     return result;
@@ -521,7 +543,12 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
                           " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
                           " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
+    while (rows.next()) {
+        auto task = p_->load(rows.number(0));
+        task["blockedBy"] = nullptr;
+        p_->addTaskDetails(task);
+        result.push_back(std::move(task));
+    }
     return result;
 }
 

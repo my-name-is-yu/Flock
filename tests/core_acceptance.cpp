@@ -579,6 +579,43 @@ void evidenceResume() {
           "history read did not resume its budget");
 }
 
+void taskPagesShowProjectOwners() {
+    Fixture f;
+    f.model.script = [](const ModelInput&) { return work(); };
+    const auto desktop = f.submit("Verify main", "beta");
+    f.reach(desktop,"running");
+    const auto cloud = f.store->submit({"beta","Check cloud","cloud","p"});
+    const auto desktopNext = f.submit("Desktop follow-up");
+    const auto independent = f.submit("Separate release","alpha","another-project");
+    const auto cancelled = f.submit("Withdrawn release");
+    f.store->operate(cancelled,0,"cancel");
+    const auto cloudNext = f.store->submit({"alpha","Cloud follow-up","cloud","p"});
+    f.restart();
+
+    const auto newest = f.store->tasks("alpha",0,2);
+    const Json cloudOwner = {{"id",cloud},{"botId","beta"},{"request","Check cloud"},{"state","queued"}};
+    check(newest.size() == 2 && newest[0].at("id") == cloudNext && newest[0].at("blockedBy") == cloudOwner &&
+          newest[1].at("id") == cancelled && newest[1].at("state") == "cancelled" && newest[1].at("blockedBy").is_null(),
+          "the newest page lost the off-page cloud owner or blocked cancelled work");
+    const auto older = f.store->tasks("alpha",cancelled,2);
+    const Json desktopOwner = {{"id",desktop},{"botId","beta"},{"request","Verify main"},{"state","running"}};
+    check(older.size() == 2 && older[0].at("id") == independent && older[0].at("blockedBy").is_null() &&
+          older[1].at("id") == desktopNext && older[1].at("blockedBy") == desktopOwner &&
+          f.store->tasks("alpha",desktopNext,2).empty(),
+          "the older page skipped a task, repeated the cursor or mixed up project owners");
+    const auto active = f.store->activeTasks("alpha");
+    check(active.size() == 3 && active.front().at("id") == cloudNext && active.front().at("blockedBy") == cloudOwner &&
+          active.back().at("id") == desktopNext && active.back().at("blockedBy") == desktopOwner,
+          "the active task list lost the owners of work in separate environments");
+
+    const auto history = f.store->tasks({},cloud,1);
+    check(history.size() == 1 && history[0].at("id") == desktop && history[0].at("blockedBy").is_null() &&
+          history[0].at("runs").size() == 1 && history[0].at("runs")[0].at("link") == "https://t3.test/thread" &&
+          history[0].at("revisions").size() == 1 && history[0].at("revisions")[0].at("doneWhen") == Evidence &&
+          history[0].at("runs")[0].at("revisionId") == history[0].at("revisions")[0].at("id"),
+          "the unfiltered task page lost the running owner's Session link or revision after restart");
+}
+
 void peerWorkAndRestart() {
     Fixture f;
     f.allowBeta();
@@ -1195,6 +1232,11 @@ void peerConsultationAndPermission() {
     };
     f.reach(busy,"running");
     const auto consultation = f.submit("Ask the Verifier about our release policy");
+    f.reach(consultation,"peer_waiting");
+    const auto consulting = f.store->tasks("beta",0,1);
+    check(consulting.size() == 1 && consulting[0].at("request") == "What is the release policy?" &&
+          consulting[0].at("state") == "queued" && consulting[0].at("blockedBy").is_null(),
+          "the consultation was shown as blocked by the Verifier's running task");
     f.reach(consultation,"completed");
     const auto messages = f.botMessages("alpha");
     check(f.t3.seen.size() == 1 && f.t3.interrupts == 0 && f.task(busy)["state"] == "running" &&
@@ -1358,6 +1400,10 @@ void concurrentPeerHandoff() {
     const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
     check(f.task(source)["state"] == "peer_waiting" && f.task(next)["blockedBy"]["id"] == recipient,
           "the queued Task did not report the active peer as the owner");
+    const auto page = f.store->tasks("alpha",0,1);
+    const Json owner = {{"id",recipient},{"botId","beta"},{"request","Verify the release"},{"state","running"}};
+    check(page.size() == 1 && page[0].at("id") == next && page[0].at("blockedBy") == owner,
+          "the queued task page lost the work recipient that inherited the sender's slot");
     f.runtime.reset();
     f.t3.finish("run-1");
     f.restart();
@@ -1621,7 +1667,7 @@ int main() {
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
-            {"history reading restart",evidenceResume},
+            {"history reading restart",evidenceResume},{"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
