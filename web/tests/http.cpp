@@ -2,6 +2,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <iostream>
@@ -10,8 +11,14 @@
 using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
-constexpr auto comparisonRequest = "Compare the three options";
-constexpr auto proposedOptions = "1. Reconcile manually\n2. Summarize the differences first\n3. Review after publication";
+constexpr auto comparisonRequest = "3案を比較して";
+constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
+constexpr auto budgetDetail = "明細は100件です";
+constexpr auto proposedOptions = "1. 手動で照合する\n"
+    "2. 差分を先に集計する\n"
+    "   - 前回と今回の明細を ID で突き合わせる。\n"
+    "   - 追加・削除・更新の件数を出し、金額が変わった明細を人が確認する。\n"
+    "3. 公開後に見直す";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -29,7 +36,14 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
+    unsigned explained = 0, summarized = 0;
+    Id comparisonResult = 0;
+    Id estimateClarification = 0;
+    std::size_t summarySourceSize = 0;
+
     Decision decide(const ModelInput& input) override {
+        if (input.event["kind"] == "route_conversation") return routeMessage(input);
+        if (input.event["kind"] == "answer_conversation_result") return answerResult(input);
         if (input.event["kind"] == "intake")
             return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
         if (input.event["kind"] == "question") {
@@ -37,11 +51,68 @@ struct FixedModel : Model {
                 return {"answer_session_question",{{"requestId","scope-question"},
                     {"answers",{{"scope",input.event["userAnswer"]}}}},"The user selected the scope"};
             }
-            return {"ask_user",{{"question","Should I include only user-facing changes?"},{"choices",{"User-facing only","All changes"}}},"The publication scope needs to be specified"};
+            return {"ask_user",{{"question","利用者向けの変更だけを載せますか？"},{"choices",{"利用者向けのみ","すべて"}}},"掲載範囲の指定が必要"};
         }
         if (input.task["request"] == comparisonRequest)
             return {"complete",{{"report",proposedOptions}},"The Session compared all three options"};
         return {"complete",{{"report","Draft complete"}},"The Session report matches the criterion"};
+    }
+
+    Decision routeMessage(const ModelInput& input) {
+        const auto& event = input.event;
+        check(event.dump().find(privateValue) == std::string::npos &&
+              input.history.dump().find(privateValue) == std::string::npos,"Connection settings entered model-visible context");
+        Json route;
+        if (event.at("text") == budgetDetail) {
+            const auto& pending = event.at("pendingClarification");
+            check(pending.at("messageId") == estimateClarification &&
+                  pending.at("result").at("messageId") == comparisonResult,
+                  "The ordinary reply lost its pending question or selected result");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","answer_result"}}})},
+                    {"resolution","resolved"},{"clarificationMessageId",estimateClarification}},{}};
+        }
+        if (event.at("text") == "2案目を詳しく" || event.at("text") == "2案目を要約して" ||
+            event.at("text") == missingBudgetQuestion) {
+            const auto& results = event.at("results");
+            const auto selected = std::ranges::find_if(results,[&](const Json& result) {
+                return result.at("messageId") == comparisonResult && result.at("request") == comparisonRequest &&
+                       result.at("text") == proposedOptions;
+            });
+            check(selected != results.end(),"The comparison was not available to the model fixture");
+            route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")},{"resultOption",2}};
+        } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
+            route = {{"kind","status"}};
+        } else {
+            const auto& anchor = event.at("reply");
+            check(anchor.at("kind") == "wait" && event.at("text") == "利用者向けのみ",
+                  "Unexpected route in HTTP fixture");
+            route = {{"kind","answer_wait"},{"taskId",anchor.at("taskId")}};
+        }
+        return {"route_conversation",{{"routes",Json::array({route})}},{}};
+    }
+
+    Decision answerResult(const ModelInput& input) {
+        const auto& source = input.event.at("source").at("text").get_ref<const std::string&>();
+        check(source.find("ID で突き合わせる") != std::string::npos &&
+              source.find("金額が変わった明細を人が確認する") != std::string::npos &&
+              source.find("手動で照合する") == std::string::npos && source.find("公開後に見直す") == std::string::npos,
+              "The result answer did not receive only the selected option");
+        const auto question = input.event.at("text").get<std::string>();
+        if (question.find(budgetDetail) != std::string::npos) {
+            check(question.starts_with(missingBudgetQuestion),"The original estimate question was lost");
+            return {"answer_conversation_result",{{"text","100件の明細を照合し、金額が変わった分の確認時間を見積もります。"}},{}};
+        }
+        if (question == "2案目を詳しく") {
+            ++explained;
+            return {"answer_conversation_result",{{"text","差分を先に集計する案です。ID ごとに前回と今回の記録を比べるので、"
+                    "追加・削除・更新を分けて数えられます。そのうち金額が変わった更新だけを人が確かめる手順です。"}},{}};
+        }
+        if (input.event.at("text") == missingBudgetQuestion)
+            return {"clarify_conversation_result",{{"text","見積もりに必要な明細の件数を教えてください。"}},{}};
+        check(input.event.at("text") == "2案目を要約して","The answer model lost the user's summary request");
+        ++summarized;
+        summarySourceSize = source.size();
+        return {"answer_conversation_result",{{"text","ID で明細の差分を集計し、金額変更を人が確認する案です。"}},{}};
     }
 };
 
@@ -73,12 +144,12 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
     return {
         [] {
             return Json::array({
-                {{"id","release"},{"name","Release"},{"soul","Write release notes for users."},
+                {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
                     {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","Review yesterday's changes"},{"token",privateValue}}})},
+                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","Triage reported issues."},{"cron",Json::array()},{"avatar","sprout"}},
-                {{"id","settings"},{"name","Settings"},{"soul","Investigate configuration errors."}},
+                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
+                {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
                 {{"id","broken"},{"name","Broken"}},
             });
         },
@@ -189,23 +260,25 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto& result = completed.at("result");
     check(result["kind"] == "completed" && result["taskId"] == taskId && result["data"]["text"] == proposedOptions,
           "task details lost the completion report");
+    model.comparisonResult = result.at("id");
     const auto& reportRun = result.at("data").at("run");
     check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
           "task details did not point to the Run and report item that produced the result");
 
-    const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","Explain option 2 in more detail"}};
+    const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
+    check(model.explained == 0 && store.tasks().size() == 1,"HTTP intake ran model routing before returning its receipt");
     disableIntake = true;
     check(browser.post("/api/messages",message,201) == receipt,"retry did not recover its receipt with changed Bot settings");
     auto changed = message;
-    changed["text"] = "Explain option 3 in more detail";
+    changed["text"] = "3案目を詳しく";
     browser.post("/api/messages",changed,409);
     changed = message;
     changed["replyToMessageId"] = result.at("id");
     browser.post("/api/messages",changed,409);
-    browser.post("/api/messages",{{"botId","release"},{"text","Additional clarification"}},400);
+    browser.post("/api/messages",{{"botId","release"},{"text","追加確認"}},400);
 
     tick(runtime,3);
     const auto page = browser.get("/api/view?bot=release");
@@ -221,8 +294,11 @@ void conversationEntry(const std::filesystem::path& path) {
     }
     const auto response = conversationReply(page,messageId);
     const auto responseText = response.at("text").get<std::string>();
-    check(response["route"] == "respond" && responseText.find("Summarize the differences first") != std::string::npos &&
-          responseText.find("Reconcile manually") == std::string::npos && responseText.find("Review after publication") == std::string::npos,
+    check(response["route"] == "respond" && responseText.find("差分を先に集計する") != std::string::npos &&
+          responseText.find("ID ごとに前回と今回の記録を比べる") != std::string::npos &&
+          responseText.find("追加・削除・更新を分けて数えられます") != std::string::npos &&
+          responseText.find("金額が変わった更新だけを人が確かめる") != std::string::npos &&
+          responseText.find("手動で照合する") == std::string::npos && responseText.find("公開後に見直す") == std::string::npos,
           "answer did not explain only the second option");
     check(response["source"]["taskId"] == taskId && response["source"]["messageId"] == result["id"],
           "answer did not point to the completed comparison");
@@ -233,16 +309,50 @@ void conversationEntry(const std::filesystem::path& path) {
           "task details omitted the comparison Run or exposed config");
     Browser::checked(browser.client.Get("/api/task?bot=triage&taskId=" + std::to_string(taskId)),404);
 
-    const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","What's the status?"}};
+    const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
+        {"text","2案目を要約して"}},201);
+    tick(runtime,3);
+    const auto summarized = conversationReply(browser.get("/api/view?bot=release"),summary.at("messageId"));
+    const auto summaryText = summarized.at("text").get<std::string>();
+    check(summarized.at("route") == "respond" && summarized.at("source").at("messageId") == result.at("id") &&
+          summaryText.find("ID で明細の差分を集計") != std::string::npos &&
+          summaryText.find("金額変更を人が確認") != std::string::npos &&
+          summaryText.find("手動で照合する") == std::string::npos && summaryText.find("公開後に見直す") == std::string::npos &&
+          summaryText.size() < model.summarySourceSize,"The summary did not condense the selected option");
+    check(model.explained == 1 && model.summarized == 1 && store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Two read-only answers added work or missed the model calls");
+
+    const auto estimate = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","estimate"},
+        {"text",missingBudgetQuestion}},201);
+    runtime.routeConversation();
+    const auto estimateReply = conversationReply(browser.get("/api/view?bot=release"),estimate.at("messageId"));
+    const auto pending = store.clarifications("release");
+    check(estimateReply.at("route") == "clarify" &&
+          estimateReply.at("text") == "見積もりに必要な明細の件数を教えてください。" &&
+          pending.size() == 1 && pending.front().at("messageId") == estimateReply.at("messageId") &&
+          pending.front().at("source").at("messageId") == result.at("id") &&
+          store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Insufficient evidence did not yield a durable read-only clarification");
+    model.estimateClarification = estimateReply.at("messageId");
+    const auto detail = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","estimate-detail"},
+        {"text",budgetDetail}},201);
+    runtime.routeConversation();
+    const auto estimateAnswer = conversationReply(browser.get("/api/view?bot=release"),detail.at("messageId"));
+    check(estimateAnswer.at("route") == "respond" && estimateAnswer.at("source").at("messageId") == result.at("id") &&
+          estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos &&
+          store.clarifications("release").empty() && store.tasks().size() == 1 && t3.launches == 1 &&
+          browser.get(taskPath).at("runs") == task.at("runs"),"Answering the clarification created work or lost the result");
+
+    const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","進捗どうなってる"}};
     const auto statusReceipt = browser.post("/api/messages",status,201);
     tick(runtime,3);
     const auto statusReply = conversationReply(browser.get("/api/view?bot=release"),statusReceipt.at("messageId"));
     const auto statusReplyText = statusReply.at("text").get<std::string>();
-    check(statusReplyText.find(comparisonRequest) != std::string::npos && statusReplyText.find("Complete") != std::string::npos &&
+    check(statusReplyText.find(comparisonRequest) != std::string::npos && statusReplyText.find("完了") != std::string::npos &&
           store.tasks().size() == 1 && t3.launches == 1,"progress inquiry with changed settings failed to report completion without creating work");
     disableIntake = false;
-    const auto firstWaitTask = browser.request("triage","Decide what to publish");
-    const auto secondWaitTask = store.submit({"triage","Decide what to publish next time","linked env","next-scope"});
+    const auto firstWaitTask = browser.request("triage","掲載する範囲を決める");
+    const auto secondWaitTask = store.submit({"triage","次回の掲載範囲を決める","linked env","next-scope"});
     tick(runtime,3);
     t3.observations["thread-triage"] = {
         .kind = Observation::Kind::Question,
@@ -261,13 +371,13 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto question = firstWait.at("messageId").get<Id>();
     const auto otherQuestion = secondWait.at("messageId").get<Id>();
     check(question > 0 && otherQuestion > 0 && question != otherQuestion,"pending questions did not have distinct reply anchors");
-    const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","User-facing only"},{"replyToMessageId",question}};
+    const Json reply = {{"botId","triage"},{"clientMessageId","answer-first"},{"text","利用者向けのみ"},{"replyToMessageId",question}};
     const auto answerReceipt = browser.post("/api/messages",reply,201);
     tick(runtime,2);
     check(browser.post("/api/messages",reply,201) == answerReceipt,"exact answer retry lost its receipt");
     auto delayed = reply;
     delayed["clientMessageId"] = "delayed-answer-first";
-    delayed["text"] = "All changes";
+    delayed["text"] = "すべて";
     const auto delayedReceipt = browser.post("/api/messages",delayed,201);
     tick(runtime,2);
     const auto afterAnswer = browser.get("/api/view?bot=triage");
@@ -296,14 +406,14 @@ void exercise(const std::filesystem::path& path) {
     Browser browser(*server);
     boundary(browser);
     check(store.tasks().empty(),"rejected requests changed SQLite");
-    const auto release = browser.request("release","Check what to include in the draft");
-    const auto triage = browser.request("triage","Review the bugs reported yesterday");
-    const auto settings = browser.request("settings","Check the connection settings");
+    const auto release = browser.request("release","下書きの掲載範囲を確認する");
+    const auto triage = browser.request("triage","昨日届いた不具合を確認する");
+    const auto settings = browser.request("settings","接続設定を確認する");
     tick(*runtime,3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     t3.observations["thread-triage"].kind = Observation::Kind::ExternalInput;
-    t3.observations["thread-triage"].status = "Permission approval required";
+    t3.observations["thread-triage"].status = "権限の承認が必要";
     tick(*runtime,2);
 
     const auto releasePage = browser.get("/api/view?bot=release");
@@ -320,22 +430,22 @@ void exercise(const std::filesystem::path& path) {
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
-    check(list[0]["preview"] == "Should I include only user-facing changes?","Bot list does not show its latest question");
+    check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
     const Id waitId = waits[0]["wait"]["id"];
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","Look into the changes for the next release"},
+    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
-    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","All changes"}};
+    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
-    cli.operate(release,waitId,"answer",{{"text","User-facing only"}});
+    cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
     browser.post("/api/operations",reply,409);
     tick(*runtime,2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&
-          t3.replies[0].answers["scope"] == "User-facing only" && cli.task(next)["state"] == "queued",
+          t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
 
@@ -368,12 +478,12 @@ void exercise(const std::filesystem::path& path) {
     triageQuestion.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     tick(*runtime,2);
     const auto questionId = reopened.get("/api/view?bot=triage")["waits"][0]["wait"]["id"];
-    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","All changes"}};
+    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","すべて"}};
     reopened.post("/api/operations",answer);
     reopened.post("/api/operations",answer,409);
     tick(*runtime,2);
     check(t3.replies.size() == 2 && t3.replies.back().target.threadId == "thread-triage" &&
-          t3.replies.back().answers["scope"] == "All changes","a Web answer did not resume its own question exactly once");
+          t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
 
     for (int i = 0; i < 43; ++i) {
         cli.submit({"release","Paged request " + std::to_string(i),"local-env","release",Json::object(),"daily",1700000000 + i});
@@ -383,8 +493,8 @@ void exercise(const std::filesystem::path& path) {
     check(cursor > 0 && newest["events"].front()["id"] == cursor,"missing exclusive older cursor");
     const auto older = reopened.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
     check(older["events"].back()["id"].get<Id>() < cursor &&
-          hasEvent(older["events"],"request","Check what to include in the draft") &&
-          !hasEvent(older["events"],"request","Review the bugs reported yesterday"),"older page was out of scope or lost events");
+          hasEvent(older["events"],"request","下書きの掲載範囲を確認する") &&
+          !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
     check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
 
     for (int i = 0; i < 8; ++i) {

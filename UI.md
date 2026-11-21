@@ -17,9 +17,9 @@ Switching Bots updates “Waiting for input,” “Sessions,” and the conversa
 
 ## New requests and replies to questions
 
-In the usual case, the input at the bottom of the conversation sends a **new request** to the selected Bot. If another task is already running in the same project, the UI shows which task must finish first.
+Use the composer to send a request, add to work in progress, or ask about a result. The Bot uses the conversation to decide how to handle the message and asks for clarification when the target is unclear. If another task is already running in the same project, the UI shows which task must finish first.
 
-Answer a Bot's question by selecting an option or choosing “Write a reply.” The composer shows the question while you enter your reply. Sending or canceling the reply returns the composer to new requests. New request drafts and replies are kept separately so switching Bots preserves the intended recipient.
+Answer a Bot's question in the composer, or select an option or choose “Write a reply” to target a specific question. The composer shows the question while you enter a direct reply. New request drafts and replies are kept separately so switching Bots preserves the intended recipient.
 
 For example, if Release asks “Should the draft include only user-facing changes?”, “User-facing changes only” answers that question. Sending “Also check the changes in the next version” in the standard composer creates another task.
 

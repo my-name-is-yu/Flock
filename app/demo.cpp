@@ -4,7 +4,28 @@ namespace flockv0::app {
 namespace {
 class DemoModel final : public Model {
     Decision decide(const ModelInput& in) override {
-        if (in.event.value("kind","") == "result") {
+        const auto event = in.event.value("kind","");
+        if (event == "route_conversation") {
+            Json route = {{"kind","create_task"}};
+            const auto& reply = in.event.at("reply");
+            if (reply["kind"] == "wait") {
+                for (const auto& task : in.event.at("tasks")) {
+                    if (task["taskId"] == reply["taskId"] && task["wait"]["reason"] == "user_question")
+                        route = {{"kind","answer_wait"},{"taskId",reply["taskId"]}};
+                }
+            } else if (reply["kind"] == "result") {
+                route = {{"kind","answer_result"},{"resultMessageId",reply["resultMessageId"]}};
+            } else if (reply["kind"] == "clarification") {
+                route = {{"kind","clarify"},{"text","Use a direct request or reply to a demo question."}};
+            }
+            return {"route_conversation",{{"routes",Json::array({route})}},"Fixed demo routing."};
+        }
+        if (event == "answer_conversation_result") {
+            return {"answer_conversation_result",
+                {{"text","The demo result records successful completion of simulated work. It contains no implementation details."}},
+                "The fixed demo reports only completion."};
+        }
+        if (event == "result") {
             return {"complete",{{"report",in.event.value("report","")}},
                 "The demo Session reported that it completed the requested work."};
         }

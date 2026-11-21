@@ -118,7 +118,7 @@ public:
     Store& operator=(const Store&) = delete;
 
     Id submit(const Intake&);
-    // Acknowledges a durable Bot message. Retrying the same key and text returns the same receipt.
+    // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0);
     std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
@@ -155,6 +155,7 @@ public:
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
+    void routeConversation();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.
     void tick();
