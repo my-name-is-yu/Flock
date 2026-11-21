@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cctype>
 #include <charconv>
+#include <cstdint>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -12,6 +15,21 @@
 
 namespace flockv0::app {
 namespace {
+constexpr std::size_t maxAvatarBytes = 5 * 1024 * 1024;
+constexpr std::size_t maxConfigBytes = 128 * 1024;
+constexpr std::array<std::string_view,4> allowedAvatarFiles = {
+    "avatar.png", "avatar.jpg", "avatar.webp", "avatar.gif"
+};
+constexpr std::array<std::string_view,7> allowedShapes = {
+    "mug", "sprout", "controller", "lightbulb", "chat", "watering-can", "barbell"
+};
+constexpr std::array<std::string_view,8> allowedIcons = {
+    "star", "orbit", "zap", "compass", "feather", "hexagon", "telescope", "sparkles"
+};
+constexpr std::array<std::string_view,4> allowedRoles = {
+    "reviewer", "builder", "researcher", "custom"
+};
+
 bool validId(std::string_view id) {
     const auto starts = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     return !id.empty() && id.size() <= 128 && std::string_view(starts).find(id.front()) != std::string_view::npos &&
@@ -40,8 +58,221 @@ std::string readText(const std::filesystem::path& file, std::size_t limit, bool 
     return out;
 }
 
+void writeAtomic(const std::filesystem::path& file, std::string_view content) {
+    static std::atomic<std::uint64_t> counter{0};
+    const auto temp = file.parent_path() / (file.filename().string() + ".tmp." + std::to_string(++counter));
+    {
+        std::ofstream output(temp,std::ios::binary | std::ios::trunc);
+        if (!output) throw Conflict("Unable to write " + file.filename().string());
+        output.write(content.data(),static_cast<std::streamsize>(content.size()));
+        output.flush();
+        if (!output) {
+            std::error_code ignore;
+            std::filesystem::remove(temp,ignore);
+            throw Conflict("Unable to write " + file.filename().string());
+        }
+    }
+    std::error_code error;
+    std::filesystem::rename(temp,file,error);
+    if (error) {
+        std::error_code ignore;
+        std::filesystem::remove(temp,ignore);
+        throw Conflict("Unable to save " + file.filename().string());
+    }
+}
+
 bool present(const std::string& text) {
     return text.find_first_not_of(" \t\r\n") != std::string::npos;
+}
+
+std::string trim(std::string_view value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return std::string(value.substr(first,last - first + 1));
+}
+
+std::size_t utf8Codepoints(std::string_view text) {
+    std::size_t count = 0;
+    for (const unsigned char ch : text)
+        if ((ch & 0xC0) != 0x80) ++count;
+    return count;
+}
+
+bool validHexColor(std::string_view color) {
+    if (color.size() != 4 && color.size() != 7) return false;
+    if (color[0] != '#') return false;
+    return std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) {
+        return std::isxdigit(ch) != 0;
+    });
+}
+
+template <std::size_t N>
+bool inList(const std::array<std::string_view,N>& list, std::string_view value) {
+    return std::find(list.begin(),list.end(),value) != list.end();
+}
+
+struct DetectedImage {
+    std::string contentType;
+    std::string filename;
+};
+
+std::optional<DetectedImage> detectImage(std::string_view bytes) {
+    if (bytes.size() < 8 || bytes.size() > maxAvatarBytes) return std::nullopt;
+    const auto byte = [&](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
+    if (byte(0) == 0x89 && byte(1) == 'P' && byte(2) == 'N' && byte(3) == 'G' &&
+        byte(4) == 0x0D && byte(5) == 0x0A && byte(6) == 0x1A && byte(7) == 0x0A)
+        return DetectedImage{"image/png","avatar.png"};
+    if (byte(0) == 0xFF && byte(1) == 0xD8 && byte(2) == 0xFF)
+        return DetectedImage{"image/jpeg","avatar.jpg"};
+    if (bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a"))
+        return DetectedImage{"image/gif","avatar.gif"};
+    if (bytes.size() >= 12 && bytes.substr(0,4) == "RIFF" && bytes.substr(8,4) == "WEBP")
+        return DetectedImage{"image/webp","avatar.webp"};
+    return std::nullopt;
+}
+
+std::string hashHex(std::string_view bytes) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char ch : bytes) {
+        hash ^= ch;
+        hash *= 1099511628211ULL;
+    }
+    constexpr char hex[] = "0123456789abcdef";
+    std::string out(16,'0');
+    for (int i = 15; i >= 0; --i) {
+        out[static_cast<std::size_t>(i)] = hex[hash & 0xF];
+        hash >>= 4;
+    }
+    return out;
+}
+
+std::string sanitizeFilename(std::string_view raw) {
+    const auto slash = raw.find_last_of("/\\");
+    if (slash != std::string_view::npos) raw.remove_prefix(slash + 1);
+    std::string cleaned;
+    cleaned.reserve(std::min<std::size_t>(raw.size(),120));
+    for (const unsigned char ch : raw) {
+        if (ch < 32 || ch == 127) continue;
+        cleaned.push_back(static_cast<char>(ch));
+    }
+    return bounded(trim(cleaned),120);
+}
+
+std::string validatedBotName(const Json& profile) {
+    const auto found = profile.find("name");
+    if (found == profile.end() || !found->is_string()) throw Conflict("Bot name must be a string");
+    const auto name = trim(found->get_ref<const std::string&>());
+    if (name.empty() || name.size() > 128 || utf8Codepoints(name) > 32)
+        throw Conflict("Bot name must be 1 to 32 characters");
+    if (std::any_of(name.begin(),name.end(),[](unsigned char ch) { return ch < 32 || ch == 127; }))
+        throw Conflict("Bot name contains invalid characters");
+    return name;
+}
+
+std::string slugForName(std::string_view name) {
+    std::string slug;
+    bool dash = false;
+    for (const unsigned char ch : name) {
+        if (std::isalnum(ch)) {
+            slug.push_back(static_cast<char>(std::tolower(ch)));
+            dash = false;
+        } else if (!slug.empty() && !dash) {
+            slug.push_back('-');
+            dash = true;
+        }
+        if (slug.size() >= 40) break;
+    }
+    while (!slug.empty() && slug.back() == '-') slug.pop_back();
+    if (slug.empty() || !validId(slug)) return "bot";
+    return slug;
+}
+
+std::string roleStarterSoul(std::string_view role) {
+    if (role == "reviewer")
+        return "Review changes carefully, verify results with evidence, and highlight risks clearly.\n";
+    if (role == "builder")
+        return "Implement requested changes cleanly, run relevant tests, and report verified outcomes.\n";
+    if (role == "researcher")
+        return "Investigate questions thoroughly, gather concrete evidence, and summarize findings clearly.\n";
+    return {};
+}
+
+// Removes only the image the previous avatar referenced, so files the editor never wrote survive.
+void removeReplacedAvatarFile(const std::filesystem::path& directory, const Json& previous, std::string_view keep) {
+    if (!previous.is_object() || previous.value("kind","") != "upload") return;
+    const auto file = previous.find("file");
+    if (file == previous.end() || !file->is_string()) return;
+    const auto& name = file->get_ref<const std::string&>();
+    if (name == keep || !inList(allowedAvatarFiles,name)) return;
+    std::error_code ignore;
+    std::filesystem::remove(directory / name,ignore);
+}
+
+Json prepareAvatar(const Json& profile, const std::filesystem::path& botDir, const Json& existingAvatar,
+                   const std::optional<AvatarImage>& image, std::string& keepFile, std::string& writeFile,
+                   std::string_view& writeBytes) {
+    const auto found = profile.find("avatar");
+    if (found == profile.end() || !found->is_object()) throw Conflict("Avatar must be an object");
+    const auto& source = *found;
+    const auto kindIt = source.find("kind");
+    if (kindIt == source.end() || !kindIt->is_string()) throw Conflict("Avatar kind is required");
+    const auto& kind = kindIt->get_ref<const std::string&>();
+    std::string color = "#69c9ac";
+    if (source.contains("color")) {
+        if (!source["color"].is_string() || !validHexColor(source["color"].get_ref<const std::string&>()))
+            throw Conflict("Avatar color must be a hex color");
+        color = source["color"].get<std::string>();
+    }
+    if (kind == "shape") {
+        const auto exampleIt = source.find("example");
+        if (exampleIt == source.end() || !exampleIt->is_string() ||
+            !inList(allowedShapes,exampleIt->get_ref<const std::string&>()))
+            throw Conflict("Unsupported avatar shape");
+        keepFile.clear();
+        return {{"kind","shape"},{"example",exampleIt->get<std::string>()},{"color",color}};
+    }
+    if (kind == "icon") {
+        const auto iconIt = source.find("icon");
+        if (iconIt == source.end() || !iconIt->is_string() ||
+            !inList(allowedIcons,iconIt->get_ref<const std::string&>()))
+            throw Conflict("Unsupported avatar icon");
+        keepFile.clear();
+        return {{"kind","icon"},{"icon",iconIt->get<std::string>()},{"color",color}};
+    }
+    if (kind == "upload") {
+        if (image) {
+            const auto detected = detectImage(image->bytes);
+            if (!detected) throw Conflict("Choose a PNG, JPEG, WebP or GIF up to 5 MB");
+            keepFile = detected->filename;
+            writeFile = detected->filename;
+            writeBytes = image->bytes;
+            const auto filename = source.contains("filename") && source["filename"].is_string()
+                ? sanitizeFilename(source["filename"].get_ref<const std::string&>()) : std::string{};
+            Json stored = {{"kind","upload"},{"file",detected->filename},
+                           {"version",hashHex(image->bytes)},{"color",color}};
+            if (!filename.empty()) stored["filename"] = filename;
+            return stored;
+        }
+        if (existingAvatar.is_object() && existingAvatar.value("kind","") == "upload" &&
+            existingAvatar.contains("file") && existingAvatar["file"].is_string()) {
+            const auto existingFile = existingAvatar["file"].get<std::string>();
+            const auto target = botDir / existingFile;
+            if (inList(allowedAvatarFiles,existingFile) &&
+                std::filesystem::is_regular_file(target) && !std::filesystem::is_symlink(target)) {
+                keepFile = existingFile;
+                Json stored = {{"kind","upload"},{"file",existingFile},
+                               {"version",existingAvatar.value("version","1")},{"color",color}};
+                const auto filename = source.contains("filename") && source["filename"].is_string()
+                    ? sanitizeFilename(source["filename"].get_ref<const std::string&>())
+                    : sanitizeFilename(existingAvatar.value("filename",""));
+                if (!filename.empty()) stored["filename"] = filename;
+                return stored;
+            }
+        }
+        throw Conflict("Uploaded image is required");
+    }
+    throw Conflict("Unsupported avatar kind");
 }
 
 int number(std::string_view value) {
@@ -142,7 +373,7 @@ std::vector<std::string> Bots::ids() const {
 
 Bot Bots::get(std::string_view id) const {
     const auto file = path(id) / "config.json";
-    const auto config = Json::parse(readText(file,128*1024),nullptr,false);
+    const auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
     Bot bot;
     bot.id = id;
@@ -152,6 +383,7 @@ Bot Bots::get(std::string_view id) const {
     if (!plainId(bot.environmentId) || !plainId(bot.projectId))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
         if (!destinations.is_object() || destinations.size() > 16)
@@ -229,23 +461,159 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     return result;
 }
 
+Json Bots::cardLocked(std::string_view id) const {
+    const auto botDir = path(id);
+    const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
+    if (!config.is_object())
+        return {{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}};
+
+    std::string name(id);
+    if (config.contains("name") && config["name"].is_string() && present(config["name"].get_ref<const std::string&>()))
+        name = config["name"].get<std::string>();
+
+    auto schedules = Json::array();
+    if (config.contains("cron") && config["cron"].is_array()) {
+        for (const auto& schedule : config["cron"]) {
+            if (!schedule.is_object()) continue;
+            try {
+                const auto scheduleId = validatedString(schedule,"id");
+                const auto expression = validatedString(schedule,"schedule");
+                const auto timezone = validatedString(schedule,"timezone");
+                const auto request = validatedString(schedule,"request");
+                schedules.push_back({{"id",scheduleId},{"schedule",expression},
+                    {"timezone",timezone},{"request",request}});
+            } catch (const Conflict&) {}
+        }
+    }
+
+    Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",8192,true)},{"cron",schedules}};
+    if (config.contains("role") && config["role"].is_string() && inList(allowedRoles,config["role"].get_ref<const std::string&>()))
+        item["role"] = config["role"];
+    if (config.contains("avatar") && (config["avatar"].is_string() || config["avatar"].is_object())) {
+        auto avatar = config["avatar"];
+        if (avatar.is_object() && avatar.value("kind","") == "upload") {
+            const auto file = avatar.value("file",std::string{});
+            const auto target = botDir / file;
+            if (!inList(allowedAvatarFiles,file) ||
+                !std::filesystem::is_regular_file(target) || std::filesystem::is_symlink(target)) {
+                avatar.erase("file");
+                avatar.erase("version");
+            }
+        }
+        item["avatar"] = std::move(avatar);
+    }
+    return item;
+}
+
 Json Bots::cards() const {
+    std::lock_guard lock(mutex_);
     auto items = Json::array();
     for (const auto& id : ids()) {
         try {
-            const auto bot = get(id);
-            auto schedules = Json::array();
-            for (const auto& schedule : bot.schedules)
-                schedules.push_back({{"id",schedule.id},{"schedule",schedule.expression},
-                    {"timezone",schedule.timezone},{"request",schedule.request}});
-            Json item = {{"id",id},{"name",bot.name},{"soul",notes(id).soul},{"cron",schedules}};
-            if (!bot.avatar.is_null()) item["avatar"] = bot.avatar;
-            items.push_back(std::move(item));
+            items.push_back(cardLocked(id));
         } catch (const std::exception&) {
             items.push_back({{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}});
         }
     }
     return items;
+}
+
+Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) {
+    if (!profile.is_object()) throw Conflict("Profile must be an object");
+    const auto name = validatedBotName(profile);
+    std::string role = "custom";
+    if (profile.contains("role")) {
+        if (!profile["role"].is_string() || !inList(allowedRoles,profile["role"].get_ref<const std::string&>()))
+            throw Conflict("Unsupported bot role");
+        role = profile["role"].get<std::string>();
+    }
+    std::string keepFile, writeFile;
+    std::string_view writeBytes;
+    const auto avatar = prepareAvatar(profile,{},Json{},image,keepFile,writeFile,writeBytes);
+
+    std::lock_guard lock(mutex_);
+    std::filesystem::create_directories(directory_);
+    const auto base = slugForName(name);
+    std::string id = base;
+    for (unsigned suffix = 2; std::filesystem::exists(directory_ / id); ++suffix)
+        id = base + "-" + std::to_string(suffix);
+    const auto botDir = directory_ / id;
+    std::filesystem::create_directories(botDir);
+    try {
+        if (!writeFile.empty()) writeAtomic(botDir / writeFile,writeBytes);
+        Json config = {{"name",name},{"role",role},{"avatar",avatar}};
+        writeAtomic(botDir / "config.json",config.dump(2,' ',false,Json::error_handler_t::replace) + "\n");
+        const auto starter = roleStarterSoul(role);
+        if (!starter.empty()) writeAtomic(botDir / "SOUL.md",starter);
+        return cardLocked(id);
+    } catch (...) {
+        std::error_code ignore;
+        std::filesystem::remove_all(botDir,ignore);
+        throw;
+    }
+}
+
+Json Bots::updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image) {
+    if (!profile.is_object()) throw Conflict("Profile must be an object");
+    const auto name = validatedBotName(profile);
+
+    std::lock_guard lock(mutex_);
+    const auto botDir = path(id);
+    const auto file = botDir / "config.json";
+    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
+    if (!config.is_object()) throw Conflict("Invalid Bot config.json");
+
+    std::string keepFile, writeFile;
+    std::string_view writeBytes;
+    const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
+    const bool changeAvatar = profile.contains("avatar");
+    config["name"] = name;
+    if (changeAvatar)
+        config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image,keepFile,writeFile,writeBytes);
+
+    // Check the size the readers accept before anything on disk changes.
+    auto text = config.dump(2,' ',false,Json::error_handler_t::replace) + "\n";
+    if (text.size() > maxConfigBytes) text = config.dump(-1,' ',false,Json::error_handler_t::replace) + "\n";
+    if (text.size() > maxConfigBytes) throw Conflict("Bot config.json would exceed its size limit");
+
+    if (!writeFile.empty()) writeAtomic(botDir / writeFile,writeBytes);
+    writeAtomic(file,text);
+    if (changeAvatar) removeReplacedAvatarFile(botDir,existingAvatar,keepFile);
+    return cardLocked(id);
+}
+
+std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
+    std::lock_guard lock(mutex_);
+    try {
+        const auto botDir = path(id);
+        const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
+        if (!config.is_object() || !config.contains("avatar") || !config["avatar"].is_object())
+            return std::nullopt;
+        const auto& avatar = config["avatar"];
+        if (avatar.value("kind","") != "upload" || !avatar.contains("file") || !avatar["file"].is_string())
+            return std::nullopt;
+        const auto file = avatar["file"].get<std::string>();
+        if (!inList(allowedAvatarFiles,file)) return std::nullopt;
+        const auto target = botDir / file;
+        if (!std::filesystem::is_regular_file(target) || std::filesystem::is_symlink(target))
+            return std::nullopt;
+        const auto bytes = readText(target,maxAvatarBytes);
+        const auto detected = detectImage(bytes);
+        if (!detected) return std::nullopt;
+        return AvatarImage{detected->contentType,bytes};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+bool Bots::hasCron(std::string_view id) const {
+    try {
+        const auto config = Json::parse(readText(path(id) / "config.json",maxConfigBytes),nullptr,false);
+        if (!config.is_object()) return true;
+        return config.contains("cron") && (!config["cron"].is_array() || !config["cron"].empty());
+    } catch (const std::exception&) {
+        return true;
+    }
 }
 
 Scheduler::Scheduler(const Bots& bots, Store& store, Seconds startedAt, ErrorReporter report)
@@ -256,6 +624,7 @@ void Scheduler::tick(Seconds now) {
     if (next_ > now) return;
     std::vector<Bot> configured;
     for (const auto& id : bots_.ids()) {
+        if (!bots_.hasCron(id)) continue;
         try { configured.push_back(bots_.get(id)); }
         catch (const std::exception& error) { report_(id,error.what()); }
     }

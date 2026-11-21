@@ -28,6 +28,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
     "cloud Mac": "<connected T3 environment ID>"
   },
   "runTimeoutSeconds": 1800,
+  "modelCallLimit": 20,
   "session": {
     "runtimeMode": "approval-required"
   },
@@ -47,6 +48,8 @@ In the same directory, use `SOUL.md` for the Bot's role and decision criteria an
 Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. An ambiguous destination is confirmed before work starts.
 
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
+
+Optional `modelCallLimit` sets the initial allowance per request (20 by default). Routing, result explanations, task decisions, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
 
 ## Connect a live model and T3
 

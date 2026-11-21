@@ -380,9 +380,12 @@ async function parseStream(body, requestId) {
     if (payload === "[DONE]") return;
     const event = JSON.parse(payload);
     if (event.type === "response.completed") completed = event.response;
-    if (event.type === "response.incomplete") throw new Failure("ChatGPT returned an incomplete response", true);
-    if (event.type === "response.failed" || event.type === "error") {
-      throw remoteFailure("ChatGPT Responses API", 0, event.response ?? event, requestId);
+    if (event.type === "response.incomplete" || event.type === "response.failed" || event.type === "error") {
+      const failure = event.type === "response.incomplete"
+        ? new Failure("ChatGPT returned an incomplete response", true)
+        : remoteFailure("ChatGPT Responses API", 0, event.response ?? event, requestId);
+      failure.usage = event.response?.usage ?? event.usage;
+      throw failure;
     }
   }
   try {
@@ -415,7 +418,6 @@ async function infer(payload) {
     throw new Failure("ChatGPT did not return the expected response stream", true);
   }
   const completed = await parseStream(response.body, response.headers.get("x-request-id"));
-  if (!Array.isArray(completed.output)) throw new Failure("ChatGPT completed without Responses output");
   return { output: completed.output, usage: completed.usage };
 }
 
@@ -440,6 +442,7 @@ try {
   console.log(JSON.stringify({
     error: known ? error.message : "Flock's ChatGPT transport failed",
     transient: known && error.transient,
+    usage: known ? error.usage : undefined,
   }));
 } finally {
   unlock();

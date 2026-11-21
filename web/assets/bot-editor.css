@@ -1,0 +1,240 @@
+.bot-editor-dialog {
+  width: min(44rem, calc(100% - 2rem));
+  height: min(25rem, calc(100dvh - 2rem));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  border: 0;
+  border-radius: var(--radius-xl);
+  background: var(--overlay);
+  box-shadow: var(--shadow-lg);
+}
+.bot-editor-dialog[open] { display: flex; }
+.bot-editor-dialog::backdrop { background: var(--backdrop); }
+
+.bot-editor-dialog, .bot-editor-dialog::backdrop {
+  transition: opacity .18s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1),
+    overlay .22s allow-discrete, display .22s allow-discrete;
+}
+.bot-editor-dialog:not([open]) { opacity: 0; transform: translateY(6px) scale(.985); transition-duration: .12s; }
+.bot-editor-dialog:not([open])::backdrop { opacity: 0; transition-duration: .12s; }
+@starting-style {
+  .bot-editor-dialog[open] { opacity: 0; transform: translateY(6px) scale(.985); }
+  .bot-editor-dialog[open]::backdrop { opacity: 0; }
+}
+
+.studio {
+  display: grid;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  width: 100%;
+  min-height: 0;
+}
+
+/* Step 1: preset or blank. Same dialog box as step 2, so nothing jumps. */
+.studio-start {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4) var(--space-4) var(--space-5) var(--space-5);
+}
+.studio-start .studio-head { margin-bottom: var(--space-4); }
+.studio-start-heading { margin: var(--space-5) 0 var(--space-2) .15rem; color: var(--text-2); font-size: var(--text-sm); font-weight: 600; }
+.studio-start-list { display: grid; flex-shrink: 0; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
+.studio-start-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 3.6rem;
+  padding: .65rem var(--space-4);
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+.studio-start-option + .studio-start-option { box-shadow: inset 0 1px var(--hairline); }
+.studio-start-option:hover { background: var(--hover); }
+.studio-start-option:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
+.studio-start-icon { display: grid; place-items: center; width: 2rem; height: 2rem; flex: none; border-radius: var(--radius-md); background: var(--overlay); color: var(--text-2); }
+.studio-start-icon svg { width: 1rem; height: 1rem; }
+.studio-start-copy { display: grid; gap: .1rem; min-width: 0; flex: 1; }
+.studio-start-copy strong { font-size: var(--text-md); font-weight: 600; }
+.studio-start-copy small { color: var(--text-2); font-size: var(--text-sm); }
+.studio-start-option > svg { width: 1rem; height: 1rem; flex: none; color: var(--text-3); }
+
+/* Preview: the avatar and the name field are the same object. */
+.studio-stage {
+  margin: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  min-width: 0;
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+}
+.studio-hero-avatar { display: grid; place-items: center; width: 8.5rem; height: 8.5rem; flex: none; }
+.studio-hero-avatar > svg, .studio-hero-avatar > canvas { width: 100%; height: 100%; }
+.studio-hero-avatar .avatar-photo { width: 6.5rem; height: 6.5rem; border-radius: 24px; }
+.studio-hero-avatar .avatar-icon-glyph { width: 70%; height: 70%; }
+
+.studio-name { position: relative; width: 100%; margin-top: var(--space-2); }
+.studio-name-input {
+  width: 100%;
+  padding: .4rem 2.4rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-xl);
+  font-weight: 600;
+  text-align: center;
+  text-overflow: ellipsis;
+}
+.studio-name-input:hover { border-color: var(--hairline); }
+.studio-name-input:focus { border-color: var(--hairline); background: var(--field); }
+.studio-name-input:focus-visible { outline-offset: 0; }
+.studio-name-random {
+  position: absolute;
+  top: 50%;
+  right: .2rem;
+  transform: translateY(-50%);
+  width: 1.9rem;
+  height: 1.9rem;
+}
+.studio-name-random svg, .studio-close svg, .studio-shuffle svg { width: 1rem; height: 1rem; }
+
+/* Controls */
+.studio-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-3);
+}
+.studio-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.studio-head h2 { font-size: var(--text-lg); font-weight: 600; }
+.studio-close { margin-right: -.35rem; color: var(--text-3); }
+
+.studio-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
+.studio-tabs { display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
+.studio-tabs button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: .3rem .75rem;
+  background: none;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.studio-tabs button:hover { color: var(--text); }
+.studio-tabs button[aria-pressed="true"] { background: var(--overlay); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px var(--shadow-color); }
+.studio-shuffle:disabled { opacity: .35; cursor: default; }
+.studio-shuffle:disabled:hover { background: none; color: var(--text-2); }
+
+.studio-gallery {
+  display: grid;
+  grid-template-columns: repeat(var(--choices, 7), minmax(0, 1fr));
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+}
+.studio-choice {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+}
+.studio-choice:hover { background: var(--hover); }
+.studio-choice[aria-pressed="true"] { background: var(--selected); box-shadow: inset 0 0 0 1.5px var(--text); }
+.studio-mini { display: grid; place-items: center; width: 72%; height: 72%; }
+.studio-mini > svg { width: 100%; height: 100%; }
+
+.studio-upload { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.studio-drop {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: .3rem;
+  min-height: 7.5rem;
+  padding: var(--space-4);
+  border: 1px dashed var(--hairline);
+  border-radius: var(--radius-md);
+  text-align: center;
+  cursor: pointer;
+}
+.studio-drop:hover, .studio-drop.dragover { border-color: var(--text-3); background: var(--hover); }
+.studio-drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.studio-drop svg { width: 1.25rem; height: 1.25rem; color: var(--text-2); }
+.studio-drop strong { max-width: 100%; font-size: var(--text-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-drop span { color: var(--text-2); font-size: var(--text-xs); }
+.studio-drop input { position: absolute; inset: 0; width: 100%; height: 100%; padding: 0; opacity: 0; cursor: pointer; }
+.dialog-button.studio-remove-upload { justify-self: start; margin-left: -.5rem; color: var(--danger); }
+.dialog-button.studio-remove-upload:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
+
+.studio-colors-field { margin-top: var(--space-4); }
+.studio-label { display: flex; justify-content: space-between; font-size: var(--text-sm); font-weight: 600; }
+.studio-label span + span { color: var(--text-2); font-weight: 400; }
+.studio-palette { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); padding: 3px; }
+.studio-swatch {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / .12);
+}
+.studio-swatch:hover { outline: 2px solid var(--hairline); outline-offset: 2px; }
+.studio-swatch[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
+
+.studio-error { margin-top: var(--space-2); color: var(--danger); font-size: var(--text-sm); }
+
+.studio-footer { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: auto; padding-top: var(--space-4); }
+
+/* Draft row the editor projects into the real sidebar. */
+.bot-row.draft { pointer-events: none; background: var(--selected); }
+
+@media (max-width: 640px) {
+  .bot-editor-dialog {
+    width: 100%;
+    height: fit-content;
+    max-height: calc(100dvh - .75rem);
+    margin: auto 0 0;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  }
+  .bot-editor-dialog[open] { display: block; }
+  .bot-editor-dialog:not([open]) { transform: translateY(1.5rem); }
+  @starting-style { .bot-editor-dialog[open] { transform: translateY(1.5rem); } }
+  .studio-start { max-height: calc(100dvh - .75rem); padding: var(--space-3) var(--space-3) max(var(--space-4), env(safe-area-inset-bottom)) var(--space-4); }
+  .studio { grid-template-columns: minmax(0, 1fr); max-height: calc(100dvh - .75rem); overflow-y: auto; overscroll-behavior: contain; }
+  .studio-stage { padding: var(--space-4); gap: var(--space-2); }
+  .studio-hero-avatar { width: 6.5rem; height: 6.5rem; }
+  .studio-hero-avatar .avatar-photo { width: 5rem; height: 5rem; border-radius: 18px; }
+  .studio-name-input { font-size: var(--text-lg); }
+  .studio-panel { display: contents; }
+  .studio .studio-head { order: -1; padding: var(--space-3) var(--space-3) 0 var(--space-4); }
+  .studio-bar, .studio-gallery, .studio-upload, .studio-colors-field, .studio-error { margin-left: var(--space-4); margin-right: var(--space-4); }
+  .studio-footer { padding: var(--space-4) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-editor-dialog, .bot-editor-dialog::backdrop {
+    transition: opacity .12s, overlay .12s allow-discrete, display .12s allow-discrete;
+  }
+  .bot-editor-dialog:not([open]) { transform: none; }
+  @starting-style { .bot-editor-dialog[open] { transform: none; } }
+}

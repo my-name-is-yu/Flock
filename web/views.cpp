@@ -71,10 +71,19 @@ Json runView(const Json& run, std::string_view environment) {
             {"link",localThreadLink(saved,path) ? saved : "https://app.t3.codes/threads" + path}};
 }
 
-Json avatarView(const Json& source) {
+Json avatarView(const Json& source, std::string_view botId) {
     if (source.is_string()) return source;
     Json view = Json::object();
-    copyFields(view,source,{"example","color","eyeColor"});
+    copyFields(view,source,{"kind","example","icon","color","eyeColor","filename","version"});
+    if (field(source,"kind") == "upload") {
+        const auto version = field(source,"version");
+        const bool hasImage = !version.empty() || !field(source,"file").empty() || !field(source,"imageUrl").empty();
+        if (hasImage && !botId.empty()) {
+            auto url = "/api/bot-avatar?bot=" + threadSegment(botId);
+            if (!version.empty()) url += "&v=" + threadSegment(version);
+            view["imageUrl"] = std::move(url);
+        }
+    }
     const auto definition = source.value("definition",source);
     Json shape = Json::object();
     copyFields(shape,definition,{"version","id","name"});
@@ -88,8 +97,9 @@ Json botSummary(const Json& bot) {
     const auto id = field(bot,"id");
     const auto name = field(bot,"name");
     Json summary = {{"id",id},{"name",name.empty() ? id : name}};
+    copyFields(summary,bot,{"role"});
     if (bot.contains("avatar") && (bot["avatar"].is_string() || bot["avatar"].is_object()))
-        summary["avatar"] = avatarView(bot["avatar"]);
+        summary["avatar"] = avatarView(bot["avatar"],id);
     return summary;
 }
 
@@ -291,6 +301,10 @@ Json activity(Store& store, std::string_view bot) {
 }
 } // namespace
 
+Json botSettings(const Json& bot) {
+    return settingsView(bot);
+}
+
 Json botList(Store& store, const Json& bots) {
     auto result = Json::array();
     for (const auto& bot : bots) {
@@ -377,7 +391,7 @@ Json botView(Store& store, const Json& bot) {
     auto& clarifications = result["clarifications"] = Json::array();
     for (const auto& clarification : store.clarifications(id)) {
         Json view = Json::object();
-        copyFields(view,clarification,{"messageId","text","destinations"});
+        copyFields(view,clarification,{"messageId","text","destinations","route"});
         if (clarification.contains("candidates"))
             view["candidates"] = candidateViews(clarification.at("candidates"),&active);
         clarifications.push_back(std::move(view));

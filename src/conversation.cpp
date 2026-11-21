@@ -168,6 +168,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
         const auto existing = this->receipt(routing.botId,clientId,text,replyTo,candidate);
         if (existing) receipt = *existing;
         else {
+            modelCallLimit(routing.config);
             const auto now = unixTime();
             Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config},
                           {"waitsAtIntake",p_->captureConversationWaits(routing.botId)}};
@@ -203,10 +204,26 @@ Json Store::clarifications(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT j.data FROM route_decisions r JOIN journal j ON j.id=r.reply_id
-WHERE j.conversation_bot_id=? AND r.status='awaiting_resolution' ORDER BY j.id DESC
+WHERE j.conversation_bot_id=? AND r.status IN ('awaiting_resolution','model_budget') ORDER BY j.id DESC
 )SQL",{bot});
     auto result = Json::array();
     while (rows.next()) result.push_back(rows.json(0));
     return result;
+}
+
+void Store::approveMessageModelCall(std::string_view botId, Id waitMessageId) {
+    std::lock_guard lock(p_->mutex);
+    Transaction transaction(p_->db);
+    auto wait = p_->query(R"SQL(
+SELECT r.message_id FROM route_decisions r JOIN messages m ON m.id=r.message_id
+WHERE m.bot_id=? AND r.reply_id=? AND r.status='model_budget'
+)SQL",{botId,waitMessageId});
+    if (!wait.next()) throw Conflict("Waiting item is no longer current");
+    const auto message = wait.number(0);
+    p_->grantModelCall(p_->messageModelBudget(message));
+    p_->exec("DELETE FROM route_decisions WHERE message_id=?",{message});
+    p_->exec("UPDATE journal SET data='{}' WHERE id=?",{message});
+    p_->exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
+    transaction.commit();
 }
 }

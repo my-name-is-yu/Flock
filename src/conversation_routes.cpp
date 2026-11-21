@@ -21,6 +21,7 @@ using conversation_storage::verifiedEnvironment;
 
 namespace {
 constexpr auto resultSize = 8192;
+struct ModelBudgetPaused {};
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -102,7 +103,7 @@ Plan routingQuestion(const std::string& text, std::string question) {
 }
 }
 
-bool Store::Impl::routeMessage(Id id, Model& model) {
+bool Store::Impl::routeMessage(Id id, Model& model, const Runtime::NotesLoader& notes) {
     const auto readMessage = [&]() -> std::optional<Message> {
         auto row = query(R"SQL(
 SELECT m.reply_to,m.sequence,m.bot_id,m.text,m.routing,
@@ -135,8 +136,68 @@ AND NOT EXISTS (
             plan = routingQuestion(message->text,ja ? "その質問はすでに終了しています。現在の質問を確認してください。"
                                                     : "That question has closed. Please check the current question.");
         } else {
+            unsigned routeStep = 0;
+            const auto decideModel = [&](const ModelInput& input) -> Decision {
+                ++routeStep;
+                Json checkpoint = {{"event",input.event},{"history",input.history},{"tools",input.tools}};
+                if (input.event["kind"] == "route_conversation") {
+                    auto& generations = checkpoint["taskGenerations"] = Json::array();
+                    for (const auto& task : context.tasks) generations.push_back({task.id,task.generation});
+                }
+                Id modelAttempt = 0;
+                {
+                    std::lock_guard lock(mutex);
+                    Transaction transaction(db);
+                    if (auto saved = savedRouteCall(id,routeStep,checkpoint)) {
+                        transaction.commit();
+                        return std::move(*saved);
+                    }
+                    const auto budget = messageModelBudget(id,
+                        context.reply.kind == Reply::Kind::clarification ? context.reply.id : 0);
+                    modelAttempt = reserveModelCall(budget,field(input.event,"kind"),id,0,0);
+                    if (!modelAttempt) {
+                        exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_reply','{}',?)",
+                             {unixTime(),message->bot});
+                        const auto reply = last();
+                        exec("UPDATE journal SET data=? WHERE id=?",
+                             {Json{{"messageId",reply},{"replyToMessageId",id},{"route","model_budget"},
+                                   {"status","needs_you"},{"text",ja
+                                       ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
+                                       : "The model call limit is exhausted. Approve one more model call to continue."}},reply});
+                        exec("INSERT INTO route_decisions(message_id,reply_id,status,data) VALUES(?,?,'model_budget','{}')",
+                             {id,reply});
+                        exec("UPDATE journal SET data=json_object('status','needs_you') WHERE id=?",{id});
+                    }
+                    transaction.commit();
+                }
+                if (!modelAttempt) throw ModelBudgetPaused{};
+                return callModel(model,input,modelAttempt,routeStep,checkpoint);
+            };
             try {
-                plan = conversation::decide(message->text,context,model,message->routing.at("config"));
+                if (auto route = conversation::shortcut(message->text,context)) plan = std::move(*route);
+                else {
+                    BotNotes botNotes;
+                    try {
+                        botNotes = notes(message->bot);
+                    } catch (const std::exception& error) {
+                        plan = routingQuestion(message->text,
+                            ja ? "このBotのノートを読み込めませんでした (" + std::string(error.what()) +
+                                 ")。ファイルを修正してから返信してください。"
+                               : "I couldn't read this Bot's notes (" + std::string(error.what()) +
+                                 "). Fix the file and reply to try again.");
+                    }
+                    if (plan.routes.empty())
+                        plan = conversation::decide(message->text,context,decideModel,botNotes,
+                            message->routing.at("config"),
+                            [&](Id resolvedId) {
+                                std::lock_guard lock(mutex);
+                                Transaction transaction(db);
+                                inheritModelBudget(id,resolvedId);
+                                transaction.commit();
+                            });
+                }
+            } catch (const ModelBudgetPaused&) {
+                return true;
             } catch (const std::exception&) {
                 plan = routingQuestion(message->text,ja ? "このメッセージを判断できませんでした。ここに返信して再試行してください。"
                                                         : "I couldn't route this message. Reply here to try again.");
@@ -154,6 +215,8 @@ AND NOT EXISTS (
             continue;
         }
         applyRoutes(*current,refreshed,plan);
+        exec("UPDATE model_attempts SET route_input=NULL,route_decision=NULL WHERE message_id=? AND route_decision IS NOT NULL",
+             {id});
         transaction.commit();
         return true;
     }
@@ -177,6 +240,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     };
     const auto* clarification = plan.resolution ? context.clarification(plan.resolution->replyId) : nullptr;
     const bool resolving = clarification && plan.resolution->kind == Resolution::Kind::resolved;
+    if (resolving) messageModelBudget(id,clarification->id);
     bool clarify = routes.empty() || (plan.resolution && !clarification);
     for (const auto& route : routes) {
         Json segment = {{"number",segments.size()+1},{"route",routeName(route.action)},{"text",route.segment}};
