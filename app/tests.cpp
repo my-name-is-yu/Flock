@@ -445,6 +445,148 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     check(sent.run.threadId == followUp.target.threadId && sent.run.runId == reconciled.run.runId &&
           sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
 }
+
+void botProfilesAndAvatars() {
+    Sandbox temp;
+    Bots bots(temp.path / "bots");
+
+    // Create a Bot with role template and shape avatar without execution settings.
+    const auto created = bots.create({
+        {"name","Scout"},
+        {"role","reviewer"},
+        {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
+    });
+    check(created.at("id") == "scout" && created.at("name") == "Scout" && created.at("role") == "reviewer" &&
+          created.at("avatar").at("kind") == "shape" && created.at("avatar").at("example") == "sprout" &&
+          created.at("avatar").at("color") == "#69c9ac" && !created.at("soul").get<std::string>().empty(),
+          "created Bot did not persist name, role starter SOUL, and shape avatar");
+
+    // Duplicate name generates a unique slug ID; non-ASCII name falls back safely.
+    const auto duplicate = bots.create({
+        {"name","Scout"},
+        {"role","custom"},
+        {"avatar",{{"kind","icon"},{"icon","sparkles"},{"color","#929dee"}}},
+    });
+    check(duplicate.at("id") == "scout-2" && duplicate.at("soul").get<std::string>().empty() &&
+          duplicate.at("avatar").at("kind") == "icon" && duplicate.at("avatar").at("icon") == "sparkles",
+          "duplicate Bot slug or icon avatar failed");
+
+    const auto japanese = bots.create({
+        {"name","レビュー担当"},
+        {"role","builder"},
+        {"avatar",{{"kind","shape"},{"example","mug"},{"color","#e1dfdf"}}},
+    });
+    check(japanese.at("id") == "bot" && japanese.at("name") == "レビュー担当",
+          "non-ASCII Bot name did not produce a valid ID");
+
+    // Cards retain profile details even before execution settings are configured.
+    const auto cards = bots.cards();
+    check(cards.size() == 3,"all created Bots should appear in cards()");
+
+    // Scheduler ignores Bots without cron schedules instead of failing on missing execution config.
+    Store store(temp.path / "scheduler.db");
+    Scheduler scheduler(bots,store,utc(2026,11,21,0,0),[](std::string_view id,std::string_view err) {
+        throw std::runtime_error(std::string(id) + ": " + std::string(err));
+    });
+    scheduler.tick(utc(2026,11,21,0,2));
+
+    // Upload a valid PNG avatar, preserve it on name-only edit, replace with GIF, then switch to icon.
+    const std::string pngBytes = std::string("\x89PNG\r\n\x1a\n",8) + std::string(16,'\x01');
+    const std::string gifBytes("GIF89a\x01\x00\x01\x00\x00\x00\x00;",14);
+    const auto uploaded = bots.updateProfile("scout",{
+        {"name","Scout Prime"},
+        {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
+    },AvatarImage{"image/png",pngBytes});
+    check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
+          uploaded.at("avatar").at("filename") == "photo.png" &&
+          !uploaded.at("avatar").at("version").get<std::string>().empty(),
+          "uploaded PNG avatar metadata was not saved");
+    const auto savedPng = bots.avatarImage("scout");
+    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+          "stored PNG bytes did not match upload");
+
+    // Rename without re-uploading keeps the existing image.
+    const auto renamed = bots.updateProfile("scout",{
+        {"name","Scout Renamed"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"}}},
+    },std::nullopt);
+    check(renamed.at("name") == "Scout Renamed" &&
+          renamed.at("avatar").at("version") == uploaded.at("avatar").at("version"),
+          "renaming Bot lost existing uploaded image");
+
+    // Replacing with GIF deletes old PNG file and updates version hash.
+    const auto replaced = bots.updateProfile("scout",{
+        {"name","Scout Renamed"},
+        {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
+    },AvatarImage{"image/gif",gifBytes});
+    check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
+          !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
+          std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
+          "replacing uploaded avatar did not clean up previous image file");
+    const auto savedGif = bots.avatarImage("scout");
+    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+          "replaced GIF bytes did not match");
+
+    // Switching back to shape removes uploaded file.
+    const auto switched = bots.updateProfile("scout",{
+        {"name","Scout Renamed"},
+        {"avatar",{{"kind","shape"},{"example","barbell"},{"color","#ee8d85"}}},
+    });
+    check(switched.at("avatar").at("kind") == "shape" && !bots.avatarImage("scout").has_value() &&
+          !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
+          "switching from upload to shape did not remove stored image file");
+
+    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
+    rejects<Conflict>([&] {
+        bots.updateProfile("scout",{
+            {"name","Scout"},
+            {"avatar",{{"kind","upload"}}},
+        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
+    },"SVG payload accepted as avatar image");
+    rejects<Conflict>([&] {
+        bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
+    },"blank Bot name accepted");
+    rejects<Conflict>([&] {
+        bots.create({{"name","Bad"},{"avatar",{{"kind","icon"},{"icon","unknown"},{"color","#69c9ac"}}}});
+    },"unknown avatar icon accepted");
+
+    // Existing execution config stays intact when editing profile.
+    createBot(temp.path / "bots" / "release",botConfig(),"Release soul","Release memory");
+    bots.updateProfile("release",{
+        {"name","Release Bot"},
+        {"avatar",{{"kind","icon"},{"icon","compass"},{"color","#eec767"}}},
+    });
+    const auto loaded = bots.get("release");
+    check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
+          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          "editing profile altered existing Bot execution configuration");
+
+    // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
+    const auto customDir = temp.path / "bots" / "custom";
+    std::filesystem::create_directories(customDir);
+    const Json customAvatar = {{"definition",{{"id","badge"},{"body",{{"path","M0 0h10v10z"}}}}},{"color","#123456"},{"eyeColor","#0000ff"}};
+    { std::ofstream(customDir / "config.json") << Json{{"name","Custom"},{"avatar",customAvatar}}.dump(); }
+    { std::ofstream(customDir / "avatar.png") << pngBytes; }
+    const auto customRenamed = bots.updateProfile("custom",{{"name","Custom Two"}});
+    check(customRenamed.at("name") == "Custom Two" && customRenamed.at("avatar") == customAvatar,
+          "name-only update replaced a custom avatar");
+    bots.updateProfile("custom",{
+        {"name","Custom Two"},
+        {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
+    });
+    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+
+    // A save that would exceed the config read limit fails before the file changes.
+    const auto bigDir = temp.path / "bots" / "big";
+    std::filesystem::create_directories(bigDir);
+    const auto bigText = Json{{"name","Big"},{"notes",std::string(128 * 1024 - 40,'x')}}.dump();
+    { std::ofstream(bigDir / "config.json") << bigText; }
+    rejects<Conflict>([&] {
+        bots.updateProfile("big",{{"name","Big"},{"avatar",{{"kind","icon"},{"icon","compass"},{"color","#eec767"}}}});
+    },"oversized config save accepted");
+    std::ifstream bigFile(bigDir / "config.json");
+    check(std::string(std::istreambuf_iterator<char>(bigFile),{}) == bigText,"rejected save changed config.json");
+}
 }
 
 int main() {
@@ -456,6 +598,7 @@ int main() {
         responseContract();
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
+        botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
