@@ -672,7 +672,11 @@ Action parseAction(const Json& route, std::string_view segment, const Context& c
             require(option >= 0);
             source = selectWorkResult(resultId,option,context,anchor,segment);
         }
-        return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation)};
+        std::optional<RevisionDraft> draft;
+        if (operation == "destination" && choices.size() == 1)
+            draft = RevisionDraft{target(*taskById(context,choices.front())),{},{}};
+        return Clarify{std::move(question),std::move(choices),std::move(source),std::move(operation),
+                       std::move(draft)};
     }
     const auto mentionedOption = (resultId || anchor.result || proposedOption ||
         kind == "create_task" || kind == "append_instruction" || kind == "revise_task") ? ordinal(normalize(segment)) : 0;

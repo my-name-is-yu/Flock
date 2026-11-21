@@ -1,5 +1,10 @@
 #include "flock/web.hpp"
 
+#ifdef FLOCK_TEST_CHATGPT
+#include "bots.hpp"
+#include "model.hpp"
+#endif
+
 #include <httplib.h>
 
 #include <algorithm>
@@ -129,8 +134,9 @@ struct FixedModel : Model {
 
 struct FixedT3 : T3 {
     std::map<std::string,Observation,std::less<>> observations;
+    std::map<std::string,unsigned> projectLaunches;
     std::vector<Command> replies;
-    unsigned launches = 0;
+    unsigned launches = 0, interruptions = 0;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
@@ -138,8 +144,11 @@ struct FixedT3 : T3 {
             ++launches;
             if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
             const auto& project = command.projectId;
-            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
-            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + std::to_string(launches),link},{}};
+            const auto sequence = ++projectLaunches[project];
+            auto thread = "thread-" + project;
+            if (sequence > 1) thread += "-" + std::to_string(sequence);
+            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/" + thread : "javascript:unexpected";
+            return {Delivery::Kind::Accepted,{std::move(thread),"run-" + std::to_string(launches),link},{}};
         }
         check(command.tool == "answer_session_question","unexpected command in fixture");
         replies.push_back(command);
@@ -148,7 +157,7 @@ struct FixedT3 : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return observations[run.threadId]; }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    void interrupt(const std::string&, const Json&, const RunRef&) override { ++interruptions; }
 };
 
 WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
@@ -373,6 +382,122 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
+#ifdef FLOCK_TEST_CHATGPT
+void chatGPTConversation(const std::filesystem::path& home) {
+    Store store(home / "conversation.sqlite");
+    app::ChatGPTModel model(home / "credentials" / "chatgpt");
+    const app::Bots bots(home / "bots");
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = [&](std::string_view bot) { return bots.peers(bot); };
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.notes(bot); },options);
+    const auto server = startWeb(store,0,{
+        [&] { return bots.cards(); },
+        [&](std::string_view bot,std::string_view request) { return bots.get(bot).intake(request); },
+    });
+    Browser browser(*server);
+    const auto send = [&](std::string_view key,std::string_view text) -> Id {
+        const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId",key},{"text",text}},201);
+        check(receipt.at("status") == "received","composer did not acknowledge the message");
+        return receipt.at("messageId");
+    };
+    const auto view = [&] { return browser.get("/api/view?bot=release"); };
+    const auto task = [&](Id id) { return browser.get("/api/task?bot=release&taskId=" + std::to_string(id)); };
+    const auto linkedTask = [&](Id messageId) -> Id {
+        const auto page = view();
+        const auto& events = page.at("events");
+        const auto message = std::ranges::find_if(events,[&](const Json& event) {
+            return event.at("kind") == "conversation_message" && event.at("id") == messageId;
+        });
+        check(message != events.end() && message->at("taskId").is_number_integer(),
+              "composer message was not linked to its Task");
+        return message->at("taskId");
+    };
+
+    const auto request = send("blockers","Summarize the release blockers.");
+    check(store.tasks().empty(),"composer created a Task before routing");
+    tick(runtime,5);
+    check(conversationReply(view(),request).at("route") == "create_task" && store.tasks().size() == 1,
+          "ordinary composer request did not create exactly one Task");
+    const auto releaseTask = linkedTask(request);
+    check(task(releaseTask).at("state") == "running" && t3.launches == 1,
+          "the Task did not start one Run");
+    t3.observations["thread-release"] = {
+        .kind = Observation::Kind::Finished, .status = "completed",
+        .report = "The signing certificate expired on 18 November.",
+        .itemId = "blockers-report", .settled = true
+    };
+    tick(runtime,3);
+    const auto completed = task(releaseTask);
+    check(completed.at("state") == "completed","the Session report did not become a completed result");
+    const auto& result = completed.at("result");
+    check(result.at("data").at("run").at("itemId") == "blockers-report","the result lost the report item");
+    t3.observations.clear();
+
+    const auto question = send("why-blocked","Why is the release blocked?");
+    tick(runtime,3);
+    const auto answer = conversationReply(view(),question);
+    check(answer.at("route") == "respond" && answer.at("text") == "The release is blocked by the expired signing certificate." &&
+          answer.at("source").at("taskId") == releaseTask && answer.at("source").at("messageId") == result.at("id"),
+          "result answer was not grounded in the saved report");
+    const auto missing = send("renewal-date","When will the signing certificate be renewed?");
+    tick(runtime,3);
+    const auto clarification = conversationReply(view(),missing);
+    check(clarification.at("route") == "clarify" && clarification.at("text") == "What is the planned certificate renewal date?" &&
+          clarification.at("source").at("messageId") == result.at("id"),
+          "missing evidence did not produce a clarification linked to the result");
+    check(store.tasks().size() == 1 && t3.launches == 1 && task(releaseTask).at("runs") == completed.at("runs"),
+          "result follow-ups created a Task or changed Runs");
+
+    const auto consult = send("consult-verifier","Ask Verifier to confirm the release criteria.");
+    tick(runtime,8);
+    const auto consultTask = linkedTask(consult);
+    const auto page = view();
+    Json messages = Json::array();
+    for (const auto& event : page.at("events"))
+        if (event.at("kind") == "bot_message" && event.at("taskId") == consultTask)
+            messages.push_back(event.at("data"));
+    check(messages.size() == 2,"the originating conversation did not show one request and one peer reply");
+    const auto& outgoing = messages.at(0);
+    const auto& incoming = messages.at(1);
+    check(outgoing.at("fromBotId") == "release" && outgoing.at("toBotId") == "verifier" &&
+          outgoing.at("requestKind") == "consult" && incoming.at("fromBotId") == "verifier" &&
+          incoming.at("messageType") == "result" && incoming.at("toBotId") == "release" &&
+          incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
+          incoming.at("text") == "Publish only after the certificate is renewed.",
+          "Verifier's reply did not return to its original exchange");
+    check(task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
+          "the originating Task did not resume after the consultation");
+
+    const auto first = send("notes","Prepare release notes.");
+    const auto second = send("checksums","Check artifact checksums in the backup environment.");
+    tick(runtime,5);
+    const auto firstTask = task(linkedTask(first));
+    const auto secondTask = task(linkedTask(second));
+    check(firstTask.at("runs").back().at("environmentId") == "local-env" &&
+          secondTask.at("runs").back().at("environmentId") == "backup-env",
+          "the composer Runs did not keep each request on its own destination");
+    const auto active = view().at("activeSessions");
+    check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&
+          active.size() == 2 && t3.launches == 3,"ambiguous-stop fixture requires two active Runs: " +
+          firstTask.at("state").dump() + ", " + secondTask.at("state").dump() + ", active=" + active.dump() +
+          ", launches=" + std::to_string(t3.launches));
+    const auto taskCount = store.tasks().size();
+    const auto stop = send("stop","それ止めて");
+    tick(runtime,3);
+    const auto afterStop = view();
+    const auto confirm = conversationReply(afterStop,stop);
+    const auto& candidates = confirm.at("candidates");
+    check(confirm.at("route") == "clarify" && confirm.at("text") == "どの作業を停止しますか？" && candidates.size() == 2 &&
+          std::ranges::all_of(active,[&](const Json& run) {
+              return std::ranges::any_of(candidates,[&](const Json& candidate) { return candidate.at("taskId") == run.at("taskId"); });
+          }),"ambiguous stop did not ask the user to choose between both running tasks");
+    check(afterStop.at("activeSessions") == active && store.tasks().size() == taskCount && t3.launches == 3 &&
+          task(firstTask.at("id")).at("runs") == firstTask.at("runs") &&
+          task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
+          "ambiguous stop changed a Run or created work");
+}
+#endif
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
     auto store = std::make_unique<Store>(path);
@@ -435,8 +560,15 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
 
 }
 
-int main() {
+int main(int argc,char** argv) {
     try {
+#ifdef FLOCK_TEST_CHATGPT
+        if (argc == 2) {
+            chatGPTConversation(argv[1]);
+            std::cout << "web ChatGPT conversation behavior passed\n";
+            return 0;
+        }
+#endif
         TestDirectory directory;
         conversationEntry(directory.path / "conversation.sqlite");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");

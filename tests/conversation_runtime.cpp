@@ -455,6 +455,33 @@ void deferredCompletionPreservesDestinationRevisionDraft() {
           "the deferred completion invalidated the pending revision draft or dispatched work before confirmation");
 }
 
+void modelDestinationClarificationKeepsRevision() {
+    Fixture f;
+    auto routing = f.routing("Release notes");
+    routing.config["conversationEnvironments"]["mock"] = "mock-executor";
+    const auto id = f.store->submit(routing);
+    f.reach(id,"running");
+
+    const auto request = "Move Release notes to mock";
+    f.script(request,{{"kind","clarify"},{"text","Which destination should I use?"},
+                      {"operation","destination"},{"candidates",{id}}});
+    const auto before = f.task(id);
+    const auto message = f.store->receive(routing,"move-destination",request);
+    f.runtime->routeConversation();
+    const auto clarification = f.response(message);
+    check(clarification["route"] == "clarify" && clarification["destinations"].is_array() &&
+          f.task(id) == before,
+          "the model's destination question changed the task before confirmation");
+    const auto destination = f.store->receive(routing,"pick-destination","mock",clarification["messageId"]);
+    f.runtime->routeConversation();
+    const auto response = f.response(destination);
+    const auto revised = f.task(id);
+    check(response["route"] == "revise_task" && revised["intent"] == before["intent"] &&
+          revised["doneWhen"] == before["doneWhen"] && revised["pendingEnvironmentId"] == "mock-executor" &&
+          f.store->clarifications("alpha").empty(),
+          "the destination answer dropped the revision instead of applying the chosen environment");
+}
+
 void lastConfiguredDestinationIsAvailable() {
     Fixture f;
     auto routing = f.routing();
@@ -1119,6 +1146,7 @@ int main() {
         omittedDestinationAndWrongNamedTaskAreBlocked();
         destinationClarificationPreservesAndValidatesRevisionDraft();
         deferredCompletionPreservesDestinationRevisionDraft();
+        modelDestinationClarificationKeepsRevision();
         lastConfiguredDestinationIsAvailable();
         independentRequestsAndPartialStop();
         restartRestoresCancelledTaskDirections();
