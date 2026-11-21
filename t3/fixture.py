@@ -146,6 +146,10 @@ class Fixture(BaseHTTPRequestHandler):
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
+        if name == "t3_thread_send" and args["mode"] == "steer":
+            assert scenario == "running" and args["threadId"] == "thread"
+            assert args["clientRequestId"] == "flock-turn-7-2"
+            return {"threadId": "thread", "runId": "root", "delivery": "steered"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
@@ -188,7 +192,7 @@ class Fixture(BaseHTTPRequestHandler):
             return {"sequence": 10}
         assert name == "t3_thread_read", name
         thread_id = args["threadId"]
-        active = "unrelated" if scenario == "manual-active" else None
+        active = "unrelated" if scenario == "manual-active" else "root" if scenario == "running" else None
         latest = "later" if scenario.endswith("-result") else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race") else 0
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,

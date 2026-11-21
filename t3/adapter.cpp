@@ -471,8 +471,8 @@ void verifyCommand(const Command& command) {
             throw Failure(Failure::Kind::Settings, "The T3 answer requires a Thread, Run, question ID and answers");
         return;
     }
-    if ((command.tool != "delegate" && command.tool != "follow_up") ||
-        (command.tool == "follow_up" && !hasRun(command.target)) || command.projectId.empty() ||
+    if ((command.tool != "delegate" && command.tool != "follow_up" && command.tool != "steer") ||
+        (command.tool != "delegate" && !hasRun(command.target)) || command.projectId.empty() ||
         command.actionId.empty() || command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
         actionPrompt(command).size() > 120000)
@@ -626,6 +626,22 @@ bool followUpReady(Client& client, const Command& command) {
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
 
+// Delivers a note into the assigned Run while it is still running. It never starts another Run.
+Delivery steer(Client& client, const Command& command, bool& invoked) {
+    const auto head = threadHead(client, command.target.threadId);
+    const auto& info = detail(head, command.target.threadId);
+    if (str(info, "projectId") != command.projectId || boolean(info, "archived") ||
+        member(info, "activeRunId") != Json(command.target.runId))
+        return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
+    invoked = true;
+    const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
+        {"message", command.instruction}, {"clientRequestId", command.actionId}});
+    const auto runId = str(reply, "runId");
+    if (str(reply, "threadId") != command.target.threadId || (!runId.empty() && runId != command.target.runId) ||
+        str(reply, "delivery") != "steered") invalidResponse();
+    return result(Outcome::Accepted, {}, command.target);
+}
+
 Delivery answer(Client& client, const Command& command) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
@@ -693,6 +709,7 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command);
+            if (command.tool == "steer") return steer(client, command, invoked);
             const bool launch = command.tool == "delegate";
             Json reply;
             if (launch) {

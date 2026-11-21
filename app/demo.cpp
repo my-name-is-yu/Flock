@@ -7,25 +7,27 @@ namespace {
 class DemoModel final : public Model {
     Decision decide(const ModelInput& in) override {
         const auto event = in.event.value("kind","");
-        if (event == "route_conversation") {
-            Json route = {{"kind","create_task"}};
-            const auto& reply = in.event.at("reply");
-            if (reply["kind"] == "wait") {
-                for (const auto& task : in.event.at("tasks")) {
-                    if (task["taskId"] == reply["taskId"] && task["wait"]["reason"] == "user_question")
-                        route = {{"kind","answer_wait"},{"taskId",reply["taskId"]}};
-                }
-            } else if (reply["kind"] == "result") {
-                route = {{"kind","answer_result"},{"resultMessageId",reply["resultMessageId"]}};
-            } else if (reply["kind"] == "clarification") {
-                route = {{"kind","clarify"},{"text","Use a direct request or reply to a demo question."}};
+        if (event == "conversation_turn") {
+            const auto& turn = in.event.at("turn");
+            if (!turn.empty()) {
+                const auto& last = turn.back();
+                const bool ok = last.at("result").value("ok",false);
+                const auto tool = last.value("tool","");
+                std::string text = !ok ? "The demo could not apply that request."
+                    : tool == "answer_task_question" ? "I passed your answer to the task."
+                    : tool == "read_result" ? "The demo result records successful completion of simulated work. "
+                                              "It contains no implementation details."
+                    : "I queued your request.";
+                return {"reply",{{"text",text}},"The fixed demo reports what it did."};
             }
-            return {"route_conversation",{{"routes",Json::array({route})}},"Fixed demo routing."};
-        }
-        if (event == "answer_conversation_result") {
-            return {"answer_conversation_result",
-                {{"text","The demo result records successful completion of simulated work. It contains no implementation details."}},
-                "The fixed demo reports only completion."};
+            const auto& reply = in.event.at("replyTo");
+            if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
+                return {"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
+                    {"text",in.event.value("text","")}},"The user replied to the demo question."};
+            }
+            if (reply.is_object() && reply.value("kind","") == "result")
+                return {"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."};
+            return {"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."};
         }
         if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
             return {"complete",{{"report",in.event.value("report","")}},

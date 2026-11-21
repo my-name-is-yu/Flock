@@ -241,6 +241,24 @@ int main(int argc, char** argv) {
         check(effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
               "T3 receives exactly one interrupt for the assigned Run");
 
+        Command note = launch;
+        note.tool = "steer";
+        note.actionId = "flock-turn-7-2";
+        note.target = run;
+        note.instruction = "Also include the CSV table";
+        note.authGeneration = adapter->authGeneration("env-1", launch.config);
+        delivery = adapter->send(note);
+        const auto steered = effects("t3_thread_send");
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "root" && !steered.empty() &&
+              steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
+                                     {"clientRequestId","flock-turn-7-2"}},
+              "a note reaches the running Run through T3 steer without starting another Run");
+        fixture({{"scenario", "settled"}});
+        const auto before = effects("t3_thread_send").size();
+        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
+              "a note for a settled Run is refused without contacting T3");
+        fixture({{"scenario", "running"}});
+
         signIn("env-1");
         const auto reauthorized = adapter->authGeneration("env-1", launch.config);
         check(reauthorized != launch.authGeneration, "reauthorization changes generation");
