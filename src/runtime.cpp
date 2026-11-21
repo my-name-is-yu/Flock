@@ -403,7 +403,7 @@ ORDER BY id)SQL");
         if (peer && peer->recipient == task["id"]) {
             if (event["kind"] == "question") return {"answer_session_question","ask_user"};
             if (peer->kind == "consult") return {"reply_to_bot","ask_user"};
-            if (event["kind"] == "result") {
+            if (event["kind"] == "result" || event.contains("sessionResult")) {
                 std::vector<std::string> tools{"delegate","follow_up","reply_to_bot","ask_user"};
                 if (options.sessionRead == "on_demand" && event["evidence"].size() < 3) tools.push_back("session_read");
                 return tools;
@@ -466,8 +466,10 @@ ORDER BY id)SQL");
         req.view = field(args,"view").empty() ? "messages" : field(args,"view");
         req.offset = readOffset(args);
         if (req.view != "messages" && req.view != "activity") throw Conflict("Unsupported history view");
-        const auto active = runRef(event.value("run",Json::object()));
-        bool owned = active.threadId == req.threadId && (active.runId == req.runId || field(event,"resultRunId") == req.runId);
+        const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
+        const auto assigned = runRef(report.value("run",Json::object()));
+        bool owned = assigned.threadId == req.threadId &&
+            (assigned.runId == req.runId || field(report,"resultRunId") == req.runId);
         if (!owned) {
             std::lock_guard lock(db.mutex);
             auto row = db.query("SELECT 1 FROM runs WHERE task_id=? AND environment_id=? AND thread_id=? AND run_id=?",
@@ -579,16 +581,24 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         sender["state"] = "peer_waiting";
     }
 
-    Json resultReference(const Json& task) const {
+    Json settledSessionReport(const Json& task) const {
         const auto run = runRef(task["lastRun"]);
         if (!hasRun(run)) return nullptr;
         auto report = db.query("SELECT data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1",
                                {task["id"]});
         if (!report.next()) return nullptr;
-        const auto data = report.json(0);
-        if (field(data["run"],"threadId") != run.threadId || field(data["run"],"runId") != run.runId) return nullptr;
-        return {{"environmentId",task["environmentId"]},{"threadId",run.threadId},{"runId",field(data,"resultRunId")},
-                {"itemId",field(data,"itemId")},{"link",run.link},{"status",field(data,"status")}};
+        auto data = report.json(0);
+        const auto reported = runRef(data["run"]);
+        if (reported.threadId != run.threadId || reported.runId != run.runId) return nullptr;
+        return data;
+    }
+
+    Json resultReference(const Json& task) const {
+        const auto report = settledSessionReport(task);
+        if (report.is_null()) return nullptr;
+        const auto run = runRef(report["run"]);
+        return {{"environmentId",task["environmentId"]},{"threadId",run.threadId},{"runId",field(report,"resultRunId")},
+                {"itemId",field(report,"itemId")},{"link",run.link},{"status",field(report,"status")}};
     }
 
     void finishPeer(const PeerExchange& exchange, const Json& recipient, std::string_view status, std::string_view text,
@@ -788,6 +798,10 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
             peer = db.peerExchange(task["id"]);
+            if (event["kind"] == "bot_answer") {
+                auto report = settledSessionReport(task);
+                if (!report.is_null()) event["sessionResult"] = std::move(report);
+            }
             auto rows = db.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
        json_extract(data,'$.itemId') FROM journal WHERE task_id=?
@@ -816,8 +830,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 }
             }
             const auto tools = available(task,event,peer,!choices.empty(),canRead);
-            if (options.sessionRead == "prefill" && event["kind"] == "result" && event["evidence"].empty()) {
-                const auto run = runRef(event["run"]);
+            if (options.sessionRead == "prefill" && event["evidence"].empty() &&
+                (event["kind"] == "result" || event.contains("sessionResult"))) {
+                const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
+                const auto run = runRef(report["run"]);
                 readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
                 return;
             }

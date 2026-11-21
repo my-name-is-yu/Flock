@@ -569,6 +569,82 @@ void peerWorkAndRestart() {
               messages[i]["replyTo"] == messages[i - 1]["messageId"],"the recorded reply chain broke");
 }
 
+void checkPeerClarificationAfterRun(std::string_view readMode) {
+    Fixture f;
+    f.read = readMode;
+    f.restart();
+    f.allowBeta();
+    const auto root = f.submit("Verify the release");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        if (input.task["id"] == root) {
+            if (event["kind"] == "intake") return botRequest("beta","work","Verify the release");
+            if (event["kind"] == "bot_question") {
+                check(event["text"] == "Which branch should I retest?","wrong question reached Release");
+                if (!event.contains("userAnswer")) return ask();
+                check(event["userAnswer"] == "main","wrong human answer reached Release");
+                return botReply("answer","Retest main");
+            }
+            check(event["kind"] == "bot_result" && event["text"] == "Retested main" &&
+                  event["references"][0]["runId"] == "run-2-result","Release lost the final evidence");
+            if (input.evidence.empty())
+                return {"read_bot_evidence",{{"messageId",event["messageId"]}},"Inspect the retest report"};
+            check(input.evidence.back()["runId"] == "run-2-result","Release read a different Run's evidence");
+            return complete();
+        }
+        if (event["kind"] == "bot_request") return work();
+        if (event["kind"] == "bot_answer") {
+            const auto& report = event.at("sessionResult");
+            check(event["text"] == "Retest main" && report["run"]["runId"] == "run-1" &&
+                  report["resultRunId"] == "run-1-result","Verifier lost the clarification or its session context");
+            check(hasTool(input,"session_read") == (readMode == "on_demand"),"history read ignored the selected mode");
+            if (readMode == "on_demand" && input.evidence.empty())
+                return {"session_read",{{"threadId",report["run"]["threadId"]},{"runId",report["resultRunId"]}},
+                        "Inspect the earlier verification"};
+            if (readMode != "off")
+                check(!input.evidence.empty() && input.evidence.back()["runId"] ==
+                      (readMode == "prefill" ? "run-1" : "run-1-result"),"Verifier lost the read excerpt");
+            check(hasTool(input,"follow_up"),"Verifier lost the settled Session");
+            return {"follow_up",{{"instruction","Retest main"}},"Continue the existing verification Session"};
+        }
+        check(event["kind"] == "result","unexpected event in Verifier");
+        if (event["run"]["runId"] == "run-1") return botReply("question","Which branch should I retest?");
+        return botReply("result","Retested main");
+    };
+
+    f.reach(root,"peer_waiting");
+    const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
+    f.reach(recipient,"running");
+    const auto initialRun = f.task(recipient)["activeRun"];
+    f.t3.finish("run-1");
+    const auto waitId = f.wait(root,"user_question");
+    f.store->operate(root,waitId,"answer",{{"text","main"}});
+    f.reach(recipient,"deciding");
+    f.restart();
+    const auto readsBeforeAnswer = f.t3.reads;
+    f.runtime->tick();
+    if (readMode == "off")
+        check(f.t3.reads == readsBeforeAnswer,"the Bot answer read T3 despite session history being off");
+    else
+        check(f.t3.reads == readsBeforeAnswer + 1 && f.t3.readRequests.back().runId ==
+              (readMode == "prefill" ? "run-1" : "run-1-result"),
+              "the Bot answer did not reopen the earlier verification record");
+
+    f.reach(recipient,"running");
+    const auto continuation = f.t3.seen.back();
+    check(f.t3.launches == 1 && f.t3.follows == 1 && continuation.target.threadId == initialRun["threadId"].get<std::string>() &&
+          continuation.target.runId == initialRun["runId"].get<std::string>() && f.task(recipient)["additionalUsed"] == 1,
+          "the retest did not continue the same settled T3 Session");
+    f.t3.finish("run-2");
+    f.reach(root,"completed");
+    check(f.logs(recipient,"report") == 2 && f.logs(root,"completed") == 1 && f.botMessages("alpha").size() == 4,
+          "the settled verification result was not delivered exactly once");
+}
+
+void peerClarificationAfterRun() {
+    for (const auto mode : {"on_demand","prefill","off"}) checkPeerClarificationAfterRun(mode);
+}
+
 void peerConsultationAndPermission() {
     Fixture f;
     f.allowBeta();
@@ -755,7 +831,8 @@ int main() {
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"history reading restart",evidenceResume},
-            {"Bot handoff and restart",peerWorkAndRestart},{"Bot consultation and permission",peerConsultationAndPermission},
+            {"Bot handoff and restart",peerWorkAndRestart},{"Bot clarification after a settled Run",peerClarificationAfterRun},
+            {"Bot consultation and permission",peerConsultationAndPermission},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},

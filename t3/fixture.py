@@ -2,10 +2,13 @@
 import base64
 import hashlib
 import json
+import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -105,6 +108,12 @@ class Fixture(BaseHTTPRequestHandler):
             content = self.tool(tool["name"], tool["arguments"])
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": "code" in content}
+            if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
+                # The accepted Run is visible to a new client, but the old client has no response.
+                self.server.launch_accepted.set()
+                assert self.server.release_launch.wait(15), "crash harness did not kill the Runtime"
+                self.close_connection = True
+                return
             self.reply(envelope)
         else:
             self.reply(code=404)
@@ -122,12 +131,18 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["projectId"] == "project"
             return {"id": "project", "defaultModelSelection": None}
         if name == "t3_thread_launch":
-            assert args["projectId"] == "project" and args["clientRequestId"] == "flock-action-0123"
+            assert args["projectId"] == "project"
             assert "modelSelection" not in args and "workspaceStrategy" not in args
-            assert args["message"].startswith("[Flock action flock-action-0123]\n\n  preserve")
+            if self.server.peer_recovery:
+                state["launches"].append(args["clientRequestId"])
+                assert len(state["launches"]) == 1, "Runtime sent a second launch"
+                assert args["message"].startswith(f"[Flock action {args['clientRequestId']}]\n\nVerify the fixture")
+            else:
+                assert args["clientRequestId"] == "flock-action-0123"
+                assert args["message"].startswith("[Flock action flock-action-0123]\n\n  preserve")
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
-                    "runId": None if state["delayRunId"] else "root"}
+                    "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
@@ -138,6 +153,8 @@ class Fixture(BaseHTTPRequestHandler):
             return {"items": [], "nextCursor": None}
         if name == "t3_thread_list":
             assert args["projectId"] == "project" and args["cursor"] == 0
+            if self.server.peer_recovery:
+                state["reconciliations"] += 1
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
             return {"projectId": "project", "threads": [self.summary(t) for t in ids],
                     "total": len(ids), "nextCursor": None}
@@ -242,12 +259,53 @@ class Fixture(BaseHTTPRequestHandler):
                 "status": status, "updatedAt": "2026-01-01T00:00:00.000Z"}
 
 
+def check_pending_send(db_path, action_id):
+    with sqlite3.connect(db_path) as db:
+        tasks = db.execute("SELECT bot_id,state,data FROM tasks ORDER BY id").fetchall()
+        assert [(bot, state) for bot, state, _ in tasks] == [("release", "peer_waiting"), ("verifier", "sending")], tasks
+        verifier = json.loads(tasks[1][2])
+        assert verifier["activeRun"] is None and verifier["actionId"] == action_id, verifier
+        outbox = db.execute("SELECT phase,auth_generation FROM outbox WHERE id=?", (action_id,)).fetchall()
+        assert len(outbox) == 1 and outbox[0][0] == "started" and outbox[0][1], outbox
+        assert db.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+
+
+def test_peer_recovery(server, runner, temp):
+    server.launch_accepted = threading.Event()
+    server.release_launch = threading.Event()
+    server.state.update(launches=[], reconciliations=0)
+    db_path = temp + "/state.db"
+    command = [runner, server.origin, temp + "/creds", db_path]
+    with subprocess.Popen(command + ["start"]) as process:
+        try:
+            deadline = time.monotonic() + 10
+            while not server.launch_accepted.wait(0.05):
+                assert process.poll() is None, f"Runtime exited before T3 accepted the launch: {process.returncode}"
+                assert time.monotonic() < deadline, "T3 did not accept the launch"
+            action_id, = server.state["launches"]
+            check_pending_send(db_path, action_id)
+            process.kill()
+            assert process.wait(timeout=5) == -signal.SIGKILL, "Runtime was not killed by SIGKILL"
+        finally:
+            if process.poll() is None:
+                process.kill()
+            server.release_launch.set()
+    subprocess.run(command + ["recover"], timeout=15, check=True)
+    assert server.state["launches"] == [action_id], "recovery resent the launch"
+    assert server.state["reconciliations"] == 1, "recovery did not perform one project history scan"
+
+
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
+    server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        completed = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False)
+        if server.peer_recovery:
+            test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        else:
+            code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode
     finally:
         server.shutdown()
-    sys.exit(completed.returncode)
+    sys.exit(code)
