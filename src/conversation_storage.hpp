@@ -24,9 +24,8 @@ inline std::string verifiedEnvironment(const Json& task, const Json& routing, st
     if (!config.is_object()) return {};
     const auto aliases = config.find("conversationEnvironments");
     if (aliases == config.end() || !aliases->is_object()) return {};
-    auto id = field(*aliases,environment);
-    if (id.empty() && std::ranges::any_of(*aliases,[&](const Json& value) { return value == environment; }))
-        id = environment;
+    const auto canonical = std::ranges::any_of(*aliases,[&](const Json& value) { return value == environment; });
+    const auto id = canonical ? std::string(environment) : field(*aliases,environment);
     constexpr auto valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.";
     if (id.empty() || id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
     return id;

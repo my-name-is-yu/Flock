@@ -1,5 +1,10 @@
 #include "flock/web.hpp"
 
+#ifdef FLOCK_TEST_CHATGPT
+#include "bots.hpp"
+#include "model.hpp"
+#endif
+
 #include <httplib.h>
 
 #include <algorithm>
@@ -13,6 +18,7 @@ using namespace flockv0;
 namespace {
 constexpr auto privateValue = "private-token-value";
 constexpr auto comparisonRequest = "3案を比較して";
+constexpr auto compoundExplanation = "2案目を詳しく。2案目を要約して";
 constexpr auto missingBudgetQuestion = "2案目にいくらかかる？";
 constexpr auto budgetDetail = "明細は100件です";
 constexpr auto proposedOptions = "1. 手動で照合する\n"
@@ -37,7 +43,7 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
-    unsigned explained = 0, summarized = 0;
+    unsigned routed = 0, explained = 0, summarized = 0;
     Id comparisonResult = 0;
     Id estimateClarification = 0;
     std::size_t summarySourceSize = 0;
@@ -60,6 +66,7 @@ struct FixedModel : Model {
     }
 
     Decision routeMessage(const ModelInput& input) {
+        ++routed;
         const auto& event = input.event;
         check(event.dump().find(privateValue) == std::string::npos &&
               input.history.dump().find(privateValue) == std::string::npos,"Connection settings entered model-visible context");
@@ -73,6 +80,7 @@ struct FixedModel : Model {
                     {"resolution","resolved"},{"clarificationMessageId",estimateClarification}},{}};
         }
         if (event.at("text") == "2案目を詳しく" || event.at("text") == "2案目を要約して" ||
+            event.at("text") == compoundExplanation ||
             event.at("text") == missingBudgetQuestion) {
             const auto& results = event.at("results");
             const auto selected = std::ranges::find_if(results,[&](const Json& result) {
@@ -81,8 +89,18 @@ struct FixedModel : Model {
             });
             check(selected != results.end(),"The comparison was not available to the model fixture");
             route = {{"kind","answer_result"},{"resultMessageId",selected->at("messageId")},{"resultOption",2}};
+            if (event.at("text") == compoundExplanation) {
+                auto summary = route;
+                route["segment"] = "2案目を詳しく";
+                summary["segment"] = "2案目を要約して";
+                return {"route_conversation",{{"routes",Json::array({route,summary})}},"Explain and summarize"};
+            }
+        } else if (event.at("text") == "Who are you?") {
+            route = {{"kind","respond"},{"text","I'm the release Bot."}};
         } else if (event.at("text") == "進捗どうなってる" || event.at("text") == "進捗は？") {
             route = {{"kind","status"}};
+        } else if (event.at("text") == "Prepare the notes in local-env or backup") {
+            route = {{"kind","create_task"}};
         } else {
             const auto& anchor = event.at("reply");
             check(anchor.at("kind") == "wait" && event.at("text") == "利用者向けのみ",
@@ -119,8 +137,9 @@ struct FixedModel : Model {
 
 struct FixedT3 : T3 {
     std::map<std::string,Observation,std::less<>> observations;
+    std::map<std::string,unsigned> projectLaunches;
     std::vector<Command> replies;
-    unsigned launches = 0;
+    unsigned launches = 0, interruptions = 0;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
@@ -128,8 +147,11 @@ struct FixedT3 : T3 {
             ++launches;
             if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
             const auto& project = command.projectId;
-            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
-            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + std::to_string(launches),link},{}};
+            const auto sequence = ++projectLaunches[project];
+            auto thread = "thread-" + project;
+            if (sequence > 1) thread += "-" + std::to_string(sequence);
+            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/" + thread : "javascript:unexpected";
+            return {Delivery::Kind::Accepted,{std::move(thread),"run-" + std::to_string(launches),link},{}};
         }
         check(command.tool == "answer_session_question","unexpected command in fixture");
         replies.push_back(command);
@@ -138,7 +160,7 @@ struct FixedT3 : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return observations[run.threadId]; }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    void interrupt(const std::string&, const Json&, const RunRef&) override { ++interruptions; }
 };
 
 WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
@@ -206,6 +228,42 @@ Json conversationReply(const Json& page, Id messageId) {
     }
     check(!result.is_null(),"message received no Bot reply");
     return result;
+}
+
+void destinationChoicesInView(const std::filesystem::path& path) {
+    Store store(path);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto config = callbacks();
+    const auto configuredIntake = config.intake;
+    config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
+        auto intake = configuredIntake(bot,request);
+        intake.config["conversationEnvironments"]["backup"] = "backup-env";
+        return intake;
+    };
+    const auto server = startWeb(store,0,std::move(config));
+    Browser browser(*server);
+    const auto send = [&](std::string_view key, std::string_view message, Id replyTo) {
+        Json input = {{"botId","release"},{"clientMessageId",key},{"text",message}};
+        if (replyTo) input["replyToMessageId"] = replyTo;
+        return browser.post("/api/messages",input,201);
+    };
+    send("request-destination","Prepare the notes in local-env or backup",0);
+    runtime.routeConversation();
+    const auto page = browser.get("/api/view?bot=release");
+    const auto& clarifications = page.at("clarifications");
+    check(clarifications.size() == 1 && clarifications[0].contains("destinations") &&
+          clarifications[0]["destinations"] == Json::array({"local-env","backup","backup-env"}) &&
+          store.tasks().empty(),"the Web view lost the configured destination choices");
+    const auto receipt = send("choose-backup","backup",clarifications[0].at("messageId"));
+    tick(runtime,4);
+    const auto resolved = browser.get("/api/view?bot=release");
+    const auto tasks = store.tasks("release");
+    check(resolved.at("clarifications").empty() && tasks.size() == 1 &&
+          conversationReply(resolved,receipt.at("messageId")).at("route") == "create_task" &&
+          store.task(tasks[0]["id"]).at("runs").back().at("environmentId") == "backup-env",
+          "the selected Web destination did not receive the new Run");
 }
 
 void conversationEntry(const std::filesystem::path& path) {
@@ -458,14 +516,322 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     }),"the DM exposed task or evidence details");
 }
 
+struct StopModel : FixedModel {
+    Id other = 0;
+    bool honorSelection = false;
+    Decision decide(const ModelInput& input) override {
+        if (input.event["kind"] != "route_conversation") return FixedModel::decide(input);
+        const auto& event = input.event;
+        const auto& reply = event.at("reply");
+        if (reply.at("kind") == "clarification" && honorSelection) {
+            check(reply.contains("selectedTaskId"),"the model did not receive the user's hidden choice");
+            return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},
+                    {"taskId",reply.at("selectedTaskId")}}})},{"resolution","resolved"}},{}};
+        }
+        if (reply.at("kind") == "clarification") {
+            return {"route_conversation",{{"routes",Json::array({{{"kind","append_instruction"},{"taskId",other}}})},
+                    {"resolution","resolved"}},{}};
+        }
+        check(event.at("text") == "ログインの件を調整して","Unexpected route in stop fixture");
+        Json candidates = Json::array();
+        for (const auto& task : event.at("tasks"))
+            if (task.at("state") == "running") candidates.push_back(task.at("taskId"));
+        return {"route_conversation",{{"routes",Json::array({{{"kind","clarify"},{"text","どちらの依頼ですか？"},
+                {"candidates",candidates}}})}},{}};
+    }
+};
+
+bool exposesTaskNumber(const std::string& text, Id task) {
+    return text.find("#" + std::to_string(task)) != std::string::npos;
 }
 
-int main() {
+void sameNameStop(const std::filesystem::path& path) {
+    Store store(path);
+    StopModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const auto first = store.submit({"triage","ログイン画面の修正","linked env","login-a"});
+    const auto second = store.submit({"triage","ログイン画面の修正","linked env","login-b"});
+    tick(runtime,4);
+    check(store.task(first)["state"] == "running" && store.task(second)["state"] == "running",
+          "same-name fixtures did not both start");
+
+    const auto stop = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","stop-login"},
+        {"text","「ログイン画面の修正」を中止して"}},201);
+    runtime.routeConversation();
+    auto page = browser.get("/api/view?bot=triage");
+    const auto question = conversationReply(page,stop.at("messageId"));
+    const auto questionText = question.at("text").get<std::string>();
+    check(question.at("route") == "clarify" && questionText.find("ログイン画面の修正") != std::string::npos &&
+          !exposesTaskNumber(questionText,first) && !exposesTaskNumber(questionText,second),
+          "same-name stop request was not confirmed by request name");
+    check(store.task(first)["state"] == "running" && store.task(second)["state"] == "running",
+          "an ambiguous stop request stopped a request before confirmation");
+    check(page.at("clarifications").size() == 1,"stop confirmation was not listed as waiting for the user");
+    const auto& clarification = page.at("clarifications").at(0);
+    const Id anchor = clarification.at("messageId");
+    check(clarification.at("candidates").size() == 2,"stop confirmation did not offer both requests");
+    for (const auto& candidate : clarification.at("candidates"))
+        check(candidate.at("request") == "ログイン画面の修正" && candidate.at("createdAt").get<Seconds>() > 0 &&
+              candidate.at("state") == "running","same-name candidates lacked the facts that tell them apart");
+
+    const auto label = "ログイン画面の修正（後から依頼した方）";
+    browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","no-anchor"},{"text",label},
+        {"candidateTaskId",second}},400);
+    const auto forged = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","forged"},{"text",label},
+        {"replyToMessageId",anchor},{"candidateTaskId",second + 100}},201);
+    runtime.routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=triage"),forged.at("messageId")).at("route") == "respond" &&
+          store.task(first)["state"] == "running" && store.task(second)["state"] == "running" &&
+          store.clarifications("triage").size() == 1,"a choice outside the confirmation reached a request");
+
+    const Json choice = {{"botId","triage"},{"clientMessageId","choose-second"},{"text",label},
+                         {"replyToMessageId",anchor},{"candidateTaskId",second}};
+    const auto chosen = browser.post("/api/messages",choice,201);
+    check(browser.post("/api/messages",choice,201) == chosen,"retrying a choice did not return its receipt");
+    auto switched = choice;
+    switched["candidateTaskId"] = first;
+    browser.post("/api/messages",switched,409);
+    runtime.routeConversation();
+    page = browser.get("/api/view?bot=triage");
+    const auto stopped = conversationReply(page,chosen.at("messageId"));
+    const auto stoppedText = stopped.at("text").get<std::string>();
+    check(stopped.at("route") == "cancel_task" && stoppedText.find("ログイン画面の修正") != std::string::npos &&
+          !exposesTaskNumber(stoppedText,second),"the chosen stop was not confirmed by request name");
+    const auto secondState = store.task(second)["state"];
+    check(store.task(first)["state"] == "running" && (secondState == "cancelling" || secondState == "cancelled") &&
+          store.clarifications("triage").empty(),"the choice did not stop only the selected request");
+
+    const auto stale = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","stale-choice"},{"text",label},
+        {"replyToMessageId",anchor},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto staleReply = conversationReply(browser.get("/api/view?bot=triage"),stale.at("messageId"));
+    check(staleReply.at("route") == "respond" && store.task(first)["state"] == "running",
+          "a reply to a closed confirmation reached another request");
+
+    const auto third = store.submit({"triage","ログイン画面の文言","linked env","login-c"});
+    tick(runtime,4);
+    check(store.task(third)["state"] == "running","the third request did not start");
+    model.other = third;
+    const auto adjust = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","adjust"},
+        {"text","ログインの件を調整して"}},201);
+    runtime.routeConversation();
+    const auto adjustQuestion = conversationReply(browser.get("/api/view?bot=triage"),adjust.at("messageId"));
+    check(adjustQuestion.at("route") == "clarify","the model clarification fixture did not ask");
+    const auto misrouted = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","misrouted"},
+        {"text","ログイン画面の修正"},{"replyToMessageId",adjustQuestion.at("messageId")},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto misroutedReply = conversationReply(browser.get("/api/view?bot=triage"),misrouted.at("messageId"));
+    const auto untouched = [&](Id task) { return store.task(task).value("pendingInstructions",Json::array()).empty(); };
+    check(misroutedReply.at("route") == "clarify" && untouched(first) && untouched(third),
+          "routing applied a chosen reply to a request the user did not choose");
+
+    model.honorSelection = true;
+    const auto honored = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","honored"},
+        {"text","ログイン画面の修正"},{"replyToMessageId",adjustQuestion.at("messageId")},{"candidateTaskId",first}},201);
+    runtime.routeConversation();
+    const auto honoredReply = conversationReply(browser.get("/api/view?bot=triage"),honored.at("messageId"));
+    check(honoredReply.at("route") == "append_instruction" && !untouched(first) && untouched(third),
+          "a chosen candidate did not resolve a non-stop clarification for that request only");
+}
+#ifdef FLOCK_TEST_CHATGPT
+void chatGPTConversation(const std::filesystem::path& home) {
+    Store store(home / "conversation.sqlite");
+    app::ChatGPTModel model(home / "credentials" / "chatgpt");
+    const app::Bots bots(home / "bots");
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = [&](std::string_view bot) { return bots.peers(bot); };
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.notes(bot); },options);
+    const auto server = startWeb(store,0,{
+        [&] { return bots.cards(); },
+        [&](std::string_view bot,std::string_view request) { return bots.get(bot).intake(request); },
+    });
+    Browser browser(*server);
+    const auto send = [&](std::string_view key,std::string_view text) -> Id {
+        const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId",key},{"text",text}},201);
+        check(receipt.at("status") == "received","composer did not acknowledge the message");
+        return receipt.at("messageId");
+    };
+    const auto view = [&] { return browser.get("/api/view?bot=release"); };
+    const auto task = [&](Id id) { return browser.get("/api/task?bot=release&taskId=" + std::to_string(id)); };
+    const auto linkedTask = [&](Id messageId) -> Id {
+        const auto page = view();
+        const auto& events = page.at("events");
+        const auto message = std::ranges::find_if(events,[&](const Json& event) {
+            return event.at("kind") == "conversation_message" && event.at("id") == messageId;
+        });
+        check(message != events.end() && message->at("taskId").is_number_integer(),
+              "composer message was not linked to its Task");
+        return message->at("taskId");
+    };
+
+    const auto request = send("blockers","Summarize the release blockers.");
+    check(store.tasks().empty(),"composer created a Task before routing");
+    tick(runtime,5);
+    check(conversationReply(view(),request).at("route") == "create_task" && store.tasks().size() == 1,
+          "ordinary composer request did not create exactly one Task");
+    const auto releaseTask = linkedTask(request);
+    check(task(releaseTask).at("state") == "running" && t3.launches == 1,
+          "the Task did not start one Run");
+    t3.observations["thread-release"] = {
+        .kind = Observation::Kind::Finished, .status = "completed",
+        .report = "The signing certificate expired on 18 November.",
+        .itemId = "blockers-report", .settled = true
+    };
+    tick(runtime,3);
+    const auto completed = task(releaseTask);
+    check(completed.at("state") == "completed","the Session report did not become a completed result");
+    const auto& result = completed.at("result");
+    check(result.at("data").at("run").at("itemId") == "blockers-report","the result lost the report item");
+    t3.observations.clear();
+
+    const auto question = send("why-blocked","Why is the release blocked?");
+    tick(runtime,3);
+    const auto answer = conversationReply(view(),question);
+    check(answer.at("route") == "respond" && answer.at("text") == "The release is blocked by the expired signing certificate." &&
+          answer.at("source").at("taskId") == releaseTask && answer.at("source").at("messageId") == result.at("id"),
+          "result answer was not grounded in the saved report");
+    const auto missing = send("renewal-date","When will the signing certificate be renewed?");
+    tick(runtime,3);
+    const auto clarification = conversationReply(view(),missing);
+    check(clarification.at("route") == "clarify" && clarification.at("text") == "What is the planned certificate renewal date?" &&
+          clarification.at("source").at("messageId") == result.at("id"),
+          "missing evidence did not produce a clarification linked to the result");
+    check(store.tasks().size() == 1 && t3.launches == 1 && task(releaseTask).at("runs") == completed.at("runs"),
+          "result follow-ups created a Task or changed Runs");
+
+    const auto consult = send("consult-verifier","Ask Verifier to confirm the release criteria.");
+    tick(runtime,8);
+    const auto consultTask = linkedTask(consult);
+    const auto page = view();
+    Json messages = Json::array();
+    for (const auto& event : page.at("events"))
+        if (event.at("kind") == "bot_message")
+            messages.push_back(event.at("data"));
+    check(messages.size() == 2,"the originating conversation did not show one request and one peer reply");
+    const auto& outgoing = messages.at(0);
+    const auto& incoming = messages.at(1);
+    check(outgoing.at("fromBotId") == "release" && outgoing.at("toBotId") == "verifier" &&
+          outgoing.at("requestKind") == "consult" && incoming.at("fromBotId") == "verifier" &&
+          incoming.at("messageType") == "result" && incoming.at("toBotId") == "release" &&
+          incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
+          incoming.at("text") == "Publish only after the certificate is renewed.",
+          "Verifier's reply did not return to its original exchange");
+    check(task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
+          "the originating Task did not resume after the consultation");
+
+    const auto first = send("notes","Prepare release notes.");
+    const auto second = send("checksums","Check artifact checksums in the backup environment.");
+    tick(runtime,5);
+    const auto firstTask = task(linkedTask(first));
+    const auto secondTask = task(linkedTask(second));
+    const auto& firstRuns = firstTask.at("runs");
+    const auto& secondRuns = secondTask.at("runs");
+    check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
+    check(firstRuns.back().at("environmentId") == "local-env" && secondRuns.back().at("environmentId") == "backup-env",
+          "the composer Runs did not keep each request on its own destination");
+    const auto active = view().at("activeSessions");
+    check(firstTask.at("state") == "running" && secondTask.at("state") == "running" &&
+          active.size() == 2 && t3.launches == 3,"ambiguous-stop fixture requires two active Runs: " +
+          firstTask.at("state").dump() + ", " + secondTask.at("state").dump() + ", active=" + active.dump() +
+          ", launches=" + std::to_string(t3.launches));
+    const auto taskCount = store.tasks().size();
+    const auto stop = send("stop","それ止めて");
+    tick(runtime,3);
+    const auto afterStop = view();
+    const auto confirm = conversationReply(afterStop,stop);
+    const auto& candidates = confirm.at("candidates");
+    check(confirm.at("route") == "clarify" && confirm.at("text") == "どの作業を停止しますか？" && candidates.size() == 2 &&
+          std::ranges::all_of(active,[&](const Json& run) {
+              return std::ranges::any_of(candidates,[&](const Json& candidate) { return candidate.at("taskId") == run.at("taskId"); });
+          }),"ambiguous stop did not ask the user to choose between both running tasks");
+    check(afterStop.at("activeSessions") == active && store.tasks().size() == taskCount && t3.launches == 3 &&
+          task(firstTask.at("id")).at("runs") == firstTask.at("runs") &&
+          task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
+          "ambiguous stop changed a Run or created work");
+}
+#endif
+void approveModelCallBeforeTask(const std::filesystem::path& path) {
+    Store webStore(path);
+    auto store = std::make_unique<Store>(path);
+    FixedModel model;
+    FixedT3 t3;
+    const auto start = [&] {
+        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+    };
+    auto runtime = start();
+    auto webCallbacks = callbacks();
+    webCallbacks.intake = [original = webCallbacks.intake](std::string_view bot, std::string_view request) {
+        auto intake = original(bot,request);
+        intake.config["modelCallLimit"] = 2;
+        return intake;
+    };
+    auto server = startWeb(webStore,0,std::move(webCallbacks));
+    Browser browser(*server);
+    const auto task = browser.request("release",comparisonRequest);
+    tick(*runtime,3);
+    t3.observations["thread-release"] = {
+        .kind = Observation::Kind::Finished,.status = "completed",.report = proposedOptions,
+        .itemId = "comparison-report",.settled = true
+    };
+    tick(*runtime,2);
+    model.comparisonResult = store->latestTaskResult(task).at("id");
+    const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","compound"},
+        {"text",compoundExplanation}},201);
+    runtime->routeConversation();
+    const auto waiting = browser.get("/api/view?bot=release");
+    const auto wait = waiting.at("clarifications").at(0);
+    const auto reply = conversationReply(waiting,receipt.at("messageId"));
+    check(wait.at("route") == "model_budget" && wait.at("messageId") == reply.at("messageId") &&
+          model.routed == 1 && model.explained == 1 && model.summarized == 0,"third call reached the fixture");
+    runtime.reset();
+    store = std::make_unique<Store>(path);
+    runtime = start();
+    tick(*runtime,3);
+    check(model.routed == 1 && model.explained == 1 && model.summarized == 0,"waiting message resumed without approval");
+
+    const auto independent = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","independent"},
+        {"text","Who are you?"}},201);
+    runtime->routeConversation();
+    check(conversationReply(browser.get("/api/view?bot=release"),independent.at("messageId")).at("route") == "respond" &&
+          model.routed == 2,"a paused message blocked an independent message to the same Bot");
+
+    Json approval = {{"botId","triage"},{"waitMessageId",wait.at("messageId")},{"operation","approve"}};
+    browser.post("/api/operations",approval,409);
+    approval["botId"] = "release";
+    browser.post("/api/operations",approval);
+    browser.post("/api/operations",approval,409);
+    runtime->routeConversation();
+    const auto resumed = browser.get("/api/view?bot=release");
+    const auto& answer = resumed.at("events").back().at("data");
+    check(resumed.at("clarifications").empty() && answer.at("route") == "compound" &&
+          answer.at("replyToMessageId") == receipt.at("messageId") &&
+          model.routed == 2 && model.explained == 1 && model.summarized == 1 &&
+          store->tasks().size() == 1 && t3.launches == 1,
+          "approval did not resume the unfinished explanation from its saved routing decisions");
+}
+
+}
+
+int main(int argc,char** argv) {
     try {
+#ifdef FLOCK_TEST_CHATGPT
+        if (argc == 2) {
+            chatGPTConversation(argv[1]);
+            std::cout << "web ChatGPT conversation behavior passed\n";
+            return 0;
+        }
+#endif
         TestDirectory directory;
+        destinationChoicesInView(directory.path / "destination.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+        sameNameStop(directory.path / "stop.sqlite");
+        approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

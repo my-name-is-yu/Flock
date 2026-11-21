@@ -154,6 +154,7 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateConversation();
+        migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
         // Databases from the DM preview may contain queued messages without a sending Bot task.
@@ -306,6 +307,7 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    modelCallLimit(item.config);
     Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
@@ -377,6 +379,9 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     } else if (operation == "approve" && reason == "budget") {
         task["remaining"] = task["remaining"].get<int>() + 1;
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
+    } else if (operation == "approve" && reason == "model_budget") {
+        grantModelCall(taskModelBudget(task));
+        journal(id,"model_budget_granted",{{"waitId",waitId}});
     } else if (operation == "retry" && reason == "model_failure") {
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
@@ -562,7 +567,10 @@ SELECT page.id,page.task_id,page.time,page.kind,
               AND json_array_length(json_extract(decision.data,'$.segments'))=1
             ) THEN 'true' ELSE 'false' END))) END
 FROM (
-  SELECT j.* FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
+  SELECT j.id,j.task_id,j.time,j.kind,
+    CASE WHEN j.kind='cancelled' THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data,
+    j.conversation_bot_id
+  FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
     AND j.conversation_bot_id IS NULL
     AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')

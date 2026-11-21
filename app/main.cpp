@@ -142,7 +142,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
 volatile std::sig_atomic_t stopRequested = 0;
 void requestStop(int) { stopRequested = 1; }
 
-void daemon(Arguments& args, const std::filesystem::path& home, Store& store, const Bots& bots) {
+void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bots& bots) {
     bool fixed = false, web = true;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
@@ -186,6 +186,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, co
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
             [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+            [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
+            [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
+                return bots.updateProfile(botId,profile,image);
+            },
+            [&](std::string_view botId) { return bots.avatarImage(botId); },
             options.peers,
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
@@ -273,7 +278,7 @@ int runCli(Arguments& args) {
     }
     if (command == "model") return modelCommand(args,home);
     if (command == "t3") return t3Command(args,home);
-    const Bots bots(home / "bots");
+    Bots bots(home / "bots");
     if (command == "bots") {
         args.end();
         print(bots.cards());

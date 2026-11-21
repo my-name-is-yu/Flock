@@ -217,7 +217,7 @@ void clarificationAndStatus() {
             return result.at("taskId") == b && result.at("state") == "cancelled";
         });
         check(source != results.end(),"The cancelled source was missing");
-        return route("create_task",{{"resultMessageId",source->at("messageId")}});
+        return route("create_task",{{"resultMessageId",source->at("messageId")},{"resume",true}});
     };
     const auto id = receive(store,"stop","それ止めて");
     execution.runtime.routeConversation();
@@ -468,6 +468,7 @@ void implicitClarificationRequiresAnEligibleReply() {
     constexpr auto another = "Prepare the deployment";
     constexpr auto question = "Which hosting service should I use?";
     Id clarificationId = 0;
+    bool sawCompetingClarifications = false;
     const auto resolve = [](Id anchor) {
         auto decision = routing(Json::array({{{"kind","create_task"}}}),"resolved");
         if (anchor) decision.args["clarificationMessageId"] = anchor;
@@ -478,8 +479,11 @@ void implicitClarificationRequiresAnEligibleReply() {
         if (event.at("text") == original || event.at("text") == another)
             return route("clarify",{{"text",question}});
         if (event.at("text") == independent) return route("create_task");
+        if (event.at("text") == "Thanks for the update") return route("respond",{{"text","You're welcome."}});
         check(event.at("text") == answer,"Unexpected clarification fixture input");
         if (event.at("reply").at("kind") == "clarification") return resolve(0);
+        sawCompetingClarifications = event.at("multiplePendingClarifications") == true &&
+                                      event.at("pendingClarification").is_null();
         return resolve(clarificationId);
     };
     const auto send = [&](std::string_view key, std::string_view text, Id anchor = 0) {
@@ -498,10 +502,12 @@ void implicitClarificationRequiresAnEligibleReply() {
           tasks.front().at("runs").empty(),"Implicit resolution lost the original request or answer");
 
     const auto second = send("second",original).at("messageId").get<Id>();
+    for (int i = 0; i < 25; ++i) send("thanks-" + std::to_string(i),"Thanks for the update");
     const auto third = send("third",another).at("messageId").get<Id>();
-    clarificationId = second;
-    check(send("ambiguous",answer).at("route") == "clarify" && store.tasks("alpha") == tasks,
-          "An unanchored answer chose between competing clarifications");
+    clarificationId = third;
+    check(send("ambiguous",answer).at("route") == "clarify" && store.tasks("alpha") == tasks &&
+          sawCompetingClarifications,
+          "An unanchored answer chose the newer clarification while an older question was still open");
     if (store.clarifications("alpha").size() > 2) {
         const auto extra = store.clarifications("alpha").front().at("messageId").get<Id>();
         send("dismiss-ambiguous","dismiss this clarification",extra);
@@ -531,6 +537,9 @@ void explicitFactsReplaceResultClarificationAtomically() {
     execution.model.conversation = [&](const ModelInput& input) {
         const auto& event = input.event;
         if (input.tools.front() == "route_conversation") {
+            if (event.at("text") == "Explain option 2 using the March evidence")
+                return route("clarify",{{"text","Which March evidence should I use?"},
+                    {"resultMessageId",result},{"resultOption",2}});
             if (event.at("text") != "yes" && event.at("text") != "no")
                 return route("answer_result",{{"resultMessageId",result},{"resultOption",2}});
             auto plan = route("answer_result");
@@ -567,6 +576,55 @@ void explicitFactsReplaceResultClarificationAtomically() {
     const auto resolved = send("negative","no",next.at("messageId"));
     check(resolved["route"] == "respond" && store.clarifications("alpha").empty() &&
           interpreted == 3 && store.tasks("alpha").size() == 1,"the result clarification applied a work action or retained a hold");
+    const auto selected = send("selected-clarification","Explain option 2 using the March evidence",result);
+    check(selected.at("route") == "clarify" && selected.at("text") == "Which March evidence should I use?" &&
+          selected.at("source") == question.at("source") && interpreted == 3,
+          "the routing clarification lost the selected excerpt or called the answer model");
+}
+
+void compoundResultClarifiesOnlyTheQuestion() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto original = task(store,"Estimate the migration");
+    execution.finish(store,original,"1. Migrate all records at once\n2. Migrate by batch");
+    const auto source = store.latestTaskResult(original).at("id");
+    const auto tasksBefore = store.tasks("alpha");
+    const auto launches = execution.t3.launches;
+    constexpr auto question = "2案目の費用は？";
+    constexpr auto compound = "2案目の費用は？\n別件、リリースノートを作って";
+    constexpr auto missingFact = "対象のレコード数は何件ですか？";
+    constexpr auto correction = "1万件です";
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto text = input.event.at("text").get<std::string>();
+        if (input.tools.front() == "route_conversation") {
+            if (text == compound) return routing(Json::array({
+                {{"kind","answer_result"},{"segment",question},{"resultMessageId",source},{"resultOption",2}},
+                {{"kind","create_task"},{"segment","リリースノートを作って"}}
+            }));
+            check(text == correction && input.event.at("reply").at("originalText") == question,
+                  "the clarification retained the unrelated request");
+            return routing(Json::array({{{"kind","answer_result"}}}),"resolved");
+        }
+        check(input.event.at("source").at("messageId") == source && input.event.at("source").at("option") == 2,
+              "the result clarification lost its selected source");
+        if (text == question) return Decision{"clarify_conversation_result",{{"text",missingFact}}, {}};
+        check(text.starts_with(question) && text.ends_with(correction),"the answer model did not receive the missing fact");
+        return Decision{"answer_conversation_result",{{"text","1万件を処理する場合はバッチごとに費用を見積もります。"}}, {}};
+    };
+    const auto first = receive(store,"compound-result",compound);
+    execution.runtime.routeConversation();
+    const auto clarification = reply(store,first);
+    const auto body = clarification.at("text").get<std::string>();
+    check(clarification.at("route") == "clarify" && body.starts_with(missingFact) && body.find("別のメッセージ") != body.npos &&
+          clarification.at("source").at("messageId") == source && store.tasks("alpha") == tasksBefore &&
+          execution.t3.launches == launches,"the compound reply hid the missing fact or started work");
+
+    const auto response = receive(store,"compound-result-fact",correction,clarification.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,response).at("route") == "respond" && store.clarifications("alpha").empty() &&
+          store.tasks("alpha") == tasksBefore && execution.t3.launches == launches,
+          "answering the result clarification applied the unrelated work");
 }
 
 void followUpsKeepThePriorResult() {
@@ -574,10 +632,12 @@ void followUpsKeepThePriorResult() {
     Store store(fixture.database()), writer(fixture.database());
     RuntimeFixture execution(store);
     const auto original = task(writer,"Original report");
-    execution.finish(store,original,"1. Ignore samples\n" + std::string(3800,'x') + "\n2. Use paired observations");
+    const std::string report = "1. Ignore samples\n" + std::string(3800,'x') + "\n2. Use paired observations";
+    execution.finish(store,original,report);
     const auto sourceId = store.latestTaskResult(original).at("id").get<Id>();
     const auto unrelated = task(writer,"Unrelated report");
-    execution.finish(store,unrelated,"1. Compare earlier dates\n2. Discard the baseline");
+    const std::string unrelatedReport = "1. Compare earlier dates\n2. Discard the baseline";
+    execution.finish(store,unrelated,unrelatedReport);
     const auto unrelatedId = store.latestTaskResult(unrelated).at("id").get<Id>();
     execution.model.conversation = [&](const ModelInput& input) {
         if (input.tools.front() == "answer_conversation_result") {
@@ -585,7 +645,16 @@ void followUpsKeepThePriorResult() {
             return Decision{"answer_conversation_result",{{"text","Pair the observations from the two runs."}},{}};
         }
         const auto& text = input.event.at("text");
-        if (text == "Explain option 2") return route("answer_result",{{"resultMessageId",sourceId}});
+        if (text == "Explain option 2") return route("answer_result",{{"resultMessageId",sourceId},{"resultOption",2}});
+        if (text == "Implement the whole report, including Option 2")
+            return route("create_task",{{"resultMessageId",sourceId},{"resultOption",0}});
+        if (text == "Implement everything in the other report")
+            return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",0}});
+        if (text == "Implement everything in \"Original report\"")
+            return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",0}});
+        if (text == "Implement the whole report in another environment")
+            return route("clarify",{{"text","Which configured execution destination should I use?"},
+                {"operation","destination"},{"resultMessageId",sourceId},{"resultOption",0}});
         if (text == "案2以外を実装") return route("create_task",{{"resultMessageId",sourceId},{"resultOption",2}});
         if (text == "案2を適用して") return route("create_task",{{"resultMessageId",unrelatedId},{"resultOption",2}});
         return route("create_task");
@@ -603,8 +672,28 @@ void followUpsKeepThePriorResult() {
           "the follow-up ignored the previous answer's report");
     send("explain-again","Explain option 2",sourceId);
     const auto deictic = send("deictic","それを実装して");
-    check(deictic["route"] == "create_task" && deictic["source"]["messageId"] == sourceId,
-          "the deictic follow-up lost the cited result");
+    check(deictic["route"] == "create_task" && deictic["source"] == answer["source"] &&
+          store.tasks("alpha").front()["sourceResultRefs"] == Json::array({answer["source"]}),
+          "the deictic follow-up lost the cited result or selected option");
+    const auto whole = send("whole","Implement the whole report, including Option 2",answer.at("messageId"));
+    check(whole.at("route") == "create_task" && whole.at("source").at("messageId") == sourceId &&
+          whole.at("source").at("option") == 0 && whole.at("source").at("text") == report &&
+          store.tasks("alpha").front()["sourceResultRefs"] == Json::array({whole.at("source")}),
+          "an explicit whole-report request received only the explained option");
+    send("explain-before-other","Explain option 2",sourceId);
+    const auto other = send("other-whole","Implement everything in the other report");
+    check(other.at("route") == "create_task" && other.at("source").at("messageId") == unrelatedId &&
+          other.at("source").at("option") == 0 && other.at("source").at("text") == unrelatedReport,
+          "a whole-report reference was redirected to a recent excerpt");
+    const auto named = send("named-whole","Implement everything in \"Original report\"");
+    check(named.at("route") == "clarify",
+          "a named report was replaced by the model's unrelated source");
+    const auto destination = send("whole-destination","Implement the whole report in another environment",answer.at("messageId"));
+    check(destination.at("route") == "clarify" && destination.at("source") == whole.at("source"),
+          "a destination question lost the whole-report scope");
+    const auto queued = send("whole-confirm","env",destination.at("messageId"));
+    check(queued.at("route") == "create_task" && queued.at("source") == whole.at("source"),
+          "choosing a destination lost the whole-report scope");
     const auto count = store.tasks("alpha").size();
     check(send("exclude","案2以外を実装",sourceId)["route"] == "clarify" &&
           send("ambiguous","案2を適用して")["route"] == "clarify" && store.tasks("alpha").size() == count,
@@ -624,31 +713,93 @@ void comparisonsDoNotSelectOneOfSeveralOptions() {
     const auto tasksBefore = store.tasks("alpha");
     const auto launches = execution.t3.launches;
     constexpr auto comparison = "Compare option 1 and option 2.";
+    constexpr auto comparisonWithRest = "Compare option 2 with the rest.";
     constexpr auto mutation = "Create a task from option 1 and option 2.";
-    bool answered = false;
+    int answered = 0;
     execution.model.conversation = [&](const ModelInput& input) {
+        const auto& text = input.event.at("text").get_ref<const std::string&>();
         if (input.tools.front() == "answer_conversation_result") {
-            check(input.event.at("text") == comparison && input.event.at("source").at("messageId") == resultId &&
+            check((text == comparison || text == comparisonWithRest) &&
+                  input.event.at("source").at("messageId") == resultId &&
                   input.event.at("source").at("text") == report,
                   "the comparison answer did not receive the whole referenced result");
-            answered = true;
+            ++answered;
             return Decision{"answer_conversation_result",{{"text","The options differ in their validation steps."}},{}};
         }
-        const auto& text = input.event.at("text").get_ref<const std::string&>();
-        if (text == comparison) return route("answer_result",{{"resultMessageId",resultId}});
+        if (text == comparison || text == comparisonWithRest)
+            return route("answer_result",{{"resultMessageId",resultId}});
         return route("create_task",{{"resultMessageId",resultId}});
     };
-    const auto compareId = receive(writer,"compare-options",comparison,resultId);
-    execution.runtime.routeConversation();
-    const auto response = reply(store,compareId);
-    check(response.at("route") == "respond" && response.at("source").at("messageId") == resultId && answered &&
-          store.tasks("alpha") == tasksBefore && execution.t3.launches == launches,
-          "a comparison across options did not answer without selecting or dispatching work");
+    for (const auto request : {comparison,comparisonWithRest}) {
+        const auto compareId = receive(writer,request,request,resultId);
+        execution.runtime.routeConversation();
+        const auto response = reply(store,compareId);
+        check(response.at("route") == "respond" && response.at("source").at("messageId") == resultId &&
+              response.at("source").at("option") == 0 && store.tasks("alpha") == tasksBefore &&
+              execution.t3.launches == launches,"a comparison selected an option or dispatched work");
+    }
+    check(answered == 2,"the comparison did not call the answer model for both phrasings");
     const auto mutationId = receive(writer,"mutate-options",mutation,resultId);
     execution.runtime.routeConversation();
     check(reply(store,mutationId).at("route") == "clarify" && store.tasks("alpha") == tasksBefore &&
           execution.t3.launches == launches,
           "a mutating request selected between multiple referenced options");
+}
+
+void excerptRepliesExpandToWholeResult() {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    RuntimeFixture execution(store);
+    const auto taskId = task(writer,"Report with options");
+    const std::string report = "1. Keep the current flow\n2. Compare both options";
+    execution.finish(store,taskId,report);
+    const auto resultId = store.latestTaskResult(taskId).at("id").get<Id>();
+    int answered = 0;
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto& text = input.event.at("text").get_ref<const std::string&>();
+        if (input.tools.front() == "answer_conversation_result") {
+            ++answered;
+            if (answered == 1)
+                check(input.event.at("source").at("option") == 1 &&
+                      input.event.at("source").at("text") == "1. Keep the current flow",
+                      "the selected excerpt did not reach the answer model");
+            else
+                check(input.event.at("source").value("option",0) == 0 &&
+                      input.event.at("source").at("text") == report,
+                      "the excerpt follow-up did not receive the whole result");
+            return Decision{"answer_conversation_result",{{"text","Here is the answer."}},{}};
+        }
+        if (text == "Explain option 1")
+            return route("answer_result",{{"resultMessageId",resultId},{"resultOption",1}});
+        if (text == "Explain option 2" || text == "Compare option 2 with the rest.")
+            return route("answer_result",{{"resultMessageId",resultId}});
+        if (text == "Tell me about option 2")
+            return route("answer_result",{{"resultMessageId",resultId},{"resultOption",1}});
+        return route("create_task");
+    };
+    const auto firstId = receive(writer,"first","Explain option 1",resultId);
+    execution.runtime.routeConversation();
+    const auto first = reply(store,firstId);
+    check(first.at("route") == "respond" && first.at("source").at("option") == 1,
+          "the first answer did not select option 1");
+    const auto unanchored = receive(writer,"unanchored-compare","Compare option 2 with the rest.");
+    execution.runtime.routeConversation();
+    check(reply(store,unanchored).at("route") == "respond" && answered == 2,
+          "the comparison after an excerpt did not reach the answer model");
+    const auto secondId = receive(writer,"second","Explain option 2",first.at("messageId"));
+    execution.runtime.routeConversation();
+    const auto second = reply(store,secondId);
+    check(second.at("route") == "respond" && second.at("source").at("option") == 0 &&
+          second.at("source").at("text") == report && answered == 3,
+          "the omitted option kept the replied excerpt");
+    const auto compareId = receive(writer,"compare","Compare option 2 with the rest.",first.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,compareId).at("route") == "respond" && answered == 4,
+          "the comparison to an excerpt did not reach the answer model");
+    const auto conflictId = receive(writer,"conflict","Tell me about option 2",first.at("messageId"));
+    execution.runtime.routeConversation();
+    check(reply(store,conflictId).at("route") == "clarify" && answered == 4,
+          "a conflicting option was answered instead of rejected");
 }
 
 void longResultOptionsStayAvailable() {
@@ -657,11 +808,14 @@ void longResultOptionsStayAvailable() {
         Store store(fixture.database()), writer(fixture.database());
         RuntimeFixture execution(store);
         const auto id = task(writer,"Compare the proposals");
-        const std::string option = "## 2. Pair measurements\n"
-            "Compare both builds using exactly the same workload.\n"
-            "Repeat the paired run to separate variance from regressions.";
+        const std::string heading = paddingSize == 3000 ? "### Option 2: Pair measurements" :
+            "Option 2: Pair measurements\n---------------------------";
+        const std::string option = heading + "\n\n"
+            "1. Compare both builds using exactly the same workload.\n"
+            "2. Repeat the paired run to separate variance from regressions.";
         execution.finish(store,id,"## 1. Compare one build\n" + std::string(paddingSize,'A') +
-            "\n\n" + option + "\n\n## 3. Defer comparison\n\n## 3. Drop the comparison");
+            "\n\n" + option + "\n\n## Overall recommendation\nPrefer the first option.\n\n"
+            "## 3. Defer comparison\n\n## 3. Drop the comparison");
         const auto history = store.history(id,0,100);
         const auto report = std::ranges::find_if(history,[](const Json& row) { return row.at("kind") == "report"; });
         check(report != history.end(),"Missing report in the long result fixture");
@@ -673,8 +827,17 @@ void longResultOptionsStayAvailable() {
         int selectedOption = 2;
         execution.model.conversation = [&](const ModelInput& input) {
             const auto& event = input.event;
-            if (input.tools.front() == "route_conversation")
+            if (input.tools.front() == "route_conversation") {
+                const auto& results = event.at("results");
+                const auto candidate = std::ranges::find_if(results,[&](const Json& result) {
+                    return result.at("messageId") == sourceId;
+                });
+                check(candidate != results.end() && candidate->at("options") == Json::array({
+                    {{"option",1},{"text",bounded("## 1. Compare one build\n" + std::string(paddingSize,'A'),512)}},
+                    {{"option",2},{"text",option}}}),
+                    "the router did not offer the bounded options in source order");
                 return route("answer_result",{{"resultMessageId",sourceId},{"resultOption",selectedOption}});
+            }
             check(event.at("text") == userQuestion && event.at("source").at("messageId") == sourceId &&
                   event.at("source").at("text") == option,
                   "The answer model did not receive the exact option and question");
@@ -682,7 +845,7 @@ void longResultOptionsStayAvailable() {
             return Decision{"answer_conversation_result",{{"text","同じ負荷で両ビルドを比較する案です。"}},{}};
         };
         for (const auto anchor : {sourceId,Id{0}}) {
-            for (const auto request : {"2案目を詳しく","2案目を要約して","両方を同じ条件で測るほうを具体的に"}) {
+            for (const auto request : {"2案目を説明して","後者をもう少し詳しく","両方を同じ条件で測るほうを具体的に"}) {
                 userQuestion = request;
                 const auto message = receive(writer,std::to_string(anchor) + request,request,anchor);
                 execution.runtime.routeConversation();
@@ -702,6 +865,72 @@ void longResultOptionsStayAvailable() {
         check(answers == 6 && store.tasks("alpha") == before && execution.t3.launches == launches,
               "Reading the result changed work or failed to call the answer model");
     }
+}
+
+void resultTargetMustComeFromTheCandidatesOrReply() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto first = task(store,"Build evaluation");
+    const auto second = task(store,"Release process");
+    const auto foreign = task(store,"Other Bot's evaluation","beta");
+    execution.finish(store,first,"1. Measure each build in isolation\n2. Compare paired measurements");
+    execution.finish(store,second,"1. Deploy in stages\n2. Deploy in one batch");
+    execution.finish(store,foreign,"1. Inspect logs\n2. Inspect traces");
+    const Id source = store.latestTaskResult(first).at("id");
+    const Id other = store.latestTaskResult(second).at("id");
+    const Id hidden = store.latestTaskResult(foreign).at("id");
+    const auto before = store.tasks();
+    const auto launches = execution.t3.launches;
+    constexpr auto unexpectedTool = "この案について説明して";
+
+    Id proposed = source;
+    int answers = 0;
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (input.tools.front() == "answer_conversation_result") {
+            check(event.at("source").at("messageId") == source &&
+                  event.at("source").at("text") == "2. Compare paired measurements",
+                  "the reply did not use the selected result and option");
+            ++answers;
+            if (event.at("text") == unexpectedTool)
+                return Decision{"create_task",Json::object(),{}};
+            return Decision{"answer_conversation_result",{{"text","ビルドごとの計測を同じ条件で対にして比較します。"}},{}};
+        }
+        const auto& results = event.at("results");
+        const auto offers = [&](Id id) {
+            return std::ranges::any_of(results,[&](const Json& result) { return result.at("messageId") == id; });
+        };
+        check(offers(source) && offers(other) && !offers(hidden),"the routing context included the wrong Bot's result");
+        if (event.at("text") == "後者をもう少し詳しく")
+            return route("clarify",{{"text","ビルド評価とリリース手順のどちらですか？"}});
+        return route("answer_result",{{"resultMessageId",proposed},{"resultOption",2}});
+    };
+    const auto send = [&](std::string_view key,std::string_view text,Id anchor = 0) {
+        const auto message = receive(store,key,text,anchor);
+        execution.runtime.routeConversation();
+        return reply(store,message);
+    };
+    const auto ambiguous = send("ambiguous","後者をもう少し詳しく");
+    check(ambiguous.at("route") == "clarify" && ambiguous.at("text") == "ビルド評価とリリース手順のどちらですか？" &&
+          !ambiguous.contains("source") && answers == 0,"an ambiguous report was answered");
+    const auto named = send("described","ビルドを比較する方の後者をもう少し詳しく");
+    const auto anchored = send("anchored","2案目を説明して",source);
+    check(named.at("route") == "respond" && anchored.at("route") == "respond" &&
+          named.at("source") == anchored.at("source") && anchored.at("source").at("option") == 2 && answers == 2,
+          "the paraphrase and the result reply did not select the same option");
+
+    check(send("unexpected-tool",unexpectedTool,source).at("route") == "clarify",
+          "the explanation step accepted a work action");
+    proposed = other;
+    const auto wrongReply = send("wrong-reply","こちらの案を説明して",anchored.at("messageId"));
+    check(wrongReply.at("route") == "clarify" && wrongReply.at("source") == anchored.at("source"),
+          "the proposed result overrode an explicit reply");
+    proposed = hidden;
+    check(send("foreign","その案を説明して").at("route") == "clarify",
+          "the proposed result escaped the Bot's candidate set");
+    check(answers == 3 && store.tasks() == before && execution.t3.launches == launches,
+          "explaining or rejecting a result reference changed work");
 }
 
 void clarificationCannotTransferAnExpiredAnswer() {
@@ -940,10 +1169,13 @@ int main() {
         naturalWaitAnswer();
         clarificationKeepsTheUserInstruction();
         implicitClarificationRequiresAnEligibleReply();
-        longResultOptionsStayAvailable();
         explicitFactsReplaceResultClarificationAtomically();
+        compoundResultClarifiesOnlyTheQuestion();
         followUpsKeepThePriorResult();
+        longResultOptionsStayAvailable();
         comparisonsDoNotSelectOneOfSeveralOptions();
+        excerptRepliesExpandToWholeResult();
+        resultTargetMustComeFromTheCandidatesOrReply();
         clarificationCannotTransferAnExpiredAnswer();
         boundedBotContextAndNamedHistory();
         legacyHistory();

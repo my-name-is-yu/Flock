@@ -6,8 +6,8 @@ using conversation_storage::hasText;
 using conversation_storage::messageSize;
 
 namespace {
-Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
-    if (row.string(1) != text || row.number(2) != replyTo)
+Json receiptRow(const Statement& row, std::string_view text, Id replyTo, Id candidate) {
+    if (row.string(1) != text || row.number(2) != replyTo || row.number(3) != candidate)
         throw Conflict("This client message ID already has different content");
     return {{"messageId",row.number(0)},{"status","received"}};
 }
@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS route_decisions(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   reply_id INTEGER NOT NULL UNIQUE REFERENCES journal(id),
   status TEXT NOT NULL, data TEXT NOT NULL, resolution_id INTEGER REFERENCES messages(id));
+CREATE INDEX IF NOT EXISTS route_decisions_awaiting ON route_decisions(message_id)
+  WHERE status='awaiting_resolution';
 CREATE TABLE IF NOT EXISTS route_candidates(
   message_id INTEGER NOT NULL REFERENCES route_decisions(message_id),
   task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -134,6 +136,13 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     return revision;
 }
 
+bool Store::Impl::conversationPending(std::string_view bot) const {
+    return query(R"SQL(
+SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'
+AND json_extract(data,'$.status') IS NULL LIMIT 1
+)SQL",{bot}).next();
+}
+
 bool Store::Impl::completionHeld(const Json& task) const {
     auto row = query(R"SQL(
 SELECT 1 FROM route_candidates c JOIN route_decisions r ON r.message_id=c.message_id
@@ -144,35 +153,42 @@ AND json_extract(r.data,'$.operation') IN ('cancel_task','revise_task','destinat
 }
 
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
-                                   std::string_view text, Id replyTo) const {
+                                   std::string_view text, Id replyTo, Id candidate) const {
     std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT id,text,reply_to FROM messages WHERE bot_id=? AND client_message_id=?",
-                         {bot,clientId});
+    auto row = p_->query(R"SQL(
+SELECT id,text,reply_to,coalesce(json_extract(routing,'$.candidateTaskId'),0)
+FROM messages WHERE bot_id=? AND client_message_id=?
+)SQL",{bot,clientId});
     if (!row.next()) return std::nullopt;
-    return receiptRow(row,text,replyTo);
+    return receiptRow(row,text,replyTo,candidate);
 }
 
-Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
+Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                    Id candidate) {
     if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
         !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
         throw Conflict("Bot, client message ID and nonempty text are required");
+    if (candidate < 0 || (candidate && !replyTo))
+        throw Conflict("A selected candidate must reply to its clarification");
     Json receipt;
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        const auto existing = this->receipt(routing.botId,clientId,text,replyTo,candidate);
         if (existing) receipt = *existing;
         else {
+            modelCallLimit(routing.config);
             const auto now = unixTime();
+            Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config},
+                          {"waitsAtIntake",p_->captureConversationWaits(routing.botId)}};
+            if (candidate) saved["candidateTaskId"] = candidate;
             p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {now,routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,
-                Json{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config},
-                     {"waitsAtIntake",p_->captureConversationWaits(routing.botId)}},
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,saved,
                 routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
@@ -197,10 +213,26 @@ Json Store::clarifications(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT j.data FROM route_decisions r JOIN journal j ON j.id=r.reply_id
-WHERE j.conversation_bot_id=? AND r.status='awaiting_resolution' ORDER BY j.id DESC
+WHERE j.conversation_bot_id=? AND r.status IN ('awaiting_resolution','model_budget') ORDER BY j.id DESC
 )SQL",{bot});
     auto result = Json::array();
     while (rows.next()) result.push_back(rows.json(0));
     return result;
+}
+
+void Store::approveMessageModelCall(std::string_view botId, Id waitMessageId) {
+    std::lock_guard lock(p_->mutex);
+    Transaction transaction(p_->db);
+    auto wait = p_->query(R"SQL(
+SELECT r.message_id FROM route_decisions r JOIN messages m ON m.id=r.message_id
+WHERE m.bot_id=? AND r.reply_id=? AND r.status='model_budget'
+)SQL",{botId,waitMessageId});
+    if (!wait.next()) throw Conflict("Waiting item is no longer current");
+    const auto message = wait.number(0);
+    p_->grantModelCall(p_->messageModelBudget(message));
+    p_->exec("DELETE FROM route_decisions WHERE message_id=?",{message});
+    p_->exec("UPDATE journal SET data='{}' WHERE id=?",{message});
+    p_->exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
+    transaction.commit();
 }
 }

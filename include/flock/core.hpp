@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace flockv0 {
@@ -21,6 +22,9 @@ Seconds unixTime();
 std::string bounded(std::string_view text, std::size_t bytes);
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
+
+// Initial allowance from an intake's saved config. Each approval adds one attempt.
+Id modelCallLimit(const Json& config);
 
 // Routing and execution settings are saved at intake. Current instructions are loaded for each turn.
 struct Intake {
@@ -48,8 +52,10 @@ struct ModelInput {
 
 };
 struct ModelError : std::runtime_error {
-    ModelError(std::string message, bool retryable) : std::runtime_error(std::move(message)), transient(retryable) {}
+    ModelError(std::string message, bool retryable, Json measurements = Json::object())
+        : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)) {}
     bool transient;
+    Json usage;
 };
 class Model {
 public:
@@ -120,11 +126,14 @@ public:
 
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
+    // candidateTaskId is a hidden choice among the candidates of the clarification at replyToMessageId.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0);
+                 Id replyToMessageId = 0, Id candidateTaskId = 0);
     std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0) const;
+                                std::string_view text, Id replyToMessageId = 0, Id candidateTaskId = 0) const;
     Json clarifications(std::string_view botId) const;
+    // Approve one call for an original message paused before routing finishes.
+    void approveMessageModelCall(std::string_view botId, Id waitMessageId);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());

@@ -1,19 +1,21 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
-  'theme-switch',
+  'reply-label', 'reply-choice', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
+const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const stateLabels = {
@@ -24,16 +26,17 @@ const stateLabels = {
 };
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
-  budget: ['Approval for more work', 'The task reached its additional run limit. You can approve one more run.'],
-  model_failure: ['Retry decision', 'The model failed to make a decision after several attempts. You can retry.'],
-  t3_input: ['Action in T3', 'Open the assigned thread in T3 to approve or answer.'],
-  deadline: ['Deadline extension', 'The session reached its deadline. You can set a new one.'],
-  unknown_delivery: ['Delivery reconciliation', 'Flock could not confirm whether T3 received the task or answer.'],
-  auth: ['T3 authentication', 'Sign in to T3 again, then reconcile.'],
-  settings: ['T3 execution settings', 'Check the T3 connection and execution settings, then reconcile.'],
+  budget: ['Approval for one more run', 'This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.'],
+  model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
+  model_failure: ['Retry decision', 'The Bot could not decide on the next step after several attempts. You can retry.'],
+  t3_input: ['Action in T3', 'Open the session in T3 to approve or answer.'],
+  deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
+  unknown_delivery: ['Delivery unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Reconcile checks T3 again without resending anything.'],
+  auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then reconcile.'],
+  settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then reconcile.'],
 };
 const closedLabels = {
-  answer: 'Answered', run_finished: 'Session ended', cancel: 'Task cancelled',
+  answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question',
 };
 const errors = {
@@ -41,6 +44,7 @@ const errors = {
   intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
+  invalid_candidate: 'That choice is no longer available. Check the latest confirmation.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -72,6 +76,7 @@ let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let scopeKey = '';
 let connection = 'loading';
 
 function node(tag, className, text) {
@@ -104,7 +109,7 @@ function runHref(run) {
 function linkToRun(run, label = 'Open in T3') {
   const href = runHref(run);
   if (!href) return null;
-  const link = node('a', 'link', `${label} ↗`);
+  const link = node('a', 'link', label);
   link.href = href;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
@@ -112,7 +117,14 @@ function linkToRun(run, label = 'Open in T3') {
 }
 function waitLabel(reason) { return waitLabels[reason]?.[0] ?? 'Waiting for input'; }
 function waitText(wait) { return wait.text || waitLabels[wait.reason]?.[1] || 'Refresh the pending request.'; }
-function badge(state) { return node('span', `badge ${state}`, stateLabels[state] ?? state); }
+function startedText(seconds, precise = false) {
+  return seconds ? `started ${(precise ? preciseClock : clock).format(seconds * 1000)}` : '';
+}
+function repeatedRequests(items) {
+  const counts = new Map();
+  for (const item of items) counts.set(item.request, (counts.get(item.request) ?? 0) + 1);
+  return new Set([...counts].filter(([, count]) => count > 1).map(([request]) => request));
+}
 function changed(key, ...values) {
   const signature = JSON.stringify(values);
   if (signatures.get(key) === signature) return false;
@@ -240,8 +252,13 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 
-function pinnedBotsInShortcutOrder() {
-  return [...pins].map((id) => bots.find((bot) => bot.id === id)).filter(Boolean);
+let botDraft = null;
+function sidebarBots() {
+  if (botDraft?.mode !== 'edit') return bots;
+  return bots.map((bot) => (bot.id === botDraft.botId ? { ...bot, name: botDraft.name, avatar: botDraft.avatar } : bot));
+}
+function pinnedBotsInShortcutOrder(source = bots) {
+  return [...pins].map((id) => source.find((bot) => bot.id === id)).filter(Boolean);
 }
 function focusKey(key) {
   sidebar.querySelector(`[data-focus="${CSS.escape(key)}"]`)?.focus();
@@ -392,19 +409,33 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
+function draftRow(draft) {
+  const row = node('div', 'bot-row draft');
+  row.setAttribute('aria-hidden', 'true');
+  const select = node('span', 'bot-select');
+  const name = node('span', 'bot-name');
+  name.append(node('span', 'bot-name-text', draft.name));
+  const text = node('span', 'bot-text');
+  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  select.append(avatar(draft, 'bot-avatar'), text);
+  row.append(select);
+  return row;
+}
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded)) return;
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
-  const pinned = pinnedBotsInShortcutOrder();
+  const source = sidebarBots();
+  const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = bots.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
   elements.pinned.replaceChildren(...pinned.map(pinTile));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
   list.replaceChildren(...unpinnedByPresence.map(botRow));
+  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
   if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length) list.append(node('p', 'activity-empty', 'No Bots configured'));
+  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
   if (focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -420,6 +451,7 @@ function renderHeader() {
   profile.hidden = !bot || !!dm;
   elements['settings-button'].hidden = !bot || !!dm;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
+  elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
   elements['peer-back'].setAttribute('aria-label', bot ? `Back to ${bot.name}` : 'Back to Bot');
@@ -435,6 +467,12 @@ function renderHeader() {
       heading.title = label;
     }
   }
+  const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
+  if (bot && nextScopeKey !== scopeKey) {
+    showAvatar(elements['activity-scope-avatar'], bot);
+    elements['activity-scope-name'].textContent = bot.name;
+  }
+  scopeKey = nextScopeKey;
   if (!bot || dm) {
     profileAvatar?.destroy();
     profileAvatar = null;
@@ -451,7 +489,7 @@ function renderHeader() {
     profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: presence });
+  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -473,7 +511,7 @@ function activityRow(tag, className, title, status, statusClass) {
 function sessionRow(task, session, status, live) {
   const link = runHref(session);
   const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
-  row.title = `#${task.id} ${task.request}`;
+  row.title = [task.request, task.createdAt ? `Started ${fullTime.format(task.createdAt * 1000)}` : ''].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -491,11 +529,13 @@ function renderActivity() {
   const clarifications = data?.clarifications ?? [];
   if (changed('waits', view?.id, loading, waits, clarifications)) {
     elements['wait-count'].textContent = waits.length + clarifications.length;
-    elements['wait-count'].classList.toggle('has-waits', waits.length + clarifications.length > 0);
     elements['wait-count'].hidden = !(waits.length + clarifications.length);
     elements['wait-list'].setAttribute('aria-busy', loading);
+    const repeated = repeatedRequests(waits);
     const rows = waits.map((task) => {
-      const row = activityRow('button', 'wait-row', task.request, waitLabel(task.wait.reason), 'waiting');
+      const status = [waitLabel(task.wait.reason), repeated.has(task.request) ? startedText(task.createdAt) : '']
+        .filter(Boolean).join(' · ');
+      const row = activityRow('button', 'wait-row', task.request, status, 'waiting');
       row.type = 'button';
       row.title = waitText(task.wait);
       row.addEventListener('click', () => {
@@ -505,15 +545,13 @@ function renderActivity() {
       return row;
     });
     for (const clarification of clarifications) {
-      const row = button(null, 'activity wait-select', () => {
+      const row = activityRow('button', 'wait-row', clarification.text, 'Clarification requested', 'waiting');
+      row.type = 'button';
+      row.title = clarification.text;
+      row.addEventListener('click', () => {
         openNavigation(false);
         openDetail({ kind: 'clarification', messageId: clarification.messageId });
       });
-      const line = node('span', 'activity-line');
-      line.append(node('span', 'wait-dot'), node('span', 'activity-title', 'Clarification requested'));
-      const subtitle = node('span', 'activity-subtitle', clarification.text);
-      subtitle.title = clarification.text;
-      row.append(line, subtitle);
       rows.push(row);
     }
     elements['wait-list'].replaceChildren(...rows);
@@ -534,7 +572,7 @@ function renderActivity() {
     const identity = key(run.taskId, run);
     if (activeKeys.has(identity)) continue;
     activeKeys.add(identity);
-    live.push(sessionRow({ id: run.taskId, request: run.request }, run, stateLabels[run.state] ?? run.state, true));
+    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state, true));
   }
   const ended = [];
   for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
@@ -543,8 +581,10 @@ function renderActivity() {
     }
   }
   const rows = [];
+  const grouped = live.length > 0 && ended.length > 0;
   for (const [label, items] of [['Active', live], ['Ended', ended]]) {
     if (!items.length) continue;
+    if (!grouped) { rows.push(...items); continue; }
     const heading = node('h3', 'activity-group');
     heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
     rows.push(heading, ...items);
@@ -556,12 +596,13 @@ function renderActivity() {
   else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
 }
 
-function beginReply(target, text = '') {
+function beginReply(target, text = '', choice = null) {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   if (view.dm) selectBot(view.id);
   const current = replies.get(view.id);
-  if (current?.messageId !== target.messageId || text)
-    replies.set(view.id, { ...target, text });
+  if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
+  if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
+    replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -618,23 +659,51 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
+function candidateButton(target, candidate, order) {
+  const started = startedText(candidate.createdAt, !!order);
+  const state = candidate.state ? stateLabels[candidate.state] ?? '' : '';
+  const label = order ? `${candidate.request} (${[order, started].filter(Boolean).join(', ')})` : candidate.request;
+  const option = button(null, 'button candidate', () => beginReply(target, label, { taskId: candidate.taskId, label }));
+  option.append(node('span', 'candidate-request', candidate.request));
+  const detail = [order, started, state].filter(Boolean).join(' · ');
+  if (detail) option.append(node('span', 'candidate-detail', detail));
+  option.setAttribute('aria-label', [candidate.request, detail].filter(Boolean).join(', '));
+  option.disabled = candidate.state === 'ended';
+  return option;
+}
+function clarificationTitle(clarification) {
+  return clarification?.route === 'model_budget' ? waitLabel('model_budget') : 'Clarification requested';
+}
 function clarificationActions(clarification) {
-  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   const actions = node('div', 'event-actions');
+  if (clarification.route === 'model_budget') {
+    const waitMessageId = clarification.messageId;
+    const key = `message/${waitMessageId}`;
+    const approve = button('Approve one more model call', 'button',
+      () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+    approve.disabled = pendingWaits.has(key);
+    actions.append(approve);
+    return actions;
+  }
+  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
   if (clarification.destinations) {
     for (const destination of clarification.destinations)
       actions.append(button(destination, 'button', () => beginReply(target, destination)));
   } else {
-    for (const candidate of clarification.candidates ?? [])
-      actions.append(button(candidate.request, 'button', () => beginReply(target, `#${candidate.taskId}`)));
+    const candidates = clarification.candidates ?? [];
+    const repeated = repeatedRequests(candidates);
+    const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+    const order = (candidate) => {
+      if (!repeated.has(candidate.request)) return '';
+      const same = candidates.filter((item) => item.request === candidate.request)
+        .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || a.taskId - b.taskId);
+      const index = same.indexOf(candidate);
+      return index === same.length - 1 ? 'requested last' : `requested ${ordinals[index] ?? `${index + 1}th`}`;
+    };
+    for (const candidate of candidates) actions.append(candidateButton(target, candidate, order(candidate)));
   }
   actions.append(button('Write a reply', 'text-button', () => beginReply(target)));
   return actions;
-}
-function detailText(label, value) {
-  const row = node('p', 'event-detail');
-  row.append(node('strong', null, label), document.createTextNode(value));
-  return row;
 }
 function messageSide(event) {
   if (event.kind === 'cancelled') return 'system';
@@ -654,10 +723,6 @@ function eventTime(event, extra) {
 }
 function sourceAction(source, label = 'Open source') {
   return button(label, 'text-button', async () => {
-    if (!source.messageId && source.taskId) {
-      await openTask(source.taskId);
-      return;
-    }
     const target = byId(`event-${source.messageId}`);
     if (target) {
       closeDetail();
@@ -680,20 +745,22 @@ function sourceAction(source, label = 'Open source') {
     renderDetail();
   });
 }
-function resultActions(event, text, run) {
-  const actions = node('div', 'event-actions');
+function runIcon(run) {
   const link = linkToRun(run);
-  if (link) actions.append(link);
-  if (text) actions.append(button('Reply to this result', 'text-button', () =>
-    beginReply({ kind: 'result', messageId: event.id, summary: text })));
-  return actions;
+  if (!link) return null;
+  link.className = 'run-link';
+  link.title = 'Open in T3';
+  link.setAttribute('aria-label', 'Open in T3');
+  link.replaceChildren(icon('open'));
+  return link;
 }
 function eventCard(event, context, place) {
   const data = event.data;
   const bot = context.bot;
   const side = messageSide(event);
   if (side === 'system') {
-    const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · Task #${event.taskId} cancelled · `);
+    const stopped = data.request ? `“${data.request.split('\n')[0]}” was stopped` : 'A request was stopped';
+    const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · ${stopped} · `);
     note.id = `event-${event.id}`;
     note.tabIndex = -1;
     note.append(eventTime(event));
@@ -710,9 +777,7 @@ function eventCard(event, context, place) {
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
     side === 'bot' ? bot?.name ?? 'Bot' : 'You');
-  const task = node('span', place.taskStart ? 'msg-task' : 'msg-task sr-only', event.taskId ? `#${event.taskId}` : '');
-  meta.append(name, task, eventTime(event, scheduled));
-  if (event.taskId) meta.append(button('Task details', 'text-button event-task', () => void openTask(event.taskId)));
+  meta.append(name, eventTime(event, scheduled));
   row.append(meta);
 
   const line = node('div', 'msg-line');
@@ -726,18 +791,19 @@ function eventCard(event, context, place) {
     actions.append(hoverTime);
   }
   const extras = [];
+  let replyTarget = null;
   let copy = data.text ?? '';
-  const openTask = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (openTask?.wait.reason === 'user_question') extras.push(questionActions(view, openTask));
-    else if (openTask) {
+    if (pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
+    else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
-      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: openTask.id, waitId: data.id })));
+      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
     } else {
       const resolution = node('p', 'msg-resolution');
@@ -752,32 +818,27 @@ function eventCard(event, context, place) {
     if (data.source?.messageId) {
       const links = node('div', 'event-actions');
       links.append(sourceAction(data.source));
-      if (data.route === 'respond') links.append(button('Reply to this answer', 'text-button', () =>
-        beginReply({ kind: 'result', messageId: event.id, summary: data.text })));
       extras.push(links);
+      if (data.route === 'respond') replyTarget = ['Reply to this answer', { kind: 'result', messageId: event.id, summary: data.text }];
     }
   } else if (event.kind === 'report') {
-    extras.push(resultActions(event, data.report));
     copy = data.report || 'The session submitted a report.';
     text.textContent = copy;
-    const link = linkToRun(data.run);
-    if (link) {
-      link.className = 'run-link';
-      link.title = 'Open in T3';
-      link.setAttribute('aria-label', 'Open in T3');
-      link.replaceChildren(icon('open'));
-      text.append(link);
-    }
+    const link = runIcon(data.run);
+    if (link) text.append(link);
     bubble.append(text);
+    if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.status && data.status !== 'completed') {
       bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
     }
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
-    extras.push(resultActions(event, data.text, data.run));
     bubble.classList.add('completed');
     text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', 'Complete: '), document.createTextNode(data.text ?? ''));
+    const link = runIcon(data.run);
+    if (link) text.append(link);
     bubble.append(text);
+    if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
     if (data.reason) bubble.append(reasonText(data.reason));
   } else {
     if (cron) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Recurring request: '));
@@ -799,7 +860,7 @@ function eventCard(event, context, place) {
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
       const owner = bots.find((item) => item.id === blocker.botId)?.name ?? blocker.botId;
-      const note = node('p', 'msg-note', `#${blocker.id}（${owner}）Waiting for completion · ${blocker.request}`);
+      const note = node('p', 'msg-note', `Waiting for “${blocker.request}” (${owner}) to finish`);
       note.title = blocker.request;
       extras.push(note);
     }
@@ -808,10 +869,15 @@ function eventCard(event, context, place) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (openTask?.wait.reason === 'user_question') {
-    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: openTask.wait.messageId, summary: waitText(openTask.wait) }));
-    reply.disabled = pendingWaits.has(openTask.wait.id);
+  if (pendingWait?.wait.reason === 'user_question') {
+    const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
+    reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
+  }
+
+  if (replyTarget) {
+    const [label, target] = replyTarget;
+    actions.append(iconButton('reply', label, () => beginReply(target)));
   }
   line.append(bubble, actions);
   row.append(line, ...extras);
@@ -981,6 +1047,10 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
     if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
+    else if (loaded && !bots.length) {
+      empty.append(node('p', null, 'Create a Bot to get started.'));
+      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+    }
     fragment.append(empty);
   }
   if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
@@ -1025,9 +1095,12 @@ function renderComposer() {
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
+  const closedReply = reply?.closed === true;
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
+  elements['reply-choice'].hidden = !reply?.choice;
+  elements['reply-choice'].textContent = reply?.choice ? `Selected: ${reply.choice}` : '';
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
@@ -1035,15 +1108,16 @@ function renderComposer() {
     elements.message.value = body;
     fitMessage();
   }
-  elements.message.readOnly = busy;
+  elements.message.readOnly = busy || closedReply;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = notice?.text ?? '';
+  elements.notice.textContent = notice?.isError ? notice.text :
+    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
   elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !!notice?.fading);
+  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1074,84 +1148,6 @@ function openDetail(selection) {
   detailOrigin = document.activeElement;
   elements.detail.showModal();
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
-}
-async function openTask(taskId) {
-  const context = view;
-  if (!context?.data) return;
-  const selection = { kind: 'task', taskId };
-  openDetail(selection);
-  try {
-    const task = await api(`task?${new URLSearchParams({ bot: context.id, taskId })}`);
-    if (detail !== selection) return;
-    selection.task = task;
-  } catch {
-    if (detail !== selection) return;
-    selection.failed = true;
-  }
-  renderDetail();
-}
-function taskContent(task) {
-  const purpose = node('section', 'dialog-section');
-  purpose.append(badge(task.state), node('h3', null, 'Goal'), node('p', 'prose', task.intent || task.request));
-  const parts = [purpose];
-  if (task.revisions.length || task.doneWhen) {
-    const revisions = node('section', 'dialog-section');
-    revisions.append(node('h3', null, 'Completion criteria'));
-    if (!task.revisions.length) revisions.append(node('p', 'prose', task.doneWhen));
-    for (const revision of [...task.revisions].reverse()) {
-      const row = node('div', 'schedule-row');
-      const label = revision.id === task.currentRevision ? `Revision ${revision.number} (current)` : `Revision ${revision.number}`;
-      row.append(node('p', 'dialog-meta', label), node('p', 'prose', revision.doneWhen));
-      if (revision.intent && revision.intent !== (task.intent || task.request)) row.append(detailText('Goal in this revision', revision.intent));
-      if (revision.sourceMessageId) row.append(sourceAction({ messageId: revision.sourceMessageId }, 'Open change request'));
-      revisions.append(row);
-    }
-    parts.push(revisions);
-  }
-  if (task.pendingInstructions.length) {
-    const pending = node('section', 'dialog-section');
-    pending.append(node('h3', null, 'Instructions pending delivery'));
-    for (const instruction of task.pendingInstructions) pending.append(node('p', 'prose', instruction.text));
-    parts.push(pending);
-  }
-  if (task.result) {
-    const result = node('section', 'dialog-section');
-    const data = task.result.data;
-    const label = task.result.kind === 'completed' ? 'Completion report' : 'Latest session report';
-    result.append(node('h3', null, label), node('p', 'prose', data.text ?? data.report));
-    const actions = node('div', 'event-actions');
-    actions.append(sourceAction({ messageId: task.result.id }, 'Open report in conversation'));
-    const link = linkToRun(data.run);
-    if (link) actions.append(link);
-    result.append(actions);
-    parts.push(result);
-  }
-  if (task.sourceResultRefs.length || task.sourceTaskId) {
-    const sources = node('section', 'dialog-section');
-    sources.append(node('h3', null, 'Original task'));
-    for (const source of task.sourceResultRefs) {
-      if (source.text) sources.append(node('p', 'prose', source.text));
-      sources.append(sourceAction(source, source.messageId ? 'Open original result' : 'Open original task'));
-    }
-    if (!task.sourceResultRefs.length)
-      sources.append(button('Open original task', 'text-button', () => void openTask(task.sourceTaskId)));
-    parts.push(sources);
-  }
-  if (task.runs.length) {
-    const runs = node('section', 'dialog-section');
-    runs.append(node('h3', null, 'Run history'));
-    for (const run of [...task.runs].reverse()) {
-      const row = node('div', 'schedule-row');
-      const revision = task.revisions.find((item) => item.id === run.revisionId);
-      const label = [run.runId, run.environmentId, revision ? `Revision ${revision.number}` : ''].filter(Boolean).join(' · ');
-      row.append(node('p', 'dialog-meta', label));
-      const link = linkToRun(run);
-      if (link) row.append(link);
-      runs.append(row);
-    }
-    parts.push(runs);
-  }
-  return parts;
 }
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
@@ -1275,16 +1271,66 @@ function settingsRow(label, value, click) {
   if (click) row.insertAdjacentHTML('beforeend', chevron);
   return row;
 }
+let reopenSettingsOnClose = false;
+const botEditor = createBotEditor(elements['bot-editor'], {
+  api,
+  onDraft(draft) {
+    botDraft = draft;
+    renderBots();
+  },
+  async onSaved(savedBot, savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    await refreshBots();
+    if (savedMode === 'create') {
+      selectBot(savedBot.id);
+      return;
+    }
+    if (view?.id === savedBot.id) await refreshView(view);
+    if (returnToSettings && view?.id === savedBot.id && view.data) {
+      openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
+    }
+  },
+  onCancel(savedMode) {
+    const returnToSettings = reopenSettingsOnClose;
+    reopenSettingsOnClose = false;
+    if (savedMode === 'edit' && returnToSettings && view?.data) {
+      openDetail({ kind: 'settings', section: 'general' });
+    }
+  },
+});
+
+function openNewBot(origin = elements['new-bot-button']) {
+  reopenSettingsOnClose = false;
+  closeMenu(false);
+  openNavigation(false, false);
+  closeDetail();
+  botEditor.openCreate({ bots, origin });
+}
+
+function openEditAppearance(bot) {
+  reopenSettingsOnClose = true;
+  closeDetail();
+  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+}
+
 function generalContent(bot) {
   const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
   const face = node('span', 'settings-avatar');
   detailAvatar = { state: presence, mount: () => {
-    const handle = showAvatar(face, bot, { still: false, state: presence });
-    hero.style.setProperty('--hero-tint', accentColor(bot));
-    return handle;
+    return showAvatar(face, bot, { still: false, state: presence });
   } };
-  hero.append(face, node('p', 'settings-name', bot.name));
+  hero.append(
+    face,
+    node('p', 'settings-name', bot.name),
+    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
+  );
+  if (detail?.status) {
+    const note = node('p', 'settings-status', detail.status);
+    note.setAttribute('role', 'status');
+    hero.append(note);
+  }
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
   role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
@@ -1343,9 +1389,8 @@ function waitContent(context, task) {
   const wait = task.wait;
   elements['detail-title'].textContent = waitLabel(wait.reason);
   const request = node('blockquote', 'wait-request');
-  const marker = node('span', 'wait-task', `#${task.id}`);
-  marker.setAttribute('aria-label', `Task #${task.id}`);
-  request.append(node('p', 'wait-request-text', task.request), marker);
+  request.append(node('p', 'wait-request-text', task.request));
+  if (task.createdAt) request.append(node('p', 'wait-request-meta', `Started ${fullTime.format(task.createdAt * 1000)}`));
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
@@ -1362,6 +1407,7 @@ function waitContent(context, task) {
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
+  else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
   else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
     if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
@@ -1376,17 +1422,11 @@ function waitContent(context, task) {
     primary.append(submit);
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
     primary.append(action('Reconcile', 'reconcile'));
-    if (wait.reason === 'unknown_delivery') {
-      const advanced = node('details', 'wait-advanced');
-      advanced.append(node('summary', null, 'Specify the assigned run'), waitForm('Reconcile with this run', [
-        { name: 'threadId', label: 'Thread ID', required: true }, { name: 'runId', label: 'Run ID', required: true },
-        { name: 'questionId', label: 'Question ID (optional)' },
-      ], (fields) => perform('reconcile', Object.fromEntries(Object.entries(fields).filter(([, value]) => value.trim()))))[0]);
-      content.push(advanced);
-    }
   }
-  actions.append(button('Cancel task', 'wait-cancel', () => {
-    if (window.confirm(`Cancel task #${task.id}?`)) perform('cancel');
+  actions.append(button('Stop this request', 'wait-cancel', () => {
+    const name = task.request.split('\n')[0];
+    if (window.confirm(`Stop “${name}”?\n\nThe Bot will stop working on this request and interrupt its T3 session if one is running.`))
+      perform('cancel');
   }), primary);
   const feedback = node('p', 'dialog-feedback');
   feedback.id = 'detail-feedback';
@@ -1448,31 +1488,28 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'task') {
-    if (changed('detail', detail)) {
-      elements['detail-title'].textContent = 'Task details';
-      elements['detail-body'].replaceChildren(...(detail.task ? taskContent(detail.task) :
-        [node('p', 'prose', detail.failed ? 'Could not load task details.' : 'Loading…')]));
-    }
-    return;
-  }
   if (detail.kind === 'source') {
     if (changed('detail', detail)) {
-      elements['detail-title'].textContent = 'Source';
+      elements['detail-title'].textContent = 'Original message';
       const source = detail.event;
       const text = source?.kind === 'waiting' ? waitText(source.data) :
-        source?.data.report ?? source?.data.text ?? (detail.failed ? 'Could not load the source.' : 'Loading…');
+        source?.data.report ?? source?.data.text ??
+        (detail.failed ? 'The original message is no longer available in this conversation.' : 'Loading…');
       const body = node('p', 'prose', text);
       elements['detail-body'].replaceChildren(body);
-      if (detail.event?.taskId) elements['detail-body'].append(
-        button('Task details', 'text-button', () => void openTask(detail.event.taskId)));
+      const link = linkToRun(source?.data.run);
+      if (link) {
+        const actions = node('div', 'event-actions');
+        actions.append(link);
+        elements['detail-body'].append(actions);
+      }
     }
     return;
   }
   if (detail.kind === 'clarification') {
     const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, clarification)) {
-      elements['detail-title'].textContent = 'Clarification requested';
+    if (changed('detail', detail, clarification, [...pendingWaits])) {
+      elements['detail-title'].textContent = clarificationTitle(clarification);
       elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
       if (clarification) elements['detail-body'].append(clarificationActions(clarification));
     }
@@ -1512,9 +1549,20 @@ function mergeLatest(context, latest) {
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
   const reply = replies.get(context.id);
-  if (reply?.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    replies.delete(context.id);
-    setNotice(context, 'That question is no longer open.');
+  if (!reply || sendingMessages.has(context.id)) return;
+  if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That question is no longer open, so your reply was not sent.');
+    }
+  } else if (reply.kind === 'clarification' &&
+             !latest.clarifications.some((item) => item.messageId === reply.messageId)) {
+    if (reply.text.trim()) reply.closed = true;
+    else {
+      replies.delete(context.id);
+      setNotice(context, 'That confirmation has closed, so your reply was not sent.');
+    }
   }
 }
 async function refreshPeerConversation(context, scroll) {
@@ -1618,21 +1666,27 @@ async function loadSessions() {
 
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
-  if (!context || pendingWaits.has(waitId)) return;
-  pendingWaits.set(waitId, context.id);
+  await submitOperation(context, waitId, { taskId: task.id, waitId, operation, ...fields });
+}
+async function submitOperation(context, key, payload) {
+  if (!context || pendingWaits.has(key)) return;
+  const isOpen = () => view === context && (payload.waitMessageId
+    ? detail?.kind === 'clarification' && detail.messageId === payload.waitMessageId
+    : detail?.waitId === payload.waitId);
+  pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   try {
-    await api('operations', { botId: context.id, taskId: task.id, waitId, operation, ...fields });
-    setNotice(context, operation === 'answer' ? 'Answer received.' : 'Action received.');
-    if (view?.id === context.id && detail?.waitId === waitId) closeDetail();
+    await api('operations', { botId: context.id, ...payload });
+    setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
+    if (isOpen()) closeDetail();
   } catch (error) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
-    if (view?.id === context.id && detail?.waitId === waitId) showDetailError(message);
+    if (isOpen()) showDetailError(message);
   } finally {
     if (view?.id === context.id) await refreshView(view);
-    pendingWaits.delete(waitId);
+    pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
 }
@@ -1643,11 +1697,13 @@ async function submit(event) {
   const reply = replies.get(context.id);
   const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
+  const candidateTaskId = reply?.candidateTaskId;
   const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
-    ? previous.clientMessageId : crypto.randomUUID();
+  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId &&
+    previous.candidateTaskId === candidateTaskId ? previous.clientMessageId : crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
+  if (replyToMessageId && candidateTaskId) payload.candidateTaskId = candidateTaskId;
   rememberMessage(context.id, { payload, reply });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
@@ -1675,6 +1731,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);
 });
+elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
@@ -1706,6 +1763,10 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
+  if (reply?.candidateTaskId && reply.text !== reply.choice) {
+    delete reply.candidateTaskId;
+    delete reply.choice;
+  }
   fitMessage();
   notices.delete(view.id);
   const limit = composerLimit(reply);
@@ -1741,7 +1802,7 @@ document.addEventListener('click', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
-  if (digit && !event.isComposing && !elements.detail.open &&
+  if (digit && !event.isComposing && !elements.detail.open && !elements['bot-editor'].open &&
       !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
     const bot = pinnedBotsInShortcutOrder()[Number(digit[1]) - 1];
     if (bot) {
@@ -1752,7 +1813,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (event.key !== 'Escape') return;
   if (menu) closeMenu();
-  else if (workspace.classList.contains('nav-open') && !elements.detail.open) openNavigation(false);
+  else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
 function refresh() {
