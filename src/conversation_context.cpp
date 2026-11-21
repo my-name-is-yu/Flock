@@ -210,7 +210,7 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
         if (!data.is_object()) return std::nullopt;
         return RevisionDraft{savedTarget(data),field(data,"intent"),field(data,"doneWhen")};
     };
-    const auto readDestinationPlan = [&](const Json& segments, const Reply& pending) {
+    const auto readDestinationPlan = [&](const Json& segments, const std::string& question) {
         std::vector<Route> routes;
         for (const auto& segment : segments) {
             const auto kind = field(segment,"route");
@@ -224,9 +224,9 @@ SELECT w.data FROM waits w JOIN tasks t ON t.id=w.task_id WHERE w.id=? AND w.tas
             const auto environment = field(segment,"environment");
             Action action;
             if (kind == "clarify")
-                action = Clarify{pending.question,{},std::move(source),"destination",
+                action = Clarify{question,{},std::move(source),"destination",
                                  savedRevision(segment.value("revisionDraft",Json(nullptr))),
-                                 segment.value("resume",false)};
+                                 segment.at("resume").get<bool>()};
             else if (kind == "create_task")
                 action = CreateTask{instruction,std::move(source),environment,segment.value("resume",false)};
             else if (kind == "append_instruction") action = AppendInstruction{target,instruction,std::move(source)};
@@ -252,9 +252,7 @@ JOIN tasks t ON t.id=json_extract(candidate.value,'$.taskId') WHERE r.message_id
         auto row = query(R"SQL(
 SELECT m.id,m.text,json_extract(m.routing,'$.waitsAtIntake'),j.data,
        json_extract(r.data,'$.segments[0].text'),json_extract(r.data,'$.operation'),
-       COALESCE(json_extract(r.data,'$.segments[0].revisionDraft'),'null'),
-       json_extract(r.data,'$.segments[0].resume'),
-       CASE WHEN json_extract(r.data,'$.destinationPlan') THEN json_extract(r.data,'$.segments') ELSE 'null' END
+       json_extract(r.data,'$.segments')
 FROM route_decisions r JOIN messages m ON m.id=r.message_id JOIN journal j ON j.id=r.reply_id
 WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
 )SQL",{reply,bot,id});
@@ -264,19 +262,13 @@ WHERE r.reply_id=? AND m.bot_id=? AND m.id<? AND r.status='awaiting_resolution'
         pending.id = reply;
         pending.originalText = row.string(1);
         pending.operation = row.string(5);
-        if (!row.string(7).empty()) pending.resume = row.number(7) != 0;
         const auto data = row.json(3);
         pending.question = bounded(field(data,"text"),2000);
-        pending.revisionDraft = savedRevision(row.json(6));
-        if (const auto segments = row.json(8); segments.is_array()) {
-            pending.destinationPlan = readDestinationPlan(segments,pending);
-            for (const auto& segment : segments)
-                if (segment.value("route",std::string{}) == "clarify" && segment.contains("resume"))
-                    pending.resume = segment["resume"].get<bool>();
-        }
+        if (pending.operation == "destination")
+            pending.destinationPlan = readDestinationPlan(row.json(6),pending.question);
         if (const auto source = data.find("source"); source != data.end()) {
             pending.result = readResult(integer(*source,"messageId"),*source);
-            if (pending.result && pending.destinationPlan.empty()) pending.originalText = row.string(4);
+            if (pending.result && pending.operation != "destination") pending.originalText = row.string(4);
         }
         if (const auto captured = row.string(2); !captured.empty()) {
             const auto waits = Json::parse(captured);

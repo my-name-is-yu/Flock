@@ -81,11 +81,10 @@ struct Reply {
     std::string originalText, question, operation;
     std::vector<Id> candidates;
     std::optional<Result> result;
-    std::optional<RevisionDraft> revisionDraft;
     std::vector<Route> destinationPlan;
     std::vector<std::pair<Id,Id>> waitsAtIntake;
     bool incompleteWaitsAtIntake = true;
-    std::optional<bool> resume;
+    const Clarify* destinationQuestion() const;
     bool operator==(const Reply&) const = default;
 };
 

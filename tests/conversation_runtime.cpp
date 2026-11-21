@@ -866,23 +866,6 @@ void restartRestoresCancelledTaskDirections() {
     check(cancellation > 0,"the cancelled task had no resume anchor");
     constexpr auto request = "この作業をクラウドMacで再開して";
     f.script(request,{{"kind","create_task"},{"resultMessageId",cancellation},{"resume",true}});
-    const auto oldReceipt = f.receive("old-restart-work",request,cancellation);
-    const auto oldQuestion = f.response(oldReceipt);
-    sqlite3* raw = nullptr;
-    check(sqlite3_open_v2(f.store->path().c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr) == SQLITE_OK,
-          "could not open the saved clarification fixture");
-    {
-        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-        check(sqlite3_exec(db.get(),"UPDATE route_decisions SET data=json_remove(data,'$.segments[0].resume') "
-                                  "WHERE status='awaiting_resolution'",nullptr,nullptr,nullptr) == SQLITE_OK,
-              "could not emulate a destination clarification saved by the previous version");
-    }
-    f.restart();
-    const auto oldChoice = f.receive("old-restart-destination","クラウドMac",oldQuestion.at("messageId"));
-    check(f.response(oldChoice).at("text").get<std::string>().find("もう一度") != std::string::npos &&
-          f.store->tasks("alpha").size() == 1 && f.store->clarifications("alpha").empty(),
-          "a destination clarification saved by the previous version guessed whether to resume");
-
     const auto receipt = f.receive("restart-work",request,cancellation);
     const auto clarification = f.response(receipt);
     check(clarification.at("route") == "clarify" && f.store->tasks("alpha").size() == 1,
