@@ -547,15 +547,19 @@ SELECT page.id,page.task_id,page.time,page.kind,
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',
             coalesce(json_extract(page.data,'$.status'),'received'),
-            'deliveredToT3',json(CASE WHEN EXISTS (
-              SELECT 1 FROM journal accepted WHERE accepted.kind IN ('instruction_accepted','instruction_steered')
-              AND json_extract(accepted.data,'$.messageId')=m.id
-            ) AND NOT EXISTS (
-              SELECT 1 FROM journal accepted WHERE accepted.kind='instruction_accepted'
-              AND json_extract(accepted.data,'$.messageId')=m.id AND NOT EXISTS (
-                SELECT 1 FROM journal delivery WHERE delivery.task_id=accepted.task_id
-                AND delivery.kind='instruction_delivered' AND json_extract(delivery.data,'$.messageId')=m.id
-                AND coalesce(json_extract(delivery.data,'$.step'),0)=coalesce(json_extract(accepted.data,'$.step'),0))
+            'deliveredToT3',json(CASE WHEN (
+              WITH instructions AS (
+                SELECT kind,task_id,coalesce(json_extract(data,'$.step'),0) AS step
+                FROM journal WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered')
+                -- The numeric key is indexed. The original value rules out lossy casts such as '12x' to 12.
+                AND CAST(json_extract(data,'$.messageId') AS NUMERIC)=m.id
+                AND json_extract(data,'$.messageId')=m.id
+              )
+              -- min() requires every instruction to be delivered and yields NULL for an ordinary message.
+              SELECT min(i.kind='instruction_steered' OR EXISTS (
+                SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
+                AND d.task_id=i.task_id AND d.step=i.step
+              )) FROM instructions i WHERE i.kind!='instruction_delivered'
             ) THEN 'true' ELSE 'false' END))) END
 FROM (
   SELECT j.id,j.task_id,j.time,j.kind,
