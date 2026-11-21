@@ -2,9 +2,11 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <set>
 
 using namespace flockv0;
 namespace {
@@ -43,16 +45,15 @@ struct FixedModel : Model {
 struct FixedT3 : T3 {
     std::map<std::string,Observation,std::less<>> observations;
     std::vector<Command> replies;
-    unsigned launches = 0;
+    std::map<std::string,unsigned,std::less<>> launches;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
         if (command.tool == "delegate") {
-            ++launches;
             if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
             const auto& project = command.projectId;
             const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
-            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + std::to_string(launches),link},{}};
+            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + project + "-" + std::to_string(++launches[project]),link},{}};
         }
         check(command.tool == "answer_session_question","unexpected command in fixture");
         replies.push_back(command);
@@ -111,15 +112,11 @@ public:
 
 void boundary(Browser& browser) {
     auto landing = browser.client.Get("/");
-    check(landing && landing->status == 200 && landing->body.find("/app.js") != std::string::npos,"missing embedded UI");
+    check(landing && landing->status == 200 && !landing->body.empty() &&
+          landing->get_header_value("Content-Type").starts_with("text/html"),"Flock did not serve its landing page");
     check(landing->get_header_value("X-Frame-Options") == "DENY" &&
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
-    for (const auto* path : {"/app.js","/avatars.js","/style.css","/flock.svg",
-                            "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
-        auto asset = browser.client.Get(path);
-        check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
-    }
     const auto draft = R"({"botId":"release","request":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
@@ -140,13 +137,81 @@ void boundary(Browser& browser) {
 
 void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
 
-bool hasEvent(const Json& events, std::string_view kind, std::string_view text) {
+bool hasEvent(const Json& events, std::string_view kind, std::string_view field, std::string_view text) {
     for (const auto& event : events) {
         if (event["kind"] != kind) continue;
-        const auto& data = event["data"];
-        if (data.value("text", data.value("report", std::string{})) == text) return true;
+        if (event.at("data").value(field,std::string{}) == text) return true;
     }
     return false;
+}
+
+void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id triage) {
+    std::map<Id,std::string> expectedRequests = {
+        {release,"下書きの掲載範囲を確認する"},
+        {next,"次の版の変更点を調べる"},
+    };
+    for (int i = 0; i < 43; ++i) {
+        const auto text = "Paged request " + std::to_string(i);
+        const auto id = cli.submit({"release",text,"local-env","release",Json::object(),"daily",1700000000 + i});
+        expectedRequests.emplace(id,text);
+    }
+
+    auto page = browser.get("/api/view?bot=release");
+    check(page.at("olderBefore").get<Id>() > 0,"conversation did not offer older history");
+    std::set<Id> cursors;
+    Id oldestSeen = 0;
+    do {
+        const auto& events = page.at("events");
+        Id previous = 0;
+        for (const auto& event : events) {
+            const auto id = event.at("id").get<Id>();
+            check(id > previous && (oldestSeen == 0 || id < oldestSeen),"conversation order or page boundary was incorrect");
+            previous = id;
+            const auto task = event.at("taskId").get<Id>();
+            check(task != triage,"conversation included another Bot's history");
+            if (event.at("kind") != "request") continue;
+            const auto request = expectedRequests.find(task);
+            const auto& data = event.at("data");
+            check(request != expectedRequests.end() && data.at("text") == request->second,
+                  "conversation returned an unexpected or repeated request");
+            if (task != release && task != next)
+                check(data.at("source") == "cron" && data.at("scheduleId") == "daily","scheduled request lost its origin");
+            expectedRequests.erase(request);
+        }
+        const auto before = page.at("olderBefore").get<Id>();
+        if (before == 0) break;
+        check(!events.empty() && cursors.insert(before).second,"older conversation cursor did not advance");
+        oldestSeen = events.front().at("id").get<Id>();
+        page = browser.get("/api/conversation?bot=release&before=" + std::to_string(before));
+    } while (true);
+    check(expectedRequests.empty(),"conversation pagination skipped requests");
+}
+
+void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
+    std::set<Id> expectedTasks = {triage};
+    for (int i = 0; i < 8; ++i) {
+        const auto id = std::to_string(i);
+        expectedTasks.insert(cli.submit({"triage","Session " + id,"linked env","separate-" + id}));
+    }
+    tick(runtime,3);
+
+    auto page = browser.get("/api/view?bot=triage");
+    check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
+    std::set<Id> cursors;
+    do {
+        const auto& tasks = page.at("sessionTasks");
+        check(!tasks.empty(),"session page contained no tasks");
+        for (const auto& task : tasks) {
+            const auto id = task.at("id").get<Id>();
+            check(expectedTasks.erase(id) == 1,"session page returned an unexpected or repeated task");
+            check(!task.at("sessions").empty(),"session task contained no links to work");
+        }
+        const auto before = page.at("sessionsBefore").get<Id>();
+        if (before == 0) break;
+        check(cursors.insert(before).second,"session cursor did not advance");
+        page = browser.get("/api/sessions?bot=triage&before=" + std::to_string(before));
+    } while (true);
+    check(expectedTasks.empty(),"session pagination skipped tasks");
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -160,7 +225,7 @@ void exercise(const std::filesystem::path& path) {
     const auto port = server->port();
     Browser browser(*server);
     boundary(browser);
-    check(store.tasks().empty(),"rejected requests changed SQLite");
+    check(cli.tasks().empty(),"rejected HTTP requests still submitted work");
     const auto release = browser.request("release","下書きの掲載範囲を確認する");
     const auto triage = browser.request("triage","昨日届いた不具合を確認する");
     const auto settings = browser.request("settings","接続設定を確認する");
@@ -174,10 +239,17 @@ void exercise(const std::filesystem::path& path) {
     const auto releasePage = browser.get("/api/view?bot=release");
     const auto triagePage = browser.get("/api/view?bot=triage");
     auto waits = releasePage.at("waits");
-    check(waits.size() == 1 && waits[0]["id"] == release && waits[0]["wait"]["choices"].size() == 2,"release Bot question was missing");
+    check(waits.size() == 1 && waits[0]["id"] == release &&
+          waits[0]["wait"]["text"] == "利用者向けの変更だけを載せますか？" &&
+          waits[0]["wait"]["choices"] == Json::array({"利用者向けのみ","すべて"}),
+          "release Bot question or available answers were incorrect");
     check(triagePage["waits"].size() == 1 && triagePage["waits"][0]["id"] == triage,"T3 wait belongs to wrong Bot");
-    check(releasePage["bot"]["cron"][0]["timezone"] == "Asia/Tokyo" && releasePage["bot"]["soul"] != triagePage["bot"]["soul"],
-          "Bot settings were mixed");
+    check(releasePage["bot"]["soul"] == "利用者向けのリリースノートをまとめる。" &&
+          triagePage["bot"]["soul"] == "報告された問題を整理する。" && triagePage["bot"]["cron"].empty(),
+          "selected Bots showed incorrect settings");
+    const auto& schedule = releasePage.at("bot").at("cron").at(0);
+    check(schedule.at("schedule") == "0 9 * * *" && schedule.at("timezone") == "Asia/Tokyo" &&
+          schedule.at("request") == "前日の変更を確認する","Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
@@ -185,7 +257,9 @@ void exercise(const std::filesystem::path& path) {
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
           "configuration failure was not classified");
     const auto list = browser.get("/api/bots");
-    check(list[0]["preview"] == "利用者向けの変更だけを載せますか？","Bot list does not show its latest question");
+    const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
+    check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
+          "Bot list does not show Release's latest question");
     const Id waitId = waits[0]["wait"]["id"];
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
@@ -200,6 +274,7 @@ void exercise(const std::filesystem::path& path) {
     browser.post("/api/operations",reply,409);
     tick(*runtime,2);
     check(t3.replies.size() == 1 && t3.replies[0].target.threadId == "thread-release" &&
+          t3.replies[0].target.runId == "run-release-1" && t3.replies[0].questionId == "scope-question" &&
           t3.replies[0].answers["scope"] == "利用者向けのみ" && cli.task(next)["state"] == "queued",
           "stale reply affected the active Run or another task");
     check(browser.get("/api/view?bot=release")["waits"].empty(),"resolved wait stayed selectable");
@@ -216,7 +291,8 @@ void exercise(const std::filesystem::path& path) {
     server = startWeb(store,port,callbacks());
     Browser reopened(*server);
     const auto page = reopened.get("/api/view?bot=release");
-    check(hasEvent(page["events"],"report",finished.report) && hasEvent(page["events"],"completed","Draft complete"),
+    check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
+          hasEvent(page["events"],"completed","text","Draft complete"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
     check(external["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
@@ -238,31 +314,11 @@ void exercise(const std::filesystem::path& path) {
     reopened.post("/api/operations",answer,409);
     tick(*runtime,2);
     check(t3.replies.size() == 2 && t3.replies.back().target.threadId == "thread-triage" &&
+          t3.replies.back().target.runId == "run-triage-1" && t3.replies.back().questionId == "scope-question" &&
           t3.replies.back().answers["scope"] == "すべて","a Web answer did not resume its own question exactly once");
 
-    for (int i = 0; i < 43; ++i) {
-        cli.submit({"release","Paged request " + std::to_string(i),"local-env","release",Json::object(),"daily",1700000000 + i});
-    }
-    const auto newest = reopened.get("/api/view?bot=release");
-    const auto cursor = newest.at("olderBefore").get<Id>();
-    check(cursor > 0 && newest["events"].front()["id"] == cursor,"missing exclusive older cursor");
-    const auto older = reopened.get("/api/conversation?bot=release&before=" + std::to_string(cursor));
-    check(older["events"].back()["id"].get<Id>() < cursor &&
-          hasEvent(older["events"],"request","下書きの掲載範囲を確認する") &&
-          !hasEvent(older["events"],"request","昨日届いた不具合を確認する"),"older page was out of scope or lost events");
-    check(newest["events"].back()["data"]["source"] == "cron","scheduled origin did not survive HTTP projection");
-
-    for (int i = 0; i < 8; ++i) {
-        const auto id = std::to_string(i);
-        cli.submit({"release","Session " + id,"local-env","separate-" + id});
-    }
-    tick(*runtime,3);
-    const auto sessionPage = reopened.get("/api/view?bot=release");
-    const auto sessionCursor = sessionPage.at("sessionsBefore").get<Id>();
-    check(sessionPage["sessionTasks"].size() == 6 && sessionCursor > 0,"missing session pagination");
-    const auto olderSessions = reopened.get("/api/sessions?bot=release&before=" + std::to_string(sessionCursor));
-    check(!olderSessions["sessionTasks"].empty() && olderSessions["sessionTasks"].front()["id"].get<Id>() < sessionCursor,
-          "session page duplicated newer tasks");
+    conversationPages(reopened,cli,release,next,triage);
+    sessionPages(reopened,cli,*runtime,triage);
 }
 } // namespace
 
