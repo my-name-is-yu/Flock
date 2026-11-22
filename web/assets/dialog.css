@@ -31,13 +31,13 @@
 .detail::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
 
 .detail, .detail::backdrop {
-  transition: opacity .19s ease-out, transform .22s cubic-bezier(.2, .9, .25, 1),
-    overlay .22s allow-discrete, display .22s allow-discrete;
+  transition: opacity .2s ease-out, transform .24s cubic-bezier(0.22, 1.15, 0.36, 1),
+    overlay .24s allow-discrete, display .24s allow-discrete;
 }
-.detail:not([open]) { opacity: 0; transform: translateY(8px) scale(.965); transition-duration: .13s; }
-.detail:not([open])::backdrop { opacity: 0; transition-duration: .13s; }
+.detail:not([open]) { opacity: 0; transform: translateY(10px) scale(.96); transition-duration: .14s; }
+.detail:not([open])::backdrop { opacity: 0; transition-duration: .14s; }
 @starting-style {
-  .detail[open] { opacity: 0; transform: translateY(8px) scale(.965); }
+  .detail[open] { opacity: 0; transform: translateY(10px) scale(.96); }
   .detail[open]::backdrop { opacity: 0; }
 }
 
