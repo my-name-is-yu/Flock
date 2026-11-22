@@ -6,7 +6,7 @@ Flock reopens databases that use the current SQLite schema. Older development sc
 
 ## Build
 
-You need a C++20 compiler, CMake 3.24 or later, and the SQLite, libcurl, and OpenSSL development libraries. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
+You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, and OpenSSL. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
 
 ```sh
 cmake -S . -B build
@@ -66,7 +66,7 @@ Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to us
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. Additional instructions for an active task are saved for its next safe point, or the Bot can pass a note to the running Session right away. Asking the Bot to implement a completed result starts a new task linked to that result.
 
-To try Flock without signing in, configure a Bot in a test state directory and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot, grant launch access, and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 ```sh
 build/app/flock --help
@@ -79,3 +79,24 @@ build/app/flock answer <task-id> <wait-id> 'main'
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
 
 The Bot normally evaluates the Session's final report. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime saves up to three excerpts per event in SQLite, with a limit of 8 KiB per excerpt.
+
+### Bot resource authorization
+
+Grant the Bot the environment’s `launch` operation before starting its first
+Session. A Bot can read its own Sessions. To share another Session, grant
+`session:read` on the exact environment and thread. Use `Scope::sessionRead`
+in C++, or the compact JSON pair `["environment-id","thread-id"]` as the resource
+ID in settings. T3 must permit each read. Set `services` and `mcpServers` to arrays of
+connection names for the conversation tools. Manage grants and protected input
+from **Manage access and credentials** in Bot settings.
+
+Adapters that perform resource operations should use the contracts in
+`include/flock/access.hpp`. At the execution boundary, pass the authenticated
+Session's environment and Run reference to `Access::executeSessionResource`,
+together with the exact scope, the upstream permission check and the action.
+Flock resolves the Run's owning task, checks current grants, and journals the
+completed action. The execution callback receives the verified owning task ID for
+resolving additional scoped resources. The transport must establish the calling Run's identity.
+A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
+adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
+External adapters must call these checks for each protected operation.

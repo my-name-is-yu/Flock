@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -67,6 +67,7 @@ int main() {
         {
             Store store(db);
             Runtime runtime(store,model,t3,notes);
+            store.access().resourceGrant({"fixture",true},"release",{"environment","env","launch"},GrantChange::grant);
             id = store.submit({"release","Check main","env","proj"});
             tickUntil(runtime, [&] { return store.task(id)["state"] == "running"; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;

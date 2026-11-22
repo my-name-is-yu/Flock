@@ -168,6 +168,7 @@ LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=t
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        initializeAccessSchema();
         migrateConversation();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
@@ -390,8 +391,11 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    const auto scrub = redactor(item.botId);
+    scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.scheduleId,item.config});
     modelCallLimit(item.config);
-    Json data = {{"botId", item.botId}, {"request", item.request}, {"intent", item.request}, {"environmentId", item.environmentId},
+    const auto request = scrub.text(item.request);
+    Json data = {{"botId", item.botId}, {"request", request}, {"intent", request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
@@ -413,7 +417,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
     }
     const auto id = last();
     if (requestJournal == RequestJournal::record)
-        journal(id, "request", {{"text",item.request},
+        journal(id, "request", {{"text",request},
             {"source",sourceMessageId ? "conversation" : (item.scheduleId.empty() ? "manual" : "cron")},
             {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt},{"messageId",sourceMessageId}});
     return id;
@@ -439,7 +443,7 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    p_->operate(id,waitId,operation,data);
+    p_->operate(id,waitId,operation,p_->redactor(field(p_->load(id),"botId")).payload(data));
     transaction.commit();
 }
 
@@ -573,7 +577,8 @@ void Store::Impl::addTaskDetails(Json& result) const {
     while (runs.next())
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
                                   {"link",runs.string(2)},{"actionId",runs.string(3)},
-                                  {"environmentId",runs.string(4)},{"revisionId",runs.number(5)}});
+                                  {"environmentId",runs.string(4)},{"revisionId",runs.number(5)},
+                                  {"ownerBotId",result.at("botId")}});
 }
 
 Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {

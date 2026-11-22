@@ -18,11 +18,6 @@
 namespace flockv0::app {
 namespace {
 constexpr std::size_t maxConfigBytes = 128 * 1024;
-bool validId(std::string_view id) {
-    const auto starts = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    return !id.empty() && id.size() <= 128 && std::string_view(starts).find(id.front()) != std::string_view::npos &&
-        id.find_first_not_of("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_.") == std::string_view::npos;
-}
 
 bool plainId(std::string_view id) {
     return !id.empty() && id.size() <= 256 &&
@@ -129,7 +124,7 @@ std::string slugForName(std::string_view name) {
         if (slug.size() >= 40) break;
     }
     while (!slug.empty() && slug.back() == '-') slug.pop_back();
-    if (slug.empty() || !validId(slug)) return "bot";
+    if (slug.empty() || !validBotId(slug)) return "bot";
     return slug;
 }
 
@@ -293,7 +288,7 @@ Intake Bot::intake(std::string_view request) const {
 Bots::Bots(std::filesystem::path directory) : directory_(std::move(directory)) {}
 
 std::filesystem::path Bots::path(std::string_view id) const {
-    if (!validId(id)) throw Conflict("Invalid Bot ID");
+    if (!validBotId(id)) throw Conflict("Invalid Bot ID");
     const auto bot = directory_ / id;
     if (!std::filesystem::is_directory(bot) || std::filesystem::is_symlink(bot))
         throw Conflict("Bot does not exist: " + std::string(id));
@@ -305,7 +300,7 @@ std::vector<std::string> Bots::ids() const {
     if (!std::filesystem::exists(directory_)) return result;
     for (const auto& entry : std::filesystem::directory_iterator(directory_)) {
         const auto id = entry.path().filename().string();
-        if (validId(id) && entry.is_directory() && !entry.is_symlink() &&
+        if (validBotId(id) && entry.is_directory() && !entry.is_symlink() &&
             std::filesystem::is_regular_file(entry.path() / "config.json")) result.push_back(id);
     }
     std::sort(result.begin(),result.end());
@@ -328,6 +323,13 @@ Bot configuredBot(std::string_view id, const Json& config) {
     if (!plainId(bot.environmentId) || !plainId(bot.projectId))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    for (const auto key : {"services","mcpServers"}) {
+        if (!config.contains(key)) continue;
+        if (!config[key].is_array()) throw Conflict("Connection names must be an array");
+        for (const auto& name : config[key])
+            if (!name.is_string() || !plainId(name.get<std::string>())) throw Conflict("Invalid connection name");
+        bot.settings[key] = config[key];
+    }
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];
@@ -362,7 +364,7 @@ Bot configuredBot(std::string_view id, const Json& config) {
     for (const auto& item : allowedBots) {
         if (!item.is_string()) throw Conflict("allowedBots must contain only Bot IDs");
         const auto& peerId = item.get_ref<const std::string&>();
-        if (!validId(peerId) || peerId == id || !allowedIds.insert(peerId).second)
+        if (!validBotId(peerId) || peerId == id || !allowedIds.insert(peerId).second)
             throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
         bot.allowedBots.push_back(peerId);
     }
@@ -374,7 +376,7 @@ Bot configuredBot(std::string_view id, const Json& config) {
         const auto expression = validatedString(schedule,"schedule");
         const auto timezone = validatedString(schedule,"timezone");
         const auto request = validatedString(schedule,"request");
-        if (!validId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
+        if (!validBotId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
             throw Conflict("Cron IDs must be valid and unique, and requests must fit in 16,000 bytes");
         bot.schedules.push_back({scheduleId,request,Cron(expression,timezone)});
     }
@@ -472,6 +474,32 @@ Json Bots::cards() const {
         }
     }
     return items;
+}
+
+void Bots::apply(const BotChange& change) {
+    if (change.operation == "rename_bot") {
+        updateProfile(change.target,{{"name",change.name}});
+        return;
+    }
+    if (change.operation != "create_bot" || !validBotId(change.target) || !validBotId(change.requestKey))
+        throw Conflict("Invalid Bot creation request");
+    const auto name = validatedBotName({{"name",change.name}});
+    std::lock_guard lock(mutex_);
+    std::filesystem::create_directories(directory_);
+    const auto destination = directory_ / change.target;
+    if (std::filesystem::exists(destination)) {
+        const auto existing = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes));
+        if (existing.value("creationRequest","") == change.requestKey) return;
+        throw Conflict("Target Bot already exists");
+    }
+    const auto staging = directory_ / (".create-" + change.requestKey);
+    if (!std::filesystem::create_directory(staging) &&
+        (std::filesystem::is_symlink(staging) || !std::filesystem::is_directory(staging)))
+        throw Conflict("Invalid Bot staging directory");
+    const Json config{{"name",name},{"role","custom"},{"creationRequest",change.requestKey},
+                      {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
+    writeAtomic(staging / "config.json",config.dump(2) + "\n");
+    std::filesystem::rename(staging,destination);
 }
 
 Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) {

@@ -22,8 +22,9 @@ std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
     std::lock_guard lock(mutex_);
     constexpr std::size_t maxSubscribers = 3;
     if (stopping_ || subscribers_ >= maxSubscribers) return std::nullopt;
-    Cursor cursor{{BotList{},0},{view,0}};
-    if (const auto* dm = std::get_if<DirectMessage>(&view)) cursor.emplace(BotView{dm->bot},0);
+    Cursor cursor{{Scope{view.person,BotList{}},0},{view,0}};
+    if (const auto* dm = std::get_if<DirectMessage>(&view.target))
+        cursor.emplace(Scope{view.person,BotView{dm->bot}},0);
     for (auto& [scope,revision] : cursor) {
         auto& watched = watched_[scope];
         ++watched.subscribers;
@@ -58,7 +59,7 @@ std::optional<Json> ChangeFeed::next(Cursor& cursor) {
         const auto next = watched_.at(scope).revision;
         if (revision == next) continue;
         revision = next;
-        std::visit([&](const auto& target) { invalidate(update,target); },scope);
+        std::visit([&](const auto& target) { invalidate(update,target); },scope.target);
     }
     return update;
 }
@@ -90,14 +91,12 @@ std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes
     const auto previousRevision = revision_;
     for (auto& [scope,snapshot] : snapshots) {
         const auto item = watched_.find(scope);
-        if (item == watched_.end() || item->second.snapshot == snapshot) continue;
+        if (item == watched_.end()) continue;
+        const auto* view = std::get_if<BotView>(&scope.target);
+        const bool historyChanged = view && !snapshot.is_null() && changes.messages.contains(view->bot);
+        if (item->second.snapshot == snapshot && !historyChanged) continue;
         item->second.snapshot = std::move(snapshot);
         item->second.revision = ++revision_;
-    }
-    for (const auto& [bot,ids] : changes.messages) {
-        const auto item = watched_.find(BotView{bot});
-        if (item != watched_.end() && item->second.revision <= previousRevision)
-            item->second.revision = ++revision_;
     }
     if (revision_ != previousRevision) changed_.notify_all();
     return failed;

@@ -1,4 +1,5 @@
 #pragma once
+#include "flock/access.hpp"
 
 #include "flock/bot_profile.hpp"
 
@@ -39,6 +40,7 @@ public:
     BotNotes notes(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;
     Json cards() const;
+    void apply(const BotChange&);
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;

@@ -11,3 +11,29 @@ The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `ses
 - [cpp-httplib v0.67.0](https://github.com/yhirose/cpp-httplib/tree/v0.67.0) is pinned by release and SHA-256 in CMake.
 - [Open Bot Avatar 0.3.0](https://www.npmjs.com/package/open-bot-avatar/v/0.3.0) is vendored as the runtime JavaScript files from the npm tarball under `assets/vendor/open-bot-avatar`, with its MIT license. Tarball integrity is `sha512-3P0o8eiClHHiLr7lIFZE/WxUtqHLjVb0xQ0PqYzA48XG/oQlWyeIdcY0egK6H8AgFuoY1aKVhc8QKSaj4z5ZOw==`. The UI uses the public `mountAvatar`, `getExample`, and `validateAvatar` APIs with static list avatars and system reduced-motion support in the conversation header.
 - [T3 Code v0.1.11 thread links](https://github.com/pingdotgg/t3code/blob/v0.1.11/packages/shared/src/threadLinks.ts) define the environment and Thread segments of the browser handoff.
+
+The loopback listener runs as the local owner by default. For a shared listener, set
+`FLOCK_WEB_IDENTITIES_FILE` before starting Flock to the path of an owner-only
+JSON file (mode 0600). Provide an array with one entry per credential. Each entry
+has a unique `authorization` string (the complete Basic or Bearer authorization
+header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
+identity for initial grants. Restart the listener after changing this file.
+Browsers can sign in through the Basic challenge.
+
+An administrator can GET `/api/access?bot=ID` and POST to `/api/access/person`,
+`resource`, `decision`, `secret` and `bot-change` under the same prefix. These
+routes require the usual same-origin JSON mutation headers. Grant mutations use
+`botId`, `action` (grant or revoke) and either `person` and `role` or
+`resourceKind`, `resourceId` and `operation`. Decisions use a saved `requestId`
+and boolean `approve`. Protected input uses a saved `requestId` and `value`.
+Supplying a named secret requires Bot admin access and personal authority for
+that secret, or a root identity. The Bot needs its own `secret:use` grant to
+resolve the value.
+
+A root can assign a person's delegation authority with `POST /api/access/person-scope`
+using `botId`, `person`, `action` and the exact resource tuple. An ordinary
+administrator needs both admin access to the receiving Bot and personal authority
+for the resource operation to approve it. Approving a Bot change applies the
+saved name to the exact target ID. Creation requires a root identity. Rename
+requires admin access to the requesting and target Bots. If the profile write
+fails after approval, use **Apply approved change** to retry.

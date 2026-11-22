@@ -31,7 +31,9 @@ constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "cancel_task","message_session","interrupt_session","read_result",
-                                         "find_tasks","reply"};
+                                         "find_tasks","reply","list_grants","request_access","list_secrets",
+                                         "request_secret_input","list_connections",
+                                         "check_environment_readiness","update_bot_settings","request_bot_change"};
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -362,6 +364,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (auto result = accessTool(bot,routing,decision); !result.is_null()) {
+        result["ok"] = true;
+        return result;
+    }
     const auto expectGeneration = [&](const Json& task) {
         const auto expected = identifier(args,"generation",true,0);
         if (expected != task.at("generation").get<Id>())
@@ -513,7 +519,7 @@ Json Store::Impl::prepareSessionEffect(const Message& message, int step, const D
                         {{"taskId",task.at("id")},{"current",taskState(task,message)}});
     Json effect = {{"kind",decision.tool == "message_session" ? "steer" : "interrupt"},{"taskId",task.at("id")},
                    {"environmentId",field(run,"environmentId").empty() ? field(task,"environmentId") : field(run,"environmentId")},
-                   {"projectId",field(task,"projectId")},{"config",task.at("config")},{"run",run},
+                   {"ownerBotId",message.bot},{"projectId",field(task,"projectId")},{"config",task.at("config")},{"run",run},
                    {"actionId","flock-turn-" + std::to_string(message.id) + "-" + std::to_string(step)}};
     if (decision.tool == "message_session") effect["text"] = text(args,"text",messageSize,true);
     return effect;
@@ -537,6 +543,7 @@ Json performSessionEffect(T3& t3, const Json& effect) {
         }
         Command command;
         command.actionId = field(effect,"actionId");
+        command.ownerBotId = field(effect,"ownerBotId");
         command.tool = "steer";
         command.environmentId = environment;
         command.projectId = field(effect,"projectId");
@@ -581,7 +588,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linked,unixTime(),message.bot});
     const auto reply = last();
-    Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",text},{"route",route},
+    Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",redactor(message.bot).text(text)},{"route",route},
                  {"status",status},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = suggestions;
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
@@ -673,7 +680,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             }
             if (!attempt) return true;
             try {
-                decision = callModel(model,input,attempt);
+                decision = callModel(message.bot,model,input,attempt);
             } catch (const ModelError& error) {
                 if (error.transient) return false;
                 finish(failure,"error");
@@ -711,13 +718,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                         auto failed = error.details;
                         failed["ok"] = false;
                         failed["error"] = error.what();
-                        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{failed,id,step});
+                        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{redactor(message.bot).record(failed),id,step});
                     }
                 }
                 transaction.commit();
             }
             if (effect.is_null()) continue;
-            const auto outcome = performSessionEffect(t3,effect);
+            const auto outcome = redactor(message.bot).record(performSessionEffect(t3,effect));
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
@@ -732,10 +739,16 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             continue;
         }
 
+        Json result;
+        if (decision->tool == "check_environment_readiness") {
+            try {
+                result = readiness(message.bot,message.routing,decision->args,t3);
+                result["ok"] = true;
+            } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
+        }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!turnPending(id)) return true;
-        Json result;
         if (decision->tool == "reply") {
             try {
                 const auto& args = decision->args;
@@ -762,7 +775,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 result["ok"] = false;
                 result["error"] = error.what();
             }
-        } else {
+        } else if (result.is_null()) {
             exec("SAVEPOINT turn_tool");
             try {
                 result = applyTurnTool(message,step,*decision);
@@ -776,7 +789,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 result["error"] = error.what();
             }
         }
-        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{result,id,step});
+        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{redactor(message.bot).record(result),id,step});
         transaction.commit();
     }
     finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"

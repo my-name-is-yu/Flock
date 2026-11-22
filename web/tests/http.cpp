@@ -6,9 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
-#include <set>
 #include <regex>
 #include <set>
 
@@ -487,6 +487,9 @@ void peerConversation(const std::filesystem::path& path) {
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
+    store.access().resourceGrant({"fixture",true},"settings",{"environment","local-env","launch"},GrantChange::grant);
+    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return BotNotes{}; };
@@ -667,6 +670,7 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto web = callbacks();
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
@@ -896,6 +900,52 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
     },404);
 }
+void accessEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    const auto id = store.access().request("release",{"repository","private","read"});
+    auto cb = callbacks();
+    const auto file = path.parent_path()/"identities.json";
+    const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
+                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
+    std::ofstream(file) << accounts;
+    std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
+    cb.authenticate = webIdentities(file);
+    const auto link = path.parent_path()/"identity-link";
+    std::filesystem::create_symlink(file,link);
+    bool rejected = false;
+    try { webIdentities(link); } catch (const Conflict&) { rejected = true; }
+    check(rejected,"symlink identity file accepted");
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    Browser::checked(browser.client.Get("/api/access?bot=release"),401);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
+    auto crossOrigin = browser.headers();
+    crossOrigin.erase("Origin");
+    crossOrigin.emplace("Origin","https://example.invalid");
+    Browser::checked(browser.client.Post("/api/access/decision",crossOrigin,
+        Json{{"botId","release"},{"requestId",id},{"approve",true}}.dump(),"application/json"),403);
+    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true},{"resourceId","wrong"}},400);
+    const auto secretRequest = store.access().requestSecret("release",{"fixture-token"});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
+    browser.post("/api/access/person",{{"botId","release"},{"action","grant"},{"person","alice"},{"role","view"}});
+    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true}});
+    auto state = browser.get("/api/access?bot=release");
+    check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
+    browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
+                                          {"resourceId","private"},{"operation","read"}});
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    browser.get("/api/conversation?bot=release");
+    check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
+    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);
+    browser.post("/api/access/resource",{{"botId","release"},{"adminRoot",true}},403);
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+}
+
 } // namespace
 
 int main() {
@@ -907,6 +957,7 @@ int main() {
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
+        accessEndpoints(directory.path / "access.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
