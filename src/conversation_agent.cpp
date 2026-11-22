@@ -24,7 +24,7 @@ constexpr int terminalTaskLimit = 8;
 constexpr int historyLimit = 24;
 constexpr int findLimit = 10;
 constexpr int maxSteps = 24;
-constexpr std::size_t historyBytes = 24000;
+constexpr std::size_t turnInputBytes = 24000;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
 
@@ -33,9 +33,21 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "find_tasks","reply"};
 
 bool japanese(std::string_view text) {
-    return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
-        return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
-    });
+    // UTF-8 preserves code point order. Compare complete characters against the
+    // Hiragana and Katakana script ranges, including halfwidth and historic kana.
+    constexpr std::pair<std::string_view,std::string_view> kana[] = {
+        {"ぁ","ゖ"},{"ゝ","ゟ"},{"ァ","ヺ"},{"ヽ","ヿ"},{"ㇰ","ㇿ"},{"㋐","㋾"},{"㌀","㍗"},
+        {"ｦ","ｯ"},{"ｱ","ﾝ"},{"𚿰","𚿳"},{"𚿵","𚿻"},{"𚿽","𚿾"},{"𛀀","𛄢"},
+        {"𛄲","𛄲"},{"𛅐","𛅒"},{"𛅕","𛅕"},{"𛅤","𛅧"},{"🈀","🈀"}
+    };
+    while (!text.empty()) {
+        const auto lead = static_cast<unsigned char>(text.front());
+        const auto ch = text.substr(0,lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4);
+        if (std::ranges::any_of(kana,[&](auto range) { return range.first <= ch && ch <= range.second; }))
+            return true;
+        text.remove_prefix(ch.size());
+    }
+    return false;
 }
 
 struct ToolError : std::runtime_error {
@@ -72,7 +84,7 @@ Id identifier(const Json& args, std::string_view key, bool required, long double
     return value->get<Id>();
 }
 
-Json waitView(const Json& wait, Id messageId) {
+Json waitView(const Json& wait, bool answerable) {
     if (!wait.is_object()) return nullptr;
     Json view = {{"waitId",wait.value("id",Id{0})},{"reason",field(wait,"reason")},
                  {"text",bounded(field(wait,"text"),1000)}};
@@ -81,14 +93,16 @@ Json waitView(const Json& wait, Id messageId) {
         for (const auto& choice : *choices)
             if (choice.is_string() && list.size() < 12) list.push_back(bounded(choice.get<std::string>(),200));
     }
-    view["answerable"] = field(wait,"reason") == "user_question" && integer(wait,"messageId") < messageId;
+    view["answerable"] = answerable;
     return view;
 }
 
 Json taskState(const Json& task, Id messageId) {
+    const auto& wait = task.at("wait");
+    const bool answerable = answerableQuestion(task,integer(wait,"id")) && integer(wait,"messageId") < messageId;
     Json view = {{"generation",task.at("generation")},{"revisionId",task.value("currentRevision",Id{0})},
                  {"state",task.at("state")},{"doneWhen",bounded(field(task,"doneWhen"),1600)},
-                 {"replanning",task.value("replanning",false)},{"wait",waitView(task.value("wait",Json(nullptr)),messageId)}};
+                 {"replanning",task.value("replanning",false)},{"wait",waitView(wait,answerable)}};
     if (const auto intent = field(task,"intent"); !intent.empty()) view["intent"] = bounded(intent,1000);
     return view;
 }
@@ -112,11 +126,7 @@ std::string effectStatus(const Json& actions) {
 std::optional<Message> Store::Impl::turnMessage(Id id) const {
     auto row = query(R"SQL(
 SELECT m.reply_to,m.bot_id,m.text,m.routing
-FROM messages m JOIN journal j ON j.id=m.id
-WHERE m.id=? AND j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
-AND NOT EXISTS (
-  SELECT 1 FROM journal prior WHERE prior.conversation_bot_id=m.bot_id AND prior.id<m.id
-  AND prior.kind='conversation_message' AND json_extract(prior.data,'$.status') IS NULL)
+FROM messages m JOIN next_conversation_turns n ON n.bot_id=m.bot_id AND n.message_id=m.id WHERE m.id=?
 )SQL",{id});
     if (!row.next()) return std::nullopt;
     return Message{id,row.number(0),row.string(1),row.string(2),row.json(3)};
@@ -146,7 +156,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled')
             {"runId",field(data,"resultRunId")},{"itemId",field(data,"itemId")}};
     } else if (data.contains("source")) provenance = data.at("source");
     Json result = {{"taskId",row.number(0)},{"messageId",messageId},{"revisionId",integer(data,"revisionId")},
-                   {"text",field(data,kind == "report" ? "report" : "text")},{"option",0},
+                   {"text",field(data,kind == "report" ? "report" : "text")},
                    {"kind",kind},{"taskState",row.string(1)},{"request",row.string(4)},
                    {"currentRevision",row.number(5)},{"truncated",data.value("truncated",false)}};
     if (!provenance.is_null()) result["run"] = provenance;
@@ -156,27 +166,65 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled')
 namespace {
 Json sourceRef(const Json& result) {
     Json source = {{"taskId",result.at("taskId")},{"messageId",result.at("messageId")},
-                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)},
-                   {"option",0}};
+                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)}};
     if (result.contains("run")) source["run"] = result.at("run");
     return source;
+}
+
+Json resultPreview(const Json& row) {
+    if (row.is_null()) return nullptr;
+    const auto& data = row.at("data");
+    return {{"messageId",row.at("id")},{"kind",row.at("kind")},{"revisionId",integer(data,"revisionId")},
+            {"excerpt",bounded(field(data,row.at("kind") == "report" ? "report" : "text"),600)}};
+}
+
+void budgetTurnInput(Json& input) {
+    // The complete user message is authoritative, even when JSON escaping expands it.
+    const auto limit = std::max(turnInputBytes,input["event"]["text"].dump().size() + 2048);
+    auto bytes = input.dump().size();
+    auto& past = input["event"]["turn"];
+    const auto compact = [&](Json& entry) {
+        const auto& result = entry.at("result");
+        Json summary = Json::object();
+        for (const auto* key : {"ok","effect","delivery","taskId","messageId","revisionId","nextOffset","before"})
+            if (result.contains(key)) summary[key] = result.at(key);
+        if (result.contains("tasks"))
+            for (const auto& task : result.at("tasks")) summary["taskIds"].push_back(task.at("taskId"));
+        if (result.contains("error")) summary["error"] = bounded(field(result,"error"),120);
+        Json reduced = {{"tool",bounded(field(entry,"tool"),64)},{"result",std::move(summary)}};
+        bytes = bytes - entry.dump().size() + reduced.dump().size();
+        entry = std::move(reduced);
+    };
+    for (std::size_t i = 0; bytes > limit && i + 1 < past.size(); ++i) compact(past[i]);
+    const auto trim = [&](Json& items, bool oldestFirst) {
+        while (bytes > limit && !items.empty()) {
+            auto it = oldestFirst ? items.begin() : std::prev(items.end());
+            bytes -= it->dump().size() + (items.size() > 1);
+            items.erase(it);
+        }
+    };
+    trim(input["history"],true);
+    if (bytes > limit && !input["task"]["tasks"].empty()) {
+        trim(input["task"]["tasks"],false);
+        input["task"]["moreTasks"] = true;
+    }
+    trim(input["task"]["environments"],false);
+    if (bytes > limit && input["event"]["replyTo"].is_object()) {
+        auto& anchor = input["event"]["replyTo"];
+        anchor.erase("inReplyTo");
+        anchor.erase("text");
+        anchor.erase("suggestions");
+        anchor.erase("choices");
+        bytes = input.dump().size();
+    }
+    if (bytes > limit && !past.empty()) compact(past.back());
+    trim(past,true);
 }
 }
 
 Json Store::Impl::turnInput(const Message& message, int step) const {
     Json tasks = Json::array();
     std::set<Id> listed;
-    const auto latestResult = [&](Id taskId) -> Json {
-        auto row = query(R"SQL(
-SELECT id,kind,data FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled') AND id<?
-ORDER BY id DESC LIMIT 1
-)SQL",{taskId,message.id});
-        if (!row.next()) return nullptr;
-        const auto kind = row.string(1);
-        const auto data = row.json(2);
-        return {{"messageId",row.number(0)},{"kind",kind},{"revisionId",integer(data,"revisionId")},
-                {"excerpt",bounded(field(data,kind == "report" ? "report" : "text"),600)}};
-    };
     const auto addTask = [&](Id taskId) {
         if (!listed.insert(taskId).second) return;
         const auto task = load(taskId);
@@ -184,7 +232,8 @@ ORDER BY id DESC LIMIT 1
                      {"environmentId",field(task,"environmentId")}};
         view.update(taskState(task,message.id));
         if (task.contains("sourceTaskId")) view["sourceTaskId"] = task.at("sourceTaskId");
-        if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
+        if (auto result = resultPreview(latestTaskResult(taskId,message.id,false)); !result.is_null())
+            view["latestResult"] = std::move(result);
         tasks.push_back(std::move(view));
     };
     bool moreTasks = false;
@@ -198,29 +247,31 @@ ORDER BY id DESC LIMIT 1
     }
     {
         auto rows = query("SELECT id FROM tasks WHERE bot_id=? AND state IN ('completed','cancelled')"
-                          " ORDER BY id DESC LIMIT ?",{message.bot,terminalTaskLimit});
-        while (rows.next()) addTask(rows.number(0));
+                          " ORDER BY id DESC LIMIT ?",{message.bot,terminalTaskLimit + 1});
+        for (int i = 0; rows.next(); ++i) {
+            if (i == terminalTaskLimit) { moreTasks = true; break; }
+            addTask(rows.number(0));
+        }
     }
 
     Json replyTo = nullptr;
     if (message.replyTo) {
         auto row = query(R"SQL(
-SELECT j.kind,j.task_id,j.data,m.text FROM journal j LEFT JOIN tasks t ON t.id=j.task_id
+SELECT j.kind,j.task_id,j.data,m.text FROM conversation_events j
 LEFT JOIN messages m ON m.id=j.id
-WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
-)SQL",{message.replyTo,message.id,message.bot,message.bot});
+WHERE j.id=? AND j.id<? AND j.bot_id=?
+)SQL",{message.replyTo,message.id,message.bot});
         if (row.next()) {
             const auto kind = row.string(0);
             const Id taskId = row.number(1);
             const auto data = row.json(2);
             replyTo = {{"messageId",message.replyTo}};
-            if (kind == "waiting") {
+            if (kind == "waiting" && field(data,"reason") == "user_question") {
                 const auto task = load(taskId);
-                const auto& current = task.at("wait");
                 replyTo.update({{"kind","task_question"},{"taskId",taskId},{"waitId",integer(data,"id")},
                     {"reason",field(data,"reason")},{"text",bounded(field(data,"text"),1000)},
-                    {"current",current.is_object() && integer(current,"id") == integer(data,"id")}});
-                if (const auto question = waitView(data,message.id); question.contains("choices"))
+                    {"current",answerableQuestion(task,integer(data,"id"))}});
+                if (const auto question = waitView(data,false); question.contains("choices"))
                     replyTo["choices"] = question.at("choices");
                 addTask(taskId);
             } else if (kind == "report" || kind == "completed" || kind == "cancelled") {
@@ -247,15 +298,12 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     Json history = Json::array();
     {
         auto rows = query(R"SQL(
-SELECT j.id,j.task_id,j.kind,j.data,m.text FROM journal j
-LEFT JOIN tasks t ON t.id=j.task_id LEFT JOIN messages m ON m.id=j.id
-WHERE j.id<? AND (
-  (j.conversation_bot_id=? AND j.kind IN ('conversation_message','conversation_reply')) OR
-  (j.conversation_bot_id IS NULL AND t.bot_id=? AND j.kind IN ('waiting','report','completed','cancelled')))
+SELECT j.id,j.task_id,j.kind,j.data,m.text FROM conversation_events j LEFT JOIN messages m ON m.id=j.id
+WHERE j.id<? AND j.bot_id=? AND (j.kind IN ('conversation_message','conversation_reply','report','completed','cancelled')
+  OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question'))
 ORDER BY j.id DESC LIMIT ?
-)SQL",{message.id,message.bot,message.bot,historyLimit});
-        std::size_t remaining = historyBytes;
-        while (rows.next() && remaining > 0) {
+)SQL",{message.id,message.bot,historyLimit});
+        while (rows.next()) {
             const auto kind = rows.string(2);
             const auto data = rows.json(3);
             Json entry = {{"messageId",rows.number(0)},{"kind",kind}};
@@ -272,15 +320,10 @@ ORDER BY j.id DESC LIMIT ?
             } else {
                 entry["role"] = "task";
                 body = field(data,kind == "report" ? "report" : "text");
-                if (kind == "waiting") {
-                    if (field(data,"reason") != "user_question") continue;
-                    entry["waitId"] = integer(data,"id");
-                }
+                if (kind == "waiting") entry["waitId"] = integer(data,"id");
             }
             const std::size_t limit = entry["role"] == "user" ? 4000 : entry["role"] == "bot" ? 1500 : 700;
-            body = bounded(body,std::min(limit,remaining));
-            remaining -= body.size();
-            entry["text"] = std::move(body);
+            entry["text"] = bounded(body,limit);
             history.push_back(std::move(entry));
         }
         std::reverse(history.begin(),history.end());
@@ -292,8 +335,11 @@ ORDER BY j.id DESC LIMIT ?
     const auto& config = message.routing.at("config");
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
         for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = verifiedEnvironment(message.routing,message.routing,alias.key());
-            if (!id.empty()) environments.push_back({{"name",alias.key()},{"environmentId",id}});
+            if (alias.key().empty()) continue;
+            try {
+                const auto id = verifiedEnvironment(message.routing,message.routing,alias.key());
+                environments.push_back({{"name",alias.key()},{"environmentId",id}});
+            } catch (const Conflict&) { /* Ignore invalid configured aliases. */ }
         }
     }
 
@@ -304,10 +350,24 @@ ORDER BY j.id DESC LIMIT ?
         const auto decision = steps.json(0);
         turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
     }
-    return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
+    Json input = {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
             {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
                       {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
             {"history",std::move(history)}};
+    budgetTurnInput(input);
+    return input;
+}
+
+Json Store::Impl::writableTask(const Json& args, const Message& message) const {
+    const auto task = ownTask(identifier(args,"taskId",true),message.bot);
+    const auto expected = identifier(args,"generation",true,0);
+    if (expected != task.at("generation").get<Id>())
+        throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},{"expected",{{"generation",expected}}},
+                                 {"current",taskState(task,message.id)}});
+    if (terminal(task) || task.at("state") == "cancelling")
+        throw ToolError("The task is " + task.at("state").get<std::string>(),
+                        {{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
+    return task;
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision) {
@@ -316,17 +376,6 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
-    const auto expectGeneration = [&](const Json& task) {
-        const auto expected = identifier(args,"generation",true,0);
-        if (expected != task.at("generation").get<Id>())
-            throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},{"expected",{{"generation",expected}}},
-                                     {"current",taskState(task,message.id)}});
-    };
-    const auto active = [&](const Json& task) {
-        if (terminal(task) || task.at("state") == "cancelling")
-            throw ToolError("The task is " + task.at("state").get<std::string>(),
-                            {{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
-    };
     const auto source = [&](const Json* target) -> Json {
         const auto sourceId = identifier(args,"sourceResultMessageId",false);
         if (!sourceId) return nullptr;
@@ -342,13 +391,15 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto doneWhen = text(args,"doneWhen",8000,false);
         const auto environment = text(args,"environment",256,false);
         const bool resume = args.value("resume",false);
-        if (field(routing,"environmentId").empty() || field(routing,"projectId").empty())
+        if ((environment.empty() && field(routing,"environmentId").empty()) || field(routing,"projectId").empty())
             throw ToolError("This Bot needs an execution environment and project before it can start work");
-        if (!environment.empty() && verifiedEnvironment(routing,routing,environment).empty())
-            throw ToolError("Unknown environment " + environment + "; use one of task.environments");
         const auto result = source(nullptr);
-        if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
+        if (resume && (result.is_null() || result.at("taskState") != "cancelled" || result.at("kind") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
+        if (resume && message.replyTo && message.replyTo != result.at("messageId") &&
+            query("SELECT 1 FROM conversation_events WHERE id=? AND bot_id=? AND kind='cancelled'",
+                  {message.replyTo,bot}).next())
+            throw ToolError("This message replies to a different cancelled task");
         const auto id = startConversationTask(routing,bot,request,environment,message.id,
                                               result.is_null() ? Json(nullptr) : sourceRef(result),resume);
         if (!doneWhen.empty()) {
@@ -360,11 +411,9 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect","started"},{"taskId",id}};
     }
     if (tool == "send_to_task" || tool == "change_task") {
-        const auto task = ownTask(identifier(args,"taskId",true),bot);
-        expectGeneration(task);
-        active(task);
+        const auto task = writableTask(args,message);
         const auto instruction = text(args,"instruction",messageSize,true);
-        const auto result = source(&task);
+        const auto result = source(tool == "change_task" ? &task : nullptr);
         std::optional<TaskChange> change;
         if (tool == "change_task") {
             const auto revision = identifier(args,"revisionId",true,0);
@@ -375,8 +424,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                                 text(args,"environment",256,false)};
             if (change->intent.empty() && change->doneWhen.empty() && change->environment.empty())
                 throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
-            if (!change->environment.empty() && verifiedEnvironment(task,routing,change->environment).empty())
-                throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+
         }
         const bool conflicting = acceptInstruction(task.at("id"),task.value("currentRevision",Id{0}),message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),routing,change ? &*change : nullptr);
@@ -386,32 +434,16 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto task = ownTask(identifier(args,"taskId",true),bot);
         const auto waitId = identifier(args,"waitId",true);
         const auto answer = text(args,"text",8000,true);
-        if (message.replyTo) {
-            auto anchor = query("SELECT task_id,json_extract(data,'$.id') FROM journal WHERE id=? AND kind='waiting'",
-                                {message.replyTo});
-            if (!anchor.next() || anchor.number(0) != task.at("id").get<Id>() || anchor.number(1) != waitId)
-                throw ToolError("This message replies to something else, so it can only answer the question it replies to");
-        }
-        if (task.value("replanning",false))
-            throw ToolError("The task is replanning, so this question will close. Its Bot asks again if it still needs to know",
-                            {{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
         const auto& wait = task.at("wait");
-        if (task.at("state") != "waiting" || !wait.is_object() || integer(wait,"id") != waitId)
-            throw ToolError("That question is no longer open",{{"taskId",task.at("id")},{"current",taskState(task,message.id)}});
-        if (field(wait,"reason") != "user_question")
-            throw ToolError("Only user_question waits can be answered; approvals use their own controls");
+        if (message.replyTo && message.replyTo != integer(wait,"messageId"))
+            throw ToolError("This message can only answer the question it replies to");
         if (integer(wait,"messageId") >= message.id)
             throw ToolError("That question opened after this message was sent, so this message cannot answer it");
-        if (wait.value("run",Json(nullptr)) != task.value("activeRun",Json(nullptr)) ||
-            integer(wait,"eventId") != task.value("eventId",Id{0}))
-            throw ToolError("That question is no longer current");
         operate(task.at("id"),waitId,"answer",{{"text",answer},{"messageId",message.id}},true);
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
     }
     if (tool == "cancel_task") {
-        const auto task = ownTask(identifier(args,"taskId",true),bot);
-        expectGeneration(task);
-        active(task);
+        const auto task = writableTask(args,message);
         operate(task.at("id"),0,"cancel",Json::object(),true);
         const auto state = load(task.at("id")).at("state");
         return {{"ok",true},{"effect",state == "cancelled" ? "cancelled" : "cancelling"},{"taskId",task.at("id")}};
@@ -441,9 +473,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto search = text(args,"query",400,false);
         const auto before = identifier(args,"before",false);
         auto rows = query(R"SQL(
-SELECT id FROM tasks WHERE bot_id=? AND (?='' OR instr(lower(json_extract(data,'$.request')),lower(?))>0)
+SELECT id FROM tasks WHERE bot_id=? AND (?='' OR instr(lower(json_extract(data,'$.request')),lower(?))>0
+OR instr(lower(json_extract(data,'$.intent')),lower(?))>0)
 AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?
-)SQL",{bot,search,search,before,before,findLimit + 1});
+)SQL",{bot,search,search,search,before,before,findLimit + 1});
         Json found = Json::array();
         Id last = 0;
         bool more = false;
@@ -454,9 +487,8 @@ AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?
             Json view = {{"taskId",last},{"request",bounded(field(task,"request"),300)},
                          {"environmentId",field(task,"environmentId")}};
             view.update(taskState(task,message.id));
-            auto result = query("SELECT id,kind FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled')"
-                                " AND id<? ORDER BY id DESC LIMIT 1",{last,message.id});
-            if (result.next()) view["latestResult"] = {{"messageId",result.number(0)},{"kind",result.string(1)}};
+            if (auto result = resultPreview(latestTaskResult(last,message.id,false)); !result.is_null())
+                view["latestResult"] = std::move(result);
             found.push_back(std::move(view));
         }
         Json response = {{"ok",true},{"tasks",std::move(found)}};
@@ -469,13 +501,7 @@ AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?
 Json Store::Impl::prepareSessionEffect(const Message& message, int step, const Decision& decision) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
-    const auto task = ownTask(identifier(args,"taskId",true),message.bot);
-    const auto expected = identifier(args,"generation",true,0);
-    if (expected != task.at("generation").get<Id>())
-        throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},{"expected",{{"generation",expected}}},
-                                 {"current",taskState(task,message.id)}});
-    if (terminal(task) || task.at("state") == "cancelling")
-        throw ToolError("The task is " + task.at("state").get<std::string>(),{{"taskId",task.at("id")}});
+    const auto task = writableTask(args,message);
     const auto& run = task.at("activeRun");
     if (!run.is_object() || field(run,"runId").empty())
         throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
@@ -494,14 +520,11 @@ Json performSessionEffect(T3& t3, const Json& effect) {
     const auto environment = field(effect,"environmentId");
     const auto& config = effect.at("config");
     const auto run = runRef(effect.at("run"));
+    bool sending = false;
     try {
         if (effect.at("kind") == "interrupt") {
-            try {
-                t3.interrupt(environment,config,run);
-            } catch (const std::exception& error) {
-                return {{"ok",false},{"taskId",taskId},{"delivery","unknown"},
-                        {"error",std::string("T3 may have received the interrupt: ") + error.what()}};
-            }
+            sending = true;
+            t3.interrupt(environment,config,run);
             return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
         }
         Command command;
@@ -513,6 +536,7 @@ Json performSessionEffect(T3& t3, const Json& effect) {
         command.config = config;
         command.target = run;
         command.authGeneration = t3.authGeneration(environment,config);
+        sending = true;
         const auto delivery = t3.send(command);
         if (delivery.kind == Delivery::Kind::Accepted)
             return {{"ok",true},{"effect","delivered"},{"taskId",taskId},{"run",runJson(delivery.run)}};
@@ -521,7 +545,9 @@ Json performSessionEffect(T3& t3, const Json& effect) {
         if (delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent) failed["delivery"] = "unknown";
         return failed;
     } catch (const std::exception& error) {
-        return {{"ok",false},{"taskId",taskId},{"error",error.what()}};
+        Json failure = {{"ok",false},{"taskId",taskId},{"error",error.what()}};
+        if (sending) failure["delivery"] = "unknown";
+        return failure;
     }
 }
 }
@@ -529,13 +555,21 @@ Json performSessionEffect(T3& t3, const Json& effect) {
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route) {
     Json actions = Json::array();
     std::set<Id> touched;
+    std::vector<std::string> uncertain;
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND result IS NOT NULL"
                        " ORDER BY step",{message.id});
     while (steps.next()) {
         const auto result = steps.json(1);
+        if (field(result,"delivery") == "unknown")
+            uncertain.push_back(field(steps.json(0),"tool") + " (" + requestName(load(result.at("taskId"))) + ")");
         if (!result.value("ok",false) || !result.contains("effect")) continue;
         actions.push_back({{"tool",steps.json(0).at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
         touched.insert(result.at("taskId").get<Id>());
+    }
+    if (route == "error" && !uncertain.empty()) {
+        text = japanese(message.text) ? "操作が届いたか確認できません。再送する前にセッションを確認してください。"
+            : "Delivery is unknown. Check the Session before repeating these actions.";
+        for (const auto& action : uncertain) text += "\n- " + action;
     }
     if (route == "error" && !actions.empty()) {
         const bool ja = japanese(message.text);
@@ -551,12 +585,12 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
          {linked,unixTime(),message.bot});
     const auto reply = last();
     Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",text},{"route",route},
-                 {"status",status},{"actions",actions}};
+                 {"effectStatus",status},{"status",route == "error" ? "error" : "ok"},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = suggestions;
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?",{linked,Json{{"status",status}},message.id});
-    exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
-         {reply,message.id});
+    exec("UPDATE conversation_turns SET status=? WHERE message_id=?",
+         {route == "error" ? "failed" : "completed",message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -565,7 +599,7 @@ void Store::Impl::pauseTurn(const Message& message) {
          {unixTime(),message.bot});
     const auto reply = last();
     exec("UPDATE journal SET data=? WHERE id=?",
-         {Json{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
+         {Json{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","paused"},
                {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
                           : "The model call limit is exhausted. Approve one more model call to continue."}},reply});
     exec("UPDATE journal SET data=json_object('status','needs_you') WHERE id=?",{message.id});
@@ -578,7 +612,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         message = turnMessage(id);
-        if (message) exec("INSERT OR IGNORE INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
+        if (message) exec("UPDATE conversation_turns SET status='running' WHERE message_id=?",{id});
         transaction.commit();
     }
     if (!message) return true;
@@ -629,22 +663,21 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 const auto context = turnInput(*message,step);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
-                auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
-                                      " AND reserved_attempt IS NOT NULL",{id});
-                if (reserved.next()) {
-                    attempt = reserved.number(0);
-                    exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?",{id});
-                } else attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
                 if (!attempt) pauseTurn(*message);
-                else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                          " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
+                else exec("INSERT OR IGNORE INTO conversation_steps(message_id,step) VALUES(?,?)",{id,step});
                 transaction.commit();
             }
             if (!attempt) return true;
             try {
                 decision = callModel(model,input,attempt);
             } catch (const ModelError& error) {
-                if (error.transient) return false;
+                if (error.transient) {
+                    std::lock_guard lock(mutex);
+                    exec("UPDATE conversation_turns SET status='pending',retry_at=? WHERE message_id=? AND status='running'",
+                         {unixTime()+2,id});
+                    return true;
+                }
                 finish(failure,"error");
                 return true;
             } catch (const std::exception&) {
@@ -716,12 +749,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 auto reply = text(args,"text",8000,true);
                 Json suggestions = Json::array();
                 if (const auto list = args.find("suggestions"); list != args.end() && !list->is_null()) {
-                    if (!list->is_array() || list->size() > 4) throw ToolError("suggestions must be up to 4 strings");
+                    if (!list->is_array()) throw ToolError("suggestions must be up to 4 strings");
                     for (const auto& item : *list) {
                         if (!item.is_string() || !hasText(item.get<std::string>()) || item.get<std::string>().size() > 200)
                             throw ToolError("Each suggestion must be a nonempty string up to 200 bytes");
                         if (std::ranges::find(suggestions,item) != suggestions.end())
-                            throw ToolError("Each suggestion must be distinct so the user's choice is unambiguous");
+                            continue;
+                        if (suggestions.size() == 4) throw ToolError("suggestions must be up to 4 strings");
                         suggestions.push_back(item);
                     }
                 }
@@ -779,13 +813,9 @@ WHERE m.bot_id=? AND t.pause_id=? AND t.status='paused'
     if (!paused.next()) throw Conflict("Waiting item is no longer current");
     const auto message = paused.number(0);
     const auto budget = p_->messageModelBudget(message);
-    p_->grantModelCall(budget);
-    const auto attempt = p_->reserveModelCall(budget,"conversation_turn",message,0,0);
-    if (!attempt) throw Conflict("The approved model call could not be reserved");
-    p_->exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
-             {attempt,message});
-    p_->exec("UPDATE journal SET data='{}' WHERE id=?",{message});
-    p_->exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
+    p_->approveModelCall(budget,"conversation_turn",message,0,0);
+    p_->exec("UPDATE conversation_turns SET status='pending',pause_id=NULL WHERE message_id=?",{message});
+    p_->exec("UPDATE journal SET data=json_set(data,'$.status','received') WHERE id=?",{message});
     transaction.commit();
 }
 }

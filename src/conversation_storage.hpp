@@ -21,13 +21,14 @@ inline std::string verifiedEnvironment(const Json& task, const Json& routing, st
     if (environment == field(task,"environmentId") || environment == field(routing,"environmentId"))
         return std::string(environment);
     const auto& config = task["projectId"] == routing["projectId"] ? routing.at("config") : task.at("config");
-    if (!config.is_object()) return {};
+
     const auto aliases = config.find("conversationEnvironments");
-    if (aliases == config.end() || !aliases->is_object()) return {};
+    if (aliases == config.end() || !aliases->is_object()) throw Conflict("Unknown environment " + std::string(environment));
     const auto canonical = std::ranges::any_of(*aliases,[&](const Json& value) { return value == environment; });
     const auto id = canonical ? std::string(environment) : field(*aliases,environment);
     constexpr auto valid = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:.";
-    if (id.empty() || id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos) return {};
+    if (id.empty() || id.size() > 1024 || id.find_first_not_of(valid) != std::string::npos)
+        throw Conflict("Unknown environment " + std::string(environment));
     return id;
 }
 }

@@ -19,6 +19,7 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 std::string field(const Json&, std::string_view);
+bool answerableQuestion(const Json&, Id waitId);
 bool terminal(const Json&);
 std::string actionId();
 Json runJson(const RunRef&);
@@ -42,6 +43,7 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    Json latestTaskResult(Id, Id before, bool currentOnly) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
@@ -49,7 +51,8 @@ struct Store::Impl {
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    void grantModelCall(std::string_view budget);
+    Id allocateModelAttempt(std::string_view budget, std::string_view purpose, Id message, Id task, Id event, bool reserved);
+    void approveModelCall(std::string_view budget, std::string_view purpose, Id message, Id task, Id event);
     Decision callModel(Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
@@ -60,6 +63,7 @@ struct Store::Impl {
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, std::string_view bot) const;
+    Json writableTask(const Json& args, const conversation::Message&) const;
     Json resultReference(Id messageId, std::string_view bot) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                              std::string_view environment, Id messageId, const Json& source, bool resume);

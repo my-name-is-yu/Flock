@@ -179,7 +179,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     Store store(fixture.database());
     const auto message = receive(store,"saved-decision","Write a release note");
     const auto id = std::to_string(message);
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
+    fixture.sql("UPDATE journal SET data=json_object('status','done') WHERE id=" + id);
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
                 ",1,'{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}')");
     RuntimeFixture execution(store);
@@ -205,7 +205,7 @@ void sessionNoteIsNotResentAfterARestart() {
     const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
                          {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
                          {"actionId","flock-turn-" + mid + "-1"}};
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
+    fixture.sql("UPDATE conversation_turns SET status='running' WHERE message_id=" + mid);
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
                 Json{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},{"reason","Saved"}}.dump() +
                 "','" + effect.dump() + "')");
@@ -227,18 +227,26 @@ void transientFailureResumesAfterTheLastFinishedStep() {
         Store store(fixture.database());
         RuntimeFixture execution(store);
         execution.model.conversation = [&](const ModelInput& input) -> Decision {
+            if (input.event.at("text") == "Hello beta") return say("Hello!");
             ++calls[turn(input).size()];
             if (turn(input).empty()) return {"start_task",{{"request","Write a release note"}},"Start it"};
             throw ModelError("The connection dropped",true);
         };
         message = receive(store,"transient","Write a release note");
+        const auto later = receive(store,"later","Hello alpha");
+        const auto beta = receive(store,"beta","Hello beta",0,Fixture::bot("beta"));
         execution.runtime.runConversations();
+        check(reply(store,later).is_null() && reply(store,beta,"beta")["text"] == "Hello!" &&
+              fixture.count("SELECT retry_at FROM conversation_turns WHERE message_id=" + std::to_string(message)) > unixTime(),
+              "Backoff lost Bot ordering or prevented a different Bot from running");
         check(store.tasks("alpha").size() == 1 && reply(store,message).is_null(),
               "A transient failure lost the finished step or ended the turn");
     }
+    fixture.sql("UPDATE conversation_turns SET retry_at=0 WHERE message_id=" + std::to_string(message));
     Store restarted(fixture.database());
     RuntimeFixture execution(restarted);
     execution.model.conversation = [&](const ModelInput& input) {
+        if (input.event.at("text") == "Hello alpha") return say("Hello!");
         ++calls[turn(input).size()];
         check(turn(input).size() == 1,"The restarted turn did not continue after its finished step");
         return say("Queued.");
@@ -261,7 +269,7 @@ void modelFailureReportsWhatWasAlreadyDone() {
     const auto message = receive(store,"failure","Write a release note and a changelog");
     execution.runtime.runConversations();
     const auto response = reply(store,message);
-    check(response["route"] == "error" && response["status"] == "working" &&
+    check(response["route"] == "error" && response["status"] == "error" && response["effectStatus"] == "working" &&
           response["text"].get<std::string>().find("Already done for this message") != std::string::npos &&
           response["text"].get<std::string>().find("Write a release note") != std::string::npos &&
           store.tasks("alpha").size() == 1,"The error reply hid the work the turn had already started");
@@ -280,6 +288,19 @@ void notesFailureEndsTheTurnWithoutWork() {
     const auto response = reply(store,message);
     check(response["route"] == "error" && response["text"].get<std::string>().find("SOUL.md is unreadable") != std::string::npos &&
           store.tasks("alpha").empty(),"A notes failure started work or hid the cause");
+}
+
+void failureLanguageUsesKana() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    execution.model.conversation = [](const ModelInput&) -> Decision { throw ModelError("Malformed",false); };
+    const auto chinese = receive(store,"chinese","查看报告");
+    const auto kana = receive(store,"kana","ﾚﾎﾟｰﾄ");
+    execution.runtime.runConversations();
+    check(reply(store,chinese)["text"].get<std::string>().starts_with("I couldn't") &&
+          reply(store,kana)["text"].get<std::string>().starts_with("このメッセージ"),
+          "Fallback language confused Han characters and kana");
 }
 
 void toolErrorsReturnToTheModel() {
@@ -315,7 +336,7 @@ void toolErrorsReturnToTheModel() {
           store.tasks("alpha").size() == 1,"A failed call changed a task");
     const auto response = reply(store,message);
     check(response["route"] == "reply" && response["suggestions"] == Json::array({"1.4","1.5"}) &&
-          response["status"] == "done","The reply or its suggestions were not saved");
+          response["status"] == "ok","The reply or its suggestions were not saved");
 }
 
 void boundedContextAndOlderTasks() {
@@ -358,6 +379,115 @@ void boundedContextAndOlderTasks() {
           "An older task outside the list could not be found and read");
     check(reply(store,message)["actions"].empty() && store.tasks("alpha",0,200) == before && execution.t3.launches == launches,
           "Reading an older result changed work");
+}
+
+void visibleHistoryAndTaskOverflow() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    execution.model.conversation = [](const ModelInput&) { return say("Visible reply"); };
+    receive(store,"earlier","Visible question");
+    execution.runtime.runConversations();
+    Id last = 0;
+    for (int i = 0; i < 9; ++i) {
+        last = task(store,"Original request");
+        store.operate(last,0,"cancel");
+    }
+    fixture.sql("UPDATE tasks SET data=json_set(data,'$.intent','Revised target') WHERE id=" + std::to_string(last));
+    for (int i = 0; i < 25; ++i)
+        fixture.sql("INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(last) +
+                    ",0,'waiting',json_object('id',1,'reason','budget'))");
+    const auto anchor = fixture.count("SELECT max(id) FROM journal");
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        if (turn(input).empty()) return {"find_tasks",{{"query","revised target"}},"Search current intent"};
+        return say("Found");
+    };
+    receive(store,"current","Find the revised target",anchor);
+    execution.runtime.runConversations();
+    const auto& input = execution.model.turns.back();
+    check(input.task["moreTasks"] == true && input.task["tasks"].size() == 8,"Terminal tasks hid overflow");
+    check(input.event["replyTo"]["kind"] == "waiting" && std::ranges::any_of(input.history,[](const Json& row) {
+        return row["text"] == "Visible question";
+    }),"Non-question waits hid dialogue or became question anchors");
+    const auto& found = input.event["turn"][0]["result"]["tasks"];
+    check(found.size() == 1 && found[0]["taskId"] == last,"Search omitted the revised intent");
+}
+
+void directAnswersRequireCurrentQuestion() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto id = task(store,"Question");
+    for (const std::string mismatch : {"'$.replanning',json('true')","'$.eventId',8","'$.activeRun',json('{}')"}) {
+        fixture.sql("UPDATE tasks SET state='waiting',data=json_set(data,'$.eventId',7,'$.activeRun',NULL,"
+                    "'$.replanning',json('false'),'$.wait',json_object('id',2,'messageId',1,'eventId',7,"
+                    "'run',NULL,'reason','user_question')," + mismatch + ") WHERE id=" + std::to_string(id));
+        bool rejected = false;
+        try { store.operate(id,2,"answer",{{"text","Yes"}}); }
+        catch (const Conflict&) { rejected = true; }
+        check(rejected,"Direct answer accepted a stale or replanning question");
+        execution.model.conversation = [](const ModelInput&) { return say("Noted"); };
+        receive(store,mismatch,"Is it still open?");
+        execution.runtime.runConversations();
+        check(execution.model.turns.back().task["tasks"][0]["wait"]["answerable"] == false,
+              "Model could answer a question that operate rejects");
+    }
+}
+
+void taskApprovalReservesTheAttempt() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto routing = Fixture::bot();
+    routing.config["modelCallLimit"] = 4;
+    routing.config["conversationEnvironments"] = {{"cloud","cloud"}};
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        if (turn(input).size() < 2)
+            return {"start_task",{{"request","Shared budget task"},{"environment",turn(input).empty() ? "env" : "cloud"}},"Start"};
+        return say("Queued");
+    };
+    const auto message = receive(store,"pair","Start two tasks",0,routing);
+    execution.runtime.runConversations();
+    const auto tasks = store.tasks("alpha");
+    const auto earlier = tasks[1]["id"].get<Id>(), later = tasks[0]["id"].get<Id>();
+    const auto budget = "message/" + std::to_string(message);
+    check(fixture.count("SELECT count(*) FROM tasks WHERE budget_id='" + budget + "'") == 2,
+          "Tasks did not persist their intake budget");
+    execution.reach(store,earlier,"running");
+    execution.reach(store,later,"waiting");
+    const auto run = store.task(earlier).at("activeRun").at("runId").get<std::string>();
+    execution.t3.observations[run] = {.kind=Observation::Kind::Finished,.status="completed",.report="Ready",
+                                      .resultRunId=run,.itemId="report",.settled=true};
+    execution.reach(store,earlier,"deciding");
+    store.operate(later,store.task(later)["wait"]["id"],"approve");
+    check(fixture.count("SELECT count(*) FROM model_attempts WHERE reserved=1 AND task_id=" + std::to_string(later)) == 1 &&
+          fixture.count("SELECT call_limit-attempts FROM model_budgets WHERE id='" + budget + "'") == 0,
+          "The approved call was available in the shared pool");
+    execution.reach(store,later,"running");
+    check(store.task(earlier)["wait"]["reason"] == "model_budget" &&
+          fixture.count("SELECT count(*) FROM model_attempts WHERE task_id=" + std::to_string(later)) == 1,
+          "A sibling consumed the approval or its owner was charged twice");
+}
+
+void serializedTurnBudgetIncludesPriorCalls() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto id = task(store,"Read the complete report");
+    execution.finish(store,id,std::string(7500,'x'));
+    const auto result = store.latestTaskResult(id).at("id");
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        if (turn(input).size() == 8) return say("Done");
+        return {"read_result",{{"messageId",result}},"Read"};
+    };
+    receive(store,"budgeted","Read the report");
+    execution.runtime.runConversations();
+    const auto& input = execution.model.turns.back();
+    const Json serialized = {{"event",input.event},{"task",input.task},{"history",input.history}};
+    const auto& steps = input.event["turn"];
+    check(serialized.dump().size() <= 24000 && steps.size() == 8 && !steps[0].contains("args") &&
+          steps[0]["result"]["messageId"] == result && steps.back()["result"]["text"].get<std::string>().size() == 6000,
+          "Turn exceeded its byte budget or lost the current tool result or earlier references");
 }
 
 void longResultsAreReadInChunks() {
@@ -452,7 +582,12 @@ int main() {
         modelFailureReportsWhatWasAlreadyDone();
         notesFailureEndsTheTurnWithoutWork();
         toolErrorsReturnToTheModel();
+        failureLanguageUsesKana();
         boundedContextAndOlderTasks();
+        visibleHistoryAndTaskOverflow();
+        directAnswersRequireCurrentQuestion();
+        taskApprovalReservesTheAttempt();
+        serializedTurnBudgetIncludesPriorCalls();
         longResultsAreReadInChunks();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         replyTargetsReachTheTurn();

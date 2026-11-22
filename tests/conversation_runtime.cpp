@@ -124,6 +124,7 @@ struct SimulatedT3 : T3 {
     Delivery send(const Command& command) override {
         if (command.tool == "steer") {
             steered.push_back(command);
+            if (std::exchange(loseNextSend,false)) throw std::runtime_error("lost steer acknowledgement");
             check(command.authGeneration == login,"a note lacks its authentication generation");
             const auto active = observations.find(command.target.runId);
             if (active == observations.end() || active->second.kind != Observation::Kind::Running)
@@ -363,6 +364,11 @@ void followUpCarriesTheReferencedReport() {
           f.t3.sent.back().instruction.find("Capture a fixture trace") != std::string::npos &&
           f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
           "the other Session did not receive the referenced result");
+    const auto target = f.store->submit(f.routing("Build a separate benchmark"));
+    f.script("Use that report",{send(target,{{"sourceResultMessageId",report}})});
+    f.receive("cross-task-source","Use that report",report);
+    check(f.task(target)["pendingInstructions"][0]["source"]["taskId"] == id,
+          "A same-Bot result could not be attached to a different task");
 }
 
 void questionAnswerReachesTheBotBeforeContinuingWork() {
@@ -478,9 +484,9 @@ void suggestionsStayWithTheBotMessage() {
           botEntry(afterSecond,"Which one?")["suggestions"].is_array(),
           "a reply to a Bot message lost the order of the suggestions it offered");
 
-    f.script("Pick a login fix",{suggest({"Fix login","Fix login"}),say("Which login fix: web or mobile?")});
+    f.script("Pick a login fix",{suggest({"Fix login","Check logs","Fix login"})});
     const auto duplicate = f.receive("duplicate","Pick a login fix");
-    check(f.lastTurn()[0]["result"]["ok"] == false && !f.response(duplicate).contains("suggestions"),
+    check(f.lastTurn().empty() && f.response(duplicate)["suggestions"] == Json::array({"Fix login","Check logs"}),
           "duplicate suggestions were offered as separate choices");
 }
 
@@ -763,6 +769,11 @@ void unfinishedTurnHoldsCompletion() {
     check(f.event(id,"completed").is_null() && f.response(receipt).is_null() && completionCalls == 1,
           "a task completed while a conversation turn was unfinished");
     failing = false;
+    sqlite3* raw = nullptr;
+    check(sqlite3_open((f.dir/"state.db").c_str(),&raw) == SQLITE_OK,"could not open retry fixture");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(sqlite3_exec(raw,"UPDATE conversation_turns SET retry_at=0",nullptr,nullptr,nullptr) == SQLITE_OK,
+          "could not advance retry time");
     f.tick();
     check(f.response(receipt)["text"] == "It shows the baseline." && f.lastTurn().size() == 1 &&
           f.lastTurn()[0]["result"]["ok"] == true,"the retried turn repeated or lost its finished step");
@@ -936,7 +947,7 @@ void cancellationReleasesOnlyAfterStopConfirmation() {
     const auto independent = f.store->submit(f.routing("別プロジェクトの作業","alpha","desktop","other-project"));
     f.script("計測作業を停止して",{stop(stopped)});
     const auto receipt = f.receive("cancel-active","計測作業を停止して");
-    check(f.response(receipt)["status"] == "stopping","the stop was not reported as in progress");
+    check(f.response(receipt)["effectStatus"] == "stopping","the stop was not reported as in progress");
     f.t3.loseNextStop = true;
     f.reach(independent,"running");
     check(f.task(stopped)["state"] == "cancelling" && f.task(follower)["state"] == "queued" &&
@@ -1145,7 +1156,7 @@ void notesReachTheRunningSession() {
           turn[0]["result"]["effect"] == "delivered" && turn[1]["result"]["ok"] == false &&
           f.event(id,"instruction_steered")["text"] == text && f.task(id)["pendingInstructions"].is_null() &&
           f.conversationMessage(message["messageId"])["deliveredToT3"] == true &&
-          f.response(message)["status"] == "working",
+          f.response(message)["effectStatus"] == "working",
           "a note did not reach the running Run directly, or one reached a task without a Run");
     f.t3.finish("run-1","Finished");
     f.reach(id,"completed");
@@ -1155,6 +1166,24 @@ void notesReachTheRunningSession() {
     f.receive("late-note","One more note");
     check(f.lastTurn()[0]["result"]["ok"] == false && f.t3.steered.size() == 1,
           "a note for a finished task reached T3");
+}
+
+void unknownSessionDeliverySurvivesTurnFailure() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.t3.loseNextSend = f.t3.loseNextStop = true;
+    const auto fail = [](const ModelInput&) -> Decision { throw ModelError("Malformed response",false); };
+    f.script("Send the note",{note(id),fail});
+    f.script("Interrupt the run",{interrupt(id),fail});
+    for (const auto* text : {"Send the note","Interrupt the run"}) {
+        const auto receipt = f.receive(text,text);
+        const auto response = f.response(receipt);
+        check(f.lastTurn()[0]["result"]["delivery"] == "unknown" && response["route"] == "error" &&
+              response["text"].get<std::string>().find("Check the Session") != std::string::npos,
+              "An uncertain Session action was reported as safe to retry");
+    }
+    check(f.t3.steered.size() == 1 && f.t3.interrupted.size() == 1,"Uncertain Session action was repeated");
 }
 
 void interruptLeavesTheTaskOpen() {
@@ -1167,12 +1196,13 @@ void interruptLeavesTheTaskOpen() {
     check(f.t3.interrupted == std::vector{std::pair<std::string,std::string>{"desktop",run}} &&
           f.lastTurn()[0]["result"]["effect"] == "interrupt_requested" && f.event(id,"interrupt_requested").is_object() &&
           f.event(id,"cancel_requested").is_null() && f.task(id)["state"] != "cancelling" &&
-          f.response(message)["status"] == "stopping","an interrupt request cancelled the task or missed the Run");
+          f.response(message)["effectStatus"] == "stopping","an interrupt request cancelled the task or missed the Run");
 }
 
 void environmentsResolveByNameOrId() {
     Fixture f;
     auto routing = f.routing();
+    routing.environmentId.clear();
     auto& aliases = routing.config["conversationEnvironments"];
     aliases["cloud"] = "staging";
     for (int i = 0; i < 15; ++i) aliases["alias" + std::to_string(i)] = "executor-" + std::to_string(i);
@@ -1231,6 +1261,7 @@ int main() {
         startCriteriaAreUsedForFirstDelegation();
         environmentsResolveByNameOrId();
         notesReachTheRunningSession();
+        unknownSessionDeliverySurvivesTurnFailure();
         interruptLeavesTheTaskOpen();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";
     } catch (const std::exception& e) {

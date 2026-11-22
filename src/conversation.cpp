@@ -16,12 +16,7 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 void Store::Impl::migrateConversation() {
     Transaction transaction(db);
     if (sqlite3_exec(db,R"SQL(
-DROP TABLE IF EXISTS route_candidates;
-DROP TABLE IF EXISTS route_decisions;
-DROP TABLE IF EXISTS conversation_migrations;
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,id)
-WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
@@ -35,12 +30,21 @@ CREATE TABLE IF NOT EXISTS messages(
   UNIQUE(bot_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
-  pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
-  reply_id INTEGER UNIQUE REFERENCES journal(id));
+  status TEXT NOT NULL CHECK(status IN ('pending','running','paused','completed','failed')),
+  pause_id INTEGER UNIQUE REFERENCES journal(id),
+  retry_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS conversation_turns_open ON conversation_turns(message_id)
+  WHERE status IN ('pending','running');
+CREATE VIEW IF NOT EXISTS open_conversation_turns AS
+SELECT m.bot_id,t.message_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
+WHERE t.status IN ('pending','running');
+CREATE VIEW IF NOT EXISTS next_conversation_turns AS
+SELECT head.bot_id,head.message_id FROM (
+  SELECT bot_id,min(message_id) AS message_id FROM open_conversation_turns GROUP BY bot_id
+) head JOIN conversation_turns t USING(message_id) WHERE t.retry_at<=unixepoch();
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
-  attempt_id INTEGER, decision TEXT, effect TEXT, result TEXT,
+  decision TEXT, effect TEXT, result TEXT,
   PRIMARY KEY(message_id,step));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -73,8 +77,7 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 // True while a message of this Bot has not been read yet. A turn paused for a model call approval does not hold
 // completion: it may wait indefinitely, and once approved it sees the tasks as they are then.
 bool Store::Impl::conversationPending(std::string_view bot) const {
-    return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
-                 " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
+    return query("SELECT 1 FROM open_conversation_turns WHERE bot_id=? LIMIT 1",{bot}).next();
 }
 
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
@@ -107,6 +110,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,saved,routing.botId});
+            p_->exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'pending')",{id});
             receipt = {{"messageId",id},{"status","received"}};
         }
         transaction.commit();
@@ -117,9 +121,7 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit) const {
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
-SELECT j.conversation_bot_id,min(j.id) FROM journal j
-WHERE j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
-GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
+SELECT bot_id,message_id FROM next_conversation_turns ORDER BY message_id LIMIT ?
 )SQL",{limit});
     std::vector<std::pair<std::string,Id>> result;
     while (next.next()) result.emplace_back(next.string(0),next.number(1));
