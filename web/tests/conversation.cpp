@@ -220,8 +220,59 @@ Json conversationReply(const Json& page, Id messageId) {
     return result;
 }
 
+void inspectors(const std::filesystem::path& path) {
+    struct InspectorModel : Model {
+        const std::string credential = "credential-protected-after-inspector-write";
+        Id boundary = 0;
+        Decision decide(const ModelInput& input) override {
+            if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
+                return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes "+credential}},"Summarize earlier work"};
+            if (input.event.at("turn").empty() && input.event.at("text")=="Release")
+                return {"start_workflow",{{"request","Prepare a release "+credential}},"Use a separate verifier"};
+            return {"reply",{{"text","Recorded"}},"Acknowledge the request"};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto){return BotNotes{};});
+    const auto routing = callbacks().intake("release","");
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    model.boundary = store.receive(routing,"a","Original release instructions").at("messageId");
+    store.receive(routing,"b","Summarize");
+    store.receive(routing,"c","Release");
+    runtime.runConversations();
+    auto access = store.access();
+    access.submitSecret({"fixture",true},"release",access.requestSecret("release",{"inspector-token"}),model.credential);
+    const auto summaries = browser.get("/api/compactions?bot=release");
+    const auto workflows = browser.get("/api/workflows?bot=release");
+    const auto view = browser.get("/api/view?bot=release");
+    check(summaries.size()==1 && summaries[0]["endMessageId"]==model.boundary &&
+          summaries[0]["summary"]=="Preserve the release notes [redacted]" && view.at("compactions")==summaries,
+          "summary or its covered range missing from the inspector");
+    check(workflows.size()==1 && workflows[0]["request"]=="Prepare a release [redacted]" &&
+          workflows[0]["stages"].size()==2 && view.at("workflows")==workflows,
+          "workflow stages missing from the Bot view");
+    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
+          "inspectors mixed Bot histories");
+    const auto audit = browser.get("/api/conversation?bot=release");
+    check(audit.dump().find("Original release instructions")!=std::string::npos,
+          "summary removed the original message from the HTTP audit history");
+    bool linked = false;
+    for (const auto& event : audit.at("events")) {
+        const auto& data = event.at("data");
+        if (!data.contains("actions")) continue;
+        for (const auto& action : data.at("actions"))
+            if (action.at("tool")=="start_workflow" && action.at("workflowId")==workflows[0]["workflowId"])
+                linked = data.at("status")=="working";
+    }
+    check(linked,"workflow start was missing from the conversation reply");
+}
+
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
+    for (auto env : {"local-env","backup-env"})
+        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
@@ -257,8 +308,11 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
 
 void conversationEntry(const std::filesystem::path& path) {
     Store store(path);
+    for (auto env : {"local-env","backup-env"})
+        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
+    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     std::atomic_bool disableIntake = false;
     Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
     auto server = startWeb(store,0,callbacks(&disableIntake));
@@ -496,8 +550,43 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     }),"the DM exposed task or evidence details");
 }
 #ifdef FLOCK_TEST_CHATGPT
+void approvedProfiles(const std::filesystem::path& directory) {
+    Store store(directory/"state.db");
+    app::Bots bots(directory/"bots");
+    auto cb = callbacks();
+    bool failAfterWrite = true;
+    cb.applyBotChange = [&](const BotChange& change) {
+        bots.apply(change);
+        if (std::exchange(failAfterWrite,false)) throw Conflict("Interrupted profile operation");
+    };
+    auto server = startWeb(store,0,std::move(cb));
+    Browser browser(*server);
+    auto access = store.access();
+    auto decide = [&](Id id, bool approve, int status) {
+        browser.post("/api/access/bot-change",{{"botId","release"},{"requestId",id},{"approve",approve}},status);
+    };
+    access.resourceGrant({"root",true},"release",{"bot_admin","reviewer","create_bot"},GrantChange::grant);
+    Id create = access.requestBotChange("release","create_bot","reviewer","Review team");
+    check(bots.ids().empty(),"request created a profile before approval");
+    decide(create,true,202);
+    check(access.administration({"root",true},"release").at("botChanges").at(0).at("status")=="approved",
+          "interrupted write lost its durable approval");
+    decide(create,true,200);
+    check(bots.ids()==std::vector<std::string>{"reviewer"} && bots.cards().at(0).at("name")=="Review team",
+          "retry created a duplicate or changed the target ID");
+    access.resourceGrant({"root",true},"release",{"bot_admin","reviewer","rename_bot"},GrantChange::grant);
+    Id rename = access.requestBotChange("release","rename_bot","reviewer","Reviewer");
+    decide(rename,false,200);
+    decide(rename,true,403);
+    check(bots.cards().at(0).at("name")=="Review team","denied change was applied");
+    decide(access.requestBotChange("release","rename_bot","reviewer","Reviewer"),true,200);
+    check(bots.cards().at(0).at("name")=="Reviewer","approved rename missing from profile");
+}
+
 void chatGPTConversation(const std::filesystem::path& home) {
     Store store(home / "conversation.sqlite");
+    for (auto env : {"local-env","backup-env"})
+        store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     app::ChatGPTModel model(home / "credentials" / "chatgpt");
     const app::Bots bots(home / "bots");
     FixedT3 t3;
@@ -612,8 +701,46 @@ void chatGPTConversation(const std::filesystem::path& home) {
 }
 #endif
 
+void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
+    Store store(path);
+    auto cb = callbacks();
+    cb.bots = [] {
+        return Json::array({{{"id","release"},{"name","Release"}},
+                            {{"id","staging-triage"},{"name","Staging"},{"soul","Check staging"}}});
+    };
+    cb.authenticate = [](std::string_view auth) {
+        if (auth == "Bearer fixture-owner") return Person{"owner",true};
+        if (auth == "Bearer fixture-alice") return Person{"alice"};
+        return Person{};
+    };
+    cb.updateBot = [](std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
+        return Json{{"id",id},{"name",profile.at("name")}};
+    };
+    const Person owner{"owner",true};
+    auto access = store.access();
+    access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
+    const auto request = access.requestSecret("release",{"fixture-token"});
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    access.resourceGrant(owner,"staging-triage",{"secret","fixture-token","use"},GrantChange::grant);
+    const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
+    check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
+
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto bots = browser.get("/api/bots");
+    check(bots.size()==1 && bots.at(0).at("id")=="staging-triage","secret redaction hid or renamed an authorized Bot");
+    const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
+    check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
+          "Bot view must preserve its ID and redact display text");
+    browser.get("/api/conversation?bot=staging-triage");
+    Browser::checked(browser.client.Get("/api/view?bot=release"),403);
+}
+
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
+    webStore.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto store = std::make_unique<Store>(path);
     FixedModel model;
     FixedT3 t3;
@@ -685,10 +812,15 @@ int main(int argc,char** argv) {
         }
 #endif
         TestDirectory directory;
+#ifdef FLOCK_TEST_CHATGPT
+        approvedProfiles(directory.path / "profile-approvals");
+#endif
+        inspectors(directory.path / "inspectors.db");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+        secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {

@@ -1,5 +1,7 @@
 #include "conversation_storage.hpp"
 
+#include <algorithm>
+
 namespace flockv0 {
 using conversation_storage::identifier;
 using conversation_storage::expandedContextBytes;
@@ -16,6 +18,10 @@ std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_
         else high = middle-1;
     }
     return bounded(text,low);
+}
+
+unsigned char asciiLower(unsigned char value) {
+    return value >= 'A' && value <= 'Z' ? value + ('a'-'A') : value;
 }
 }
 
@@ -37,12 +43,14 @@ void Store::Impl::initializeCompactionSchema() {
 }
 
 Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
+    const auto scrub = redactor(bot);
     auto rows = query("SELECT id,start_message_id,end_message_id,summary,original_count,created_at,created_by "
                       "FROM conversation_compactions WHERE bot_id=? AND (?=0 OR id<?) AND (?=0 OR end_message_id<?) ORDER BY id DESC LIMIT ?",
                       {bot,before,before,beforeMessage,beforeMessage,std::min(limit,100u)});
     Json result = Json::array();
     while (rows.next()) result.push_back({{"compactionId",rows.number(0)},{"startMessageId",rows.number(1)},
-        {"endMessageId",rows.number(2)},{"summary",rows.string(3)},{"originalCount",rows.number(4)},
+        {"endMessageId",rows.number(2)},
+        {"summary",boundedJsonText(scrub.text(rows.string(3)),4000,expandedContextBytes-2)},{"originalCount",rows.number(4)},
         {"createdAt",rows.number(5)},{"createdBy",rows.string(6)}});
     return result;
 }
@@ -53,6 +61,7 @@ Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
 }
 
 Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Json& summaries, std::size_t expandedBytes) const {
+    const auto scrub = redactor(bot);
     std::size_t remaining = 24000 - expandedBytes - 2;
     Json history = Json::array();
     Id boundary = 0;
@@ -81,13 +90,13 @@ ORDER BY id DESC LIMIT 24
         if (kind=="conversation_reply") {
             const auto data = rows.json(3);
             for (const auto* key : {"actions","suggestions"})
-                if (data.contains(key)) entry[key] = data.at(key);
+                if (data.contains(key)) entry[key] = scrub.record(data.at(key));
         } else if (kind=="waiting") entry["waitId"] = rows.json(3).at("id");
         else if (kind=="user_answer") entry["waitId"] = conversation_storage::integer(rows.json(3),"waitId");
         const std::size_t limit = user ? 4000 : reply ? 1500 : 700;
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes>remaining) break;
-        entry["text"] = boundedJsonText(rows.string(4),limit,remaining-bytes);
+        entry["text"] = boundedJsonText(scrub.text(rows.string(4)),limit,remaining-bytes);
         remaining -= bytes + (entry.at("text").dump().size()-2);
         history.push_back(std::move(entry));
     }
@@ -110,12 +119,14 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
         return {{"ok",true},{"freshContext",true},{"taskId",task.at("id")},{"effect","replanning"}};
     }
 
+    const auto scrub = redactor(bot);
     const auto latest = compactions(bot,0,1);
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
     if (tool == "compact_conversation") {
         const auto end = identifier(args,"endMessageId",true);
-        const auto summary = conversation_storage::text(args,"summary",4000,true);
-        if (Json(summary).dump().size()>expandedContextBytes) throw Conflict("Escaped summary exceeds the context budget");
+        const auto summary = scrub.text(conversation_storage::text(args,"summary",4000,true));
+        if (summary.size()>4000 || Json(summary).dump().size()>expandedContextBytes)
+            throw Conflict("Escaped summary exceeds the context budget");
         if (end<boundary || end>=message) throw Conflict("Supply an older boundary covering the previous summary");
         auto range = query("SELECT min(id),max(id),count(*) FROM compactable_messages WHERE bot_id=? AND id<=?",{bot,end});
         range.next();
@@ -135,8 +146,8 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
     const Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
     const auto needle = conversation_storage::text(args,"query",512,false);
     if (end<start) throw Conflict("No compacted messages in this range");
-    auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? "
-                      "AND instr(lower(text),lower(?))>0 ORDER BY id LIMIT 9",{bot,start,end,needle});
+    auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",
+                      {bot,start,end});
     Json result = {{"ok",true},{"messages",Json::array()}};
     constexpr std::size_t chunkBytes = 2000, cursorBytes = 128;
     const std::size_t limit = args.contains("limit") ? std::min<Id>(identifier(args,"limit",true),8) : 8;
@@ -144,11 +155,13 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
     if (offset && !args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
     std::size_t used = result.dump().size()+cursorBytes;
     while (rows.next()) {
+        const auto body = scrub.text(rows.string(2));
+        if (!needle.empty() && std::search(body.begin(),body.end(),needle.begin(),needle.end(),
+                [](unsigned char lhs, unsigned char rhs) { return asciiLower(lhs) == asciiLower(rhs); })==body.end()) continue;
         if (result["messages"].size()>=limit || expandedContextBytes-used<cursorBytes) {
             result["nextMessageId"] = rows.number(0);
             break;
         }
-        auto body = rows.string(2);
         if ((offset && rows.number(0)!=start) || offset>body.size() || (offset<body.size() && (static_cast<unsigned char>(body[offset])&0xc0)==0x80))
             throw Conflict("Invalid UTF-8 byte offset");
         Json entry = {{"messageId",rows.number(0)},{"kind",rows.string(1)},{"text",""}};

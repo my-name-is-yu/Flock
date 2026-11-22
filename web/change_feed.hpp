@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <compare>
 #include <condition_variable>
@@ -25,7 +25,12 @@ public:
         std::string bot, peer;
         auto operator<=>(const DirectMessage&) const = default;
     };
-    using Scope = std::variant<BotList,BotView,DirectMessage>;
+    using Target = std::variant<BotList,BotView,DirectMessage>;
+    struct Scope {
+        Person person;
+        Target target;
+        auto operator<=>(const Scope&) const = default;
+    };
     using Cursor = std::map<Scope,std::uint64_t>;
     using Load = std::function<Json(const Scope&)>;
 

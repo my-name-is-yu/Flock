@@ -115,6 +115,7 @@ void Store::Impl::initializeWorkflowSchema() {
 Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {
     auto owner = query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?",{id,bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
+    const auto scrub = redactor(bot);
     const bool stopping = owner.number(0);
     Json result = {{"ok",true},{"workflowId",id},{"request",owner.string(1)},{"stages",Json::array()},{"artifacts",Json::array()},{"verdicts",Json::array()}};
     bool finished = true, attention = false, failed = false, stale = false;
@@ -143,7 +144,7 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         attention |= needs;
         failed |= (status=="failed" && !outdated) || status=="stopped";
         stale |= outdated;
-        Json stage = {{"stageId",spec.at("stageId")},{"name",spec.at("name")},{"role",spec.at("role")},
+        Json stage = {{"stageId",spec.at("stageId")},{"name",spec.at("name")},{"role",scrub.text(field(spec,"role"))},
             {"dependsOn",rows.json(13)},{"outdated",outdated},{"taskId",rows.number(2)},{"runRef",run},{"status",status},
             {"stopRequested",stopping || rows.string(7)=="cancelling" || status=="stopped"},
             {"softDeadlineAt",rows.number(5)},{"deadlineExceeded",exceeded},{"needsAttention",needs},
@@ -186,10 +187,13 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
 Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::string_view bot, Id message,
                               int step, const Json& routing) {
     if (tool=="start_workflow") {
-        conversation_storage::text(routing,"environmentId",1024,true);
-        conversation_storage::text(routing,"projectId",1024,true);
-        const auto stages = stageDefinitions(args);
-        exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",{bot,routing,args.at("request"),message});
+        const auto environment = conversation_storage::text(routing,"environmentId",1024,true);
+        const auto project = conversation_storage::text(routing,"projectId",1024,true);
+        const auto scrub = redactor(bot);
+        scrub.requirePublic({bot,environment,project,routing.at("config")});
+        const auto safe = scrub.record(args,SecretRedactor::Fields::external);
+        const auto stages = stageDefinitions(safe);
+        exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",{bot,routing,safe.at("request"),message});
         const auto id = last();
         for (auto stage : stages) {
             stage.erase("dependsOn");
@@ -231,7 +235,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     }
 
     if (stopping) throw Conflict("Workflow is stopping");
-    const auto instruction = conversation_storage::text(args,"instruction",8000,true);
+    const auto instruction = redactor(bot).text(conversation_storage::text(args,"instruction",8000,true));
     auto stage = query("SELECT s.task_id,s.status,EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id"
                        " AND d.stage_id=s.stage_id) FROM workflow_stages s WHERE s.workflow_id=? AND s.stage_id=?", {id,target});
     if (!stage.next()) throw Conflict("Unknown stage");
@@ -285,6 +289,10 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         const Id id = ready.number(0);
         const auto spec = ready.json(1);
         const auto stage = spec.at("stageId");
+        const auto bot = ready.string(2);
+        const auto scrub = redactor(bot);
+        const auto routing = ready.json(3);
+        const auto request = scrub.text(field(spec,"request"));
         Json sources = Json::array();
         std::string input;
         const auto inputFrom = field(spec,"inputFrom");
@@ -296,30 +304,31 @@ void Store::Impl::advanceWorkflows(Seconds now) {
             if (parents.string(0)==inputFrom) input = parents.string(1);
             sources.push_back({{"stageId",parents.string(0)},{"artifactVersion",parents.string(1)},
                 {"messageId",parents.number(2)},{"taskId",parents.number(3)},{"run",report.at("run")},
-                {"resultRunId",report.at("resultRunId")},{"text",bounded(field(report,"report"),2000)}});
+                {"resultRunId",report.at("resultRunId")},{"text",bounded(scrub.text(field(report,"report")),2000)}});
+        }
+        const auto role = field(spec,"role");
+        if (!conversation_storage::hasText(request) || scrub.text(input)!=input ||
+            (role=="verify" && !immutableVersion(input)) || scrub.text(bot)!=bot ||
+            scrub.record(routing,SecretRedactor::Fields::external)!=routing) {
+            exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?",{id,spec.at("stageId")});
+            continue;
         }
         exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
             FROM workflow_stages p WHERE p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             AND d.workflow_id=? AND d.stage_id=?)SQL",{id,stage});
-        const auto role = field(spec,"role");
-        if (role=="verify" && !immutableVersion(input)) {
-            exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?",{id,spec.at("stageId")});
-            continue;
-        }
-        const auto request = field(spec,"request");
-        const auto taskId = startConversationTask(ready.json(3),ready.string(2),request,"",ready.number(4),nullptr,false);
+        const auto taskId = startConversationTask(routing,bot,request,"",ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");
-        task["sourceResultRefs"] = std::move(sources);
+        task["sourceResultRefs"] = scrub.record(std::move(sources),SecretRedactor::Fields::external);
         task["inputArtifactVersion"] = input;
         const bool hasPriorRevision = ready.number(6) != 0;
-        addRevision(task,hasPriorRevision ? ready.string(7) : request,
-                    hasPriorRevision ? ready.string(8) : request,ready.number(9));
+        addRevision(task,hasPriorRevision ? scrub.text(ready.string(7)) : request,
+                    hasPriorRevision ? scrub.text(ready.string(8)) : request,ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
             acceptInstruction(task,next.at("messageId"),next.at("step"),
-                              field(next,"text"),nullptr,ready.json(3),nullptr);
+                              scrub.text(field(next,"text")),nullptr,routing,nullptr);
         } else save(task);
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
              {taskId,input,id,spec.at("stageId")});

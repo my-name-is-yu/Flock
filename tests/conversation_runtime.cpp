@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 #include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
@@ -184,6 +184,9 @@ struct Fixture {
         if (!created) throw std::runtime_error("cannot create a test directory");
         dir = created;
         restart();
+        for (auto bot : {"alpha","beta"})
+            for (auto env : {"desktop","cloud"})
+                store->access().resourceGrant({"fixture",true},bot,{"environment",env,"launch"},GrantChange::grant);
     }
     ~Fixture() {
         runtime.reset();
@@ -1448,12 +1451,18 @@ void cancellationReleasesOnlyAfterStopConfirmation() {
 
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
+    f.store->access().resourceGrant({"fixture",true},"alpha",{"environment","desktop","configure"},GrantChange::grant);
+    f.script("Set the desktop timeout",{[](const ModelInput&){
+        return Decision{"update_bot_settings",{{"environmentId","desktop"},{"runTimeoutSeconds",123}},"Set timeout"};
+    }});
+    f.receive("set-timeout","Set the desktop timeout");
     const auto occupied = f.store->submit(f.routing("Cloud work","beta","cloud"));
     const auto moving = f.store->submit(f.routing());
     f.script("Include the table as CSV",{send(moving)});
     f.receive("format-before-launch","Include the table as CSV");
     f.reach(occupied,"running");
     f.reach(moving,"running");
+    check(f.task(moving).at("deadline")==f.now+123,"desktop launch missed its own timeout");
     f.script("Run the measurement on the cloud Mac",{change(moving,{{"environment","クラウドMac"}})});
     f.receive("where","Run the measurement on the cloud Mac");
     const auto following = f.store->submit(f.routing("Cloud follower","beta","cloud"));
@@ -1484,6 +1493,7 @@ void cloudDestinationWaitsForItsProject() {
     f.reach(occupied,"completed");
     f.reach(moving,"running");
     const auto task = f.task(moving);
+    check(task.at("deadline")==f.now+1800,"moved task retained the old environment timeout");
     check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
           f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&

@@ -6,9 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
-#include <set>
 #include <regex>
 #include <set>
 
@@ -140,51 +140,6 @@ void pageAssets(Browser& browser, const std::string& html) {
         else hasStylesheet = true;
     }
     check(hasScript && hasStylesheet,"landing page does not load its script and stylesheet");
-}
-
-void inspectors(const std::filesystem::path& path) {
-    struct InspectorModel : Model {
-        Id boundary = 0;
-        Decision decide(const ModelInput& input) override {
-            if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
-                return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes"}},"Summarize earlier work"};
-            if (input.event.at("turn").empty() && input.event.at("text")=="Release")
-                return {"start_workflow",{{"request","Prepare a release"}},"Use a separate verifier"};
-            return {"reply",{{"text","Recorded"}},"Acknowledge the request"};
-        }
-    } model;
-    Store store(path);
-    FixedT3 t3;
-    Runtime runtime(store,model,t3,[](auto){return BotNotes{};});
-    const auto routing = callbacks().intake("release","");
-    auto server = startWeb(store,0,callbacks());
-    Browser browser(*server);
-    model.boundary = store.receive(routing,"a","Original release instructions").at("messageId");
-    store.receive(routing,"b","Summarize");
-    store.receive(routing,"c","Release");
-    runtime.runConversations();
-    const auto summaries = browser.get("/api/compactions?bot=release");
-    const auto workflows = browser.get("/api/workflows?bot=release");
-    const auto view = browser.get("/api/view?bot=release");
-    check(summaries.size()==1 && summaries[0]["endMessageId"]==model.boundary &&
-          summaries[0]["summary"]=="Preserve the release notes" && view.at("compactions")==summaries,
-          "summary or its covered range missing from the inspector");
-    check(workflows.size()==1 && workflows[0]["stages"].size()==2 && view.at("workflows")==workflows,
-          "workflow stages missing from the Bot view");
-    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
-          "inspectors mixed Bot histories");
-    const auto audit = browser.get("/api/conversation?bot=release");
-    check(audit.dump().find("Original release instructions")!=std::string::npos,
-          "summary removed the original message from the HTTP audit history");
-    bool linked = false;
-    for (const auto& event : audit.at("events")) {
-        const auto& data = event.at("data");
-        if (!data.contains("actions")) continue;
-        for (const auto& action : data.at("actions"))
-            if (action.at("tool")=="start_workflow" && action.at("workflowId")==workflows[0]["workflowId"])
-                linked = data.at("status")=="working";
-    }
-    check(linked,"workflow start was missing from the conversation reply");
 }
 
 void boundary(Browser& browser) {
@@ -536,6 +491,9 @@ void peerConversation(const std::filesystem::path& path) {
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
+    store.access().resourceGrant({"fixture",true},"settings",{"environment","local-env","launch"},GrantChange::grant);
+    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return BotNotes{}; };
@@ -716,6 +674,7 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto web = callbacks();
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
@@ -945,18 +904,66 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
     },404);
 }
+void accessEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    const auto id = store.access().request("release",{"repository","private","read"});
+    auto cb = callbacks();
+    const auto file = path.parent_path()/"identities.json";
+    const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
+                                       {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
+    std::ofstream(file) << accounts;
+    std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
+    cb.authenticate = webIdentities(file);
+    const auto link = path.parent_path()/"identity-link";
+    std::filesystem::create_symlink(file,link);
+    bool rejected = false;
+    try { webIdentities(link); } catch (const Conflict&) { rejected = true; }
+    check(rejected,"symlink identity file accepted");
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    Browser::checked(browser.client.Get("/api/access?bot=release"),401);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
+    auto crossOrigin = browser.headers();
+    crossOrigin.erase("Origin");
+    crossOrigin.emplace("Origin","https://example.invalid");
+    Browser::checked(browser.client.Post("/api/access/decision",crossOrigin,
+        Json{{"botId","release"},{"requestId",id},{"approve",true}}.dump(),"application/json"),403);
+    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true},{"resourceId","wrong"}},400);
+    const auto secretRequest = store.access().requestSecret("release",{"fixture-token"});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
+    browser.post("/api/access/person",{{"botId","release"},{"action","grant"},{"person","alice"},{"role","view"}});
+    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true}});
+    auto state = browser.get("/api/access?bot=release");
+    check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
+    browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
+                                          {"resourceId","private"},{"operation","read"}});
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    browser.get("/api/conversation?bot=release");
+    check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/workflows?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
+    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);
+    browser.post("/api/access/resource",{{"botId","release"},{"adminRoot",true}},403);
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+}
+
 } // namespace
 
 int main() {
     try {
         TestDirectory directory;
-        inspectors(directory.path / "inspectors.db");
         exercise(directory.path / "state.db");
         eventStream(directory.path / "events.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
+        accessEndpoints(directory.path / "access.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

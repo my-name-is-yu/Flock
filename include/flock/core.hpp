@@ -99,6 +99,7 @@ struct Command {
     std::string questionId;
     RunRef candidate; // User-specified reconciliation hint. T3 must verify ownership.
     std::string candidateQuestionId;
+    std::string ownerBotId;
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -130,6 +131,7 @@ public:
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
+class Access;
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -137,6 +139,7 @@ public:
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
+    Access access();
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
@@ -186,6 +189,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;
+    friend class Access;
 };
 
 struct RuntimeOptions {

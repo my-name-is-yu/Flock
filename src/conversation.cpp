@@ -84,7 +84,7 @@ std::optional<Json> Store::receipt(std::string_view bot, std::string_view client
     auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
                          {bot,clientId});
     if (!row.next()) return std::nullopt;
-    return receiptRow(row,text,replyTo);
+    return receiptRow(row,p_->redactor(bot).text(std::string(text)),replyTo);
 }
 
 Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
@@ -101,13 +101,15 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
             modelCallLimit(routing.config);
             const Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},
                                 {"config",routing.config}};
+            const auto scrub = p_->redactor(routing.botId);
+            scrub.requirePublic({routing.botId,clientId,saved});
             p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {unixTime(),routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,saved,routing.botId});
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
         transaction.commit();

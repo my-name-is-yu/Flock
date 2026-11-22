@@ -1,4 +1,5 @@
 #include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -33,6 +34,8 @@ struct SessionService : T3 {
     }
     Delivery reconcile(const Command& command) override {
         if (!receiptVisible) return {};
+        const auto sent = std::ranges::find(commands,command.actionId,&Command::actionId);
+        require(sent!=commands.end() && sent->instruction==command.instruction,"reconciliation changed the dispatched instruction");
         return {Delivery::Kind::Accepted,runs.at(command.actionId),{}};
     }
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
@@ -52,10 +55,11 @@ struct SessionService : T3 {
 struct Bot : Model {
     Decision action;
     Json history, result;
-    std::function<Decision(const ModelInput&)> conversation;
+    std::function<Decision(const ModelInput&)> conversation, work;
     Decision decide(const ModelInput& input) override {
         if (input.event.at("kind")=="question")
             return {"answer_session_question",{{"requestId","q"},{"answers",{{"choice","yes"}}}},"Answer the Session"};
+        if (input.event.at("kind")!="conversation_turn" && work) return work(input);
         if (input.event.at("kind")!="conversation_turn")
             throw std::runtime_error("Unexpected task decision: "+input.event.dump());
         history = input.history;
@@ -76,11 +80,13 @@ struct Fixture {
     Seconds now = unixTime();
     std::unique_ptr<Store> store;
     std::unique_ptr<Runtime> runtime;
-    Fixture() {
+    explicit Fixture(bool grantLaunch = true) {
         char name[] = "/tmp/flock-workflow-context-XXXXXX";
         if (!mkdtemp(name)) throw std::runtime_error("Cannot create test directory");
         dir = name;
         restart();
+        if (grantLaunch)
+            store->access().resourceGrant({"owner",true},"bot",{"environment","env","launch"},GrantChange::grant);
     }
     ~Fixture() {
         runtime.reset();
@@ -112,6 +118,85 @@ struct Fixture {
 };
 
 const std::string shaA(40,'a'), shaB(40,'b');
+
+void workflowLaunchUsesGrantsAndRedactsQueuedPrompt() {
+    Fixture f(false);
+    auto access = f.store->access();
+    const Person owner{"owner",true};
+    const auto grant = access.request("bot",{"environment","env","launch"});
+    const std::string secret = "workflow-credential-registered-after-queueing";
+    f.call("start_workflow",{{"request","Collect the release notes " + secret},{"stages",Json::array({
+        {{"stageId","collect"},{"role","collect"}}})}});
+    f.ticks(2);
+    const Id task = f.status()["stages"][0]["taskId"];
+    const auto wait = f.store->task(task).at("wait");
+    require(wait.at("reason")=="settings" && f.t3.commands.empty(),"unapproved workflow launch reached T3");
+    const auto input = access.requestSecret("bot",{"workflow-credential"});
+    access.submitSecret(owner,"bot",input,secret);
+    access.decide(owner,"bot",grant,true);
+    f.store->operate(task,wait.at("id"),"reconcile");
+    f.t3.loseReceipt = true;
+    f.ticks(1);
+    require(f.t3.commands.size()==1 && f.t3.commands[0].instruction.find(secret)==std::string::npos &&
+            f.t3.commands[0].instruction.find("Collect the release notes [redacted]")!=std::string::npos,
+            "the approved workflow prompt included newly protected text or lost the stage request");
+    f.now += 5;
+    f.ticks(2);
+    require(f.t3.commands.size()==1 && f.store->task(task).at("state")=="running",
+            "the redacted workflow launch was not reconciled");
+}
+
+void expansionRedactsBeforeSearchAndPaging() {
+    Fixture f;
+    const std::string secret = "secret-value-for-compaction";
+    const std::string prefix(1995,'x');
+    const auto original = f.turn(prefix+secret+" tail");
+    const auto compacted = f.call("compact_conversation",{{"endMessageId",original},{"summary","Notes: "+secret}});
+    const auto compaction = compacted.at("compaction").at("compactionId");
+    auto access = f.store->access();
+    access.submitSecret({"owner",true},"bot",access.requestSecret("bot",{"context-credential"}),secret);
+    const auto first = f.call("expand_context",{{"compactionId",compaction},{"startMessageId",original}});
+    const auto second = f.call("expand_context",{{"compactionId",compaction},{"startMessageId",first.at("nextMessageId")},
+                                                {"offset",first.at("nextOffset")}});
+    require(first.at("messages").at(0).at("text").get<std::string>()+second.at("messages").at(0).at("text").get<std::string>()
+            ==prefix+"[redacted] tail","paging split the protected value before redaction");
+    require(f.bot.history.front().at("summary")=="Notes: [redacted]","protected value reached the compacted model history");
+    require(f.call("expand_context",{{"compactionId",compaction},{"query","value-for-compaction"}}).at("messages").empty(),
+            "expansion search matched a fragment of the protected value");
+}
+
+void freshStandaloneSessionIncludesEarlierEvidence() {
+    Fixture f;
+    f.call("start_workflow",{{"request","Compare the options"},{"stages",Json::array({{{"stageId","compare"},{"role","collect"}}})}});
+    f.ticks(2);
+    const Id sourceTask = f.status()["stages"][0]["taskId"];
+    f.t3.finish("run-1","Option B must preserve the retry window");
+    f.ticks(1);
+    const auto history = f.store->history(sourceTask);
+    const auto report = std::ranges::find_if(history,[](const Json& item) { return item.at("kind")=="report"; });
+    require(report!=history.end(),"fixture did not save the source report");
+    f.bot.work = [](const ModelInput& input) -> Decision {
+        return {input.event.at("kind")=="intake" ? "delegate" : "follow_up",
+                {{"instruction","Continue implementing"}},"Work remains"};
+    };
+    const Id task = f.call("start_task",{{"request","Implement the chosen option"},{"doneWhen","Tests pass"},
+                                        {"sourceResultMessageId",report->at("id")}}).at("taskId");
+    f.ticks(3);
+    f.t3.finish("run-2","Earlier Run identified a timeout");
+    f.ticks(3);
+    f.t3.finish("run-3","Second Run found a duplicate entry");
+    f.ticks(3);
+    f.call("continue_fresh_session",{{"taskId",task}});
+    f.t3.finish("run-4","Latest report: "+std::string(9000,'z'));
+    f.ticks(5);
+    const auto& next = f.t3.commands.back();
+    require(f.t3.commands.size()==5 && next.tool=="delegate" &&
+            next.instruction.find("Option B must preserve the retry window")!=std::string::npos &&
+            next.instruction.find("Latest report:")!=std::string::npos &&
+            next.instruction.find("Second Run found a duplicate entry")!=std::string::npos &&
+            next.instruction.find("Earlier Run identified a timeout")!=std::string::npos,
+            "fresh Session lost the linked result or reports from earlier Runs");
+}
 
 void stageRequestKeepsEmbeddedNul() {
     Fixture f;
@@ -570,6 +655,9 @@ void compactAndContinue() {
 
 int main() {
     try {
+        workflowLaunchUsesGrantsAndRedactsQueuedPrompt();
+        expansionRedactsBeforeSearchAndPaging();
+        freshStandaloneSessionIncludesEarlierEvidence();
         verifyAfterRestart(false);
         verifyAfterRestart(true);
         stageRequestKeepsEmbeddedNul();

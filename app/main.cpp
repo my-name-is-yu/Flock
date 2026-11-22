@@ -22,6 +22,9 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
   run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand|prefill]
   bots
+  access grant BOT KIND RESOURCE ACTION
+  access revoke BOT KIND RESOURCE ACTION
+  access list BOT
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
   status TASK
@@ -185,6 +188,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 #ifdef FLOCK_WITH_WEB
     std::unique_ptr<WebServer> server;
     if (web) {
+        const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
             [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
@@ -194,6 +198,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             },
             [&](std::string_view botId) { return bots.avatarImage(botId); },
             options.peers,
+            identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
+            [&](const BotChange& change) { bots.apply(change); },
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
@@ -264,6 +270,25 @@ void taskCommand(const std::filesystem::path& home, const std::string& command, 
     } else print(store.tasks(bot,cursor,limit));
 }
 
+void accessCommand(const std::filesystem::path& home, Arguments& args) {
+    const auto action = args.pop("access command (grant, revoke or list)");
+    if (action != "grant" && action != "revoke" && action != "list")
+        throw Conflict("Unknown access command: " + action);
+    const auto bot = args.pop("Bot ID");
+    if (!validBotId(bot)) throw Conflict("Invalid Bot ID");
+    std::optional<Scope> scope;
+    if (action != "list") {
+        scope = Scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
+        if (!scope->valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
+    }
+    args.end();
+    auto store = openStore(home);
+    auto access = store.access();
+    if (scope)
+        access.resourceGrant(Person{"local-cli",true},bot,*scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
+    print(access.grants(bot));
+}
+
 int runCli(Arguments& args) {
     if (args.empty() || args.peek() == "--help" || args.peek() == "-h") {
         std::cout << usage;
@@ -282,6 +307,7 @@ int runCli(Arguments& args) {
         args.end();
         print(bots.cards());
     } else if (command == "run") daemon(args,home,bots);
+    else if (command == "access") accessCommand(home,args);
     else if (command == "submit") {
         const auto botId = args.pop("Bot ID");
         const auto request = args.pop("request");

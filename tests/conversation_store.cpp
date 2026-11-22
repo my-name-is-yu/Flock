@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <sqlite3.h>
 
@@ -112,7 +112,10 @@ struct RuntimeFixture {
     Runtime runtime;
 
     explicit RuntimeFixture(Store& store)
-        : runtime(store,model,t3,[this](std::string_view bot) { return notes(bot); }) {}
+        : runtime(store,model,t3,[this](std::string_view bot) { return notes(bot); }) {
+        for (auto bot : {"alpha","beta"})
+            store.access().resourceGrant({"fixture",true},bot,{"environment","env","launch"},GrantChange::grant);
+    }
 
     void reach(Store& store, Id id, std::string_view state) {
         for (int i = 0; i < 16 && store.task(id).at("state") != state; ++i) runtime.tick();

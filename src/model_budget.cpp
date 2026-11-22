@@ -75,16 +75,33 @@ void Store::Impl::grantModelCall(std::string_view budget) {
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
 }
 
-Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemptId) {
+Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+    const auto scrub = redactor(bot);
     Decision decision;
     try {
-        decision = model.decide(input);
+        auto safe = input;
+        safe.task = scrub.record(input.task);
+        safe.event = scrub.record(input.event);
+        safe.history = scrub.record(input.history);
+        safe.evidence = scrub.record(input.evidence);
+        safe.config = scrub.record(input.config,SecretRedactor::Fields::external);
+        safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
+        safe.feedback = scrub.text(input.feedback);
+        decision = model.decide(safe);
+        for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
+        decision.reason = scrub.text(decision.reason);
+        if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
+            decision.tool = scrub.text(decision.tool);
+        decision.usage = scrub.payload(decision.usage);
     } catch (const ModelError& error) {
-        if (!error.usage.empty()) {
+        auto usage = scrub.payload(error.usage);
+        if (!usage.empty()) {
             std::lock_guard lock(mutex);
-            exec("UPDATE model_attempts SET usage=? WHERE id=?",{error.usage,attemptId});
+            exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
-        throw;
+        throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+    } catch (const std::exception& error) {
+        throw ModelError(scrub.text(error.what()),false);
     }
     if (!decision.usage.empty()) {
         std::lock_guard lock(mutex);

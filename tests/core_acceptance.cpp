@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -93,6 +93,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
+    std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
@@ -153,6 +154,7 @@ struct SimulatedT3 : T3 {
         readRequests.push_back(req);
         ++reads;
         if (beforeRead) beforeRead();
+        if (!historyPages.empty()) return historyPages.at(reads - 1);
         return {reads == 1 ? "commit wanted, updates enabled" : "RSS 25 MiB",
                 req.threadId,req.runId,"item-"+std::to_string(reads),"next",100,reads==1};
     }
@@ -194,6 +196,11 @@ struct Fixture {
         if (!path) throw std::runtime_error("Cannot create test directory");
         directory = path;
         restart();
+        for (auto bot : {"alpha","beta"}) {
+            for (auto env : {"e","cloud"})
+                store->access().resourceGrant({"fixture",true},bot,{"environment",env,"launch"},GrantChange::grant);
+            store->access().resourceGrant({"fixture",true},bot,Scope::sessionRead("e","thread-1"),GrantChange::grant);
+        }
     }
     ~Fixture() {
         runtime.reset();
@@ -694,6 +701,45 @@ void evidenceResume() {
           "history read did not resume its budget");
 }
 
+void redactedHistoryPagination() {
+    Fixture f;
+    f.read = "on_demand";
+    f.restart();
+    const std::string secret = "fixture-history-secret";
+    auto access = f.store->access();
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"history-token"}),secret);
+    f.t3.historyPages = {
+        {"Token: " + secret,{},{},"history-item","7",64,true},
+        {"Verified " + secret,{},{},"history-item",{},0,false},
+    };
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        const auto& run = input.event.at("run");
+        Json ref = {{"threadId",run.at("threadId")},{"runId",run.at("runId")}};
+        if (input.evidence.empty()) return Decision{"session_read",ref,"Read the first page"};
+        const auto& first = input.evidence.front();
+        check(first.at("text") == "Token: [redacted]" && first.at("more") == true &&
+              first.at("itemTruncated") == true && first.at("nextCursor") == "7" && first.at("nextOffset") == 64,
+              "redaction lost the adapter's continuation");
+        if (input.evidence.size() == 1) {
+            ref["itemId"] = first.at("itemId");
+            ref["offset"] = first.at("nextOffset");
+            return Decision{"session_read",ref,"Read the final page"};
+        }
+        const auto& last = input.evidence.back();
+        check(last.at("text") == "Verified [redacted]" && last.at("more") == false &&
+              last.at("itemTruncated") == false && last.at("nextCursor") == "" && last.at("nextOffset") == 0,
+              "redaction made a complete excerpt appear truncated");
+        return complete();
+    };
+    const auto id = f.submit();
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.readRequests.size() == 2 && f.t3.readRequests.back().offset == 64,
+          "history did not resume at the adapter's offset");
+}
+
 void taskPagesShowProjectOwners() {
     Fixture f;
     f.model.script = [](const ModelInput&) { return work(); };
@@ -806,7 +852,7 @@ void peerWorkAndRestart() {
     check(f.t3.reads == 1 && f.logs(root,"completed") == 0,"reading evidence did not leave a result to evaluate");
     const auto& read = f.t3.readRequests.back();
     check(read.environmentId == "e" && read.threadId == "thread-1" && read.runId == "run-1-result" &&
-          read.config.at("model") == "beta-model","peer evidence did not read the recipient's result with its own settings");
+          read.config == f.task(root).at("config"),"peer evidence did not use the reading Bot's settings");
     f.restart();
     f.reach(root,"completed");
     f.wait(unrelated,"user_question");
@@ -1873,6 +1919,41 @@ void inferenceInvalidatedByCancel() {
     f.reach(id,"cancelled");
     check(f.t3.launches == 0 && f.logs(id,"decision") == 0,"cancelled inference committed");
 }
+void prefillWithoutGrant() {
+    Fixture f;
+    f.read = "prefill";
+    f.restart();
+    auto access = f.store->access();
+    access.resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    for (const auto& [name,token] : std::map<std::string,std::string>{{"first","result"},{"second","complete"}}) {
+        auto request = access.requestSecret("alpha",{name});
+        access.submitSecret({"fixture",true},"alpha",request,token);
+    }
+    const std::string hidden = "fixture-hidden-question";
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"question-token"}),hidden);
+    const auto id = f.submit();
+    f.model.script = [&](const ModelInput& in) {
+        if (in.event.at("kind")=="intake") return work();
+        if (in.event.at("kind")=="question") {
+            check(in.event.dump().find(hidden)==std::string::npos,"Session question reached the model with a secret");
+            return reply();
+        }
+        check(in.event.at("kind")=="result" && in.event.at("report")=="checked" && in.evidence.size()==1,
+              "prefill damaged the settled report or control fields");
+        return complete();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.t3.runs.at("run-1").question.fields.at(0)["prompt"] = hidden;
+    f.runtime->tick();
+    check(f.task(id).at("question").at("fields").at(0).at("prompt")=="[redacted]" &&
+          f.store->history(id).dump().find(hidden)==std::string::npos,"raw question persisted in Task or journal");
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.reads==1,"owner could not read its own Session without an explicit share");
+}
+
 }
 
 int main() {
@@ -1884,7 +1965,9 @@ int main() {
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
-            {"history reading restart",evidenceResume},{"project owners on task pages",taskPagesShowProjectOwners},
+            {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
+            {"redacted history pagination",redactedHistoryPagination},
+            {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},

@@ -18,6 +18,6 @@ private:
 };
 
 Json responseRequest(const ModelInput&);
-Decision responseDecision(const Json& output, const std::vector<std::string>& allowed);
+Decision responseDecision(const Json& output, const Json& request);
 bool runModelAcceptance(Model&, const std::string& slug, std::ostream&);
 }
