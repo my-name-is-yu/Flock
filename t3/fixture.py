@@ -13,10 +13,6 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-EXACT_RUN = "/api/orchestration/exact-run"
-EXACT_CREDENTIAL = "a" * 43
-
-
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -36,11 +32,8 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
-        elif self.path == EXACT_RUN + "/capabilities":
-            assert self.headers.get("Authorization") is None
-            self.reply({"protocolVersion": 1, "environmentId": "env-1", "serverVersion": "0.1.11-fixture",
-                        "exactTarget": True, "grantSeal": True, "receiptLookup": True, "senderAttribution": True} |
-                       self.server.state.get("exactCapabilities", {}))
+        elif self.path == "/fixture/stock":
+            self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")})
         elif self.path == "/protected,resource":
             if self.server.state.get("oauthFailure") == "discovery":
                 self.reply({"error": "invalid_resource"}, code=400)
@@ -78,6 +71,10 @@ class Fixture(BaseHTTPRequestHandler):
             return
         args = json.loads(raw)
         if self.path == "/fixture":
+            if args.get("advanceStockWorker"):
+                assert self.server.stock_thread
+                subprocess.run(["/usr/bin/git","-C",state["stockTree"],"checkout","--detach",state["stockHead"]],
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
             state.update(args)
             if "authorization" in args:
                 auth = urllib.parse.parse_qs(urllib.parse.urlsplit(args["authorization"]).query)
@@ -99,8 +96,6 @@ class Fixture(BaseHTTPRequestHandler):
 
                 threading.Thread(target=callback, daemon=True).start()
             self.reply({})
-        elif self.path.startswith(EXACT_RUN + "/"):
-            self.exact_run(args)
         elif self.path == "/register":
             if state.get("oauthFailure") == "registration":
                 self.reply({"error": "invalid_client_metadata"}, code=400)
@@ -147,176 +142,6 @@ class Fixture(BaseHTTPRequestHandler):
         else:
             self.reply(code=404)
 
-    def exact_run(self, args):
-        operation = self.path.removeprefix(EXACT_RUN)
-        state = self.server.state
-        state.setdefault("effects", {}).setdefault("exact" + operation, []).append(args)
-        if operation == "/redirected":
-            self.reply({}, code=500)
-            return
-        assert self.headers["Content-Type"] == "application/json"
-        assert self.headers["Authorization"] == "Bearer " + EXACT_CREDENTIAL
-        assert args["target"] == {"environmentId": "env-1", "projectId": "project", "threadId": "human-thread",
-                                  "runId": "human-run"}
-        if operation.startswith("/invitations/"):
-            self.exact_invitation(operation, args)
-            return
-        assert args["epoch"] == (0 if args["grantId"] == "consult" else 4)
-        if operation == "/grants/events":
-            self.exact_events(args)
-            return
-        if operation == "/grants/input-commit":
-            assert set(args) == {"target", "grantId", "epoch"} and args["grantId"] == "grant"
-            scenario = state.get("exactInputCommit")
-            if scenario == "unavailable":
-                self.reply({"reason": "stale"}, code=409)
-            else:
-                target = args["target"] | ({"runId": "another-run"} if scenario == "wrong-target" else {})
-                commit = {"missing": None, "abbreviated": "b" * 39, "upper": "B" * 40,
-                          "non-git": "g" * 40, "credential": EXACT_CREDENTIAL + "b" * 21,
-                          "sha256": "c" * 64}.get(scenario, "b" * 40)
-                self.reply({"target": target, "commit": commit})
-            return
-        if operation in ("/grants/read", "/grants/seal-status", "/grants/release"):
-            fields = {"target", "grantId", "epoch"}
-            assert set(args) == (fields | {"sealMarker", "freezeGeneration"} if operation == "/grants/release" else fields)
-            permission = ({"kind": "consult"} if args["grantId"] == "consult" else
-                          {"kind": "coordinate", "expectedEpoch": 3, "goal": "Check the remaining work",
-                           "allowDelegation": True})
-            if args["grantId"] == "wrong-project":
-                args = args | {"target": args["target"] | {"projectId": "different"}}
-            sealed = state.get("exactSealed", False)
-            grant = {key: args[key] for key in fields} | {"sourceMessageId": "original-person-message", "botId": "planner",
-                                                         "permission": permission, "sealed": sealed}
-            if operation == "/grants/read":
-                self.reply(grant)
-                return
-            marker = "seal-proof" if sealed else None
-            if operation == "/grants/release":
-                assert args["freezeGeneration"] == 2 and args["sealMarker"] == "seal-proof"
-            if args["grantId"] == "wrong-confirmation":
-                marker = "another-epoch-marker"
-            residual = ["admitted-command"] if sealed else []
-            self.reply({"grant": grant, "sealMarker": marker, "residualCommandIds": residual,
-                        "releaseAcknowledged": operation == "/grants/release"})
-            return
-
-        assert operation in ("/commands/send", "/commands/receipt")
-        command = args["commandId"]
-        receipt = {key: args[key] for key in ("target", "grantId", "epoch", "commandId")}
-        receipt["botId"] = "planner"
-        receipt["observation"] = {"state": "applied", "nativeTurnId": "native-turn", "nativeItemId": "native-item"}
-        if operation == "/commands/receipt":
-            assert set(args) == {"target", "grantId", "epoch", "commandId"}
-            if command == "absent":
-                self.reply({"status": "authoritativelyAbsent"})
-            elif command == "expired":
-                self.reply({"status": "unknown"})
-            elif command == "contradictory":
-                self.reply({"status": "authoritativelyAbsent", "receipt": receipt})
-            elif command == "not-found":
-                self.reply({"reason": "notFound"}, code=404)
-            else:
-                self.reply({"status": "found", "receipt": receipt})
-            return
-
-        assert set(args) == {"target", "grantId", "epoch", "commandId", "text"}
-        assert args["text"] == "Stay in this Run.\n確認してください。"
-        error = {"redirect": ({}, 307, {"Location": EXACT_RUN + "/redirected"}),
-                 "conflict": ({"reason": "conflict"}, 409, {}), "stale": ({"reason": "stale"}, 409, {}),
-                 "unexpected-error": ({"reason": "fixture-private-detail", "text": args["text"]}, 409, {}),
-                 "unavailable": ({"reason": "storage"}, 503, {}),
-                 "wrong-content-type": (receipt, 200, {"Content_Type": "text/html"})}.get(command)
-        if error:
-            body, code, headers = error
-            self.reply(body, code=code, **headers)
-            return
-        if command == "disconnect":
-            self.close_connection = True
-            return
-        if command in ("pending", "failed", "unknown"):
-            receipt["observation"] = {"state": command}
-        elif command == "wrong-run":
-            receipt["target"] = receipt["target"] | {"runId": "follow-up-run"}
-        elif command == "wrong-epoch":
-            receipt["epoch"] += 1
-        elif command == "wrong-command":
-            receipt["commandId"] = "another-command"
-        elif command == "invalid-bot":
-            receipt["botId"] = "Unverified Bot"
-        elif command == "missing-proof":
-            receipt["observation"].pop("nativeItemId")
-        self.reply(receipt)
-
-    def exact_invitation(self, operation, args):
-        target = args["target"]
-        request = args["requestId"]
-        consult = request == "invite-consult"
-        permission = ({"kind": "consult"} if consult else
-                      {"kind": "coordinate", "expectedEpoch": 3, "goal": "Check the remaining work",
-                       "allowDelegation": True})
-        binding = {"target": target, "sourceMessageId": "original-person-message", "botId": "planner",
-                   "permission": permission}
-        if operation == "/invitations/activate":
-            assert set(args) == {"target", "requestId", "activationId"}
-            grant = request if consult else args["activationId"]
-            epoch = 0 if consult else 4
-            if request == "wrong-activation":
-                grant = "another-activation"
-            if request == "wrong-activation-epoch":
-                epoch = 6
-            self.reply(binding | {"grantId": grant, "epoch": epoch, "sealed": False})
-            return
-
-        assert operation == "/invitations/read" and set(args) == {"target", "requestId"}
-        item = {"target": target, "itemId": "shared-event", "text": "Shared evidence", "truncated": True}
-        context = [item]
-        if request == "wrong-request":
-            request = "another-request"
-        elif request == "wrong-context":
-            item["target"] = target | {"runId": "another-run"}
-        elif request == "oversized-context":
-            item["text"] = "x" * 8193
-        elif request == "duplicate-context":
-            context.append(item)
-        elif request == "excessive-context":
-            context = [item | {"itemId": f"item-{i}"} for i in range(4)]
-        self.reply(binding | {"requestId": request, "personRef": "authenticated-t3-person", "context": context})
-
-    def exact_events(self, args):
-        assert set(args) == {"target", "grantId", "epoch", "after"} and args["grantId"] == "grant"
-        target = args["target"]
-        after = args["after"]
-        events = [{"id": "progress-event", "position": 4, "kind": "progress", "status": "running",
-                   "summary": "The Run is progressing."},
-                  {"id": "decision-event", "position": 9, "kind": "decisionNeeded", "status": "pending",
-                   "summary": "The Run is waiting for a decision."}]
-        events = [event for event in events if event["position"] > after]
-        cursor = events[-1]["position"] if events else after
-        scenario = self.server.state.get("exactEvents")
-        if scenario == "wrong-target":
-            target = target | {"runId": "different-run"}
-        elif scenario == "duplicate-id":
-            events[1]["id"] = events[0]["id"]
-        elif scenario == "out-of-order":
-            events.reverse()
-        elif scenario == "cursor-gap":
-            cursor += 1
-        elif scenario == "cursor-rewind":
-            cursor = 0
-        elif scenario == "summary-too-long":
-            events[0]["summary"] = "x" * 121
-        elif scenario == "credential-in-summary":
-            events[0]["summary"] = "Details " + EXACT_CREDENTIAL
-        elif scenario == "wrong-kind":
-            events[0]["kind"] = "fullTranscript"
-        elif scenario == "wrong-decision-status":
-            events[1]["status"] = "running"
-        elif scenario == "too-many-events":
-            events = [events[0] | {"id": f"event-{i}", "position": i} for i in range(1, 22)]
-            cursor = 21
-        self.reply({"target": target, "cursor": cursor, "events": events})
-
     def tool(self, name, args):
         state = self.server.state
         scenario = state.get("scenario", "settled")
@@ -334,6 +159,8 @@ class Fixture(BaseHTTPRequestHandler):
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
+        if self.server.stock_thread:
+            return self.stock_tool(name, args)
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
@@ -491,6 +318,63 @@ class Fixture(BaseHTTPRequestHandler):
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}
 
+    def stock_tool(self, name, args):
+        state = self.server.state
+        if name == "t3_environment_read":
+            return {"environmentId": state.get("claimedEnvironment", "env-1")}
+        if name == "t3_project_read":
+            return {"id": "project", "workspaceRoot": state["stockRoot"]}
+        if name == "t3_thread_launch":
+            assert args["projectId"] == "project" and "message" not in args
+            assert args["runtimeMode"] == "approval-required"
+            assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["stockPin"],
+                                                 "startFromOrigin": False}
+            assert set(args) == {"projectId", "title", "clientRequestId", "runtimeMode", "workspaceStrategy"}
+            return {"projectId": "project", "threadId": args["clientRequestId"], "runId": None}
+        if name == "t3_thread_send":
+            assert args["mode"] == "queue"
+            assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
+            thread = args["threadId"]
+            if thread == "human":
+                assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+            else:
+                assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
+                assert "Check fixture" in args["message"]
+            return {"threadId": "wrong" if state.get("badReceipt") else thread,
+                    "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
+        if name == "t3_thread_wait":
+            assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
+            return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
+                    "resultRun": {"runId": "next-run", "status": "completed"}}
+        assert name == "t3_thread_read"
+        thread = args["threadId"]
+        is_root = thread == "human"
+        summary = self.summary(thread) | {
+            "activeRunId": "root-run" if is_root else None,
+            "latestRunId": "root-run" if is_root else None,
+            "archived": False,
+            "projectId": state.get("claimedProject", "project"),
+            "worktreePath": None if is_root else state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
+        }
+        rows = [] if not is_root else [
+            self.item("human", 3, "root-run", "user_message", "Human progress", "web") | {"messageId": "human-id"},
+            self.item("other", 4, "other-run", "assistant_message", "Inherited secret") | {"visibility": "inherited"},
+            self.item("human", 5, "root-run", "assistant_message", "Streaming content",
+                      status="completed" if state.get("finalized") else "running") | {"messageId": "reply-id"},
+            self.item("human", 6, "root-run", "user_message", "[Flock result] Complete.", "mcp") |
+                {"messageId": "sent-id"},
+        ]
+        if thread == "pinned-worker":
+            rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
+                    {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
+        if args.get("beforePosition") is not None:
+            rows = [row for row in rows if row["position"] < args["beforePosition"]]
+        else:
+            rows = [row for row in rows if row["position"] > args.get("afterPosition", -1)]
+        rows = rows[:args["limit"]]
+        return {"thread": summary, "items": rows, "nextPosition": rows[-1]["position"] if rows else None,
+                "recentRuns": [], "hasMore": False, "earlierPosition": None}
+
     def result_history(self, thread_id, scenario, recent, rows):
         def add(run, kind, text, source="provider", **fields):
             rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
@@ -569,6 +453,23 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
+    server.stock_thread = sys.argv[2:] == ["stock-thread"]
+    if server.stock_thread:
+        root = temp + "/project"
+        good = temp + "/worker"
+        wrong = temp + "/wrong-worker"
+        def git(*args):
+            return subprocess.check_output(["/usr/bin/git", *args], stderr=subprocess.DEVNULL, text=True).strip()
+        git("init", "-b", "main", root)
+        commit = ["-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                  "commit", "--allow-empty", "-m"]
+        git(*commit, "original input")
+        pin = git("-C", root, "rev-parse", "HEAD")
+        git(*commit, "advanced input")
+        git("-C", root, "worktree", "add", "--detach", good, pin)
+        git("-C", root, "worktree", "add", "--detach", wrong, "HEAD")
+        server.state.update(stockRoot=root, stockTree=good, stockWrongTree=wrong, stockPin=pin,
+                            stockHead=git("-C", root, "rev-parse", "HEAD"))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         if server.peer_recovery:

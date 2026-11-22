@@ -1,310 +1,224 @@
 #include "http_fixture.hpp"
 
-#include <atomic>
 #include <fstream>
 #include <iostream>
-#include <mutex>
 
 using namespace flockv0;
 using namespace flockv0::http_test;
 
 namespace {
-const ExactRunTarget target{"local-env","release","human-session","human-run"};
-const RootInvitationRef request{target,"consultation"};
-const RootInvitationRef coordinationRequest{target,"coordination"};
-const std::string credential(43,'q');
-const std::string coordinatorCredential(43,'w');
-const CoordinationRequest coordination{0,"Coordinate remaining checks",false};
-constexpr auto t3Person = "authenticated-t3-person";
+const ThreadTarget target{"local-env","release","human-session"};
+const ThreadTarget otherTarget{"local-env","release","other-session"};
 constexpr auto aliceCredential = "Bearer flock-fixture-alice";
 constexpr auto bobCredential = "Bearer flock-fixture-bob";
+constexpr auto endpoint = "/mcp/flock";
+constexpr auto pairingRoute = "/api/session-handoffs/pair";
 
-const Json input{{"target",{{"environmentId",target.environmentId},{"projectId",target.projectId},
-                            {"threadId",target.threadId},{"runId",target.runId}}},
-                 {"requestId",request.requestId},{"credential",credential}};
+Json pairingInput(const ThreadTarget& destination, bool coordinate = false) {
+    Json inputs{{"target",{{"environmentId",destination.environmentId},{"projectId",destination.projectId},
+                          {"threadId",destination.threadId}}},
+                {"botId","release"},{"mode",coordinate ? "coordinate" : "consult"}};
+    if (coordinate) {
+        inputs["goal"] = "Coordinate remaining checks";
+        inputs["allowDelegation"] = false;
+    }
+    return inputs;
+}
 
-class Gate final : public RootGate {
+class Session final : public ThreadSession {
 public:
-    std::atomic<bool> canActivate{false}, applied{false};
-    std::atomic<bool> coordinationSealed{false}, canAcknowledgeFreeze{false}, freezeAcknowledged{false};
-    std::atomic<bool> advanceCoordination{false}, coordinationApplied{false};
-    std::atomic<unsigned> sends{0}, reads{0};
+    std::vector<std::pair<ThreadTarget,std::string>> sends;
 
-    std::optional<RootGateCapabilities> capabilities(std::string_view environment) override {
-        check(environment == target.environmentId,"wrong capability environment");
-        return RootGateCapabilities{target.environmentId,"fixture",1,true,true,true,true};
+    std::optional<ThreadPage> read(const ThreadTarget& requested, std::optional<Id> after) override {
+        if (requested != target && requested != otherTarget) return {};
+        return ThreadPage{requested,after.value_or(0),"fixture-auth","human-run",{}};
     }
-
-    std::optional<RootInvitation> readInvitation(const RootInvitationRef& ref, std::string_view token) override {
-        ++reads;
-        const bool consult = ref == request && token == credential;
-        if (!consult && (ref != coordinationRequest || token != coordinatorCredential)) return {};
-        return RootInvitation{{target,ref.requestId,"source-message","release"},t3Person,
-                              {{target,"selected-message","Shared evidence",false}},
-                              consult ? std::nullopt : std::optional(coordination)};
+    ThreadSend send(const ThreadTarget& requested, std::string_view auth, std::string_view,
+                    std::string_view text) override {
+        check(auth == "fixture-auth","delivery did not reuse the bound authorization");
+        sends.emplace_back(requested,text);
+        return {ThreadSend::Accepted,ThreadReceipt{"ordinary-input","next-run","queued"}};
     }
-
-    std::optional<RootGrant> activateInvitation(const RootInvitationRef& ref, std::string_view activation,
-                                               std::string_view token) override {
-        if (ref == coordinationRequest && token == coordinatorCredential) {
-            std::lock_guard lock(mutex);
-            if (coordinatorGrantId.empty()) coordinatorGrantId = activation;
-            check(activation == coordinatorGrantId,"coordination retry created another activation");
-            return coordinatorGrant();
-        }
-        check(ref == request && activation == request.requestId && token == credential,"activation changed the consult binding");
-        if (!canActivate) return {};
-        return rootGrant();
-    }
-
-    std::optional<RootGrant> readGrant(const RootGrantRef& ref, std::string_view token) override {
-        if (token == coordinatorCredential) {
-            std::lock_guard lock(mutex);
-            auto grant = coordinatorGrant();
-            return grant.ref == ref ? std::optional(grant) : std::nullopt;
-        }
-        if (ref != rootGrant().ref || token != credential) return {};
-        return rootGrant();
-    }
-
-    std::optional<RootSealStatus> sealStatus(const RootGrantRef& ref, std::string_view token) override {
-        const auto grant = readGrant(ref,token);
-        if (!grant) return {};
-        if (!grant->sealed) return RootSealStatus{*grant,{},{},false};
-        std::lock_guard lock(mutex);
-        return RootSealStatus{*grant,{coordinationCommandId},"seal-marker",freezeAcknowledged};
-    }
-
-    std::optional<RootProgressPage> events(const RootGrantRef& ref, Id after, std::string_view token) override {
-        if (token != coordinatorCredential || !readGrant(ref,token)) return {};
-        if (after == 0) return RootProgressPage{target,5,{{"decision-needed",5,"decisionNeeded","pending","A decision is needed"}}};
-        if (advanceCoordination && after == 5)
-            return RootProgressPage{target,6,{{"checks-ready",6,"progress","running","Checks are ready"}}};
-        if (advanceCoordination && after == 6)
-            return RootProgressPage{target,7,{{"another-decision",7,"decisionNeeded","pending","Another decision is needed"}}};
-        return RootProgressPage{target,after,{}};
-    }
-
-    std::optional<RootSealStatus> confirmFreeze(const RootGrantRef& ref, std::string_view marker, Id generation,
-                                               std::string_view token) override {
-        check(token == coordinatorCredential && marker == "seal-marker" && generation == 2,
-              "T3 release was acknowledged without the local freeze generation and exact seal");
-        if (!canAcknowledgeFreeze) return {};
-        freezeAcknowledged = true;
-        return sealStatus(ref,token);
-    }
-
-    RootGateReply readReceipt(const RootCommandRef& ref, std::string_view token) override {
-        if (token == coordinatorCredential) {
-            std::lock_guard lock(mutex);
-            check(ref.grant == coordinatorGrant().ref,"receipt changed the coordination grant");
-            if (coordinationCommandId.empty()) return {RootGateReply::Kind::AuthoritativelyAbsent,{},{}};
-            check(ref.commandId == coordinationCommandId,"receipt changed the admitted coordination command");
-            if (!coordinationApplied) return pending(ref);
-            return {RootGateReply::Kind::Found,RootReceipt{ref,"release",RootDeliveryState::Applied,
-                                                          "native-turn","coordination-item"},{}};
-        }
-        check(ref.grant == rootGrant().ref && token == credential,"receipt lookup changed the grant");
-        if (!sends) return {RootGateReply::Kind::AuthoritativelyAbsent,{},{}};
-        if (!applied) return pending(ref);
-        return {RootGateReply::Kind::Found,RootReceipt{ref,"release",RootDeliveryState::Applied,"native-turn","native-item"},{}};
-    }
-
-    RootGateReply send(const RootCommand& command, std::string_view token) override {
-        if (token == coordinatorCredential) {
-            std::lock_guard lock(mutex);
-            check(command.ref.grant == coordinatorGrant().ref && command.text == "Start the checks" &&
-                  !coordinationSealed && coordinationCommandId.empty(),"replayed or misdirected coordination send");
-            coordinationCommandId = command.ref.commandId;
-            return pending(command.ref);
-        }
-        check(command.ref.grant == rootGrant().ref && command.text == "Keep the existing checks" &&
-              token == credential,"root send changed the Bot's scoped reply or exact Run");
-        ++sends;
-        return pending(command.ref);
-    }
-
-private:
-    std::mutex mutex;
-    std::string coordinatorGrantId, coordinationCommandId;
-    RootGrant coordinatorGrant() const {
-        return {{target,coordinatorGrantId,1},"source-message","release",coordination,coordinationSealed};
-    }
-    static RootGrant rootGrant() { return {{target,request.requestId,0},"source-message","release",{},false}; }
-    static RootGateReply pending(const RootCommandRef& ref) {
-        return {RootGateReply::Kind::Found,RootReceipt{ref,"release",RootDeliveryState::ProviderPending,{},{}},{}};
-    }
+    std::optional<std::string> inputCommit(const ThreadTarget&) override { return {}; }
 };
 
 class ConsultationModel final : public Model {
 public:
-    std::atomic<unsigned> calls{0};
-    std::atomic<unsigned> coordinationCalls{0};
-
+    unsigned calls = 0;
     ModelTurn decide(const ModelInput& input) override {
-        if (input.event.at("kind") == "root_coordination") {
-            ++coordinationCalls;
-            if (input.event.at("answer").is_null()) {
-                const auto& kind = input.event.at("progress").at(0).at("kind");
-                if (kind == "progress")
-                    return {{{"root_guidance",{{"text","Start the checks"}},"Ready to proceed"}}};
-                check(kind == "decisionNeeded", "wrong event for the coordinator");
-                return {{{"handoff_question",{{"text","Which test suite should run?"}},"A person must decide"}}};
-            }
-            check(input.event.at("answer").at("question") == "Which test suite should run?" &&
-                  input.event.at("answer").at("text") == "Integration checks", "the answer changed source question");
-            return {{{"wait_for_root",{},"Wait for further progress"}}};
-        }
         ++calls;
-        check(input.task["botId"] == "release" && input.event["sourceMessageId"] == "source-message" &&
-              input.event["sharedContext"].at(0).at("text") == "Shared evidence" &&
-              input.tools == std::vector<std::string>{"reply"},"consultation model received the wrong scope or source");
+        check(input.task.at("botId") == "release" && input.event.at("kind") == "session_consultation" &&
+              input.tools == std::vector<std::string>{"reply"},"consultation received the wrong scope");
         return {{{"reply",{{"text","Keep the existing checks"}},"One consultation reply"}}};
     }
 };
 
-void installIdentities(const std::filesystem::path& file, const Json& identities, Store& db, WebCallbacks& cb) {
+void installIdentities(const std::filesystem::path& file, Store& db, WebCallbacks& cb) {
+    const auto identities = Json::array({{{"person","alice"},{"authorization",aliceCredential},{"adminRoot",true}},
+                                          {{"person","bob"},{"authorization",bobCredential}}});
     std::ofstream(file) << identities;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(db,file,cb);
 }
 
+class Mcp {
+public:
+    explicit Mcp(const WebServer& server) : client("127.0.0.1",static_cast<int>(server.port())) {}
+
+    Json request(std::string_view method, const Json& params, httplib::Headers extra = {}) {
+        const auto id = ++index;
+        extra.emplace("Accept","application/json, text/event-stream");
+        const auto data = Json{{"jsonrpc","2.0"},{"id",id},{"method",method},{"params",params}};
+        const auto result = Browser::checked(client.Post(endpoint,extra,data.dump(),"application/json"),200);
+        check(result.at("jsonrpc") == "2.0" && result.at("id") == id,"wrong MCP response envelope");
+        return result;
+    }
+
+    Json call(const Json& args, httplib::Headers extra = {}) {
+        return request("tools/call",{{"name","request_flock_bot"},{"arguments",args}},std::move(extra));
+    }
+
+    httplib::Client client;
+
+private:
+    Id index = 0;
+};
+
 void anonymous(const std::filesystem::path& path) {
     Store db(path);
     auto server = startWeb(db,0,callbacks());
-    Browser browser(*server);
-    browser.post("/api/session-handoffs",input,401);
+    Browser(*server).post(pairingRoute,pairingInput(target),401);
 }
 
 void sessionHandoffs(const std::filesystem::path& directory) {
     Store db(directory/"handoffs.sqlite3");
-    Gate gate;
+    Session session;
     ConsultationModel model;
     auto cb = callbacks();
-    auto identities = Json::array({{{"person","alice"},{"authorization",aliceCredential},{"t3People",{{"local-env",t3Person}}}},
-                                  {{"person","bob"},{"authorization",bobCredential},{"t3People",{{"another-env",t3Person}}}}});
-    installIdentities(directory/"identities.json",identities,db,cb);
-    identities.at(1).at("t3People") = {{"local-env",t3Person}};
-    bool rejected = false;
-    try { installIdentities(directory/"overlapping.json",identities,db,cb); }
-    catch (const Conflict&) { rejected = true; }
-    check(rejected,"one remote person was mapped to two local actors");
-    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,gate,cb.bindT3Person);
+    installIdentities(directory/"identities.json",db,cb);
+    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson);
     const auto handoffs = cb.sessionHandoffs;
-    cb.sessionHandoffModel = &model;
-    cb.sessionHandoffSoul = [](std::string_view bot) {
-        check(bot == "release","web supplied the wrong Bot profile");
-        return "You check releases";
-    };
+    const auto intake = cb.intake;
 
-    auto access = db.access();
-    for (const auto* person : {"alice","bob"}) {
-        access.personGrant(localOwner,"release",person,Role::decide,GrantChange::grant);
-        access.personScope(localOwner,person,Scope::sessionRead("local-env","human-session"),GrantChange::grant);
-    }
-    access.resourceGrant(localOwner,"release",Scope::consultReply("local-env","human-session"),GrantChange::grant);
-    access.resourceGrant(localOwner,"release",Scope::sessionCoordinate("local-env","human-session"),GrantChange::grant);
+    const Person alice{"alice",true};
+    const auto grant = [&](const Scope& scope) {
+        db.access().resourceGrant(alice,"release",scope,GrantChange::grant);
+    };
+    grant(Scope::consultReply(target.environmentId,target.threadId));
+    grant(Scope::consultReply(otherTarget.environmentId,otherTarget.threadId));
+    grant(Scope::sessionCoordinate(target.environmentId,target.threadId));
+    grant(Scope::sessionRead(target.environmentId,target.threadId));
+
     auto server = startWeb(db,0,std::move(cb));
     Browser browser(*server);
-    browser.post("/api/session-handoffs",input,401);
+    Mcp mcp(*server);
+    browser.post(pairingRoute,pairingInput(target),401);
     browser.client.set_default_headers({{"Authorization",bobCredential}});
-    check(browser.post("/api/session-handoffs",input,403).at("error") == "handoff_unavailable",
-          "another mapped person obtained the invitation");
+    browser.post(pairingRoute,pairingInput(target),403);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
-    auto forged = input;
-    forged["botId"] = "triage";
-    browser.post("/api/session-handoffs",forged,400);
-    browser.post("/api/session-handoffs?credential=forbidden",input,400);
-    auto crossOrigin = browser.headers();
-    crossOrigin.erase("Origin");
-    crossOrigin.emplace("Origin","https://different.invalid");
-    Browser::checked(browser.client.Post("/api/session-handoffs",crossOrigin,input.dump(),"application/json"),403);
-    check(gate.reads == 1,"an unauthenticated, malformed, or cross-origin request reached T3");
+    auto unknownBot = pairingInput(target);
+    unknownBot["botId"] = "unconfigured-bot";
+    browser.post(pairingRoute,unknownBot,403);
+    auto oldTarget = pairingInput(target);
+    oldTarget.at("target")["runId"] = "human-run";
+    browser.post(pairingRoute,oldTarget,400);
+    auto wrongTarget = pairingInput(target);
+    wrongTarget.at("target")["projectId"] = "different-project";
+    browser.post(pairingRoute,wrongTarget,403);
+    browser.post("/api/session-handoffs/pair?code=forbidden",pairingInput(target),400);
+    Browser::checked(browser.client.Post(pairingRoute,{{"Origin","https://different.invalid"},{"X-Flock-Action","1"}},
+        pairingInput(target).dump(),"application/json"),403);
 
-    const auto opening = browser.post("/api/session-handoffs",input);
-    check(opening.at("opening") == true && opening.at("botId") == "release" && opening.at("target") == input.at("target") &&
-          opening.at("reply").is_null() && opening.dump().find(credential) == std::string::npos &&
-          opening.dump().find(t3Person) == std::string::npos,"opening status changed the origin or exposed credentials");
-    const auto path = "/api/session-handoffs/" + std::to_string(opening.at("channelId").get<Id>());
-    check(browser.get("/api/session-handoffs").at(0).at("channelId") == opening.at("channelId"),
-          "the authenticated person could not reopen their saved handoff");
+    const auto init = mcp.request("initialize",{{"protocolVersion","2025-06-18"},
+        {"capabilities",Json::object()},{"clientInfo",{{"name","fixture"},{"version","1"}}}});
+    check(init.at("result").at("protocolVersion") == "2025-06-18","the MCP server did not negotiate with the client");
+    const auto initialized = mcp.client.Post(endpoint,R"({"jsonrpc":"2.0","method":"notifications/initialized"})","application/json");
+    check(initialized && initialized->status == 202 && initialized->body.empty(),"wrong initialized notification response");
+    const auto gt = mcp.client.Get(endpoint);
+    check(gt && gt->status == 405,"stateless MCP GET did not report method availability");
+    const auto tools = mcp.request("tools/list",Json::object()).at("result").at("tools");
+    check(tools.size() == 1 && tools.at(0).at("name") == "request_flock_bot" &&
+          tools.at(0).at("inputSchema").at("additionalProperties") == false,"Flock exposes an unexpected MCP tool");
+
+    const auto ticket = browser.post(pairingRoute,pairingInput(target),201);
+    const auto secondTicket = browser.post(pairingRoute,pairingInput(otherTarget),201);
+    const auto code = ticket.at("code").get<std::string>();
+    check(!code.empty() && ticket.at("expiresAt").get<Seconds>() > unixTime() &&
+          ticket.at("code") != secondTicket.at("code"),"pairing did not issue a unique expiring code");
+    const Json args{{"pairingCode",code},{"requestId","caller-request"},{"text","Review the existing checks"}};
+    const Json request{{"jsonrpc","2.0"},{"id",4},{"method","tools/call"},
+                       {"params",{{"name","request_flock_bot"},{"arguments",args}}}};
+    Browser::checked(mcp.client.Post(endpoint,{{"Origin",browser.origin}},
+        request.dump(),"application/json"),403);
+    auto wrong = args;
+    wrong["threadId"] = otherTarget.threadId;
+    check(mcp.call(wrong).at("error").at("code") == -32602,"the tool accepted a caller-supplied destination");
+    wrong = args;
+    wrong["pairingCode"] = "wrong-code";
+    check(mcp.call(wrong,{{"Authorization",aliceCredential}}).at("result").at("isError") == true,
+          "a Web credential replaced the pairing code");
+
+    const auto ack = mcp.call(args).at("result");
+    const auto paired = ack.at("structuredContent");
+    check(!paired.at("requestId").get<std::string>().empty() && ack.dump().find(code) == std::string::npos &&
+          ack.dump().find(target.threadId) == std::string::npos && session.sends.empty() && model.calls == 0,
+          "MCP intake ran the Bot synchronously or disclosed pairing material");
+    check(mcp.call(args).at("result").at("structuredContent") == paired,"identical MCP retry created new work");
+    wrong = args;
+    wrong["text"] = "Change the original request";
+    check(mcp.call(wrong).at("result").at("isError") == true,"same request accepted a different payload");
+    wrong = args;
+    wrong["requestId"] = "another-request";
+    check(mcp.call(wrong).at("result").at("isError") == true,"pairing code authorized a second request");
+
+    auto otherArgs = args;
+    otherArgs["pairingCode"] = secondTicket.at("code");
+    const auto other = mcp.call(otherArgs).at("result").at("structuredContent");
+    const auto channel = paired.at("channelId").get<Id>();
+    const auto otherChannel = other.at("channelId").get<Id>();
+    check(channel != otherChannel,"different return destinations shared a request");
+    const auto path = "/api/session-handoffs/" + std::to_string(channel);
+    check(browser.get("/api/session-handoffs").size() == 2,"paired requests did not become visible");
+    auto view = browser.get(path);
+    check(view.at("target") == pairingInput(target).at("target") && view.at("deliveries").empty() &&
+          view.dump().find(code) == std::string::npos,"view exposed a code or changed the destination");
     browser.client.set_default_headers({{"Authorization",bobCredential}});
-    check(browser.get("/api/session-handoffs").empty(),"another person's handoff appeared in the list");
+    check(browser.get("/api/session-handoffs").empty(),"another person's handoffs appeared in the list");
     Browser::checked(browser.client.Get(path),403);
-    browser.post(path + "/resume",Json::object(),403);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
-    browser.post(path + "/consult",Json::object(),403);
-    gate.canActivate = true;
-    const auto active = browser.post(path + "/resume",Json::object());
-    check(active.at("opening") == false && active.at("channelId") == opening.at("channelId") &&
-          browser.post("/api/session-handoffs",input).at("channelId") == opening.at("channelId"),
-          "resume or invite retry did not keep the same return channel");
-    const auto pending = browser.post(path + "/consult",Json::object());
-    check(pending.at("state") == rootDeliveryStateName(RootDeliveryState::ProviderPending) &&
-          pending.at("provider").size() == 1 && browser.get(path).at("reply") == pending,
-          "pending delivery was not visible or presented as provider proof");
-    gate.applied = true;
-    const auto applied = browser.post(path + "/consult",Json::object());
-    check(applied.at("state") == rootDeliveryStateName(RootDeliveryState::Applied) &&
-          applied.at("provider").at("nativeItemId") == "native-item" &&
-          applied.at("commandId") == pending.at("commandId") && applied.dump().find(credential) == std::string::npos &&
-          gate.sends == 1 && model.calls == 1 && db.tasks().empty(),"provider evidence, dedupe, or root ownership changed");
 
-    auto inviteCoordinator = input;
-    inviteCoordinator["requestId"] = coordinationRequest.requestId;
-    inviteCoordinator["credential"] = coordinatorCredential;
-    const auto coordinating = browser.post("/api/session-handoffs",inviteCoordinator);
-    const auto coordPath = "/api/session-handoffs/" + std::to_string(coordinating.at("channelId").get<Id>());
-    const auto question = browser.post(coordPath + "/step",Json::object());
-    check(question.at("eventCursor") == 5 && question.at("pendingQuestion").at("eventId") == "decision-needed",
-          "coordination question lost its durable event binding");
-    const Json answer{{"generation",question.at("generation")},{"eventId","decision-needed"},{"text","Integration checks"}};
-    auto wrongAnswer = answer;
-    wrongAnswer["generation"] = 2;
-    browser.post(coordPath + "/answer",wrongAnswer,403);
+    const Runtime::SoulLoader soul = [](std::string_view) { return "Check releases carefully"; };
+    handoffs->consult(alice,channel,model,intake,soul);
+    handoffs->consult(alice,otherChannel,model,intake,soul);
+    view = browser.get(path);
+    const auto& delivery = view.at("deliveries").at(0);
+    check(session.sends.size() == 2 && session.sends[0].first == target && session.sends[1].first == otherTarget &&
+          session.sends[0].second.find("Keep the existing checks") != std::string::npos &&
+          session.sends[0].second.find("release") != std::string::npos && model.calls == 2 && db.tasks().empty(),
+          "consultation misrouted, lost attribution, or used the root as Task work");
+    check(delivery.at("state") == "queued" && delivery.at("receipt").at("runId") == "next-run" &&
+          delivery.at("observedRunId").is_null(),"queue acceptance appeared as provider observation");
+
+    const auto coordTicket = browser.post(pairingRoute,pairingInput(target,true),201);
+    const auto coord = mcp.call({{"pairingCode",coordTicket.at("code")},{"requestId","coordinate"},
+                                  {"text","Please start coordinating"}}).at("result").at("structuredContent");
+    const auto coordPath = "/api/session-handoffs/" + std::to_string(coord.at("channelId").get<Id>());
+    const auto active = browser.get(coordPath);
+    check(active.at("mode") == "coordinate" && active.at("goal") == "Coordinate remaining checks",
+          "coordination changed the authorized goal");
+    const auto paused = browser.post(coordPath + "/pause",Json::object());
+    check(paused.at("state") == "paused" && paused.at("frozen") == true,"local pause did not block admission");
     browser.client.set_default_headers({{"Authorization",bobCredential}});
-    browser.post(coordPath + "/answer",answer,403);
+    browser.post(coordPath + "/resume",Json::object(),403);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
-    check(browser.post(coordPath + "/answer",answer).at("pendingQuestion").is_null(),"answer did not settle the question");
-    browser.post(coordPath + "/answer",answer);
-    wrongAnswer = answer;
-    wrongAnswer["text"] = "Other checks";
-    browser.post(coordPath + "/answer",wrongAnswer,403);
-    browser.post(coordPath + "/step",Json::object());
-    browser.post(coordPath + "/step",Json::object());
-    check(model.coordinationCalls == 2,"a repeated event or answer rescheduled a decision");
-    gate.advanceCoordination = true;
-    const auto guidance = browser.post(coordPath + "/step",Json::object()).at("reply");
-    check(guidance.at("state") == "providerPending","coordination guidance prematurely appeared as Applied");
-    const auto commandId = guidance.at("commandId");
-    const auto laterQuestion = browser.post(coordPath + "/step",Json::object());
-    check(laterQuestion.at("pendingQuestion").at("eventId") == "another-decision" && laterQuestion.at("reply") == guidance,
-          "a subsequent question hid the in-flight coordination reply");
-    const auto frozen = browser.post(coordPath + "/freeze",Json::object());
-    check(frozen.at("mode") == "coordinate" && frozen.at("frozen") == true && frozen.at("sealed") == false &&
-          frozen.at("generation") == 2 && frozen.at("released") == false,
-          "local freeze alone was represented as released or remotely sealed");
-    browser.post(coordPath + "/answer",answer,403);
-    gate.coordinationSealed = true;
-    const auto sealing = browser.post(coordPath + "/resume",Json::object());
-    check(sealing.at("sealed") == true && sealing.at("frozen") == true && sealing.at("released") == false &&
-          sealing.at("residualCommandIds") == Json::array({commandId}) && sealing.at("sealMarker") == "seal-marker",
-          "remote seal hid residuals or was represented as final release before acknowledgment");
-    gate.canAcknowledgeFreeze = true;
-    const auto released = browser.post(coordPath + "/resume",Json::object());
-    check(released.at("released") == true && released.at("releaseAcknowledged") == true &&
-          released.at("generation") == 2 && browser.get(coordPath) == released && db.tasks().empty(),
-          "acknowledged two-barrier take-back was not durable and independently visible");
-    const auto channel = coordinating.at("channelId").get<Id>();
-    const auto awaiting = handoffs->pending(0);
-    check(awaiting.size() == 1 && awaiting.front().first == channel,
-          "the background worker dropped a released handoff with an unresolved residual");
-    gate.coordinationApplied = true;
-    const auto late = browser.post(coordPath + "/step",Json::object());
-    check(late.at("released") == true && late.at("reply").at("commandId") == commandId &&
-          late.at("reply").at("state") == "applied" && late.at("reply").at("provider").at("nativeItemId") == "coordination-item" &&
-          handoffs->pending(0).empty() && model.coordinationCalls == 4,
-          "an admitted residual did not settle by read-only reconciliation after release");
+    const auto resumed = browser.post(coordPath + "/resume",Json::object());
+    check(resumed.at("frozen") == false && resumed.at("state") != "paused","the owner could not resume a paused coordination");
+    const auto stopped = browser.post(coordPath + "/freeze",Json::object());
+    check(stopped.at("state") == "stopped" && stopped.at("frozen") == true &&
+          stopped.at("generation").get<Id>() > active.at("generation").get<Id>() &&
+          !stopped.contains("sealed") && browser.get(coordPath) == stopped,
+          "local stop was not durable or showed remote seal state");
+    browser.post(coordPath + "/resume",Json::object(),403);
 }
 }
 

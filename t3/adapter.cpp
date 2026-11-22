@@ -4,6 +4,7 @@
 #include <charconv>
 #include <chrono>
 #include <set>
+#include <thread>
 
 namespace flockv0 {
 namespace t3detail {
@@ -372,6 +373,18 @@ Json launchArgs(const Command& command) {
     return args;
 }
 
+std::string pinnedCommit(const Json& args) {
+    const auto workspace = args.find("workspaceStrategy");
+    if (workspace == args.end() || !workspace->contains("expectedCommit")) return {};
+    const auto pin = str(*workspace,"expectedCommit");
+    if (!gitCommit(pin) || str(*workspace,"type") != "worktree" || str(*workspace,"baseRef") != pin ||
+        workspace->value("startFromOrigin",Json(nullptr)) != Json(false) ||
+        str(args,"runtimeMode") != "approval-required" ||
+        str(args,"clientRequestId").size() > 250)
+        throw Failure(Failure::Kind::Settings, "Invalid pinned specialist workspace");
+    return pin;
+}
+
 void verifyCommand(const Command& command) {
     if (command.tool == "answer_session_question") {
         if (!hasRun(command.target) || command.questionId.empty() || !command.answers.is_object())
@@ -578,6 +591,38 @@ Delivery answer(Client& client, const Command& command) {
     }
 }
 
+Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin) {
+    auto prompt = str(args,"message");
+    args.erase("message");
+    args["workspaceStrategy"].erase("expectedCommit");
+    const auto launched = client.call("t3_thread_launch",std::move(args));
+    const auto threadId = str(launched,"threadId");
+    if (threadId.empty() || str(launched,"projectId") != command.projectId ||
+        !member(launched,"runId").is_null()) invalidResponse();
+
+    const auto until = Clock::now() + std::chrono::seconds(8);
+    while (Clock::now() < until) {
+        const auto head = threadHead(client,threadId);
+        const auto& thread = detail(head,threadId);
+        if (str(thread,"projectId") != command.projectId || str(thread,"createdBy") != "agent" ||
+            str(thread,"creationSource") != "mcp" || boolean(thread,"archived")) invalidResponse();
+        if (!member(thread,"latestRunId").is_null() || !member(thread,"activeRunId").is_null())
+            return result(Outcome::Unknown,"The provisioned specialist already has a Run. Check its saved action in T3.");
+        if (member(thread,"worktreePath").is_null()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+        if (workspaceHead(client,command.projectId,thread,true) != pin)
+            return {Outcome::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
+        const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
+            {"message",std::move(prompt)},{"clientRequestId",command.actionId+":start"}});
+        if (str(sent,"threadId") != threadId || str(sent,"runId").empty() ||
+            (str(sent,"delivery") != "started" && str(sent,"delivery") != "queued")) invalidResponse();
+        return result(Outcome::Accepted,{}, {threadId,str(sent,"runId"),str(launched,"link")});
+    }
+    return result(Outcome::Unknown,"The specialist worktree is still being provisioned");
+}
+
 class Adapter final : public T3 {
 public:
     explicit Adapter(std::filesystem::path directory) : directory_(std::move(directory)) {}
@@ -592,7 +637,9 @@ public:
             auto connection = credential(command.environmentId, command.config);
             requireOperate(connection);
             if (command.tool == "delegate") {
-                launchArgs(command);
+                const auto args = launchArgs(command);
+                if (!pinnedCommit(args).empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
+                    return result(Outcome::Settings,"Pinned specialist worktrees require a local T3 environment");
                 Client client(std::move(connection));
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
                 if (str(project,"id") != command.projectId)
@@ -620,6 +667,15 @@ public:
             Json reply;
             if (launch) {
                 auto args = launchArgs(command);
+                const auto pin = pinnedCommit(args);
+                if (!pin.empty()) {
+                    if (!loopbackGitHost(origin))
+                        return {Outcome::Settings,{},"Pinned specialist worktrees require a local T3 environment",true};
+                    invoked = true;
+                    auto delivery = launchPinned(client,command,std::move(args),pin);
+                    useLocalThreadLink(delivery.run,command.environmentId,origin);
+                    return delivery;
+                }
                 invoked = true;
                 reply = client.call("t3_thread_launch", std::move(args));
                 if (str(reply, "projectId") != command.projectId) invalidResponse();
@@ -654,6 +710,15 @@ public:
             Client client(std::move(connection));
             if (command.tool == "delegate" || command.tool == "follow_up") {
                 auto recovered = reconcileWork(client, command);
+                if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
+                    const auto pin = pinnedCommit(launchArgs(command));
+                    if (!pin.empty()) {
+                        const auto head = threadHead(client,recovered.run.threadId);
+                        if (!loopbackGitHost(origin) ||
+                            workspaceHead(client,command.projectId,detail(head,recovered.run.threadId),true) != pin)
+                            return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
+                    }
+                }
                 useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
             }
@@ -672,7 +737,9 @@ public:
     Observation observe(const std::string& environmentId, const Json& config, const RunRef& run) override {
         if (!hasRun(run)) return state(Observed::Unavailable, "The assigned T3 Run is missing");
         try {
-            Client client(credential(environmentId, config));
+            auto connection = credential(environmentId,config);
+            const auto origin = checkedUrl(connection.mcpUrl).origin;
+            Client client(std::move(connection));
             const auto reply = wait(client, run, true);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
@@ -686,6 +753,24 @@ public:
                 if (ownsResult(client, run, effective, laterId)) {
                     source.runId = laterId;
                     observed.status = str(later, "status");
+                }
+                const auto settings = config.value("session",Json::object());
+                const auto workspace = settings.find("workspaceStrategy");
+                const auto pin = workspace == settings.end() ? std::string() : str(*workspace,"expectedCommit");
+                if (observed.status == "completed" && !pin.empty()) {
+                    if (!gitCommit(pin) || !loopbackGitHost(origin))
+                        return state(Observed::Unavailable,"Could not verify the specialist's pinned workspace");
+                    const auto head = threadHead(client,run.threadId);
+                    const auto& thread = detail(head,run.threadId);
+                    const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
+                    if (!actual) return state(Observed::Unavailable,"Could not verify the specialist's pinned workspace");
+                    if (*actual != pin) {
+                        observed.status = "failed";
+                        observed.detail = "The specialist worktree changed from the saved commit";
+                        observed.report = observed.detail;
+                        observed.resultRunId = source.runId;
+                        return observed;
+                    }
                 }
                 auto report = readReport(client, source, "messages", "assistant_message");
                 if (observed.status != "completed") {

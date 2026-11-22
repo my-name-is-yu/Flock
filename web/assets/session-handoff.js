@@ -1,12 +1,22 @@
 const $ = (id) => document.getElementById(id);
 const status = $('status');
+const pairingForm = $('pair');
 const savedChannel = new URLSearchParams(location.search).get('channel') ?? '';
-let channel = /^[1-9][0-9]*$/.test(savedChannel) ? savedChannel : /^#channel=([1-9][0-9]*)$/.exec(location.hash)?.[1];
+const channel = /^[1-9][0-9]*$/.test(savedChannel) ? savedChannel : '';
 let busy = false;
+let refreshing = false;
+let actionRevision = 0;
 let question;
-const labels = {
-  prepared: 'Prepared', accepted: 'Accepted', providerPending: 'Provider pending', applied: 'Applied',
-  failed: 'Failed', rejected: 'Rejected', unknown: 'Unknown',
+let rendered = '';
+let recentRendered = '';
+let pairingTimer;
+const handoffLabels = {
+  active: 'Active', paused: 'Paused in Flock',
+  stopped: 'Stopped in Flock', completed: 'Completed', budget_exhausted: 'Budget exhausted',
+};
+const deliveryLabels = {
+  prepared: 'Ready to send', dispatching: 'Sending', accepted: 'Accepted by T3', queued: 'Queued by T3',
+  observed: 'Response observed', failed: 'Failed', rejected: 'Rejected', unknown: 'Delivery unknown',
 };
 
 async function request(path, data) {
@@ -29,12 +39,10 @@ function fields(id, entries) {
   }));
 }
 
-function list(id, items) {
-  $(id).replaceChildren(...items.map((text) => {
-    const item = document.createElement('li');
-    item.textContent = text;
-    return item;
-  }));
+function listItem(text) {
+  const item = document.createElement('li');
+  item.textContent = text;
+  return item;
 }
 
 function workState(value) {
@@ -68,31 +76,50 @@ function workAnswer(view, work, stage, prompt) {
 }
 
 function render(view) {
+  const key = JSON.stringify(view);
+  if (key === rendered) return;
+  rendered = key;
   const coordination = view.mode === 'coordinate';
-  const takingBack = view.sealed || view.frozen;
+  const stopped = view.frozen || ['completed', 'budget_exhausted'].includes(view.state);
   $('handoff').hidden = false;
   $('handoff-heading').textContent = `${coordination ? 'Coordination' : 'Consultation'} with ${view.botId}`;
-  $('state').textContent = view.released ? 'Released' : takingBack ? 'Take-back in progress' :
-    view.opening ? 'Opening · awaiting T3 activation' : !coordination && view.reply?.state === 'applied' ? 'Replied' : 'Active';
+  $('state').textContent = handoffLabels[view.state] ?? workState(view.state);
   fields('origin', [
-    ['Invited by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
-    ['Session', view.target.threadId], ['Original Run', view.target.runId], ['Source message', view.sourceMessageId],
-    ['Grant epoch', view.grantEpoch], ['Local generation', view.generation],
-    ...(coordination ? [['Goal', view.goal], ['Scope', view.allowDelegation ? 'Guide and delegate' : 'Guide']] : []),
-  ]);
-  fields('barriers', [
-    ['T3 root admission', view.sealed ? 'Sealed' : view.opening ? 'Awaiting activation' : 'Seal unconfirmed'],
-    ['Flock work admission', view.frozen ? 'Frozen' : 'Freeze unconfirmed'],
-    ...(coordination ? [['T3 knows of freeze', view.releaseAcknowledged ? 'Confirmed' : 'Unconfirmed']] : []),
+    ['Paired by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
+    ['Thread', view.target.threadId], ['Request', view.requestId],
+    ...(coordination ? [['Goal', view.goal], ['Scope', view.allowDelegation ? 'Guide and delegate' : 'Guide'],
+      ['Local generation', view.generation], ['Progress cursor', view.eventCursor]] : []),
   ]);
   const commandCount = view.residualCommandIds.length;
+  const residualCommands = new Set(view.residualCommandIds);
   $('residual').hidden = commandCount === 0;
-  $('residual-count').textContent = `${commandCount} root ${commandCount === 1 ? 'command' : 'commands'} admitted before the seal`;
-  list('residual-commands', view.residualCommandIds);
+  $('residual-count').textContent = `${commandCount} in-flight or unresolved T3 ${commandCount === 1 ? 'message' : 'messages'}`;
+  $('residual-commands').replaceChildren(...view.residualCommandIds.map(listItem));
   const childCount = view.admittedChildIds.length;
   $('residual-work').hidden = !view.frozen || childCount === 0;
-  $('residual-work-count').textContent = `${childCount} child ${childCount === 1 ? 'launch' : 'launches'} admitted before the freeze`;
-  list('residual-children', view.admittedChildIds);
+  $('residual-work-count').textContent = `${childCount} child ${childCount === 1 ? 'launch' : 'launches'} admitted before pause or stop`;
+  $('residual-children').replaceChildren(...view.admittedChildIds.map(listItem));
+
+  $('no-deliveries').hidden = view.deliveries.length !== 0;
+  $('deliveries').replaceChildren(...view.deliveries.map((delivery) => {
+    const detail = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = [
+      deliveryLabels[delivery.state] ?? workState(delivery.state),
+      delivery.receipt?.mode,
+      residualCommands.has(delivery.commandId) ? 'Outstanding after pause or stop' : '',
+    ].filter(Boolean).join(' · ');
+    const entries = [`Command ${delivery.commandId}`];
+    if (delivery.receipt) entries.push(`Accepted Run ${delivery.receipt.runId}`, `Message ${delivery.receipt.messageId}`);
+    if (delivery.observedRunId) entries.push(`Response observed in Run ${delivery.observedRunId}`);
+    const list = document.createElement('ul');
+    list.replaceChildren(...entries.map(listItem));
+    detail.append(summary, list);
+    const row = document.createElement('li');
+    row.append(detail);
+    return row;
+  }));
+
   $('delegated').hidden = view.work.length === 0;
   const expanded = new Set(Array.from($('work-list').querySelectorAll('details[open]'), (item) => item.dataset.delegation));
   const workers = new Map(view.work.map((work) => [work.delegationId, work.executor]));
@@ -104,88 +131,153 @@ function render(view) {
     const title = document.createElement('summary');
     title.textContent = `${work.executor} · ${workState(work.result?.status ?? work.state)}`;
     const content = document.createElement('ul');
+    const canAnswer = !stopped && work.generation === view.generation;
+    const showQuestion = (parent, stage, question) => {
+      if (!question) return;
+      if (canAnswer) parent.append(workAnswer(view, work, stage, question));
+      else {
+        const text = document.createElement('p');
+        text.textContent = question.text;
+        parent.append(text);
+      }
+    };
     const notes = [work.purpose, `Requested by: ${workers.get(work.parentDelegationId) ?? view.botId}`,
       `Required evidence: ${work.doneWhen}`, `Input commit: ${work.commit}`,
       ...(work.result ? [work.result.report, ...work.result.evidence.map((source) =>
         [source.stageId, source.verdict, source.findings, source.threadId, source.runId, source.itemId]
           .filter(Boolean).join(' · '))] : []),
     ];
-    for (const note of notes) {
-      const row = document.createElement('li');
-      row.textContent = note;
-      content.append(row);
-    }
+    content.replaceChildren(...notes.map(listItem));
     for (const stage of work.stages) {
-      const row = document.createElement('li');
-      row.textContent = `${stage.name} · ${workState(stage.status)}`;
-      if (!takingBack && stage.question) row.append(workAnswer(view,work,stage.stageId,stage.question));
+      const row = listItem(`${stage.name} · ${workState(stage.status)}`);
+      showQuestion(row, stage.stageId, stage.question);
       content.append(row);
     }
     summary.append(title, content);
-    if (!takingBack && work.question) summary.append(workAnswer(view,work,null,work.question));
+    showQuestion(summary, null, work.question);
     item.append(summary);
     return item;
   }));
-  fields('reply', [
-    ['Delivery', view.reply ? labels[view.reply.state] ?? view.reply.state : 'No reply yet'],
-    ...(view.reply?.provider?.nativeItemId ? [['Provider turn', view.reply.provider.nativeTurnId],
-      ['Provider input', view.reply.provider.nativeItemId]] : []),
-  ]);
   $('decision').hidden = !view.latestDecision;
   $('decision-text').textContent = view.latestDecision?.text ?? '';
-  $('consult').hidden = coordination || takingBack || view.opening || ['applied','failed','rejected'].includes(view.reply?.state);
-  $('freeze').hidden = !coordination || view.frozen || view.opening;
-  question = view.pendingQuestion ? { generation: view.generation, eventId: view.pendingQuestion.eventId } : undefined;
+  $('pause').hidden = !coordination || stopped || view.state === 'paused';
+  $('resume').hidden = !coordination || view.state !== 'paused';
+  $('stop').hidden = !coordination || ['stopped', 'completed', 'budget_exhausted'].includes(view.state);
+  const nextQuestion = !stopped && view.pendingQuestion;
+  if (question?.eventId !== nextQuestion?.eventId) $('answer').elements.text.value = '';
+  question = nextQuestion ? { generation: view.generation, eventId: nextQuestion.eventId } : undefined;
   $('answer').hidden = !question;
-  $('question').textContent = view.pendingQuestion?.text ?? '';
+  $('question').textContent = nextQuestion?.text ?? '';
 }
 
 async function run(work, message) {
   if (busy) return;
   busy = true;
-  for (const button of document.querySelectorAll('button')) button.disabled = true;
+  actionRevision += 1;
+  const buttons = [...document.querySelectorAll('button:not(:disabled)')];
+  for (const button of buttons) button.disabled = true;
   status.textContent = '';
   try { await work(); }
   catch { status.textContent = message; }
   finally {
     busy = false;
-    for (const button of document.querySelectorAll('button')) button.disabled = false;
+    for (const button of buttons) button.disabled = false;
   }
 }
 
-async function loadRecent() {
-  const recent = await request('');
+function renderRecent(recent) {
+  const key = JSON.stringify(recent);
+  if (key === recentRendered) return;
+  recentRendered = key;
   $('recent').hidden = recent.length === 0;
   $('recent-links').replaceChildren(...recent.map((item) => {
     const row = document.createElement('li');
     const link = document.createElement('a');
     link.href = '/session-handoff.html?channel=' + item.channelId;
-    link.textContent = `${item.mode === 'coordinate' ? 'Coordination' : 'Consultation'} with ${item.botId}`;
-    link.title = item.runId;
+    link.textContent = `${item.mode === 'coordinate' ? 'Coordination' : 'Consultation'} with ${item.botId} · ${handoffLabels[item.state] ?? workState(item.state)}`;
+    link.title = item.threadId;
+    if (String(item.channelId) === channel) link.setAttribute('aria-current', 'page');
     row.append(link);
     return row;
   }));
 }
 
-$('accept').addEventListener('submit', (event) => {
-  event.preventDefault();
-  const field = event.currentTarget.elements.invitation;
-  const text = field.value;
-  field.value = '';
-  void run(async () => {
-    const invited = await request('', JSON.parse(text));
-    channel = String(invited.channelId);
-    history.replaceState(null, '', '#channel=' + channel);
-    render(invited);
-    await loadRecent();
-  }, 'Could not accept the invitation. Copy it from T3 and check your Flock access.');
+async function loadRecent() {
+  renderRecent(await request(''));
+}
+
+async function refresh() {
+  if (busy || refreshing || document.hidden) return;
+  refreshing = true;
+  const revision = actionRevision;
+  try {
+    const recent = await request('');
+    if (busy || revision !== actionRevision) return;
+    renderRecent(recent);
+    if (channel && !$('handoff').querySelector('form :focus')) {
+      const view = await request(`/${channel}`);
+      if (!busy && revision === actionRevision && !$('handoff').querySelector('form :focus')) render(view);
+    }
+  } catch {
+    // The explicit Refresh button reports connection errors.
+  } finally { refreshing = false; }
+}
+
+function clearPairing() {
+  clearTimeout(pairingTimer);
+  $('pairing').hidden = true;
+  $('pairing-code').value = '';
+  $('pairing-help').textContent = '';
+}
+
+pairingForm.elements.mode.addEventListener('change', () => {
+  const coordinating = pairingForm.elements.mode.value === 'coordinate';
+  $('coordination-scope').hidden = !coordinating;
+  pairingForm.elements.goal.required = coordinating;
 });
 
-for (const [id, action] of [['reconcile', 'resume'], ['consult', 'consult'], ['freeze', 'freeze']]) {
+pairingForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const { environmentId, projectId, threadId, botId, mode, goal, allowDelegation } = pairingForm.elements;
+  const data = {
+    target: { environmentId: environmentId.value.trim(), projectId: projectId.value.trim(), threadId: threadId.value.trim() },
+    botId: botId.value, mode: mode.value,
+  };
+  if (mode.value === 'coordinate') Object.assign(data, { goal: goal.value.trim(), allowDelegation: allowDelegation.checked });
+  void run(async () => {
+    clearPairing();
+    const ticket = await request('/pair', data);
+    $('pairing-code').value = ticket.code;
+    const expiry = new Date(ticket.expiresAt * 1000);
+    $('pairing-help').textContent =
+      `Give this code to the agent in the paired Thread and ask it to call request_flock_bot. Expires at ${expiry.toLocaleTimeString()}.`;
+    $('pairing').hidden = false;
+    pairingTimer = setTimeout(clearPairing, Math.max(0, expiry.getTime() - Date.now()));
+  }, 'Could not pair this Session. Check the IDs, T3 connection, and Flock access.');
+});
+
+$('copy-code').addEventListener('click', async () => {
+  const code = $('pairing-code');
+  try {
+    await navigator.clipboard.writeText(code.value);
+    status.textContent = 'Pairing code copied.';
+  } catch {
+    code.focus();
+    code.select();
+    status.textContent = 'Copy the selected code.';
+  }
+});
+
+$('refresh').addEventListener('click', () => void run(async () => {
+  render(await request(`/${channel}`));
+  await loadRecent();
+}, 'Could not refresh the handoff.'));
+
+for (const [id, action] of [['pause', 'pause'], ['resume', 'resume'], ['stop', 'freeze']]) {
   $(id).addEventListener('click', () => void run(async () => {
-    const response = await request(`/${channel}/${action}`, {});
-    render(action === 'consult' ? await request(`/${channel}`) : response);
-  }, 'Could not update the handoff. Check the connection and try again.'));
+    render(await request(`/${channel}/${action}`, {}));
+    await loadRecent();
+  }, 'Could not update the handoff. Refresh and try again.'));
 }
 
 $('answer').addEventListener('submit', (event) => {
@@ -198,8 +290,16 @@ $('answer').addEventListener('submit', (event) => {
     input.value = '';
     render(view);
     status.textContent = 'Answer recorded.';
-  }, 'Could not record the answer. Refresh the handoff and try again.');
+  }, 'Could not record the answer. Refresh and try again.');
 });
 
-void loadRecent().catch(() => {});
-if (channel) void run(async () => render(await request(`/${channel}`)), 'This handoff is unavailable.');
+void (async () => {
+  const response = await fetch('/api/bots');
+  if (!response.ok) throw new Error('Could not load Bots');
+  const bots = await response.json();
+  if (!Array.isArray(bots)) throw new Error('Could not load Bots');
+  for (const bot of bots) pairingForm.elements.botId.add(new Option(bot.name || bot.id, bot.id));
+  await loadRecent();
+  if (channel) render(await request(`/${channel}`));
+})().catch(() => { status.textContent = 'Session handoffs are unavailable. Check your Flock sign-in.'; });
+setInterval(() => void refresh(), 3500);

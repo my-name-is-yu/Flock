@@ -1,261 +1,225 @@
-#include "flock/participation.hpp"
+#include "flock/session_handoff.hpp"
 #include "storage.hpp"
 
 #include <algorithm>
-#include <set>
+#include <array>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 
 namespace flockv0 {
 namespace {
 
-constexpr std::size_t maxContextItems = 3;
-constexpr std::size_t maxContextBytes = 8192;
+constexpr std::string_view pairingPrefix = "flock-pair-";
+constexpr std::size_t maxRequestBytes = 8192;
 
-bool validId(std::string_view value) {
-    return !value.empty() && value.size() <= 1024 &&
-           std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; });
+template<class Bytes>
+std::string hex(const Bytes& bytes) {
+    constexpr std::string_view digits = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const auto byte : bytes) {
+        result += digits[byte >> 4];
+        result += digits[byte & 15];
+    }
+    return result;
 }
 
-void validateInvitation(const InvitationRef& ref) {
-    const auto& target = ref.target;
-    if (!validId(target.environmentId) || !validId(target.projectId) || !validId(target.threadId) ||
-        !validId(target.runId) || !validId(ref.requestId) || !validId(ref.sourceMessageId) || !validBotId(ref.botId))
-        throw Conflict("Invalid Session invitation");
+std::string digest(std::string_view value) {
+    std::array<unsigned char,32> bytes{};
+    unsigned int size = 0;
+    if (EVP_Digest(value.data(),value.size(),bytes.data(),&size,EVP_sha256(),nullptr) != 1 || size != bytes.size())
+        throw std::runtime_error("Could not hash Session pairing data");
+    return hex(bytes);
 }
 
-void authorize(const Access& access, const Person& person, const ImmutableOrigin& origin,
-               const CoordinationRequest* coordination) {
-    const auto& ref = origin.invitation;
-    const auto& [environment, project, thread, run] = ref.target;
-    const auto operation = coordination ? Scope::sessionCoordinate(environment, thread)
-                                        : Scope::consultReply(environment, thread);
-    if (person.id != origin.personId || !access.permitsPerson(person, ref.botId, Role::decide) ||
-        !access.permitsPersonScope(person, Scope::sessionRead(environment, thread)) ||
-        !access.permits(ref.botId, operation, true) ||
+bool validId(std::string_view value, std::size_t max = 1024) {
+    return !value.empty() && value.size() <= max &&
+           std::ranges::none_of(value,[](unsigned char c) { return c <= 32 || c == 127; });
+}
+
+void authorize(const Access& access, const Person& person, std::string_view bot,
+               const ThreadTarget& target, const CoordinationRequest* coordination, bool requireBot = true) {
+    const auto operation = coordination ? Scope::sessionCoordinate(target.environmentId,target.threadId)
+                                        : Scope::consultReply(target.environmentId,target.threadId);
+    if (person.id.empty() || !access.permitsPerson(person,bot,Role::decide) ||
+        !access.permitsPersonScope(person,Scope::sessionRead(target.environmentId,target.threadId)))
+        throw Conflict("Session participation access denied");
+    if (!requireBot) return;
+    if (!access.permits(bot,operation,true) ||
+        (coordination && !access.permits(bot,Scope::sessionRead(target.environmentId,target.threadId),true)) ||
         (coordination && coordination->allowDelegation &&
-         !access.permits(ref.botId, Scope::workDelegate(environment, thread), true)))
+         !access.permits(bot,Scope::workDelegate(target.environmentId,target.threadId),true)))
         throw Conflict("Session participation access denied");
 }
 
-void redactContext(std::vector<SharedSessionContext>& context, const ImmutableOrigin& origin,
-                   const SecretRedactor& redactor) {
-    const auto& ref = origin.invitation;
-    const auto& target = ref.target;
-    redactor.requirePublic({origin.personId, ref.botId, ref.requestId, ref.sourceMessageId,
-                            target.environmentId, target.projectId, target.threadId, target.runId});
-    for (auto& item : context) {
-        redactor.requirePublic({item.itemId});
-        auto text = redactor.text(item.text, item.truncated);
-        item.truncated = item.truncated || text.size() > maxContextBytes;
-        item.text = bounded(text, maxContextBytes);
+std::optional<CoordinationRequest> permission(const Json& value) {
+    if (value.is_null()) return {};
+    return CoordinationRequest{value.at("goal").get<std::string>(),value.at("allowDelegation").get<bool>()};
+}
+
+}
+
+std::string redactPairingCodes(std::string value) {
+    std::size_t at = 0;
+    while ((at = value.find(pairingPrefix,at)) != value.npos) {
+        const auto first = at + pairingPrefix.size();
+        std::size_t end = first;
+        while (end < value.size() && std::string_view("0123456789abcdef").find(value[end]) != std::string_view::npos) ++end;
+        if (end == first) {
+            at = first;
+            continue;
+        }
+        value.replace(at,end - at,"[pairing code]");
+        at += std::string_view("[pairing code]").size();
     }
-}
-
-Json contextJson(const std::vector<SharedSessionContext>& context) {
-    auto data = Json::array();
-    for (const auto& item : context)
-        data.push_back({{"itemId", item.itemId}, {"text", item.text}, {"truncated", item.truncated}});
-    return data;
-}
-
-std::optional<Participation> lookup(sqlite3* db, Id id, std::string_view environment = {},
-                                    std::string_view request = {}) {
-    Statement row(db, R"SQL(
-SELECT c.id, c.environment_id, c.project_id, c.thread_id, c.run_id, c.request_id, c.source_message_id,
-       c.bot_id, c.person_id, c.context, p.command_id, a.activation_id, a.expected_epoch, a.goal,
-       a.allow_delegation, a.grant_epoch
-FROM return_channels c
-LEFT JOIN consult_permits p ON p.channel_id=c.id
-LEFT JOIN coordination_activations a ON a.channel_id=c.id
-WHERE c.id=? OR (c.environment_id=? AND c.request_id=?)
-)SQL", {id, environment, request});
-    if (!row.next()) return {};
-    const ExactRunTarget target{row.string(1), row.string(2), row.string(3), row.string(4)};
-    const ImmutableOrigin origin{{target, row.string(5), row.string(6), row.string(7)}, row.string(8)};
-    ReturnChannel channel{row.number(0), origin, {}};
-    for (const auto& item : row.json(9))
-        channel.context.push_back({target, item.at("itemId").get<std::string>(),
-                                   item.at("text").get<std::string>(), item.at("truncated").get<bool>()});
-    auto command = row.string(10);
-    if (!command.empty()) return ConsultPermit{std::move(channel), std::move(command)};
-    CoordinationBinding binding{row.string(11), origin, {row.number(12), row.string(13), row.number(14) != 0}};
-    const Id epoch = row.number(15);
-    std::optional<CoordinationGrant> grant;
-    if (epoch) grant.emplace(CoordinationGrant{binding, epoch});
-    return CoordinationActivation{std::move(channel), std::move(binding), std::move(grant)};
-}
-
-CoordinationActivation loadCoordination(sqlite3* db, Id channel) {
-    auto participation = lookup(db, channel);
-    if (!participation || !std::holds_alternative<CoordinationActivation>(*participation))
-        throw Conflict("Unknown coordination activation");
-    return std::get<CoordinationActivation>(std::move(*participation));
-}
-
+    return value;
 }
 
 void Store::Impl::initializeParticipationSchema() {
+    // Preserve IDs and history written by earlier draft builds. Only channels
+    // with a local control row can authorize new work.
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS return_channels(
  id INTEGER PRIMARY KEY,
  environment_id TEXT NOT NULL, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL,
  request_id TEXT NOT NULL, source_message_id TEXT NOT NULL, bot_id TEXT NOT NULL, person_id TEXT NOT NULL,
- context TEXT NOT NULL,
- UNIQUE(environment_id,request_id));
+ context TEXT NOT NULL, UNIQUE(environment_id,request_id))
 )SQL");
     exec("CREATE INDEX IF NOT EXISTS return_channels_thread ON return_channels(environment_id,thread_id)");
     exec(R"SQL(
-CREATE TABLE IF NOT EXISTS consult_permits(
+CREATE TABLE IF NOT EXISTS session_controls(
  channel_id INTEGER PRIMARY KEY REFERENCES return_channels(id),
- command_id TEXT NOT NULL UNIQUE);
+ generation INTEGER NOT NULL DEFAULT 1,
+ state TEXT NOT NULL CHECK(state IN ('active','paused','stopped','completed','failed','budget_exhausted')),
+ auth_generation TEXT NOT NULL,
+ permission TEXT NOT NULL,
+ consult_command TEXT NOT NULL,
+ event_cursor INTEGER NOT NULL,
+ initial_pending INTEGER NOT NULL DEFAULT 1)
 )SQL");
     exec(R"SQL(
-CREATE TABLE IF NOT EXISTS coordination_activations(
- channel_id INTEGER PRIMARY KEY REFERENCES return_channels(id),
- activation_id TEXT NOT NULL UNIQUE,
- expected_epoch INTEGER NOT NULL CHECK(expected_epoch>=0),
- goal TEXT NOT NULL,
- allow_delegation INTEGER NOT NULL CHECK(allow_delegation IN (0,1)),
- grant_epoch INTEGER NOT NULL DEFAULT 0 CHECK(grant_epoch=0 OR grant_epoch>expected_epoch));
+CREATE TABLE IF NOT EXISTS session_pairings(
+ code_digest TEXT PRIMARY KEY,
+ person_id TEXT NOT NULL, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL,
+ thread_id TEXT NOT NULL, auth_generation TEXT NOT NULL, cursor INTEGER NOT NULL, permission TEXT NOT NULL,
+ expires_at INTEGER NOT NULL, used_channel INTEGER REFERENCES return_channels(id),
+ client_request TEXT, request_digest TEXT)
 )SQL");
 }
 
-Participation Store::Impl::authorizeParticipation(const Person& person, Id channel) {
-    auto entry = lookup(db, channel);
-    if (!entry) throw Conflict("Unknown Session participation");
-    if (const auto* consult = std::get_if<ConsultPermit>(&*entry))
-        authorize(Access(*this), person, consult->channel.origin, nullptr);
-    else {
-        const auto& activation = std::get<CoordinationActivation>(*entry);
-        authorize(Access(*this), person, activation.channel.origin, &activation.binding.request);
-    }
-    return std::move(*entry);
+Participation Store::Impl::authorizeParticipation(const Person& person, Id channel, bool requireBot) {
+    auto row = query(R"SQL(
+SELECT c.environment_id,c.project_id,c.thread_id,c.request_id,c.bot_id,c.person_id,c.context,
+       s.permission,s.consult_command
+FROM return_channels c JOIN session_controls s ON s.channel_id=c.id WHERE c.id=?
+)SQL",{channel});
+    if (!row.next() || person.id != row.string(5)) throw Conflict("Unknown Session participation");
+    ThreadTarget target{row.string(0),row.string(1),row.string(2)};
+    auto scope = permission(row.json(7));
+    authorize(Access(*this),person,row.string(4),target,scope ? &*scope : nullptr,requireBot);
+    ReturnChannel result{channel,{{std::move(target),row.string(3),row.string(4)},person.id},
+                         row.json(6).at("request").get<std::string>()};
+    if (!scope) return ConsultPermit{std::move(result),row.string(8)};
+    return CoordinationActivation{std::move(result),{std::move(*scope)}};
 }
 
-Participation ParticipationStore::open(const Person& person, const InvitationRef& ref,
-                                       ParticipationAuthority& authority) {
-    validateInvitation(ref);
-    auto verified = authority.invitation(ref);
-    if (!verified || verified->ref != ref || verified->personId != person.id)
-        throw Conflict("The Session invitation could not be verified");
-    const auto& target = ref.target;
-    if (verified->context.size() > maxContextItems) throw Conflict("Too many shared Session context items");
-    std::set<std::string_view> sharedItems;
-    for (const auto& item : verified->context) {
-        if (item.target != target || !validId(item.itemId) || item.text.size() > maxSessionPromptBytes ||
-            !sharedItems.insert(item.itemId).second)
-            throw Conflict("Invalid shared Session context");
+PairingTicket SessionHandoff::pair(const Person& person, const ThreadTarget& target, std::string_view bot,
+                                   std::optional<CoordinationRequest> coordination) {
+    if (!validId(target.environmentId) || !validId(target.projectId) || !validId(target.threadId) ||
+        !validBotId(bot) || (coordination && (coordination->goal.size() > maxRequestBytes ||
+                              trimSessionQuestionText(coordination->goal).empty())))
+        throw Conflict("Invalid Session pairing");
+    auto& db = *store_.p_;
+    auto check = [&] {
+        authorize(store_.access(),person,bot,target,coordination ? &*coordination : nullptr);
+        db.sharedRedactor().requirePublic({person.id,bot,target.environmentId,target.projectId,target.threadId,
+                                           coordination ? coordination->goal : ""});
+        if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=?",
+                     {target.environmentId,target.threadId}).next())
+            throw Conflict("A Flock-owned Thread cannot be paired");
+    };
+    {
+        std::lock_guard lock(db.mutex);
+        check();
     }
-    const auto* request = verified->coordination ? &*verified->coordination : nullptr;
-    if (request && (request->expectedEpoch < 0 || trimSessionQuestionText(request->goal).empty() ||
-                    request->goal.size() > maxContextBytes))
-        throw Conflict("Invalid coordination scope");
+    const auto origin = session_.read(target,std::nullopt);
+    if (!origin || origin->target != target || origin->authGeneration.empty())
+        throw Conflict("The configured T3 connection cannot verify this Thread");
 
+    std::array<unsigned char,32> bytes{};
+    if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
+        throw std::runtime_error("Could not generate Session pairing code");
+    PairingTicket ticket{std::string(pairingPrefix) + hex(bytes),unixTime() + 10 * 60};
+    const auto scope = coordination ? Json{{"goal",redactPairingCodes(coordination->goal)},
+                                             {"allowDelegation",coordination->allowDelegation}} : Json(nullptr);
+    std::lock_guard lock(db.mutex);
+    Transaction tx(db.db);
+    check();
+    db.exec("DELETE FROM session_pairings WHERE expires_at<=?",{unixTime()});
+    db.exec(R"SQL(
+INSERT INTO session_pairings(code_digest,person_id,bot_id,environment_id,project_id,thread_id,
+auth_generation,cursor,permission,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+)SQL",{digest(ticket.code),person.id,bot,target.environmentId,target.projectId,target.threadId,
+        origin->authGeneration,origin->cursor,scope.dump(),ticket.expiresAt});
+    tx.commit();
+    return ticket;
+}
+
+HandoffAck SessionHandoff::intake(std::string_view code, std::string_view requestId, std::string_view text) {
+    if (!code.starts_with(pairingPrefix) || code.size() != pairingPrefix.size() + 64 || !validId(code,128) ||
+        !validId(requestId,128) || text.size() > maxRequestBytes || trimSessionQuestionText(text).empty())
+        throw Conflict("Invalid Session request");
+    const auto key = digest(code);
+    const auto payload = digest(text);
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    const ImmutableOrigin origin{ref, verified->personId};
-    authorize(store_.access(), person, origin, request);
-    if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=? AND run_id=?",
-                 {target.environmentId, target.threadId, target.runId}).next())
-        throw Conflict("Session participation requires a person-started Run");
-
-    const auto redactor = db.sharedRedactor();
-    if (request) redactor.requirePublic({request->goal});
-    redactContext(verified->context, origin, redactor);
-    if (auto existing = lookup(db.db, 0, target.environmentId, ref.requestId)) {
-        const auto* activation = std::get_if<CoordinationActivation>(&*existing);
-        auto& channel = std::visit([](auto& item) -> ReturnChannel& { return item.channel; }, *existing);
-        if (channel.origin != origin || (activation != nullptr) != (request != nullptr) ||
-            (activation && activation->binding.request != *request))
-            throw Conflict("The Session invitation has changed");
-        const bool sameContext = channel.context == verified->context;
-        redactContext(channel.context, channel.origin, redactor);
-        if (!sameContext && channel.context != verified->context)
-            throw Conflict("The Session invitation has changed");
+    auto row = db.query(R"SQL(
+SELECT person_id,bot_id,environment_id,project_id,thread_id,auth_generation,cursor,permission,
+       used_channel,client_request,request_digest FROM session_pairings
+WHERE code_digest=? AND expires_at>?
+)SQL",{key,unixTime()});
+    if (!row.next()) throw Conflict("Session pairing is unavailable");
+    const auto person = people_ ? people_(row.string(0)) : std::nullopt;
+    if (!person || person->id != row.string(0)) throw Conflict("Session pairing is unavailable");
+    const ThreadTarget target{row.string(2),row.string(3),row.string(4)};
+    const auto bot = row.string(1);
+    const auto scopeJson = row.json(7);
+    const auto scope = permission(scopeJson);
+    authorize(store_.access(),*person,bot,target,scope ? &*scope : nullptr);
+    if (const auto used = row.number(8)) {
+        if (row.string(9) != requestId || row.string(10) != payload) throw Conflict("Session pairing is already used");
+        const auto existing = db.authorizeParticipation(*person,used);
+        const auto reply = std::visit([](const auto& entry) {
+            return HandoffAck{entry.channel.id,entry.channel.origin.invitation.requestId};
+        },existing);
         tx.commit();
-        return std::move(*existing);
+        return reply;
     }
-    if (request && db.query(R"SQL(
-SELECT 1 FROM coordination_activations a JOIN return_channels c ON c.id=a.channel_id
-LEFT JOIN root_gate_channels g ON g.channel_id=c.id
-WHERE c.environment_id=? AND c.thread_id=?
- AND (g.sealed IS NOT 1 OR g.frozen IS NOT 1 OR g.release_acknowledged IS NOT 1)
-)SQL", {target.environmentId, target.threadId}).next())
-        throw Conflict("A coordination activation already exists for this Session");
+    if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=?",
+                 {target.environmentId,target.threadId}).next())
+        throw Conflict("A Flock-owned Thread cannot be paired");
+    if (scope && db.query(R"SQL(
+SELECT 1 FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
+WHERE c.environment_id=? AND c.thread_id=? AND s.permission<>'null' AND s.state IN ('active','paused')
+)SQL",{target.environmentId,target.threadId}).next())
+        throw Conflict("This Session already has a coordinator");
 
+    const auto request = actionId();
+    const Json context{{"request",redactPairingCodes(db.sharedRedactor().text(text))}};
     db.exec(R"SQL(
 INSERT INTO return_channels(environment_id,project_id,thread_id,run_id,request_id,source_message_id,bot_id,person_id,context)
-VALUES(?,?,?,?,?,?,?,?,?)
-)SQL", {target.environmentId, target.projectId, target.threadId, target.runId, ref.requestId,
-         ref.sourceMessageId, ref.botId, person.id, contextJson(verified->context)});
-    ReturnChannel channel{db.last(), origin, std::move(verified->context)};
-    auto id = actionId();
-    if (!request) {
-        db.exec("INSERT INTO consult_permits(channel_id,command_id) VALUES(?,?)", {channel.id, id});
-        tx.commit();
-        return ConsultPermit{std::move(channel), std::move(id)};
-    }
+VALUES(?,?,?,'',?,'',?,?,?)
+)SQL",{target.environmentId,target.projectId,target.threadId,request,bot,person->id,context.dump()});
+    const auto channel = db.last();
     db.exec(R"SQL(
-INSERT INTO coordination_activations(channel_id,activation_id,expected_epoch,goal,allow_delegation)
-VALUES(?,?,?,?,?)
-)SQL", {channel.id, id, request->expectedEpoch, request->goal, static_cast<int>(request->allowDelegation)});
+INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor)
+VALUES(?,'active',?,?,?,?)
+)SQL",{channel,row.string(5),scopeJson.dump(),scope ? "" : actionId(),row.number(6)});
+    db.exec("UPDATE session_pairings SET used_channel=?,client_request=?,request_digest=? WHERE code_digest=?",
+            {channel,requestId,payload,key});
     tx.commit();
-    return CoordinationActivation{std::move(channel), {std::move(id), origin, *request}, {}};
-}
-
-ConsultPermit ParticipationStore::consult(const Person& person, std::string_view bot, Id channel) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db, Transaction::Mode::read);
-    auto entry = lookup(db.db, channel);
-    auto* permit = entry ? std::get_if<ConsultPermit>(&*entry) : nullptr;
-    if (!permit || permit->channel.origin.invitation.botId != bot) throw Conflict("Unknown consultation permit");
-    authorize(store_.access(), person, permit->channel.origin, nullptr);
-    redactContext(permit->channel.context, permit->channel.origin, db.sharedRedactor());
-    tx.commit();
-    return std::move(*permit);
-}
-
-CoordinationActivation ParticipationStore::coordination(const Person& person, Id channel) const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db, Transaction::Mode::read);
-    auto activation = loadCoordination(db.db, channel);
-    authorize(store_.access(), person, activation.channel.origin, &activation.binding.request);
-    const auto redactor = db.sharedRedactor();
-    redactor.requirePublic({activation.binding.request.goal});
-    redactContext(activation.channel.context, activation.channel.origin, redactor);
-    tx.commit();
-    return activation;
-}
-
-CoordinationActivation ParticipationStore::observeGrant(const Person& person, Id channel,
-                                                       ParticipationAuthority& authority) {
-    const auto opening = coordination(person, channel);
-    auto grant = authority.grant(opening.binding);
-    if (!grant) {
-        auto current = coordination(person, channel);
-        if (current.acknowledgment) throw Conflict("The current T3 grant could not be verified");
-        return current;
-    }
-    if (grant->binding != opening.binding || grant->epoch <= opening.binding.request.expectedEpoch)
-        throw Conflict("T3 returned a different coordination grant");
-
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
-    auto activation = loadCoordination(db.db, channel);
-    authorize(store_.access(), person, activation.channel.origin, &activation.binding.request);
-    const auto redactor = db.sharedRedactor();
-    redactor.requirePublic({activation.binding.request.goal});
-    redactContext(activation.channel.context, activation.channel.origin, redactor);
-    if (activation.acknowledgment && *activation.acknowledgment != *grant)
-        throw Conflict("A different T3 grant has already been recorded");
-    db.exec("UPDATE coordination_activations SET grant_epoch=? WHERE channel_id=? AND grant_epoch=0",
-            {grant->epoch, channel});
-    activation.acknowledgment = std::move(grant);
-    tx.commit();
-    return activation;
+    return {channel,request};
 }
 
 }

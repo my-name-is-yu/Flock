@@ -1,5 +1,5 @@
 #include "flock/board_inbox.hpp"
-#include "flock/root_delivery.hpp"
+#include "flock/session_handoff.hpp"
 
 #include <algorithm>
 #include <barrier>
@@ -102,6 +102,7 @@ struct SimulatedT3 : T3 {
     std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
+    std::function<bool(const Command&)> rejectWork;
     std::function<void()> beforeWorkAcknowledgement;
     std::string authGeneration(const std::string&,const Json&) override { return generation; }
     std::optional<Delivery> preflight(const Command&) override {
@@ -121,6 +122,8 @@ struct SimulatedT3 : T3 {
         check(cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos,
               "missing full action marker");
         if (std::exchange(failBeforeWorkSend,false)) return {};
+        if (rejectWork && rejectWork(cmd))
+            return {Delivery::Kind::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
         const auto serial = launches + follows + 1;
         RunRef run{"thread-" + std::to_string(launches + 1),"run-" + std::to_string(serial),"https://t3.test/thread"};
         if (cmd.tool == "delegate") ++launches;
@@ -195,9 +198,8 @@ struct Fixture {
     std::string read = "off";
     std::map<std::string,BotNotes> notes{{"alpha",{"Initial SOUL","ALPHA_ONLY"}},{"beta",{"Second SOUL","BETA_ONLY"}}};
     std::map<std::string,std::vector<PeerBot>,std::less<>> peers;
-    std::function<std::optional<Id>(const Person&,Id)> specialistGrant;
+    std::function<std::optional<Person>(std::string_view)> specialistPerson;
     std::function<std::optional<std::string>(const Person&,Id)> specialistInput;
-    std::function<bool(const Command&,std::string_view)> specialistWorkspace;
 
     Fixture() {
         char temp[] = "/tmp/flock-acceptance-XXXXXX";
@@ -226,9 +228,8 @@ struct Fixture {
             const auto found = peers.find(source);
             return found == peers.end() ? std::vector<PeerBot>{} : found->second;
         };
-        options.observeSpecialistGrant = specialistGrant;
+        options.resolveSpecialistPerson = specialistPerson;
         options.observeSpecialistInput = specialistInput;
-        options.verifySpecialistWorkspace = specialistWorkspace;
         runtime = std::make_unique<Runtime>(*store,model,t3,[&](std::string_view id) {
             return notes.at(std::string(id)).soul;
         },std::move(options));
@@ -1918,48 +1919,36 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, FrozenWorkflowAdmission, Nested, CancelledNested };
+enum class SpecialistMode { Single, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
     f.allowBeta();
     f.peers.at("alpha").front().role = "reviewer";
-    const Person person{"participant"};
-    const InvitationRef invitation{{"e","p","root-thread","human-run"},"request","source","alpha"};
-    const CoordinationRequest scope{0,"Check the pinned project",true};
-    struct Authority final : ParticipationAuthority {
-        VerifiedInvitation verified;
-        explicit Authority(VerifiedInvitation input) : verified(std::move(input)) {}
-        std::optional<VerifiedInvitation> invitation(const InvitationRef& ref) override {
-            if (verified.ref==ref) return verified;
-            return {};
+    const Person person{"participant",mode==SpecialistMode::Single};
+    const ThreadTarget target{"e","p","root-thread"};
+    const CoordinationRequest scope{"Check the pinned project",true};
+    const std::string pin(40,'a');
+    std::string currentPin = pin;
+    struct Session final : ThreadSession {
+        std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
+            return ThreadPage{origin,0,"root-credential-generation","",{}};
         }
-        std::optional<CoordinationGrant> grant(const CoordinationBinding& binding) override {
-            return CoordinationGrant{binding,1};
+        ThreadSend send(const ThreadTarget&,std::string_view,std::string_view,std::string_view) override {
+            throw std::runtime_error("A specialist tried to send to the root Thread");
         }
-    } authority({invitation,person.id,{},scope});
-    struct Gate final : RootGate {
-        RootGrant grant;
-        explicit Gate(RootGrant root) : grant(std::move(root)) {}
-        std::optional<RootGateCapabilities> capabilities(std::string_view environment) override {
-            return RootGateCapabilities{std::string(environment),"test",1,true,true,true,true,true};
-        }
-        std::optional<RootGrant> readGrant(const RootGrantRef& ref, std::string_view) override {
-            if (grant.ref==ref) return grant;
-            return {};
-        }
-        std::optional<RootSealStatus> sealStatus(const RootGrantRef& ref, std::string_view) override {
-            if (grant.ref==ref) return RootSealStatus{grant,{}, {},false};
-            return {};
-        }
-        RootGateReply readReceipt(const RootCommandRef&,std::string_view) override { return {}; }
-        RootGateReply send(const RootCommand&,std::string_view) override {
-            throw std::runtime_error("A specialist tried to send to the root Run");
-        }
+        std::optional<std::string> inputCommit(const ThreadTarget&) override { return {}; }
+    } session;
+    f.specialistPerson = [&](std::string_view id) -> std::optional<Person> {
+        return id==person.id ? std::optional(person) : std::nullopt;
     };
+    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson); };
     auto access = f.store->access();
-    access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
-    access.personScope(localOwner,person.id,Scope::sessionRead("e","root-thread"),GrantChange::grant);
+    if (!person.adminRoot) {
+        access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
+        access.personScope(localOwner,person.id,Scope::sessionRead("e","root-thread"),GrantChange::grant);
+    }
+    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested;
@@ -1973,34 +1962,21 @@ void specialistAdmission(SpecialistMode mode) {
         for (const auto* bot : {"beta","gamma"})
             access.resourceGrant(localOwner,bot,Scope::workDelegate("e","root-thread"),GrantChange::grant);
     }
-    ParticipationStore participation(*f.store);
-    const auto opening = std::get<CoordinationActivation>(participation.open(person,invitation,authority));
-    const auto channel = opening.channel.id;
-    participation.observeGrant(person,channel,authority);
-    Gate gate({{invitation.target,opening.binding.activationId,1},invitation.sourceMessageId,"alpha",scope,false});
-    RootDelivery(*f.store,gate).bind(person,channel,std::string(43,'z'));
-    f.specialistGrant = [&](const Person& actor, Id id) -> std::optional<Id> {
-        const auto grant = RootDelivery(*f.store,gate).observeGrant(actor,id);
-        if (grant.verified && !grant.frozen && !grant.sealed) return grant.generation;
-        return {};
-    };
+    const auto pairing = handoffs().pair(person,target,"alpha",scope);
+    const auto channel = handoffs().intake(pairing.code,"request","Check the pinned project.").channel;
     bool freezeBeforeReservation = false;
+    bool freezeDuringWorkflowAdmission = false;
     unsigned workspaceChecks = 0;
-    f.specialistWorkspace = [&](const Command& command, std::string_view sha) {
-        if (freezeBeforeReservation || (++workspaceChecks==2 && mode==SpecialistMode::FrozenWorkflow))
-            RootDelivery(*f.store,gate).freeze(person,channel);
-        const auto& session = command.config.at("session");
-        return session.at("workspaceStrategy").at("expectedCommit")==sha &&
-            session.at("workspaceStrategy").at("baseRef")==sha;
+    f.t3.onPreflight = [&] {
+        if (freezeBeforeReservation || (mode==SpecialistMode::FrozenWorkflow && ++workspaceChecks==2))
+            handoffs().freeze(person,channel);
     };
-    const std::string pin(40,'a');
-    std::string currentPin = pin;
     f.specialistInput = [&](const Person&, Id) {
-        if (mode==SpecialistMode::FrozenWorkflowAdmission) RootDelivery(*f.store,gate).freeze(person,channel);
+        if (freezeDuringWorkflowAdmission) handoffs().freeze(person,channel);
         return currentPin;
     };
     f.restart();
-    const auto generation = *f.specialistGrant(person,channel);
+    const auto generation = handoffs().view(person,channel).generation;
     SpecialistCheck request{channel,generation,"coord/check-1","beta","Review the pinned project",Evidence,pin};
     const auto first = f.runtime->startSpecialist(person,request);
     check(first.senderTaskId!=first.recipientTaskId && f.task(first.senderTaskId)["activeRun"].is_null() &&
@@ -2094,9 +2070,10 @@ void specialistAdmission(SpecialistMode mode) {
             return ask();
         };
         if (mode==SpecialistMode::FrozenWorkflowAdmission) {
+            freezeDuringWorkflowAdmission = true;
             f.wait(first.recipientTaskId,"model_failure");
             check(f.store->workflows("beta",0,10).empty() && f.store->tasks("beta").size()==1 && f.t3.launches==0,
-                  "freeze between grant observation and workflow creation admitted stage tasks");
+                  "freeze before workflow creation admitted stage tasks");
             return;
         }
         const auto unrelated = f.submit("Unrelated work");
@@ -2107,18 +2084,23 @@ void specialistAdmission(SpecialistMode mode) {
         check(stage1!=stage2 && stage1!=first.recipientTaskId && stage2!=first.recipientTaskId,
               "workflow did not persist two independent stage tasks");
         f.restart();
-        if (mode==SpecialistMode::FrozenWorkflow) {
+        if (mode==SpecialistMode::RejectedWorkflowInput) {
+            f.t3.rejectWork = [](const Command& command) {
+                return command.instruction.find("verify-2") != std::string::npos;
+            };
+        }
+        if (mode==SpecialistMode::FrozenWorkflow || mode==SpecialistMode::RejectedWorkflowInput) {
             f.reach(stage2,"completed");
             check(f.task(stage1).at("state")=="running" && f.t3.launches==1 && f.t3.interrupts==0 &&
                   f.logs(stage2,"specialist_launch_blocked")==1 && f.task(first.recipientTaskId).at("state")=="workflow_waiting",
-                  "freeze did not stop only the reserved stage before launch");
+                  "refusal of the second stage did not preserve the running sibling");
             f.t3.finish("run-1");
             f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},
                 {"findings","The pre-freeze check completed."}}.dump();
             f.reach(first.senderTaskId,"completed");
             check(f.task(first.senderTaskId).at("peerOutcome")=="failed" && f.t3.launches==1 && f.t3.interrupts==0 &&
                   f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
-                  "late evidence after freeze created a new stage or falsely passed");
+                  "the running sibling's evidence was lost or incorrectly passed both checks");
             return;
         }
         f.reach(stage2,"running");
@@ -2243,7 +2225,7 @@ void specialistAdmission(SpecialistMode mode) {
     f.reach(second.senderTaskId,"completed");
     check(f.t3.launches==1 && f.logs(second.recipientTaskId,"specialist_launch_blocked")==1 &&
           f.task(second.senderTaskId).at("peerOutcome")=="failed",
-          "freeze between remote observation and launch reservation started new work");
+          "freeze before launch reservation started new work");
     request.delegationId = "coord/check-after-freeze";
     denied(request);
 }
@@ -2353,6 +2335,7 @@ int main() {
             {"scoped specialist workflow retains a failed check's findings",[] { specialistAdmission(SpecialistMode::FailedWorkflow); }},
             {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},
             {"specialist workflow freezes only work which did not start",[] { specialistAdmission(SpecialistMode::FrozenWorkflow); }},
+            {"specialist workflow settles a rejected worktree without losing its sibling",[] { specialistAdmission(SpecialistMode::RejectedWorkflowInput); }},
             {"specialist workflow rejects a frozen stage creation",[] { specialistAdmission(SpecialistMode::FrozenWorkflowAdmission); }},
             {"nested specialist preserves scope, provenance and shared allowance",[] { specialistAdmission(SpecialistMode::Nested); }},
             {"nested specialist cancellation reaches only its assigned Run",[] { specialistAdmission(SpecialistMode::CancelledNested); }},

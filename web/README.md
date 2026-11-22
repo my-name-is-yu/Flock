@@ -24,27 +24,49 @@ Browsers can sign in through the Basic challenge.
 
 ## Session handoffs
 
-Use a T3 build with the exact-Run handoff contract. Open **Flock** in a running
-T3 Session, choose a Bot and permission, and select the messages to share.
-Copy the invitation and paste it into **Session handoffs** in Flock. The
-invitation contains a credential scoped to the selected Run and permission.
-Treat it as private. Flock retains the channel for reload and stores the
-credential in its local vault.
+Use stock T3 Code v0.1.11 or a compatible version. Sign in to T3 from Flock
+with its existing MCP authorization, and configure a Web identity in Flock.
+On the machine running the T3 provider, add the Flock MCP endpoint to the
+provider's normal MCP configuration. Set a stable Flock port, for example
+`flock run --port 4173`, and use it in the URL.
 
-Add a `t3People` object to the inviting person's Web identity. Its keys are
-T3 environment IDs and its values are the authenticated person references
-shown in the T3 invitation. Grant the person Session read and decision access
-for the Bot. Grant the Bot `consult:reply-once` or `session:coordinate` for the
-exact environment and Session. A coordinator also needs `work:delegate` to
-choose specialists. Set the specialist's `role` in its Bot configuration,
-include its ID in the requester's `allowedBots`, and grant it permission to
-launch in the same T3 project. Both participants need their own applicable
-scope for a further delegation.
+```sh
+codex mcp add flock --url http://127.0.0.1:4173/mcp/flock
+claude mcp add --scope user --transport http flock http://127.0.0.1:4173/mcp/flock
+```
 
-Use **Take back** in T3 to seal new root input and **Refresh from T3** in Flock
-to see the seal and local freeze. The details show admitted commands and launch
-IDs for work that may still settle. **Freeze Flock work** is available separately
-when a person needs to stop local work admission first.
+Configure the provider instance that T3 uses before starting its Session. For
+a configured Claude project, project-local HTTP MCP registration also works.
+The endpoint runs on Flock's loopback listener.
+
+1. In Flock, open **Session handoffs**, enter the destination environment,
+   project, and Thread IDs, and select a Bot. The T3 Session link contains the
+   environment and Thread IDs. Run `t3 thread list --json` from the T3 project
+   directory to find its project ID and Threads.
+2. Choose **One consultation reply** or **Ongoing coordination**. Coordination
+   requires a goal and can separately permit specialist checks.
+3. Copy the short-lived pairing code and give it to the agent in that Thread.
+   Ask the agent to call `request_flock_bot` with the code, a unique
+   `requestId`, and the request text. The tool acknowledges the request. Flock
+   sends replies back through ordinary T3 input when they are ready. An
+   identical retry uses the same request ID and payload. Keep the code private
+   until you give it to the intended agent.
+
+Grant the person Session read and Bot decision access. Grant the Bot
+`consult:reply-once` or `session:coordinate` for the environment and Thread.
+A coordinator also needs `session:read` to observe progress and
+`work:delegate` to select a specialist. Configure a role
+for each specialist, include it in the requester's `allowedBots`, and grant
+it permission to launch in the same project.
+
+Flock queues Bot messages through the T3 API, so someone can keep typing in the
+T3 composer. T3 orders submitted inputs. Flock rechecks observed human progress
+before sending guidance, but a human submission can still race a send.
+Pause in Flock before intervening if you need to halt new coordinator messages
+and work. **Resume coordination** continues observation. **Stop coordination**
+ends the local coordination. Already-dispatched messages may still reach T3,
+and admitted specialist work may still finish. The handoff view shows the
+queued or unresolved messages and admitted work separately from local state.
 
 ## Access administration
 

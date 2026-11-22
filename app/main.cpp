@@ -193,22 +193,18 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
 #ifdef FLOCK_WITH_T3
-    auto handoffGate = !fixed ? makeT3RootGate(home / "credentials" / "t3") : nullptr;
-    if (handoffGate) {
-        options.observeSpecialistGrant = [&](const Person& person, Id channel) -> std::optional<Id> {
-            const auto grant = RootDelivery(store,*handoffGate).observeGrant(person,channel);
-            if (!grant.verified || grant.sealed || grant.frozen) return {};
-            return grant.generation;
+    auto handoffSession = !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
+    std::shared_ptr<SessionHandoff> handoffs;
+    SessionHandoff::People handoffPeople;
+    if (handoffSession) {
+        options.resolveSpecialistPerson = [&](std::string_view person) -> std::optional<Person> {
+            return handoffPeople ? handoffPeople(person) : std::nullopt;
         };
-        options.observeSpecialistInput = [&](const Person& person, Id channel) {
-            return RootDelivery(store,*handoffGate).inputCommit(person,channel);
-        };
-        options.verifySpecialistWorkspace = [&](const Command& command, std::string_view sha) {
-            const auto caps = handoffGate->capabilities(command.environmentId);
-            const auto session = command.config.value("session",Json::object());
-            const auto strategy = session.value("workspaceStrategy",Json::object());
-            return caps && caps->strictPinnedWorktree && strategy.value("type","") == "worktree" &&
-                   strategy.value("baseRef","") == sha && strategy.value("expectedCommit","") == sha;
+        options.observeSpecialistInput = [&](const Person& person, Id channel) -> std::optional<std::string> {
+            if (!handoffs) return {};
+            const auto view = handoffs->view(person,channel);
+            if (!view.coordination) return {};
+            return handoffSession->inputCommit(view.origin.invitation.target);
         };
     }
 #endif
@@ -236,13 +232,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (bridges) configureChannelBridges(store,bridges,callbacks);
 #ifdef FLOCK_WITH_T3
     std::jthread handoffWorker;
-    if (web && handoffGate && callbacks.bindT3Person) {
-        callbacks.sessionHandoffs = std::make_shared<SessionHandoff>(store,*handoffGate,callbacks.bindT3Person,
-                                                                    &runtime,options.peers);
-        callbacks.sessionHandoffModel = model.get();
-        callbacks.sessionHandoffSoul = [&](std::string_view botId) { return bots.soul(botId); };
-        handoffWorker = std::jthread([handoffs=callbacks.sessionHandoffs, person=callbacks.configuredPerson,
-                                     intake=callbacks.intake, soul=callbacks.sessionHandoffSoul,
+    if (web && handoffSession && callbacks.configuredPerson) {
+        handoffPeople = callbacks.configuredPerson;
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
+        handoffs->recover();
+        callbacks.sessionHandoffs = handoffs;
+        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
+                                     soul=[&](std::string_view botId) { return bots.soul(botId); },
                                      &model](std::stop_token stop) {
             Id after = 0;
             while (!stop.stop_requested()) {
@@ -256,11 +252,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                         if (!actor) continue;
                         try {
                             const auto view = handoffs->view(*actor,channel);
-                            if (view.opening) handoffs->resume(*actor,channel);
-                            else if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
                             else handoffs->consult(*actor,channel,*model,intake,soul);
                         } catch (const std::exception&) {
-                            // The next pass rechecks the persisted grant and receipt.
+                            // The next pass rechecks local permission and delivery history.
                         }
                     }
                 } catch (const std::exception&) {

@@ -396,6 +396,17 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
+        // The MCP tool uses its own short-lived pairing credential. Browser identity
+        // and CSRF headers do not authorize a call to this endpoint.
+        if (req.path == "/mcp/flock") {
+            if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
+            else if (req.method != "POST") {
+                res.set_header("Allow","POST");
+                error(res,405,"method_not_allowed");
+            }
+            else return HandlerResult::Unhandled;
+            return HandlerResult::Handled;
+        }
         if (!origins && !req.has_header("Sec-Fetch-Site") && req.method == "POST" && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
         if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");

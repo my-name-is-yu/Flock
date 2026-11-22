@@ -4,138 +4,54 @@
 
 namespace flockv0 {
 
-struct RootGateCapabilities {
-    std::string environmentId, serverVersion;
-    Id protocolVersion = 0;
-    bool exactTarget = false, grantSeal = false, receiptLookup = false, senderAttribution = false;
-    bool strictPinnedWorktree = false;
-    bool operator==(const RootGateCapabilities&) const = default;
+struct ThreadEvent {
+    std::string id, messageId, runId, kind, status, createdBy, text;
+    Id position;
+    std::string creationSource;
+};
+struct ThreadPage {
+    ThreadTarget target;
+    Id cursor;
+    std::string authGeneration, activeRunId;
+    std::vector<ThreadEvent> events;
+};
+struct ThreadReceipt {
+    std::string messageId, runId, mode;
+};
+struct ThreadSend {
+    enum Kind { Accepted, Rejected, Unknown };
+    Kind kind = Unknown;
+    std::optional<ThreadReceipt> receipt;
+};
+class ThreadSession {
+public:
+    virtual ~ThreadSession() = default;
+    virtual std::optional<ThreadPage> read(const ThreadTarget&, std::optional<Id> after) = 0;
+    virtual ThreadSend send(const ThreadTarget&, std::string_view authGeneration,
+                            std::string_view requestId, std::string_view text) = 0;
+    virtual std::optional<std::string> inputCommit(const ThreadTarget&) = 0;
 };
 
-struct RootGrantRef {
-    ExactRunTarget target;
-    std::string grantId;
-    Id epoch = 0;
-    bool operator==(const RootGrantRef&) const = default;
-};
-
-struct RootGrant {
-    RootGrantRef ref;
-    std::string sourceMessageId, botId;
-    std::optional<CoordinationRequest> coordination;
-    bool sealed = false;
-};
-
-struct RootSealStatus {
-    RootGrant grant;
-    std::vector<std::string> residualCommandIds;
-    std::optional<std::string> sealMarker;
-    bool releaseAcknowledged = false;
-};
-
-struct RootGrantView {
-    bool verified = false, sealed = false, frozen = false;
-    Id generation = 1;
-    std::vector<std::string> residualCommandIds;
-    std::optional<std::string> sealMarker;
-    bool releaseAcknowledged = false;
-};
-
-struct RootCommandRef {
-    RootGrantRef grant;
-    std::string commandId;
-    bool operator==(const RootCommandRef&) const = default;
-};
-
-struct RootCommand {
-    RootCommandRef ref;
-    std::string text;
-};
-
-enum class RootDeliveryState { Prepared, Accepted, ProviderPending, Applied, Failed, Rejected, Unknown };
+enum class RootDeliveryState { Prepared, Dispatching, Accepted, Queued, Observed, Failed, Rejected, Unknown };
 std::string_view rootDeliveryStateName(RootDeliveryState);
 
-struct RootReceipt {
-    RootCommandRef ref;
-    std::string botId;
-    RootDeliveryState observation = RootDeliveryState::Unknown;
-    std::string nativeTurnId, nativeItemId;
-};
-
-struct RootGateReply {
-    enum class Kind { Found, AuthoritativelyAbsent, Rejected, Unknown } kind = Kind::Unknown;
-    std::optional<RootReceipt> receipt;
-    std::string reason;
-};
-
-struct RootInvitationRef {
-    ExactRunTarget target;
-    std::string requestId;
-    bool operator==(const RootInvitationRef&) const = default;
-};
-
-struct RootInvitation {
-    InvitationRef ref;
-    std::string personRef;
-    std::vector<SharedSessionContext> context;
-    std::optional<CoordinationRequest> coordination;
-};
-
-struct RootProgressEvent {
-    std::string id;
-    Id position;
-    std::string kind, status, summary;
-};
-
-struct RootProgressPage {
-    ExactRunTarget target;
-    Id cursor;
-    std::vector<RootProgressEvent> events;
-};
-
-class RootGate {
-public:
-    virtual ~RootGate() = default;
-    virtual std::optional<RootGateCapabilities> capabilities(std::string_view environmentId) = 0;
-    virtual std::optional<RootGrant> readGrant(const RootGrantRef&, std::string_view credential) = 0;
-    virtual RootGateReply readReceipt(const RootCommandRef&, std::string_view credential) = 0;
-    virtual RootGateReply send(const RootCommand&, std::string_view credential) = 0;
-    virtual std::optional<RootInvitation> readInvitation(const RootInvitationRef&, std::string_view) { return {}; }
-    virtual std::optional<RootGrant> activateInvitation(const RootInvitationRef&, std::string_view, std::string_view) { return {}; }
-    virtual std::optional<RootSealStatus> sealStatus(const RootGrantRef&, std::string_view) { return {}; }
-    virtual std::optional<RootSealStatus> confirmFreeze(const RootGrantRef&, std::string_view, Id,
-                                                       std::string_view) { return {}; }
-    virtual std::optional<RootProgressPage> events(const RootGrantRef&, Id, std::string_view) { return {}; }
-    virtual std::optional<std::string> inputCommit(const RootGrantRef&, std::string_view) { return {}; }
-};
-
 struct RootDeliveryView {
-    RootCommandRef ref;
-    std::string botId, evidenceRef, serverVersion;
-    RootDeliveryState state = RootDeliveryState::Prepared;
-    std::optional<RootReceipt> receipt;
-    bool sealed = false;
+    std::string commandId;
+    RootDeliveryState state;
+    std::optional<ThreadReceipt> receipt;
+    std::string observedRunId;
 };
 
 class RootDelivery {
 public:
-    RootDelivery(Store& store, RootGate& gate) : store_(store), gate_(gate) {}
-
-    void bind(const Person&, Id channel, std::string_view credential);
-    RootGrantView observeGrant(const Person&, Id channel);
-    std::optional<std::string> inputCommit(const Person&, Id channel);
-    RootGrantView freeze(const Person&, Id channel);
-    RootDeliveryView prepare(const Person&, std::string_view bot, Id channel, std::string_view commandId,
-                             std::string_view text, std::string_view evidenceRef);
-    RootDeliveryView deliver(const Person&, std::string_view bot, Id channel, std::string_view commandId);
-    RootDeliveryView reconcile(const Person&, std::string_view bot, Id channel, std::string_view commandId);
-    RootDeliveryView view(const Person&, std::string_view bot, Id channel, std::string_view commandId) const;
-
+    RootDelivery(Store& store, ThreadSession& session) : store_(store), session_(session) {}
+    void prepare(Id channel, Id generation, std::string_view commandId, std::string_view bot,
+                 std::string_view requestId, std::string_view text, Id observationCursor);
+    RootDeliveryView deliver(const Person&, Id channel, std::string_view commandId);
+    void reconcile(const Person&, Id channel);
 private:
-    RootDeliveryView advance(const Person&, std::string_view bot, Id channel, std::string_view commandId,
-                             bool allowSend);
     Store& store_;
-    RootGate& gate_;
+    ThreadSession& session_;
 };
 
 }

@@ -1,0 +1,94 @@
+#include "internal.hpp"
+#include "flock/root_delivery.hpp"
+
+#include <iostream>
+
+using namespace flockv0;
+using flockv0::t3detail::http;
+
+namespace {
+void check(bool passed, std::string_view reason) {
+    if (!passed) throw std::logic_error(std::string(reason));
+}
+}
+
+int main(int argc, char** argv) {
+    try {
+        check(argc == 3,"expected fixture URL and credential directory");
+        const std::string origin = argv[1];
+        const std::filesystem::path directory = argv[2];
+        auto fixture = [&](const Json& settings) {
+            check(http(origin+"/fixture","POST",{{"Content-Type","application/json"}},settings.dump()).status == 200,
+                  "fixture rejected configuration");
+        };
+        const auto commits = Json::parse(http(origin+"/fixture/stock","GET").body);
+        const auto pin = commits.at("stockPin").get<std::string>();
+        loginT3(directory,"env-1",origin+"/mcp",[&](const auto& auth) { fixture({{"authorization",auth}}); });
+        auto session = makeT3ThreadSession(directory);
+        const ThreadTarget target{"env-1","project","human"};
+        const auto page = session->read(target,{});
+        check(page && page->cursor == 4 && page->events.size() == 1 &&
+              page->events.front().creationSource == "web" && page->events.front().createdBy == "user",
+              "newest page excludes inherited and unfinalized messages and holds the cursor");
+        fixture({{"finalized",true}});
+        const auto later = session->read(target,page->cursor);
+        check(later && later->cursor == 6 && later->events.size() == 2 && later->events.back().messageId == "sent-id" &&
+              later->events.back().creationSource == "mcp" && later->events.back().createdBy == "agent",
+              "forward page includes finalized progress and correlated MCP delivery");
+
+        const auto generation = page->authGeneration;
+        const auto send = [&](const ThreadTarget& destination, std::string_view auth = "") {
+            return session->send(destination,auth.empty() ? generation : auth,"command-1","[Flock result] Complete.");
+        };
+        check(send(target,"old-generation").kind == ThreadSend::Rejected, "stale OAuth namespace refuses the send");
+        fixture({{"claimedProject","wrong"}});
+        check(!session->read(target,{}) && send(target).kind == ThreadSend::Rejected,
+              "mismatched project fails closed");
+        fixture({{"claimedProject","project"},{"claimedEnvironment","wrong"}});
+        check(!session->read(target,{}) && send(target).kind == ThreadSend::Rejected,
+              "mismatched environment fails closed");
+        fixture({{"claimedEnvironment","env-1"}});
+        const auto delivery = send(target);
+        check(delivery.kind == ThreadSend::Accepted && delivery.receipt && delivery.receipt->mode == "queued" &&
+              delivery.receipt->messageId == "sent-id" && delivery.receipt->runId == "next-run",
+              "queue receipt can identify a later Run in the same Thread");
+        fixture({{"badReceipt",true}});
+        check(send(target).kind == ThreadSend::Unknown, "mismatched post-dispatch receipt stays unknown");
+        fixture({{"badReceipt",false}});
+
+        check(session->inputCommit(target) == commits.at("stockHead"), "input pin comes from the bound workspace");
+        auto adapter = makeT3Mcp(directory);
+        Command command;
+        command.actionId = "pinned-worker";
+        command.tool = "delegate";
+        command.environmentId = target.environmentId;
+        command.projectId = target.projectId;
+        command.authGeneration = generation;
+        command.instruction = "Check fixture";
+        command.config["session"] = {{"runtimeMode","approval-required"},
+            {"workspaceStrategy",{{"type","worktree"},{"baseRef",pin},{"startFromOrigin",false},{"expectedCommit",pin}}}};
+        check(!adapter->preflight(command), "valid pinned specialist preflight");
+        const auto started = adapter->send(command);
+        check(started.kind == Delivery::Kind::Accepted && started.run.threadId == command.actionId &&
+              started.run.runId == "next-run", "idle stock workspace starts only after its input pin matches");
+        const auto report = adapter->observe(target.environmentId,command.config,started.run);
+        check(report.kind == Observation::Kind::Finished && report.status == "completed" && report.report == "Pinned report",
+              "provider report from the pinned workspace is accepted");
+        fixture({{"advanceStockWorker",true}});
+        const auto changed = adapter->observe(target.environmentId,command.config,started.run);
+        check(changed.kind == Observation::Kind::Finished && changed.status == "failed" && changed.report != "Pinned report",
+              "settled specialist result is invalidated when the actual workspace drifted");
+        command.actionId = "wrong-worker";
+        const auto wrong = adapter->send(command);
+        check(wrong.kind == Delivery::Kind::NotAccepted && wrong.definitelyUnsent,
+              "different actual worktree input blocks the first prompt");
+        const auto effects = Json::parse(http(origin+"/fixture/effects","GET").body);
+        check(effects.at("t3_thread_send").size() == 3 && effects.at("t3_thread_launch").size() == 2 &&
+              !effects.contains("t3_thread_interrupt"), "invalid destinations and mismatched pins cause no prompt");
+        std::cout << "Stock Thread delivery, history provenance, and pinned specialist verified\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+}

@@ -526,16 +526,18 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
 SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
  JOIN specialist_delegations d ON d.id=w.delegation_id JOIN return_channels c ON c.id=d.channel_id
  JOIN tasks t ON t.id=s.task_id
+ JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.generation=d.generation AND sc.state='active'
 WHERE t.id=? AND t.bot_id=? AND d.recipient_task=json_extract(t.data,'$.workflowParentTaskId') AND c.person_id=?
 UNION ALL
 SELECT d.channel_id FROM specialist_delegations d JOIN tasks t ON t.id=d.sender_task
  JOIN return_channels c ON c.id=d.channel_id
+ JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.generation=d.generation AND sc.state='active'
 WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
 )SQL",{id,bot,actor.id,id,bot,actor.id});
         if (!origin.next()) throw DecisionDenied{};
         const auto participation = authorizeParticipation(actor,origin.number(0));
         const auto* grant = std::get_if<CoordinationActivation>(&participation);
-        if (!grant || !grant->acknowledgment || !grant->binding.request.allowDelegation) throw DecisionDenied{};
+        if (!grant || !grant->binding.request.allowDelegation) throw DecisionDenied{};
     }
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};

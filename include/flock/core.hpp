@@ -324,10 +324,8 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
-    std::function<std::optional<Id>(const Person&, Id channel)> observeSpecialistGrant = {};
+    std::function<std::optional<Person>(std::string_view)> resolveSpecialistPerson = {};
     std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
-    // True only for an adapter which guarantees that this launch requires the pinned commit.
-    std::function<bool(const Command&, std::string_view commitSha)> verifySpecialistWorkspace = {};
 };
 class Runtime {
 public:

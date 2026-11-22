@@ -1,290 +1,233 @@
-#include "flock/participation.hpp"
+#include "flock/session_handoff.hpp"
 
-#include <barrier>
-#include <fstream>
-#include <future>
+#include <filesystem>
 #include <iostream>
-#include <iterator>
+#include <map>
 #include <unistd.h>
 
 using namespace flockv0;
 
 namespace {
-const Person alice{"alice"}, bob{"bob"};
-const ExactRunTarget target{"desktop","project","session","run"};
-const auto readScope = Scope::sessionRead(target.environmentId,target.threadId);
-const auto replyScope = Scope::consultReply(target.environmentId,target.threadId);
-const auto coordinateScope = Scope::sessionCoordinate(target.environmentId,target.threadId);
-const auto delegateScope = Scope::workDelegate(target.environmentId,target.threadId);
+const Person owner{"owner",true}, visitor{"visitor"};
+const ThreadTarget first{"desktop","project","first"}, second{"desktop","project","second"};
+const auto resolve = [](std::string_view person) -> std::optional<Person> {
+    return person == owner.id ? std::optional(owner) : std::nullopt;
+};
+const auto intake = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","desktop","project"}; };
+const auto soul = [](std::string_view) { return std::string("Follow the authorized goal."); };
 
-void check(bool result, std::string_view message) {
-    if (!result) throw std::runtime_error(std::string(message));
+void check(bool pass, std::string_view message) {
+    if (!pass) throw std::runtime_error(std::string(message));
 }
-
-template<class Action> void denied(Action action, std::string_view message) {
-    try { action(); }
+template<class Call> void denied(Call call) {
+    try { call(); }
     catch (const Conflict&) { return; }
-    throw std::runtime_error(std::string(message));
+    throw std::runtime_error("Operation should have been denied");
 }
 
-InvitationRef invite(std::string request, std::string bot = "planner") {
-    return {target,std::move(request),"source-message",std::move(bot)};
-}
-
-struct Authority : ParticipationAuthority {
-    explicit Authority(InvitationRef ref) : verified(VerifiedInvitation{std::move(ref),alice.id,{},{}}) {}
-
-    std::optional<VerifiedInvitation> verified;
-    std::optional<CoordinationGrant> observed;
-    std::optional<CoordinationBinding> lookup;
-    std::function<void()> onGrant;
-
-    std::optional<VerifiedInvitation> invitation(const InvitationRef&) override { return verified; }
-    std::optional<CoordinationGrant> grant(const CoordinationBinding& binding) override {
-        lookup = binding;
-        if (onGrant) onGrant();
-        return observed;
+class Sessions final : public ThreadSession {
+public:
+    struct Sent { ThreadTarget target; std::string id, text; };
+    std::map<std::string,std::vector<ThreadEvent>> history{{first.threadId,{}},{second.threadId,{}}};
+    std::vector<Sent> sent;
+    std::function<void()> beforeSend;
+    std::string auth = "auth";
+    bool uncertain = false;
+    std::optional<ThreadPage> read(const ThreadTarget& target, std::optional<Id> after) override {
+        if (target != first && target != second) return {};
+        const auto& all = history.at(target.threadId);
+        std::vector<ThreadEvent> events;
+        for (const auto& event : all) if (!after || event.position > *after) events.push_back(event);
+        return ThreadPage{target,static_cast<Id>(all.size()),auth,"",events};
+    }
+    ThreadSend send(const ThreadTarget& target, std::string_view generation, std::string_view id,
+                    std::string_view text) override {
+        check(generation == auth,"changed authentication entered the send port");
+        sent.push_back({target,std::string(id),std::string(text)});
+        if (beforeSend) beforeSend();
+        return uncertain ? ThreadSend{} : ThreadSend{ThreadSend::Accepted,ThreadReceipt{std::string(id),"new-run","queued"}};
+    }
+    std::optional<std::string> inputCommit(const ThreadTarget&) override { return std::nullopt; }
+    void event(const ThreadTarget& target, std::string kind, std::string by, std::string source,
+               std::string message, std::string text) {
+        auto& rows = history[target.threadId];
+        const auto position = static_cast<Id>(rows.size() + 1);
+        rows.push_back({target.threadId + ":" + std::to_string(position),std::move(message),"new-run",
+                        std::move(kind),"completed",std::move(by),std::move(text),position,std::move(source)});
+    }
+    void consumed(const Sent& input) {
+        event(input.target,"user_message","agent","mcp",input.id,input.text);
+        event(input.target,"assistant_message","agent","provider","","Performed the requested step.");
     }
 };
 
-void personAccess(Store& db, const InvitationRef& ref) {
-    auto access = db.access();
-    access.personGrant(localOwner,ref.botId,alice.id,Role::decide,GrantChange::grant);
-    access.personScope(localOwner,alice.id,Scope::sessionRead(ref.target.environmentId,ref.target.threadId),GrantChange::grant);
-}
-
-void botAccess(Store& db, const InvitationRef& ref, const Scope& scope, GrantChange change = GrantChange::grant) {
-    db.access().resourceGrant(localOwner,ref.botId,scope,change);
-}
-
-void authorization(const std::filesystem::path& path) {
-    Store db(path);
-    ParticipationStore store(db);
-    const auto ref = invite("origin-checks");
-    Authority authority(ref);
-    auto access = db.access();
-    access.personScope(localOwner,alice.id,readScope,GrantChange::grant);
-    access.personGrant(localOwner,ref.botId,alice.id,Role::view,GrantChange::grant);
-    botAccess(db,ref,replyScope);
-    denied([&] { store.open(alice,ref,authority); },"view-only person created a consultation");
-
-    personAccess(db,ref);
-    denied([&] { store.open(bob,ref,authority); },"wrong person opened the invitation");
-    denied([&] { store.open(localOwner,ref,authority); },"local owner bypassed the authenticated T3 identity");
-    for (auto member : {&ExactRunTarget::environmentId,&ExactRunTarget::projectId,
-                        &ExactRunTarget::threadId,&ExactRunTarget::runId}) {
-        auto wrong = ref;
-        wrong.target.*member = "different";
-        denied([&] { store.open(alice,wrong,authority); },"another target resolved to the original invitation");
+class Bot final : public Model {
+public:
+    std::vector<std::string> decision;
+    std::vector<ModelInput> seen;
+    std::function<void()> beforeDecision;
+    ModelTurn decide(const ModelInput& input) override {
+        seen.push_back(input);
+        if (beforeDecision) beforeDecision();
+        if (decision.empty()) throw std::runtime_error("Unexpected second model decision");
+        auto next = decision.front();
+        decision.erase(decision.begin());
+        return {{{next,{{"text","Test output from Flock"}},""}}};
     }
-    for (auto member : {&InvitationRef::requestId,&InvitationRef::sourceMessageId,&InvitationRef::botId}) {
-        auto wrong = ref;
-        wrong.*member = "different";
-        denied([&] { store.open(alice,wrong,authority); },"a different request, message, or Bot was accepted");
-    }
-    authority.verified.reset();
-    denied([&] { store.open(alice,ref,authority); },"an unverified invitation was accepted");
-    authority.verified = VerifiedInvitation{ref,alice.id,{},{}};
+};
 
-    access.personScope(localOwner,alice.id,readScope,GrantChange::revoke);
-    denied([&] { store.open(alice,ref,authority); },"person without Session read opened an invitation");
-    personAccess(db,ref);
-    botAccess(db,ref,replyScope,GrantChange::revoke);
-    botAccess(db,ref,readScope);
-    denied([&] { store.open(alice,ref,authority); },"Bot Session read escalated to a consultation reply");
-    botAccess(db,ref,readScope,GrantChange::revoke);
-    botAccess(db,ref,replyScope);
-
-    const auto permit = std::get<ConsultPermit>(store.open(alice,ref,authority));
-    check(!access.permits(ref.botId,readScope,true) && !access.permits(ref.botId,coordinateScope,true) &&
-          !access.permits(ref.botId,delegateScope,true),"consultation exposed unrelated Bot permissions");
-    denied([&] { store.consult(bob,ref.botId,permit.channel.id); },"wrong person retrieved the consultation");
-    denied([&] { store.consult(alice,"specialist",permit.channel.id); },"another Bot retrieved the consultation");
-    denied([&] { store.coordination(alice,permit.channel.id); },"consultation became coordination");
-    denied([&] { store.observeGrant(alice,permit.channel.id,authority); },"consultation attempted grant observation");
-
-    Store admin(path);
-    botAccess(admin,ref,replyScope,GrantChange::revoke);
-    denied([&] { store.consult(alice,ref.botId,permit.channel.id); },"revoked Bot retrieved a persisted permit");
-    denied([&] { store.open(alice,ref,authority); },"revoked Bot reopened a persisted permit");
+void access(Store& store, const ThreadTarget& target) {
+    for (const auto& scope : {Scope::consultReply(target.environmentId,target.threadId),
+                             Scope::sessionRead(target.environmentId,target.threadId),
+                             Scope::sessionCoordinate(target.environmentId,target.threadId)})
+        store.access().resourceGrant(owner,"planner",scope,GrantChange::grant);
 }
 
-void contextAndRestart(const std::filesystem::path& path) {
-    constexpr auto secret = "participation-fixture-protected-value";
-    const auto ref = invite("first-consult");
-    Authority authority(ref);
-    authority.verified->context = {{target,"shared-note",std::string(8190,'x') + "日本語 " + secret,false},
-                                   {target,"shared-status",std::string("Credential ") + secret,false}};
-    Id channel = 0;
-    Id existingTask = 0;
-    std::string command;
+void pairingAndRecovery(const std::filesystem::path& path) {
+    Sessions sessions;
+    Id lost;
     {
-        Store db(path);
-        ParticipationStore store(db);
-        personAccess(db,ref);
-        botAccess(db,ref,replyScope);
-        db.protectGitCredential(secret);
-        existingTask = db.submit({"planner","Ordinary Bot task",target.environmentId,target.projectId});
+        Store store(path);
+        access(store,first);
+        access(store,second);
+        SessionHandoff handoff(store,sessions,resolve);
+        denied([&] { handoff.pair(visitor,first,"planner",{}); });
+        denied([&] { handoff.pair(owner,{"desktop","other","first"},"planner",{}); });
+        denied([&] { handoff.intake("unpaired","client-request","Run a check"); });
 
-        auto& context = authority.verified->context;
-        context.at(0).target.runId = "unshared-run";
-        denied([&] { store.open(alice,ref,authority); },"context crossed the exact Run boundary");
-        context.at(0).target = target;
-        context.push_back({target,"extra-note","one",false});
-        context.push_back({target,"excess-note","two",false});
-        denied([&] { store.open(alice,ref,authority); },"an oversized context list was stored");
-        context.resize(2);
+        const auto left = handoff.pair(owner,first,"planner",{});
+        const auto right = handoff.pair(owner,second,"planner",{});
+        const auto a = handoff.intake(left.code,"client-request","Check first.");
+        const auto retry = handoff.intake(left.code,"client-request","Check first.");
+        const auto b = handoff.intake(right.code,"client-request","Check second.");
+        check(a.channel == retry.channel && a.requestId == retry.requestId && b.channel != a.channel,
+              "pairing was duplicated or conversations were combined");
+        denied([&] { handoff.intake(left.code,"client-request","Changed request."); });
+        denied([&] { handoff.view(visitor,a.channel); });
+        denied([&] { handoff.resume(owner,a.channel); });
 
-        const auto permit = std::get<ConsultPermit>(store.open(alice,ref,authority));
-        channel = permit.channel.id;
-        command = permit.commandId;
-        check(channel > 0 && !command.empty(),"consultation has no stable identity");
-        check(permit.channel.origin == ImmutableOrigin{ref,alice.id},"return route lost exact provenance");
-        const auto& shared = permit.channel.context;
-        check(shared.size() == 2 && shared[0].target == target && shared[0].itemId == "shared-note" &&
-              shared[0].truncated && shared[0].text == std::string(8190,'x') && shared[1].itemId == "shared-status" &&
-              shared[1].text == "Credential [redacted]","stored context is unbounded, invalid, unredacted, or unattributed");
-        for (auto suffix : {"","-wal"}) {
-            std::ifstream file(path.string() + suffix,std::ios::binary);
-            const std::string bytes((std::istreambuf_iterator<char>(file)),{});
-            check(bytes.find(secret) == std::string::npos,"raw credential reached SQLite");
-        }
+        Bot bot;
+        bot.decision = {"reply","reply"};
+        sessions.uncertain = true;
+        handoff.consult(owner,a.channel,bot,intake,soul);
+        sessions.uncertain = false;
+        handoff.consult(owner,b.channel,bot,intake,soul);
+        check(sessions.sent.size() == 2 && sessions.sent[0].target == first && sessions.sent[1].target == second,
+              "consultations lost their immutable return Thread");
+        check(handoff.view(owner,a.channel).deliveries.front().state == RootDeliveryState::Unknown,
+              "ambiguous send was presented as accepted");
+        check(handoff.view(owner,b.channel).deliveries.front().state == RootDeliveryState::Queued,
+              "accepted queue was presented as observed");
+        lost = a.channel;
     }
-
-    Store reopened(path);
-    reopened.protectGitCredential(secret);
-    ParticipationStore store(reopened);
-    const auto replayed = std::get<ConsultPermit>(store.open(alice,ref,authority));
-    check(replayed.channel.id == channel && replayed.commandId == command &&
-          store.consult(alice,ref.botId,channel).commandId == command,"restart created another reply identity");
-
-    authority.verified->context.back().text = "Changed evidence";
-    denied([&] { store.open(alice,ref,authority); },"reusing a request replaced immutable context");
-    authority.verified->ref.sourceMessageId = "another-source";
-    denied([&] { store.open(alice,authority.verified->ref,authority); },"reusing a request moved its return channel");
-
-    auto other = invite("second-consult");
-    other.target.runId = "another-run";
-    other.sourceMessageId = "another-source";
-    Authority second(other);
-    const auto different = std::get<ConsultPermit>(store.open(alice,other,second));
-    check(different.channel.id != channel && different.commandId != command &&
-          store.consult(alice,ref.botId,channel).channel.origin.invitation == ref &&
-          store.consult(alice,ref.botId,different.channel.id).channel.origin.invitation == other,
-          "consultations shared reply identity or delivered to another origin");
-    check(reopened.tasks().size() == 1 && reopened.task(existingTask).at("activeRun").is_null(),
-          "participation created a Bot task or took ownership of a human Run");
+    Store restarted(path);
+    SessionHandoff handoff(restarted,sessions,resolve);
+    handoff.recover();
+    Bot bot;
+    handoff.consult(owner,lost,bot,intake,soul);
+    check(bot.seen.empty() && sessions.sent.size() == 2,"restart blindly repeated an uncertain reply");
+    sessions.consumed(sessions.sent.front());
+    handoff.consult(owner,lost,bot,intake,soul);
+    const auto reconciled = handoff.view(owner,lost);
+    check(reconciled.state == "completed" && reconciled.deliveries.front().state == RootDeliveryState::Observed &&
+          reconciled.deliveries.front().observedRunId == "new-run","history did not reconcile delivery in a later Run");
 }
 
-void activationAndRestart(const std::filesystem::path& path) {
-    const auto ref = invite("coordination");
-    Authority authority(ref);
-    authority.verified->coordination = CoordinationRequest{7,"Coordinate the remaining checks",true};
-    Id channel = 0;
-    std::optional<CoordinationBinding> binding;
-    {
-        Store db(path);
-        ParticipationStore store(db);
-        personAccess(db,ref);
-        botAccess(db,ref,replyScope);
-        denied([&] { store.open(alice,ref,authority); },"reply-once authority escalated to coordination");
-        botAccess(db,ref,coordinateScope);
-        denied([&] { store.open(alice,ref,authority); },"coordination granted delegation without permission");
-        botAccess(db,ref,delegateScope);
-        const auto activation = std::get<CoordinationActivation>(store.open(alice,ref,authority));
-        channel = activation.channel.id;
-        binding = activation.binding;
-        check(!activation.acknowledgment && !binding->activationId.empty() && binding->request == *authority.verified->coordination,
-              "activation was unbound or acknowledged before the remote grant existed");
-        denied([&] { store.consult(alice,ref.botId,channel); },"coordination activation yielded a consultation permit");
+void coordinate(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve);
+    access(store,first);
+    const CoordinationRequest goal{"Run two checks and report",false};
+    const auto ticket = handoff.pair(owner,first,"planner",goal);
+    const auto channel = handoff.intake(ticket.code,"coordinate-once","Start the checks.").channel;
+    const auto duplicate = handoff.pair(owner,first,"planner",goal);
+    denied([&] { handoff.intake(duplicate.code,"another","Start over."); });
+    Bot bot;
+    bot.decision = {"root_guidance","root_guidance","handoff_question","complete_handoff"};
+    handoff.step(owner,channel,bot,intake,soul);
+    check(sessions.sent.size() == 1,"first autonomous input was not sent");
+    const auto firstSend = sessions.sent.front();
+    sessions.event(first,"user_message","agent","mcp",firstSend.id,firstSend.text);
+    handoff.step(owner,channel,bot,intake,soul);
+    check(bot.seen.size() == 1 && sessions.sent.size() == 1,"own input triggered another decision");
+    sessions.event(first,"assistant_message","agent","provider","","Finished step one.");
+    handoff.step(owner,channel,bot,intake,soul);
+    check(sessions.sent.size() == 2,"agent progress did not trigger step two");
+    sessions.consumed(sessions.sent.back());
+    auto question = handoff.step(owner,channel,bot,intake,soul);
+    check(!question.pendingQuestion.is_null(),"human question was not saved");
+    handoff.step(owner,channel,bot,intake,soul);
+    check(bot.seen.size() == 3,"coordination continued through a human decision");
+    handoff.answer(owner,channel,question.generation,question.pendingQuestion.at("eventId").get<std::string>(),"Finish.");
+    const auto done = handoff.step(owner,channel,bot,intake,soul);
+    check(done.state == "completed" && sessions.sent.size() == 2,"completion created another input");
+
+    const auto fresh = handoff.pair(owner,first,"planner",goal);
+    const auto stopped = handoff.intake(fresh.code,"stop-test","Check again.").channel;
+    sessions.beforeSend = [&] { handoff.pause(owner,stopped); };
+    bot.decision = {"root_guidance","root_guidance"};
+    const auto paused = handoff.step(owner,stopped,bot,intake,soul);
+    check(paused.state == "paused" && paused.residualCommandIds.size() == 1,"pause lost an admitted residual");
+    denied([&]{ handoff.resume(owner,stopped); });
+    sessions.consumed(sessions.sent.back());
+    const auto resumed = handoff.resume(owner,stopped);
+    check(resumed.state == "active" && resumed.generation == paused.generation,"resume changed the wrong generation");
+    handoff.freeze(owner,stopped);
+    const auto halted = handoff.step(owner,stopped,bot,intake,soul);
+    check(halted.state == "stopped" && sessions.sent.size() == 3,"stop admitted a new effect");
+}
+void concurrentHumanAndBudget(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve);
+    access(store,first);
+    const auto pairing = handoff.pair(owner,first,"planner",CoordinationRequest{"Observe progress only",false});
+    const auto channel = handoff.intake(pairing.code,"request","Begin.").channel;
+    Bot bot;
+    bot.decision = {"root_guidance"};
+    bot.beforeDecision = [&] {
+        sessions.event(first,"user_message","user","web","","New priority from the person.");
+    };
+    auto changed = handoff.step(owner,channel,bot,intake,soul);
+    check(sessions.sent.empty() && changed.deliveries.front().state == RootDeliveryState::Rejected,
+          "coordinator sent guidance from before a newer human message");
+    bot.beforeDecision = {};
+    bot.decision.assign(23,"wait_for_root");
+    handoff.step(owner,channel,bot,intake,soul);
+    check(bot.seen.back().event.at("progress").dump().find("New priority") != std::string::npos,
+          "coordinator did not re-evaluate newer human input");
+    for (int i = 0; i < 22; ++i) {
+        sessions.event(first,"assistant_message","agent","provider","","Progress update.");
+        handoff.step(owner,channel,bot,intake,soul);
     }
+    const auto stopped = handoff.step(owner,channel,bot,intake,soul);
+    check(stopped.state == "budget_exhausted" && bot.seen.size() == 24,
+          "the cumulative planning budget did not stop further actions");
 
-    Store reopened(path);
-    ParticipationStore store(reopened);
-    const auto opening = std::get<CoordinationActivation>(store.open(alice,ref,authority));
-    check(opening.channel.id == channel && opening.binding == binding && !opening.acknowledgment,
-          "opening activation did not survive restart");
-    const auto observed = store.observeGrant(alice,channel,authority);
-    check(!observed.acknowledgment && authority.lookup == binding,"retry lost the pending activation identity");
-
-    Store admin(path);
-    authority.onGrant = [&] { botAccess(admin,ref,delegateScope,GrantChange::revoke); };
-    denied([&] { store.observeGrant(alice,channel,authority); },"access changed during grant lookup but returned the activation");
-    authority.onGrant = {};
-    botAccess(admin,ref,delegateScope);
-
-    authority.observed = CoordinationGrant{*binding,7};
-    denied([&] { store.observeGrant(alice,channel,authority); },"stale epoch activated coordination");
-    authority.observed = CoordinationGrant{*binding,8};
-    authority.observed->binding.origin.invitation.target.runId = "wrong-run";
-    denied([&] { store.observeGrant(alice,channel,authority); },"another Run's grant activated coordination");
-    authority.observed = CoordinationGrant{*binding,8};
-    authority.observed->binding.request.allowDelegation = false;
-    denied([&] { store.observeGrant(alice,channel,authority); },"another scope activated coordination");
-    check(!store.coordination(alice,channel).acknowledgment,"a rejected acknowledgment changed persisted state");
-
-    authority.observed = CoordinationGrant{*binding,8};
-    check(store.observeGrant(alice,channel,authority).acknowledgment == authority.observed &&
-          store.observeGrant(alice,channel,authority).acknowledgment == authority.observed,
-          "matching remote acknowledgment failed to persist idempotently");
-    check(ParticipationStore(admin).coordination(alice,channel).acknowledgment == authority.observed,
-          "remote acknowledgment was lost after reopening the database");
-    authority.observed->epoch = 9;
-    denied([&] { store.observeGrant(alice,channel,authority); },"another epoch replaced a persisted acknowledgment");
-    botAccess(admin,ref,delegateScope,GrantChange::revoke);
-    denied([&] { store.coordination(alice,channel); },"revoked specialist scope remained available");
-    denied([&] { store.observeGrant(alice,channel,authority); },"revoked specialist scope still allowed grant observation");
+    const auto consult = handoff.pair(owner,first,"planner",{});
+    const auto request = handoff.intake(consult.code,"request","Reply once.").channel;
+    store.access().resourceGrant(owner,"planner",Scope::consultReply(first.environmentId,first.threadId),GrantChange::revoke);
+    denied([&] { handoff.consult(owner,request,bot,intake,soul); });
+    check(handoff.freeze(owner,request).state == "stopped" && sessions.sent.empty(),
+          "revoking the Bot's scope removed the owner's ability to stop the request");
 }
 
-void concurrentInvitations(const std::filesystem::path& path) {
-    Store left(path), right(path);
-    const auto consult = invite("concurrent-consult");
-    personAccess(left,consult);
-    botAccess(left,consult,replyScope);
-    auto openConsult = [&](Store& db, const InvitationRef& ref, std::barrier<>& start) {
-        Authority authority(ref);
-        start.arrive_and_wait();
-        return std::get<ConsultPermit>(ParticipationStore(db).open(alice,ref,authority));
-    };
-    std::barrier consultStart(2);
-    auto consultRetry = std::async(std::launch::async,openConsult,std::ref(right),std::cref(consult),std::ref(consultStart));
-    const auto first = openConsult(left,consult,consultStart);
-    const auto second = consultRetry.get();
-    check(first.channel.id == second.channel.id && first.commandId == second.commandId,
-          "simultaneous retry created duplicate reply authority");
-
-    const auto one = invite("coordinator-one"), two = invite("coordinator-two","specialist");
-    personAccess(left,two);
-    botAccess(left,one,coordinateScope);
-    botAccess(left,two,coordinateScope);
-    std::barrier coordinationStart(2);
-    auto openCoordination = [&](Store& db, const InvitationRef& ref) {
-        Authority authority(ref);
-        authority.verified->coordination = CoordinationRequest{0,"Check the work",false};
-        coordinationStart.arrive_and_wait();
-        try {
-            return std::holds_alternative<CoordinationActivation>(ParticipationStore(db).open(alice,ref,authority));
-        } catch (const Conflict&) { return false; }
-    };
-    auto other = std::async(std::launch::async,openCoordination,std::ref(right),std::cref(two));
-    const auto won = openCoordination(left,one);
-    check(won != other.get(),"competing invitations did not reserve exactly one coordination slot");
-}
 }
 
 int main() {
-    char directory[] = "/tmp/flock-participation-XXXXXX";
-    if (!mkdtemp(directory)) return 1;
-    const std::filesystem::path root(directory);
+    char name[] = "/tmp/flock-participation.XXXXXX";
+    const auto* dir = mkdtemp(name);
+    if (!dir) return 1;
+    const std::filesystem::path path(dir);
     try {
-        authorization(root/"authorization.db");
-        contextAndRestart(root/"consultations.db");
-        activationAndRestart(root/"coordination.db");
-        concurrentInvitations(root/"concurrent.db");
-    } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
-        std::filesystem::remove_all(root);
+        pairingAndRecovery(path / "pairing.sqlite3");
+        coordinate(path / "coordination.sqlite3");
+        concurrentHumanAndBudget(path / "human-policy.sqlite3");
+        std::filesystem::remove_all(path);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << '\n';
+        std::filesystem::remove_all(path);
         return 1;
     }
-    std::filesystem::remove_all(root);
 }
