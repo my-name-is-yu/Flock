@@ -538,8 +538,7 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
         for (const auto& peer : peers_(bot)) {
             const auto& settings = peer.intake;
             if (validBotRole(peer.role) && settings.environmentId == target.environmentId &&
-                settings.projectId == target.projectId &&
-                store_.access().permits(settings.botId,{"environment",settings.environmentId,"launch"},true))
+                settings.projectId == target.projectId)
                 peers.push_back({{"botId",clean(settings.botId)},{"role",clean(peer.role)}});
         }
         if (!peers.empty() && !workResult && !hasPriorEvidence) pin = session_.inputCommit(target);

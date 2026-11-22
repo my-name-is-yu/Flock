@@ -2490,7 +2490,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
+enum class SpecialistMode { Single, ConsultRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -2522,8 +2522,13 @@ void specialistAdmission(SpecialistMode mode) {
     f.specialistPerson = [&](std::string_view id) -> std::optional<Person> {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
-    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,f.runtime.get()); };
+    const auto handoffs = [&] {
+        return SessionHandoff(*f.store,session,f.specialistPerson,f.runtime.get(),[&](std::string_view bot) {
+            return f.peers.at(std::string(bot));
+        });
+    };
     auto access = f.store->access();
+    access.resourceGrant(localOwner,"beta",{"environment","e","launch"},GrantChange::revoke);
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
     }
@@ -2534,8 +2539,7 @@ void specialistAdmission(SpecialistMode mode) {
         f.peers["beta"] = {{"Root",{"alpha","","e","p"},"reviewer"},
                            {"Nested",{"gamma","","e","p"},"reviewer"}};
         f.peers["gamma"] = {{"Too deep",{"delta","","e","p"},"reviewer"}};
-        access.resourceGrant(localOwner,"gamma",{"environment","e","launch"},GrantChange::grant);
-        access.resourceGrant(localOwner,"delta",{"environment","e","launch"},GrantChange::grant);
+        f.peers["alpha"].push_back(f.peers["beta"].back());
     }
     T3Connections connections(*f.store);
     const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
@@ -2557,6 +2561,17 @@ void specialistAdmission(SpecialistMode mode) {
     f.restart();
     const auto generation = handoffs().view(person,channel).generation;
     SpecialistCheck request{channel,generation,"coord/check-1","beta","Review the pinned project",Evidence,pin};
+    if (mode==SpecialistMode::Single) {
+        session.pin = pin;
+        f.model.script = [](const ModelInput& input) -> Decision {
+            check(hasTool(input,"delegate_specialist") && input.event.at("specialists").at(0).at("botId")=="beta",
+                  "coordination did not offer the specialist without an environment grant");
+            return {"wait_for_root",Json::object(),""};
+        };
+        handoffs().step(person,channel,f.model,[](std::string_view bot,std::string_view) {
+            return Intake{std::string(bot),"","e","p"};
+        },[](std::string_view) { return std::string{}; });
+    }
     const auto first = f.runtime->startSpecialist(person,request);
     check(first.senderTaskId!=first.recipientTaskId && f.task(first.senderTaskId)["activeRun"].is_null() &&
           f.task(first.recipientTaskId)["inputArtifactVersion"]==pin,"delegation did not bind two distinct tasks to the pin");
@@ -2571,6 +2586,23 @@ void specialistAdmission(SpecialistMode mode) {
     auto changed = request;
     changed.commitSha = std::string(40,'b');
     denied(changed);
+    if (mode==SpecialistMode::ConsultRevoked || mode==SpecialistMode::Disconnected) {
+        f.model.script = [](const ModelInput&) { return work("delegate",false); };
+        f.reach(first.recipientTaskId,"sending");
+        f.t3.onPreflight = [&] {
+            T3Connections connections(*f.store);
+            if (mode==SpecialistMode::ConsultRevoked)
+                connections.connect(target.environmentId,person.id,T3ConnectionMode::Consult,4173);
+            else connections.disconnect(target.environmentId);
+        };
+        f.reach(first.recipientTaskId,"completed");
+        auto later = request;
+        later.delegationId = "coord/check-2";
+        denied(later);
+        check(f.t3.launches==0 && f.logs(first.recipientTaskId,"specialist_launch_blocked")==1,
+              "a revoked connection still launched unadmitted specialist work");
+        return;
+    }
     if (nested) {
         f.model.script = [&](const ModelInput& input) -> Decision {
             if (input.task.at("botId")=="beta") {
@@ -3297,7 +3329,17 @@ int main() {
             {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
-            {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"pinned specialist admission without a launch grant",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"consult mode blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::ConsultRevoked); }},
+            {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
+            {"ordinary launch still needs a grant with a full connection",[] {
+                Fixture f;
+                f.store->access().resourceGrant(localOwner,"alpha",{"environment","e","launch"},GrantChange::revoke);
+                T3Connections(*f.store).connect("e",localOwner.id,T3ConnectionMode::Full,4173);
+                f.model.script = [](const ModelInput&) { return work(); };
+                f.wait(f.submit(),"settings");
+                check(f.t3.launches==0,"the connector granted an ordinary Bot launch");
+            }},
             {"direct specialist rejects missing findings",[] { specialistAdmission(SpecialistMode::MissingFindings); }},
             {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},
             {"direct specialist rejects more than eight findings",[] { specialistAdmission(SpecialistMode::TooManyFindings); }},
