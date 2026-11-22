@@ -15,7 +15,7 @@ import { mountConversationFind } from '/conversation-find.mjs';
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar', 'profile-avatar-button',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target', 'decision-cancel-reply',
@@ -691,7 +691,7 @@ function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
   conversationFind.setContext(view?.data && !dm ? view : null);
-  const profile = elements.profile;
+  const profile = elements['profile-avatar-button'];
   const identity = elements['profile-identity'];
   identity.hidden = !bot || !!dm;
   elements['profile-toolbar'].hidden = !bot;
@@ -748,7 +748,6 @@ function renderHeader() {
   const name = elements['profile-name'];
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
-  elements['profile-avatar-button']?.setAttribute('aria-label', settingsLabel);
   name.textContent = bot.name;
   name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
@@ -1430,7 +1429,7 @@ function leavePeerConversation(updateHistory = true) {
   const anchor = dm.fromPeerLink && readingPositions.has(timelineKey(id)) ? dm.anchor : 0;
   selectBot(id, null, { updateHistory });
   const picker = elements['peer-picker'];
-  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements.profile : picker);
+  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements['profile-avatar-button'] : picker);
   target.focus({ preventScroll: true });
 }
 
@@ -2045,7 +2044,7 @@ function openNewBot(origin = elements['new-bot-button']) {
 function openEditAppearance(bot) {
   reopenSettingsOnClose = true;
   closeDetail();
-  botEditor.openEdit(bot, { bots, origin: elements.profile });
+  botEditor.openEdit(bot, { bots, origin: elements['profile-avatar-button'] });
 }
 
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -2614,7 +2613,7 @@ const decisions = mountBoardInbox({
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {
-    const target = elements.composer.hidden || elements['composer-container'].hidden ? elements.profile : elements.message;
+    const target = elements.composer.hidden || elements['composer-container'].hidden ? elements['profile-avatar-button'] : elements.message;
     target.focus({ preventScroll: true });
   },
   onChange() {
@@ -2707,8 +2706,7 @@ function openCurrentBotSettings() {
   closeConversationActions();
   openDetail({ kind: 'settings' });
 }
-elements.profile.addEventListener('click', openCurrentBotSettings);
-elements['profile-avatar-button']?.addEventListener('click', openCurrentBotSettings);
+elements['profile-avatar-button'].addEventListener('click', openCurrentBotSettings);
 elements['peer-picker'].addEventListener('click', () => {
   closeConversationActions(true);
   openDetail({ kind: 'peers' });
