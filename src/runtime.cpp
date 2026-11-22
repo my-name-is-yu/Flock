@@ -1032,7 +1032,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         peer.intake.scheduleId.clear();
         peer.intake.scheduledAt = 0;
-        const auto id = db.submit(peer.intake,0,nullptr,true);
+        const auto id = db.submit(peer.intake,0,nullptr,RequestJournal::skip);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
         db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task)"
