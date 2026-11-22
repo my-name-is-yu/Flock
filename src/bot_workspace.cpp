@@ -569,7 +569,15 @@ void Store::Impl::stopWorkspace() {
     // Runtime has joined the workers that can admit commands. Only command workers remain.
     for (auto& [id,job] : workspaceJobs)
         if (job->worker.joinable()) job->worker.join();
-    persistWorkspaceResults();
+    for (int attempt = 1; ; ++attempt) {
+        try {
+            persistWorkspaceResults();
+            break;
+        } catch (const StorageError& error) {
+            if (!error.contended() || attempt == 3) throw;
+            std::this_thread::sleep_for(50ms);
+        }
+    }
     workspaceJobs.clear();
 }
 

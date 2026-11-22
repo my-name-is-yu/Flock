@@ -717,6 +717,37 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     };
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
+    const auto persistModelCheckpoint = [&] {
+        std::lock_guard lock(mutex);
+        const auto entry = conversationCheckpoints.find(id);
+        if (entry == conversationCheckpoints.end()) return true;
+        const auto& checkpoint = entry->second;
+        Transaction transaction(db);
+        const auto* decisions = std::get_if<std::vector<Decision>>(&checkpoint.outcome);
+        const bool isHead = turnPending(id);
+        // An approval can restore an older turn while this message is inferring.
+        if (!isHead && !decisions) return false;
+        if (!checkpoint.usage.empty())
+            exec("UPDATE model_attempts SET usage=? WHERE id=?",{checkpoint.usage,checkpoint.attempt});
+        bool hasDecision = false;
+        if (!isHead || authorizeTurn(message)) {
+            if (decisions) {
+                auto saved = Json::array();
+                for (const auto& call : *decisions)
+                    saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
+                exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
+                     {saved,id,checkpoint.step});
+                exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
+                hasDecision = true;
+            } else if (const auto retry = std::get<ConversationModelFailure>(checkpoint.outcome).retryFrom) {
+                deferConversation(id,*retry);
+            } else finishTurn(message,failure,nullptr,"error");
+        }
+        transaction.commit();
+        conversationCheckpoints.erase(entry);
+        return hasDecision;
+    };
+    if (!persistModelCheckpoint()) return;
     for (int step = 1; step <= maxSteps && !shutdown.stop_requested(); ++step) {
         if (!message.channelScope.empty()) deliverChannels(shutdown);
         std::vector<Decision> calls;
@@ -785,39 +816,31 @@ LIMIT 1
                 transaction.commit();
             }
             if (!attempt) return;
+            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
-                calls = callModel(message.bot,model,input,attempt).calls;
+                auto response = callModel(message.bot,model,input,0);
+                checkpoint.usage = std::move(response.usage);
+                calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count",false);
                 if (calls.size() > 1 && !std::ranges::all_of(calls,[](const auto& call) { return isBotTool(call.tool); }))
                     throw ModelError("Parallel calls must be independent Bot tools",false);
+                checkpoint.outcome = calls;
             } catch (const ModelError& error) {
-                if (error.transient) {
-                    std::lock_guard lock(mutex);
-                    Transaction transaction(db);
-                    if (turnPending(id)) deferConversation(id,clock());
-                    transaction.commit();
-                    return;
-                }
-                finish(failure,"error");
-                return;
+                if (!error.usage.empty()) checkpoint.usage = error.usage;
+                if (error.transient) checkpoint.outcome = ConversationModelFailure{clock()};
             } catch (const StorageError&) {
                 throw;
             } catch (const std::exception&) {
-                finish(failure,"error");
-                return;
+                // Preserve the terminal model error behavior for invalid responses.
             }
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            auto saved = Json::array();
-            if (turnPending(id) && !authorizeTurn(message)) { transaction.commit(); return; }
-            for (const auto& call : calls)
-                saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
-            exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",{saved,id,step});
-            exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
-            transaction.commit();
+            {
+                std::lock_guard lock(mutex);
+                conversationCheckpoints.insert_or_assign(id,std::move(checkpoint));
+            }
+            if (!persistModelCheckpoint()) return;
         }
 
         if (shutdown.stop_requested()) return;

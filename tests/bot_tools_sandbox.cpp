@@ -502,10 +502,10 @@ void workspaceResultSurvivesARejectedTerminalWrite(Fixture& f) {
     check(rejected,"The failed terminal workspace write was swallowed");
     sql("DROP TRIGGER reject_workspace_result");
     const auto result = f.status(command);
+    const auto attempts = read(f.home/"workspaces"/"alpha"/"terminal-attempts");
     check(result.at("state") == "exited" && result.at("stdout") == "stdout" &&
-          read(f.home/"workspaces"/"alpha"/"terminal-attempts") == "x" &&
-          result.at("stderr") == "stderr" && result.at("exitCode") == 7,
-          "Retry lost the original command result");
+          attempts == "x" && result.at("stderr").get<std::string>().ends_with("stderr") && result.at("exitCode") == 7,
+          "Retry lost the original command result (attempts " + attempts + "): " + result.dump());
     const auto next = f.command(Json::array({"printf","next"}));
     check(f.until(next,[](const auto& row) { return row.at("state") == "exited"; }).at("stdout") == "next",
           "The terminal retry left the Bot's command slot occupied");

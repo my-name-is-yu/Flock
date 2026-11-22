@@ -82,8 +82,9 @@ struct ScriptedModel : Model {
     std::mutex mutex;
     std::function<Decision(const ModelInput&)> conversation;
     std::vector<ModelInput> turns;
+    Json usage = Json::object();
 
-    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)},usage}; }
     Decision choose(const ModelInput& input) {
         if (input.event.value("kind","") == "conversation_turn") {
             {
@@ -298,7 +299,7 @@ void concurrentWorkerRecoversFromWriterContention() {
     Store store(fixture.database());
     auto locker = fixture.connect();
     bool reported = false;
-    std::atomic_bool first = true;
+    std::atomic_int blockedCalls = 0;
     std::promise<void> entered, allow;
     const auto resume = allow.get_future().share();
     RuntimeFixture execution(store,[&](std::string_view error) {
@@ -307,14 +308,17 @@ void concurrentWorkerRecoversFromWriterContention() {
             reported = true;
         }
     });
+    execution.model.usage = {{"input_tokens",7}};
     execution.model.conversation = [&](const ModelInput& input) {
-        if (input.event.at("text") == "Wait for SQLite" && first.exchange(false)) {
+        if (input.event.at("text") == "Wait for SQLite" && ++blockedCalls == 1) {
             entered.set_value();
             resume.wait();
         }
         return say("Done.");
     };
-    const auto blocked = receive(store,"blocked","Wait for SQLite");
+    auto intake = Fixture::bot();
+    intake.config["modelCallLimit"] = 1;
+    const auto blocked = receive(store,"blocked","Wait for SQLite",0,intake);
     Id other = 0;
     execution.runtime.tickConcurrent();
     const auto ready = entered.get_future().wait_for(5s) == std::future_status::ready;
@@ -328,7 +332,10 @@ void concurrentWorkerRecoversFromWriterContention() {
         if (other && !reply(store,blocked).is_null() && !reply(store,other,"beta").is_null()) break;
         std::this_thread::sleep_for(5ms);
     }
-    check(reported && reply(store,blocked)["text"] == "Done." && reply(store,other,"beta")["text"] == "Done.",
+    check(reported && blockedCalls == 1 && reply(store,blocked)["text"] == "Done." &&
+          reply(store,other,"beta")["text"] == "Done." &&
+          fixture.count("SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE message_id=" +
+                        std::to_string(blocked)) == 7,
           "A contended worker stopped the Runtime or left a Bot without a reply");
 }
 

@@ -53,6 +53,17 @@ struct PeerExchange {
 
 struct TaskChange { std::string intent, doneWhen, environment; };
 
+struct ConversationModelFailure {
+    std::optional<Seconds> retryFrom;
+};
+
+struct ConversationModelCheckpoint {
+    Id attempt;
+    int step;
+    Json usage;
+    std::variant<std::vector<Decision>,ConversationModelFailure> outcome;
+};
+
 class SecretStore {
 public:
     explicit SecretStore(const std::filesystem::path& stateDirectory);
@@ -192,6 +203,8 @@ struct Store::Impl {
     ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
+    // Retain model outcomes through write contention without spending another attempt.
+    std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, std::stop_token);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);

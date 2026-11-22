@@ -128,7 +128,7 @@ ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const Model
         turn.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         auto usage = scrub.payload(error.usage);
-        if (!usage.empty()) {
+        if (attemptId && !usage.empty()) {
             std::lock_guard lock(mutex);
             exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
@@ -138,7 +138,7 @@ ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const Model
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }
-    if (!turn.usage.empty()) {
+    if (attemptId && !turn.usage.empty()) {
         std::lock_guard lock(mutex);
         exec("UPDATE model_attempts SET usage=? WHERE id=?",{turn.usage,attemptId});
     }
