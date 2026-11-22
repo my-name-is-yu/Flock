@@ -2046,13 +2046,40 @@ SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.work
         });
     }
 
+    bool forwardedQuestionAnswer(const Json& task, const Json& target) {
+        std::lock_guard lock(db.mutex);
+        const auto event = db.currentEvent(task);
+        const auto peer = db.peerExchange(task["id"]);
+        if (!peer || peer->recipient != task["id"] || peer->kind != "work" || peer->phase != "working" ||
+            event.is_null() || event["consumed"] == true || field(event,"kind") != "bot_answer" ||
+            field(event,"messageType") != "answer" || field(event,"requestKind") != peer->kind ||
+            field(event,"exchangeId") != peer->id || field(event,"messageId") != peer->lastMessage ||
+            field(event,"toBotId") != field(task,"botId")) return false;
+        const auto sender = db.load(peer->sender);
+        if (field(event,"fromBotId") != field(sender,"botId")) return false;
+        auto original = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{target.at("eventId"),task["id"]});
+        if (!original.next()) return false;
+        const auto question = original.json(0);
+        const auto questionRun = question.value("run",Json::object());
+        const auto targetRun = target.value("run",Json::object());
+        return field(question,"kind") == "question" &&
+            field(questionRun,"threadId") == field(targetRun,"threadId") &&
+            field(questionRun,"runId") == field(targetRun,"runId") &&
+            field(question.value("question",Json::object()),"requestId") == field(target,"requestId");
+    }
+
     bool questionStillOpen(const Json& task) {
         const auto observed = observe(task);
         if (ingest(task,observed) || observed.kind != Observation::Kind::Question) return false;
         const auto target = questionTarget(task);
         const auto& question = task["question"];
-        return question.is_object() && question.value("target",target) == target &&
-            target["requestId"] == observed.question.requestId;
+        if (!question.is_object() || target["requestId"] != observed.question.requestId) return false;
+        const auto savedTarget = question.value("target",target);
+        if (savedTarget == target) return true;
+        if (!savedTarget.is_object()) return false;
+        auto forwardedTarget = target;
+        forwardedTarget["eventId"] = savedTarget.value("eventId",Json(nullptr));
+        return savedTarget == forwardedTarget && forwardedQuestionAnswer(task,savedTarget);
     }
 
     std::optional<TaskDecision> savedDecision(const Json& task, const Json& event) {

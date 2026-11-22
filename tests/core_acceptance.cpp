@@ -1919,7 +1919,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAfterResume, ResidualStageAfterResume };
+enum class SpecialistMode { Single, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -2093,7 +2093,8 @@ void specialistAdmission(SpecialistMode mode) {
         mode!=SpecialistMode::EmptyFindings && mode!=SpecialistMode::TooManyFindings &&
         mode!=SpecialistMode::CancelledPrelaunch && mode!=SpecialistMode::PausedPrelaunch &&
         mode!=SpecialistMode::InterruptedPauseCleanup && mode!=SpecialistMode::InterruptedPauseStopRecovery &&
-        mode!=SpecialistMode::ResidualDirectAfterResume &&
+        mode!=SpecialistMode::ResidualDirectAnswer && mode!=SpecialistMode::ResidualDirectAfterResume &&
+        mode!=SpecialistMode::ResidualDirectStaleQuestion &&
         mode!=SpecialistMode::EvidenceFreshness) {
         f.model.script = [](const ModelInput& input) -> Decision {
             if (input.event.at("kind")=="bot_request") {
@@ -2191,6 +2192,8 @@ void specialistAdmission(SpecialistMode mode) {
         check(f.task(first.recipientTaskId).at("state")=="workflow_waiting" &&
               f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
               "a question blocked its independent check or emitted early aggregate success");
+        const auto answerModelCalls=f.model.calls;
+        const auto answerReplies=f.t3.replies;
         if (mode==SpecialistMode::ResidualStageAfterResume) {
             const auto before = handoffs().view(person,channel);
             const auto assignment = before.work.front();
@@ -2231,6 +2234,10 @@ void specialistAdmission(SpecialistMode mode) {
             f.store->operate(person,question,"answer",{{"text","main"}});
         }
         f.reach(stage1,"running");
+        if (mode==SpecialistMode::ResidualStageAfterResume)
+            check(f.model.calls>answerModelCalls && f.t3.replies==answerReplies+1 &&
+                  f.t3.seen.back().tool=="answer_session_question" && f.t3.interrupts==0,
+                  "the resumed workflow answer did not reach the model and T3");
         if (mode==SpecialistMode::StaleWorkflow) currentPin = std::string(40,'b');
         f.t3.finish(run1);
         const bool failed = mode==SpecialistMode::FailedWorkflow;
@@ -2271,13 +2278,19 @@ void specialistAdmission(SpecialistMode mode) {
             return work("delegate",false);
         }
         if (input.event.at("kind")=="bot_answer") {
-            check(input.event.at("text")=="Check the unit test fixture","specialist lost its own answer");
-            return work("delegate",false);
+            if (input.event.at("text")=="Check the unit test fixture") return work("delegate",false);
+            if ((mode==SpecialistMode::ResidualDirectAnswer || mode==SpecialistMode::ResidualDirectAfterResume ||
+                 mode==SpecialistMode::ResidualDirectStaleQuestion) &&
+                input.event.at("text")=="Prioritize the unit test") return reply();
+            check(false,"specialist lost its own answer");
         }
-        if (mode==SpecialistMode::ResidualDirectAfterResume && input.event.at("kind")=="question")
+        if ((mode==SpecialistMode::ResidualDirectAnswer || mode==SpecialistMode::ResidualDirectAfterResume ||
+             mode==SpecialistMode::ResidualDirectStaleQuestion) &&
+            input.event.at("kind")=="question")
             return botReply("question","Which test should I prioritize?");
         check(input.event.at("kind")=="result","unexpected specialist event");
-        return mode==SpecialistMode::Single ? botReply("result","Verified the immutable input") :
+        return mode==SpecialistMode::Single || mode==SpecialistMode::ResidualDirectAnswer ||
+            mode==SpecialistMode::ResidualDirectAfterResume ? botReply("result","Verified the immutable input") :
             botReply("failed","The report did not contain valid findings.");
     };
     const auto wait = f.wait(first.senderTaskId,"user_question");
@@ -2386,7 +2399,8 @@ void specialistAdmission(SpecialistMode mode) {
     check(f.t3.seen.size()==2 && f.t3.reconciles==2 && f.t3.seen.at(1).actionId==launched.actionId &&
           f.t3.seen.at(1).instruction==launched.instruction && f.t3.seen.at(1).authGeneration==launched.authGeneration,
           "restart lost the reserved launch or changed its OAuth namespace or payload");
-    if (mode==SpecialistMode::ResidualDirectAfterResume) {
+    if (mode==SpecialistMode::ResidualDirectAnswer || mode==SpecialistMode::ResidualDirectAfterResume ||
+        mode==SpecialistMode::ResidualDirectStaleQuestion) {
         f.t3.question("run-1");
         const auto wait = f.wait(first.senderTaskId,"user_question");
         const auto before = handoffs().view(person,channel);
@@ -2396,13 +2410,17 @@ void specialistAdmission(SpecialistMode mode) {
         check(assignment.at("canAnswer") && assignment.at("question").at("waitId")==wait &&
               f.task(first.recipientTaskId).at("activeRun").at("runId")=="run-1",
               "an admitted direct question was not projected as answerable");
-        const auto paused = handoffs().pause(person,channel);
-        check(!paused.work.front().at("canAnswer") && paused.work.front().at("question").at("waitId")==wait &&
-              f.t3.interrupts==0,"pause interrupted or rebound an admitted direct question");
-        const auto resumed = handoffs().resume(person,channel);
-        check(resumed.generation>assignmentGeneration && resumed.work.front().at("canAnswer") &&
-              resumed.work.front().at("question").at("waitId")==wait,
-              "resume did not preserve the admitted direct question's original wait");
+        if (mode==SpecialistMode::ResidualDirectAfterResume) {
+            const auto paused = handoffs().pause(person,channel);
+            check(!paused.work.front().at("canAnswer") && paused.work.front().at("question").at("waitId")==wait &&
+                  f.t3.interrupts==0,"pause interrupted or rebound an admitted direct question");
+            const auto resumed = handoffs().resume(person,channel);
+            check(resumed.generation>assignmentGeneration && resumed.work.front().at("canAnswer") &&
+                  resumed.work.front().at("question").at("waitId")==wait,
+                  "resume did not preserve the admitted direct question's original wait");
+        }
+        const auto modelCalls = f.model.calls;
+        const auto replies = f.t3.replies;
         const auto launches = f.t3.launches;
         handoffs().answerWork(person,channel,assignmentGeneration,delegation,"",wait,"Prioritize the unit test");
         check(f.t3.launches==launches && f.task(first.recipientTaskId).at("activeRun").at("runId")=="run-1" &&
@@ -2411,6 +2429,27 @@ void specialistAdmission(SpecialistMode mode) {
             handoffs().answerWork(person,channel,assignmentGeneration,delegation,"",wait,"Late answer");
             throw std::runtime_error("A consumed direct wait accepted another answer");
         } catch (const Conflict&) {}
+        if (mode==SpecialistMode::ResidualDirectStaleQuestion) {
+            f.t3.runs.at("run-1").question.requestId="replacement-question";
+            for (int step=0;step<8;++step) f.runtime->tick();
+            check(f.t3.replies==replies,"a forwarded answer was delivered to a replaced T3 question");
+            return;
+        }
+        f.reach(first.recipientTaskId,"running");
+        check(f.model.calls>modelCalls && f.t3.replies==replies+1 &&
+              f.t3.seen.back().tool=="answer_session_question" && f.t3.interrupts==0,
+              "the forwarded direct answer did not reach the model and T3");
+        f.t3.finish("run-1");
+        f.t3.runs.at("run-1").report=Json{{"artifactVersion",pin},{"verdict","pass"},{"findings","The check passed"}}.dump();
+        f.reach(first.recipientTaskId,"completed");
+        f.reach(first.senderTaskId,"completed");
+        const auto history=f.store->history(first.senderTaskId,0,200);
+        const auto result=std::find_if(history.begin(),history.end(),[](const Json& item) {
+            return item.at("kind")=="specialist_result";
+        });
+        check(result!=history.end() && result->at("data").at("status")=="completed" &&
+              result->at("data").at("verdict")=="pass" && f.t3.replies==replies+1,
+              "the answered direct Run did not progress to its specialist result");
         return;
     }
     f.t3.finish("run-1");
@@ -2680,7 +2719,9 @@ int main() {
             {"pause settles prelaunch questions and resumes unrelated work",[] { specialistAdmission(SpecialistMode::PausedPrelaunch); }},
             {"recovery settles work frozen before cleanup",[] { specialistAdmission(SpecialistMode::InterruptedPauseCleanup); }},
             {"pause then stop recovery sweeps all prior delegation generations",[] { specialistAdmission(SpecialistMode::InterruptedPauseStopRecovery); }},
+            {"admitted direct question reaches T3 and progresses",[] { specialistAdmission(SpecialistMode::ResidualDirectAnswer); }},
             {"admitted direct question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualDirectAfterResume); }},
+            {"forwarded answer cannot target a replaced T3 question",[] { specialistAdmission(SpecialistMode::ResidualDirectStaleQuestion); }},
             {"admitted workflow stage question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualStageAfterResume); }},
             {"exhausted saved delegation settles across restart",exhaustedSavedSpecialistEffect},
             {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {
