@@ -90,10 +90,11 @@ ID in settings. T3 must permit each read. Set `services` and `mcpServers` to arr
 connection names for the conversation tools. Manage grants and protected input
 from **Access and credentials** in Bot settings.
 
-Session search scans up to 64 candidates per page and uses a shared two-second
-deadline for T3 requests. Follow `nextCursor` with the same filters even when
-the page contains no matches. If a timeout occurs before the scan advances,
-retry with the same cursor.
+Session search scans up to 64 candidates per page with a shared two-second
+deadline for candidate reads. A cursor after a matched Session first rechecks
+that Session's readability with its own two-second deadline. Follow `nextCursor`
+with the same filters even when the page contains no matches. If a timeout occurs
+before the scan advances, retry with the same cursor.
 
 Adapters that perform resource operations should use the contracts in
 `include/flock/access.hpp`. At the execution boundary, pass the authenticated

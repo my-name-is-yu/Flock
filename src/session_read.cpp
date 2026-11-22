@@ -72,7 +72,6 @@ public:
         : store_(store), access_(access), bot_(bot), channelScope_(channelScope), t3_(t3) {}
 
     Json search(const Json& args) {
-        const auto deadline = Clock::now()+searchTimeLimit;
         const Filters filters(args);
         const auto project = argument(args,"project");
         const auto status = argument(args,"status",128);
@@ -86,7 +85,7 @@ public:
             anchor = resolve(cursor,RefKind::search);
             if (anchor) {
                 if ((anchor->payload != scopedKey && anchor->payload != key) ||
-                    !permitted(anchor->target) || !readable(anchor->target,deadline))
+                    !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
                     return scopedResult(failure(unavailable));
                 after = anchor->target;
             } else {
@@ -101,21 +100,21 @@ public:
         std::vector<SessionTarget> incomplete;
         const auto batch = candidates(after);
         const auto scanLimit = std::min(searchCandidateLimit,batch.size());
+        const auto scanDeadline = Clock::now()+searchTimeLimit;
         std::size_t scanned = 0;
         bool timedOut = false;
         for (;;) {
             while (matches.size() <= limit && scanned < scanLimit) {
-                if (Clock::now() >= deadline) {
+                if (Clock::now() >= scanDeadline) {
                     timedOut = true;
                     break;
                 }
                 const auto& target = batch[scanned];
                 std::optional<SessionMetadata> item;
                 try {
-                    if (permitted(target)) item = t3_.sessionMetadata(target,!filters.query.empty(),deadline);
+                    if (permitted(target)) item = t3_.sessionMetadata(target,!filters.query.empty(),scanDeadline);
                 } catch (const SessionReadTimeout&) {
                     timedOut = true;
-                    // A candidate that used a fresh page's budget must not block every later match.
                     if (scanned == 0) {
                         incomplete.push_back(target);
                         ++scanned;
@@ -166,7 +165,6 @@ public:
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
             }
-            // A scan boundary can be unreadable. This cursor records only a position and grants no access.
             if (result["nextCursor"].is_null() && scanned < batch.size())
                 result["nextCursor"] = issue(RefKind::searchPosition,batch[scanned-1],scopedKey);
             result["truncated"] = truncated;

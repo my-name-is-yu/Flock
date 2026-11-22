@@ -255,9 +255,12 @@ class Fixture(BaseHTTPRequestHandler):
             title = state["searchTitles"].get(thread_id, "Background investigation")
             summary |= {"title": title, "status": "failed", "createdAt": "2026-11-21T01:00:00Z",
                         "updatedAt": "2026-11-21T13:00:00Z"}
+            delay = state.get("searchReadDelays", {}).get(thread_id, 0)
             if thread_id == state.get("slowSearchThread"):
-                time.sleep(1.6)
+                delay = 1.6
                 summary["projectId"] = "slow-search-project"
+            if delay:
+                time.sleep(delay)
             rows = [self.item(thread_id, 0, "root", "user_message", "Check the logs", source="web")]
         if scenario == "session-read":
             failure = state.get("threadReadErrors", {}).get(thread_id)

@@ -148,5 +148,21 @@ void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const 
           resumed.at("sessions").at(0).at("title") == "Staging failure A" &&
           resumed.at("sessions").at(1).at("title") == "Staging failure B",
           "the timed-out candidate was skipped or reordered on retry");
-    fixture({{"scenario","session-read"}});
+
+    auto matchedPage = query;
+    matchedPage["limit"] = 1;
+    const auto firstMatch = conversation.search(matchedPage);
+    check(firstMatch.at("sessions").size() == 1 && firstMatch.at("nextCursor").is_string(),
+          "could not create a matched-result cursor");
+    matchedPage["cursor"] = firstMatch.at("nextCursor");
+    fixture({{"searchReadDelays",{{"deadline-2",1.15},{"deadline-3",0.9}}}});
+    const auto afterSlowAnchor = conversation.search(matchedPage);
+    check(afterSlowAnchor.at("ok") == true && afterSlowAnchor.at("sessions").size() == 1 &&
+          afterSlowAnchor.at("sessions").at(0).at("title") == "Staging failure B" &&
+          afterSlowAnchor.at("nextCursor").is_null() && afterSlowAnchor.at("truncated") == false,
+          "a slow but readable anchor exhausted the next candidate's budget");
+
+    fixture({{"searchReadDelays",Json::object()},{"missingSearchThreads",{"deadline-2"}}});
+    check(conversation.search(matchedPage).at("ok") == false,"matched-result cursor accepted an unreadable anchor");
+    fixture({{"scenario","session-read"},{"missingSearchThreads",Json::array()}});
 }
