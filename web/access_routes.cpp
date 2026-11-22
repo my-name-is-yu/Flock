@@ -5,7 +5,7 @@
 
 namespace flockv0::web {
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
-    if (!callbacks.authenticate) return request.has_header("Authorization") ? Person{} : Person{"local-owner",true};
+    if (!callbacks.authenticate) return request.has_header("Authorization") ? Person{} : localOwner;
     if (request.get_header_value_count("Authorization") != 1) return {};
     return callbacks.authenticate(request.get_header_value("Authorization"));
 }

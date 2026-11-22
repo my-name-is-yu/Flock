@@ -9,7 +9,7 @@ target_link_libraries(flock PRIVATE flock_app_support)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  add_executable(flock_app_tests tests.cpp tests/schedules.cpp demo.cpp)
+  add_executable(flock_app_tests tests.cpp session_tests.cpp tests/schedules.cpp demo.cpp)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
   add_test(NAME flock_cli_invalid_port

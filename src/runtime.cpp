@@ -72,6 +72,7 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
+    std::future<void> channelWorker;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
@@ -98,6 +99,7 @@ struct Runtime::Impl {
     ~Impl() {
         conversationWorkers.clear();
         workers.clear();
+        if (channelWorker.valid()) channelWorker.wait();
         close(lockFd);
     }
 
@@ -1325,8 +1327,10 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
-            const auto budget = db.taskModelBudget(current);
-            attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+            auto reserved = db.query("SELECT reserved_attempt FROM events WHERE id=?",{event["id"]});
+            if (reserved.next()) attempt = reserved.number(0);
+            if (attempt) db.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event["id"]});
+            else attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
                     "The model call limit is exhausted. Approve one more model call to continue."}});
@@ -1459,17 +1463,20 @@ Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOpt
     : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
+    p_->db.deliverChannels();
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
         if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock)) break;
     }
+    p_->db.deliverChannels();
 }
 void Runtime::tick() {
     p_->fireDueAutomations();
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit))
         p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
+    p_->db.deliverChannels();
 }
 void Runtime::tickConcurrent() {
     p_->fireDueAutomations();
@@ -1484,6 +1491,11 @@ void Runtime::tickConcurrent() {
     };
     collect(p_->conversationWorkers);
     collect(p_->workers);
+    if (p_->channelWorker.valid() &&
+        p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        p_->channelWorker.get();
+    if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
+        p_->channelWorker = std::async(std::launch::async,[db = &p_->db] { db->deliverChannels(); });
     constexpr auto maxConversationWorkers = Impl::batchLimit;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {
         for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {

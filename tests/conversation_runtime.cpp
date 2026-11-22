@@ -1,4 +1,5 @@
 #include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
@@ -57,7 +58,9 @@ Step stop(Id id) {
 }
 Step answer(Id id) {
     return [id](const ModelInput& input) {
-        return Decision{"answer_task_question",{{"taskId",id},{"waitId",listed(input,id).at("wait").at("waitId")},
+        const auto task = listed(input,id);
+        return Decision{"answer_task_question",{{"taskId",id},{"waitId",task.at("wait").at("waitId")},
+                                                {"revisionId",task.at("revisionId")},{"generation",task.at("generation")},
                                                 {"text",input.event.at("text")}},"Scripted answer"};
     };
 }
@@ -208,7 +211,7 @@ struct Fixture {
     }
     Json enqueue(std::string_view key,std::string_view text,Id replyTo = 0) {
         Store httpWriter(dir/"state.db");
-        return httpWriter.receive(routing(),key,text,replyTo);
+        return httpWriter.receive(localOwner,routing(),key,text,replyTo);
     }
     void script(std::string_view text, std::vector<Step> steps) {
         model.turns.insert_or_assign(std::string(text),std::move(steps));
@@ -270,7 +273,7 @@ void durableInboxAndTargetedRevision() {
     f.tick();
     check(f.event(id,"completed").is_null() && f.t3.sent.size() == 2 &&
           f.task(other)["state"] == "completed","a saved revision accepted a stale completion or held another task");
-    const auto receipt = f.store->receipt("alpha","raw",criteria);
+    const auto receipt = f.store->receipt(localOwner,"alpha","raw",criteria);
     check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "stopping",
           "the accepted revision was not recorded");
     f.model.beforeComplete = {};
@@ -415,7 +418,7 @@ void answersStayOnTheirQuestion() {
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (!input.event.at("turn").empty()) return;
         Store writer(f.dir/"state.db");
-        writer.operate(naming,namingWait.at("id"),"answer",{{"text","別の名前"}});
+        writer.operate(localOwner,TaskTarget::from(writer.task(naming),namingWait.at("id")),"answer",{{"text","別の名前"}});
     };
     f.script("Flock",{answer(naming)});
     f.receive("late-answer","Flock");
@@ -454,7 +457,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     check(!listed(f.model.turnInputs.back(),color).at("wait").at("answerable").get<bool>() &&
           f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
           "a reply to an unrelated message answered a task question");
-    const auto foreign = f.store->receive(f.routing("","beta"),"foreign-greeting","hello",wait.at("messageId"));
+    const auto foreign = f.store->receive(localOwner,f.routing("","beta"),"foreign-greeting","hello",wait.at("messageId"));
     f.runtime->runConversations();
     f.receive("foreign-yes","yes",f.response(foreign,"beta").at("messageId"));
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
@@ -464,7 +467,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     check(f.lastTurn()[0]["result"]["ok"] == true && f.lastTurn()[1]["result"]["ok"] == false &&
           f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
     bool rejected = false;
-    try { f.store->operate(color,wait.at("id"),"answer",{{"text","青"}}); }
+    try { f.store->operate(localOwner,TaskTarget::from(f.task(color),wait.at("id")),"answer",{{"text","青"}}); }
     catch (const Conflict&) { rejected = true; }
     check(rejected && f.task(color).at("wait") == wait && f.event(color,"user_answer").is_null(),
           "a direct answer was accepted for a question that replanning will discard");
@@ -478,7 +481,7 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           "an old question or its explanation answered the replacement question");
     const auto replacement = f.task(color).at("wait");
     f.model.beforeTurn = [&](const ModelInput& input) {
-        if (input.event.at("turn").empty()) f.store->operate(color,replacement.at("id"),"cancel");
+        if (input.event.at("turn").empty()) f.store->operate(localOwner,TaskTarget::from(f.task(color),replacement.at("id")),"cancel");
     };
     f.receive("answer-after-cancel","yes",replacement.at("messageId"));
     check(f.lastTurn()[0]["result"]["ok"] == false && f.event(color,"user_answer").is_null(),
@@ -507,7 +510,7 @@ void directAnswersRemainInConversationHistory() {
     f.model.questions.emplace(id,Json{{"question","Which name?"},{"choices",{"Maple","Juniper"}}});
     f.reach(id,"waiting");
     const auto wait = f.task(id).at("wait");
-    f.store->operate(id,wait.at("id"),"answer",{{"text","Maple"}});
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text","Maple"}});
     f.script("Which name did I choose?",{say("Maple")});
     f.receive("remember-name","Which name did I choose?");
     const auto& history = f.model.turnInputs.back().history;
@@ -620,7 +623,7 @@ void pausedTurnDoesNotHoldCompletion() {
             readResult = input.event.at("turn").back().at("result").at("text") == "Timing evidence";
             return Decision{"reply",{{"text","It already finished."}},"Report the current state"};
         }});
-    const auto message = f.store->receive(limited,"paused","Check what is running, then change the criteria");
+    const auto message = f.store->receive(localOwner,limited,"paused","Check what is running, then change the criteria");
     f.tick();
     f.tick();
     check(f.store->pausedConversations("alpha").size() == 1,
@@ -632,7 +635,9 @@ void pausedTurnDoesNotHoldCompletion() {
         if (row.at("kind") == "completed") reportId = row.at("id").get<Id>();
     check(reportId > message.at("messageId").get<Id>(),"the fixture report did not arrive after the conversation message");
     for (int call = 0; call < 3; ++call) {
-        f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
+        const auto paused = f.store->pausedConversations("alpha").at(0);
+        const Id pause = paused.at("messageId");
+        f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,paused.at("replyToMessageId"),pause,0,0,pause},"approve");
         f.tick();
     }
     check(f.store->pausedConversations("alpha").empty() && seen == "completed" &&
@@ -653,7 +658,7 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
     f.t3.finish("run-1",report);
     f.reach(old,"deciding");
     const auto source = f.store->latestTaskResult(old).at("id");
-    f.store->operate(old,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(old),0),"cancel");
     f.reach(old,"cancelled");
 
     constexpr auto request = "Write release notes explaining these findings";
@@ -684,7 +689,7 @@ void resumeRestoresCancelledTaskDirections() {
     f.receive("pending-direction","Add timing requirements");
     check(f.task(old).at("pendingInstructions").back().at("text") == pending,
           "the full instruction was not pending at cancellation");
-    f.store->operate(old,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(old),0),"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
     Id cancellation = 0;
@@ -733,7 +738,7 @@ void resumeRestoresCancelledTaskDirections() {
     constexpr auto correction = "Change the completion criteria to report p95 latency";
     f.script(correction,{change(next,{{"doneWhen",correctedCriteria}})});
     f.receive("correct-criteria",correction);
-    f.store->operate(next,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.task(next),0),"cancel");
     f.t3.finish(f.task(next)["activeRun"]["runId"].get<std::string>(),"Resumed work settled");
     f.reach(next,"cancelled");
     Id anchor = 0;
@@ -849,7 +854,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
           moved.instruction.find(trace) != moved.instruction.npos &&
           moved.instruction.find(trace) == moved.instruction.rfind(trace),
           "the move direction was not delivered to the new destination exactly once");
-    f.store->operate(original,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.task(original),0),"cancel");
     f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(),"Desktop work settled");
     f.reach(original,"cancelled");
 
@@ -894,7 +899,7 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
     check(f.task(original)["pendingEnvironmentId"] == "desktop",
           "the fixture did not create an environment-only move");
     const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
-    f.store->operate(original,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.task(original),0),"cancel");
     f.t3.finish(activeRun,"Cloud work cancelled before the move was delivered");
     f.reach(original,"cancelled");
     check(f.t3.sent.size() == 1,"the environment-only move was delivered before cancellation");
@@ -931,7 +936,7 @@ void resumeBatchesOversizedPendingBacklog() {
         f.script(marker,{send(old,{{"instruction",specs.back()}})});
         f.receive(marker,marker);
     }
-    f.store->operate(old,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.task(old),0),"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
     Id anchor = 0;
@@ -959,7 +964,7 @@ void resumeBatchesOversizedPendingBacklog() {
 
     const auto wait = f.task(next).at("wait");
     check(wait.at("reason") == "unknown_delivery","missing acknowledgement did not enter delivery recovery");
-    f.store->operate(next,wait.at("id"),"reconcile");
+    f.store->operate(localOwner,TaskTarget::from(f.task(next),wait.at("id")),"reconcile");
     f.reach(next,"running");
     const auto remaining = f.task(next).at("pendingInstructions");
     check(!remaining.empty() && remaining.size() < inherited.size(),"delegate did not consume a bounded batch");
@@ -1081,7 +1086,7 @@ void cancellationTakesOverRevisionStop() {
     f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"revision did not interrupt its Run");
     const auto stop = f.task(id).at("runStop");
     check(stop.at("intent") == "replan" && stop.at("run") == f.task(id).at("activeRun"),"wrong revision stop target");
-    f.store->operate(id,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
     f.restart();
     f.tick();
     check(f.task(id).at("runStop").at("intent") == "cancel" && f.t3.interrupted.size() == 1,
@@ -1159,7 +1164,7 @@ void unknownSendThenScopeChange() {
     check(f.t3.sent.size() == 2,"the uncertain replacement did not reach T3 exactly once");
     const auto replacementAction = f.t3.sent.back().actionId;
     f.restart();
-    f.store->operate(id,f.task(id)["wait"]["id"],"reconcile");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),f.task(id)["wait"]["id"]),"reconcile");
     f.reach(id,"running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
           f.t3.sent.back().tool == "follow_up" &&
@@ -1315,7 +1320,7 @@ void unrelatedUpdatesDoNotDisturbATurn() {
     check(f.event(targetId,"instruction_accepted")["messageId"] == receipt["messageId"] &&
           f.event(other,"instruction_accepted").is_null() && f.response(receipt)["actions"].size() == 1,
           "an unrelated generation change or later receipt disturbed the turn");
-    const auto later = f.store->receipt("alpha","arrived-later","status");
+    const auto later = f.store->receipt(localOwner,"alpha","arrived-later","status");
     check(later && f.response(*later)["text"] == "Working on it.",
           "the later message did not get its own turn after the earlier one");
 }
@@ -1328,7 +1333,7 @@ void staleTargetIsReportedToTheModel() {
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (!input.event["turn"].empty()) return;
         Store writer(f.dir/"state.db");
-        writer.operate(id,0,"cancel");
+        writer.operate(localOwner,TaskTarget::from(writer.task(id),0),"cancel");
     };
     const auto receipt = f.receive("racing-instruction",instruction);
     const auto result = f.lastTurn()[0]["result"];
@@ -1376,7 +1381,7 @@ void concurrentTasksShareModelBudget() {
                    start({{"request","クラウドMacでメモリを計測して"},{"environment","クラウドMac"}})});
     auto routing = f.routing();
     routing.config["modelCallLimit"] = 4;
-    f.store->receive(routing,"compound-budget",text);
+    f.store->receive(localOwner,routing,"compound-budget",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "desktop" &&
@@ -1409,7 +1414,7 @@ void concurrentTasksShareModelBudget() {
 
     const auto approve = [&] {
         Store writer(f.dir/"state.db");
-        try { writer.operate(pausedId,waitId,"approve"); return true; }
+        try { writer.operate(localOwner,TaskTarget::from(writer.task(pausedId),waitId),"approve"); return true; }
         catch (const Conflict&) { return false; }
     };
     auto first = std::async(std::launch::async,approve);
@@ -1594,7 +1599,7 @@ void continuationUsesTheCurrentBudget() {
     f.receive("unrelated-agreement","はい",wait["messageId"].get<Id>());
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
           f.event(id,"budget_granted").is_null(),"a conversation turn approved a budget wait");
-    f.store->operate(id,wait["id"],"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait["id"]),"approve");
     f.reach(id,"running");
     check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 0 && f.task(id)["additionalUsed"] == 4 &&
           f.store->tasks("alpha").size() == 1,"explicit budget approval did not permit precisely one extra Run");
@@ -1717,7 +1722,7 @@ void environmentsResolveByNameOrId() {
     f.script(text,{start({{"request","Benchmark"},{"environment","cloud"}}),
                    start({{"request","Archive"},{"environment","z-final"}}),
                    start({{"request","Audit"},{"environment","mars"}})});
-    const auto message = f.store->receive(routing,"environments",text);
+    const auto message = f.store->receive(localOwner,routing,"environments",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "cloud" &&

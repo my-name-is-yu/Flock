@@ -96,7 +96,7 @@ build/app/flock submit release "Check the upcoming release"
 build/app/flock tasks
 build/app/flock status TASK_ID
 build/app/flock history TASK_ID
-build/app/flock answer TASK_ID WAIT_ID "Use main"
+build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 ```
 
 ## Offline demo
@@ -135,8 +135,8 @@ retries, and in-flight attempts at restart count. The `model_attempts` table
 records usage fields when available. Missing fields are unknown.
 
 When the allowance runs out, choose **Approve one more model call** on the
-paused conversation message or task. For a task, `flock approve TASK WAIT`
-uses the current wait ID. If another Bot's task is paused, open that Bot's
+paused conversation message or task. For a task, `flock approve TASK WAIT REVISION GENERATION`
+uses the wait ID, current revision (or `0` before the first revision), and generation from `flock status TASK`. If another Bot's task is paused, open that Bot's
 waiting item. Each approval grants one attempt. The additional Run
 allowance remains separate. T3 observation, reconciliation, and calls made
 inside T3 or an external provider are outside the local model call allowance.

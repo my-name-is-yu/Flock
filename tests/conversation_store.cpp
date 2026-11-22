@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 
 #include <sqlite3.h>
 
@@ -63,7 +63,7 @@ Json reply(Store& store, Id message, std::string_view bot = "alpha") {
 }
 
 Id receive(Store& store, std::string_view id, std::string_view text, Id anchor = 0, Intake intake = Fixture::bot()) {
-    return store.receive(intake,id,text,anchor).at("messageId");
+    return store.receive(localOwner,intake,id,text,anchor).at("messageId");
 }
 
 Decision say(std::string text, Json suggestions = nullptr) {
@@ -404,9 +404,11 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     check(pauses.size() == 1 && pauses[0]["route"] == "model_budget" && reply(store,paused)["route"] == "model_budget" &&
           reply(store,later)["text"] == "You're welcome.","A paused turn blocked a later message or was not reported");
     const auto waitMessage = pauses[0]["messageId"].get<Id>();
-    store.approveMessageModelCall("alpha",waitMessage);
+    const InboxTarget target{"alpha",InboxKind::conversation_model_budget,pauses.at(0).at("replyToMessageId"),
+                             waitMessage,0,0,waitMessage};
+    store.decideInbox(localOwner,target,"approve");
     bool rejected = false;
-    try { store.approveMessageModelCall("alpha",waitMessage); }
+    try { store.decideInbox(localOwner,target,"approve"); }
     catch (const Conflict&) { rejected = true; }
     check(rejected && store.pausedConversations("alpha").empty(),"The same pause was approved twice");
     execution.runtime.runConversations();

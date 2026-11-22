@@ -99,11 +99,58 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
         if (std::ranges::none_of(references,[&](const Json& ref) { return ref.at("messageId") == source.at("messageId"); }))
             references.push_back(source);
     }
-    if (conflicting) task["replanning"] = true;
+    if (conflicting) {
+        task["replanning"] = true;
+        exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{task.value("eventId",Id{0})});
+        if (task.at("state") == "waiting" && waitIsActionable(task)) {
+            auto pendingWait = query("SELECT data FROM waits WHERE id=? AND resolution IS NULL",{task.at("wait").at("id")});
+            if (!pendingWait.next()) throw DecisionUnavailable{};
+            auto data = pendingWait.json(0);
+            const auto reason = field(data,"reason");
+            clearWait(task,"request_changed");
+            wait(task,reason,std::move(data));
+            if (task["question"].is_object()) task["question"]["target"] = questionTarget(task);
+        }
+    }
     if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
     task["pendingInstructions"].push_back(pending);
     journal(taskId,"instruction_accepted",pending);
     save(task);
     return conflicting;
 }
+
+void Store::Impl::recordTaskBlocker(Json& task, std::string_view reason, Id waitId) {
+    if ((!reason.empty() && !conversation_storage::hasText(reason)) || reason.size() > 2000)
+        throw Conflict("Provide a blocker reason of up to 2,000 bytes, or an empty string to clear it");
+    const auto& wait = task.at("wait");
+    if (waitId && (reason.empty() || task.at("state") != "waiting" || wait.is_null() || wait.at("id") != waitId ||
+                   !waitIsActionable(task))) throw DecisionUnavailable{};
+    const auto publicReason = redactor(field(task,"botId")).text(std::string(reason));
+    task.erase("blockerWaitId");
+    if (reason.empty()) task.erase("blockerReason");
+    else task["blockerReason"] = publicReason;
+    if (waitId) task["blockerWaitId"] = waitId;
+    auto entry = Json{{"blockerReason",publicReason},{"targetRevision",task.value("currentRevision",Id{0})}};
+    if (waitId) entry["waitId"] = waitId;
+    journal(task.at("id"),reason.empty() ? "blocker_cleared" : "blocker_recorded",entry);
+    save(task);
+}
+
+void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
+    const auto& wait = task.at("wait");
+    if (task.at("state") != "waiting" || field(wait,"reason") != "user_question" ||
+        wait.at("id") != waitId || !waitIsActionable(task))
+        throw Conflict("The question is no longer open");
+    auto updated = currentEvent(task);
+    for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
+    updated["withdrawnUserQuestion"] = field(wait,"text");
+    consumeEvent(task);
+    event(task,"withdraw/" + std::to_string(waitId),updated);
+    clearWait(task,"withdrawn");
+    if (task["question"].is_object()) task["question"]["target"] = questionTarget(task);
+    journal(task.at("id"),"question_withdrawn",{{"waitId",waitId}});
+    task["state"] = "deciding";
+    save(task);
+}
+
 }

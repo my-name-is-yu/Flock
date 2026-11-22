@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/memory_automation.hpp"
 
 #include <algorithm>
@@ -86,7 +86,7 @@ void memoryFlow(const std::filesystem::path& db) {
         const auto start = bot.inputs.size();
         choices.push_back(reply());
         bot.choices = std::move(choices);
-        store.receive(target,id,id);
+        store.receive(localOwner,target,id,id);
         runtime.runConversations();
         check(bot.choices.empty(),"Conversation did not complete");
         return start;
@@ -183,6 +183,20 @@ void memoryFlow(const std::filesystem::path& db) {
           "Shared-memory decision leaked a protected value in the conversation trace");
     const auto sharedContent = store.memory(owner,"beta","read_memory",{{"docId",path}});
     check(sharedContent.at("content") == "Example: [redacted]","Shared text exposed another Bot's protected value");
+
+    auto limited = beta;
+    limited.config["modelCallLimit"] = 1;
+    bot.choices = {{"read_memory",{{"docId",path}},"Check the playbook"},reply()};
+    const auto receipt = store.receive(localOwner,limited,"paused-shared-read","Check the shared playbook");
+    runtime.runConversations();
+    const Id pauseId = store.pausedConversations(beta.botId).at(0).at("messageId");
+    access.resourceGrant(owner,beta.botId,{"shared_memory",path,"read"},GrantChange::revoke);
+    store.decideInbox(owner,{beta.botId,InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
+                      "approve");
+    runtime.runConversations();
+    check(bot.choices.empty() && lastResult(bot.inputs.back()).at("ok") == false &&
+          bot.inputs.back().event.dump().find("Example: [redacted]") == std::string::npos,
+          "Resuming after revocation exposed a cached shared-memory read");
 }
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
@@ -340,7 +354,7 @@ void automationConversation(const std::filesystem::path& db) {
         {"create_trigger",{{"source","deploy"},{"eventFilter",{{"status","finished"}}},{"request","Check deployed status"}},"Create trigger"},
         {"list_schedules",Json::object(),"List managed automations"},reply(),
     };
-    store.receive(alpha,"create","Create my automation");
+    store.receive(localOwner,alpha,"create","Create my automation");
     runtime.runConversations();
     const auto list = lastResult(bot.inputs.back()).at("automations");
     check(list.size() == 3 && list.at(0).at("createdBy") == "bot:alpha","Conversation automation tools did not create entries");
@@ -348,7 +362,7 @@ void automationConversation(const std::filesystem::path& db) {
           list.at(1).at("nextRunAt") == options.clock() + 600,"Conversation reminder did not use the Runtime clock");
     const auto triggerId = list.at(0).at("id");
     bot.choices = {{"remove_schedule",{{"id",list.at(2).at("id")}},"Cancel schedule"},reply()};
-    store.receive(alpha,"remove","Cancel the weekly progress schedule");
+    store.receive(localOwner,alpha,"remove","Cancel the weekly progress schedule");
     runtime.runConversations();
     check(lastResult(bot.inputs.back()).at("status") == "canceled","Conversation scheduler could not cancel");
     const auto delivery = store.receiveWebhook(owner,"deploy","deployment-1",{{"status","finished"}},options.clock());

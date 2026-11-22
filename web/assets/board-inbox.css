@@ -1,0 +1,54 @@
+.board-inbox-nav, .board-inbox-filters, .board-inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .5rem;
+}
+.board-inbox-nav { padding: .3rem .85rem .65rem; }
+.board-inbox-nav button, .board-inbox button:not(.icon-button), .board-inbox select {
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  padding: .38rem .65rem;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+.board-inbox-nav button:hover, .board-inbox button:not(.icon-button):hover { background: var(--hover); }
+.board-inbox { width: min(49rem, calc(100% - 1.5rem)); height: min(46rem, 88dvh); }
+.board-inbox-filters label, .board-inbox-form label {
+  display: grid;
+  gap: .25rem;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+}
+.board-inbox-items, .board-inbox-card, .board-inbox-form { display: grid; gap: .65rem; }
+.board-inbox-card {
+  padding: .85rem 1rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--canvas);
+  overflow-wrap: anywhere;
+}
+.board-inbox-card h3 { font-size: var(--text-md); }
+.board-inbox-card p, .board-inbox-card dd { white-space: pre-wrap; }
+.board-inbox-card p, .board-inbox-card dl, .board-inbox-card a { font-size: var(--text-sm); }
+.board-inbox-card dl { display: grid; grid-template-columns: auto 1fr; gap: .3rem .8rem; margin: 0; }
+.board-inbox-card dd { margin: 0; }
+.board-inbox-card dt, .board-inbox-meta, #work-view-message { color: var(--text-2); }
+.board-inbox-card a { color: var(--accent); justify-self: start; }
+.board-inbox-form input, .board-inbox-form textarea {
+  width: min(100%, 32rem);
+  padding: .5rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+  color: var(--text);
+}
+.board-inbox-form button[type="submit"]:first-child {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+#work-view-message { font-size: var(--text-sm); }
+#work-view-message:empty { display: none; }
+@media (max-width: 500px) { .board-inbox { --detail-pad: .85rem; } }

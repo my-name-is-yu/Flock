@@ -3,6 +3,9 @@
 #include "embedded_assets.hpp"
 #include "views.hpp"
 #include "access_routes.hpp"
+#include "board_inbox_routes.hpp"
+#include "flock/board_inbox.hpp"
+#include "channel_routes.hpp"
 
 #include <httplib.h>
 
@@ -48,13 +51,13 @@ Id queryId(const Request& req, const char* key, bool optional) {
     return id;
 }
 
-Id bodyId(const Json& body, std::string_view key) {
+Id bodyId(const Json& body, std::string_view key, Id minimum = 1) {
     const auto value = body.find(key);
     if (value == body.end() || !value->is_number_integer() ||
         (value->is_number_unsigned() && value->get<std::uint64_t>() > std::numeric_limits<Id>::max()))
         throw InputError("invalid_id");
     const auto id = value->get<Id>();
-    if (id <= 0) throw InputError("invalid_id");
+    if (id < minimum) throw InputError("invalid_id");
     return id;
 }
 
@@ -163,6 +166,18 @@ Json operationData(const Json& body, std::string_view operation) {
     return Json::object();
 }
 
+bool localApprovalNavigation(const Request& req) {
+    if (req.method != "GET" || req.has_header("Origin") ||
+        req.get_header_value("Sec-Fetch-Site") != "cross-site" ||
+        req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
+        req.get_header_value("Sec-Fetch-Dest") != "document") return false;
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    if (!path.starts_with(prefix)) return false;
+    path.remove_prefix(prefix.size());
+    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+}
+
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
@@ -212,6 +227,8 @@ public:
         });
         web::accessRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
+        web::boardInboxRoutes(server_,store_,callbacks_);
+        web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });
@@ -290,6 +307,7 @@ public:
         changes_.stop();
         server_.stop();
         worker_.join();
+        store_.setWebOrigin({});
     }
     unsigned port() const override { return port_; }
 
@@ -342,13 +360,23 @@ private:
             error(res,403,"invalid_host");
             return HandlerResult::Handled;
         }
+        if ((req.method == "GET" || req.method == "HEAD") && web::artifactPreview(req.path))
+            return HandlerResult::Unhandled;
         const auto origin = req.get_header_value("Origin");
         const auto origins = req.get_header_value_count("Origin");
         const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
         const bool sameOrigin = origins == 1 && origin == "http://" + host;
         if ((origins != 0 && !sameOrigin) || (req.has_header("Sec-Fetch-Site") &&
-            (req.get_header_value_count("Sec-Fetch-Site") != 1 || (fetchSite != "same-origin" && fetchSite != "none")))) {
+            (req.get_header_value_count("Sec-Fetch-Site") != 1 ||
+             (fetchSite != "same-origin" && fetchSite != "none" && !localApprovalNavigation(req))))) {
             error(res,403,"invalid_origin");
+            return HandlerResult::Handled;
+        }
+        if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
+            if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
+            else if (req.get_header_value_count("Content-Type") != 1 ||
+                     req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
+            else return HandlerResult::Unhandled;
             return HandlerResult::Handled;
         }
         if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
@@ -511,16 +539,16 @@ private:
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
             const auto bot = requiredText(body,"botId",1024);
-            if (!store_.access().permitsPerson(web::person(callbacks_,req),bot,Role::decide)) return error(res,403,"access_denied");
-            const auto known = bots();
-            if (!botById(known,bot)) return error(res,404,"bot_not_found");
+            const auto actor = web::person(callbacks_,req);
+            if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
+            if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
             if (mutation != Mutation::Operation) {
                 const auto message = mutation == Mutation::Message;
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
                 if (message) {
-                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
+                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo);
                     if (previous) return json(res,201,*previous);
                 }
                 Intake intake;
@@ -531,25 +559,21 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
+                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);
-            if (body.contains("waitMessageId")) {
-                if (operation != "approve" || body.contains("taskId") || body.contains("waitId"))
-                    throw InputError("invalid_operation");
-                store_.approveMessageModelCall(bot,bodyId(body,"waitMessageId"));
-                return json(res,200,{{"accepted",true}});
-            }
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
             auto data = operationData(body,operation);
             const auto task = store_.task(id);
             if (web::field(task,"botId") != bot) return error(res,404,"task_not_found");
             if (operation == "reconcile") data = reconciliationData(task,wait,std::move(data),callbacks_.intake);
-            store_.operate(id,wait,operation,data);
+            store_.operate(actor,{bot,id,wait,bodyId(body,"targetRevision",0),bodyId(body,"targetGeneration",0)},operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
+        catch (const DecisionDenied&) { error(res,403,"access_denied"); }
+        catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {
             const auto code = mutation == Mutation::Message ? "message_conflict" :
                 mutation == Mutation::Request ? "request_conflict" : "operation_conflict";
@@ -567,6 +591,8 @@ private:
 } // namespace
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
-    return std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
+    return server;
 }
 } // namespace flockv0

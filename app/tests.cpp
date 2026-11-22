@@ -13,6 +13,10 @@ using namespace flockv0;
 using namespace flockv0::app;
 using namespace flockv0::app::test;
 
+namespace flockv0::app {
+void sessionConversationDispatch(Store&, const Json&);
+}
+
 namespace {
 class NotesModel final : public Model {
 public:
@@ -81,8 +85,8 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db,seed);
         Runtime runtime(store,model,t3,soul);
-        store.operate(firstId,waitId,"answer",{{"text","main"}});
-        rejects<Conflict>([&] { store.operate(firstId,waitId,"answer",{{"text","old answer"}}); },"duplicate answer accepted");
+        store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","main"}});
+        rejects<Conflict>([&] { store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","old answer"}}); },"duplicate answer accepted");
         runtime.tick();
         runtime.tick();
         check(store.task(firstId)["state"] == "running" && store.task(firstId)["doneWhen"] == "Evidence required before edit",
@@ -206,7 +210,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
         const auto start = model.requests.size();
-        store.receive(bot,"new-work","Collect the validation evidence");
+        store.receive(localOwner,bot,"new-work","Collect the validation evidence");
         runtime.runConversations();
         const auto tasks = store.tasks(bot.botId);
         check(tasks.size() == 1,"the request should create one Task for this Bot");
@@ -225,7 +229,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
         const Id result = store.latestTaskResult(task).at("id");
-        return store.receive(bot,key,"Why does that evidence support the result?",result).at("messageId");
+        return store.receive(localOwner,bot,key,"Why does that evidence support the result?",result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
                                        const BotNotes& notes, std::string_view expectedReply) {
@@ -267,7 +271,7 @@ void notesAcrossConversationAndWork() {
     const auto beforeFailure = model.requests.size();
     const auto originalRequest = "Collect the missing release evidence";
     noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
-    store.receive(firstIntake,"unreadable-notes",originalRequest);
+    store.receive(localOwner,firstIntake,"unreadable-notes",originalRequest);
     runtime.runConversations();
     const auto failure = store.conversation(firstIntake.botId).back().at("data");
     check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
@@ -276,7 +280,7 @@ void notesAcrossConversationAndWork() {
           "an unreadable note must prompt repair without calling the model or creating work");
 
     noteReadError.reset();
-    store.receive(firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
+    store.receive(localOwner,firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
     runtime.runConversations();
     const auto tasks = store.tasks(firstIntake.botId);
     check(model.requests.size() == beforeFailure + 2 &&
@@ -345,11 +349,13 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
+                   "record_task_blocker","withdraw_task_question",
                    "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
                    "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
-                   "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
+                   "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger",
+                   "flock_session_search","flock_session_events"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
@@ -357,7 +363,7 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 28 &&
+    check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
@@ -368,6 +374,10 @@ void responseContract() {
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
+    check(turnTool("record_task_blocker")["required"] == Json::array({"reason","taskId","generation","blockerReason"}) &&
+          turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
+          turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
+          "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
@@ -388,12 +398,66 @@ void responseContract() {
         check(turnTool(name).at("required") == required,"memory or automation schema does not match dispatch");
     check(turnTool("apply_memory_edit")["properties"]["baseVersion"]["minimum"] == 0 &&
           turnTool("create_trigger")["properties"]["eventFilter"]["type"] == "object","incorrect schema constraints");
+    const auto& search = turnTool("flock_session_search");
+    const auto& events = turnTool("flock_session_events");
+    check(search.at("required") == Json::array({"reason"}) && search.at("properties").size() == 8 &&
+          events.at("required") == Json::array({"reason","sessionRef","operation"}) &&
+          events.at("properties").size() == 11 &&
+          events.at("properties").at("operation").at("enum") ==
+              Json::array({"list","search","read_event","counts","get_attachment"}),
+          "Session search and event schemas do not match their contracts");
+    for (const auto* schema : {&search,&events}) {
+        const auto& fields = schema->at("properties");
+        check(fields.at("limit").at("minimum") == 1 && fields.at("limit").at("maximum") == sessionPageLimit &&
+              fields.at("fromTime").at("type") == "string" && fields.at("toTime").at("type") == "string" &&
+              !fields.contains("botId"),"Session tool bounds or authenticated identity changed");
+    }
+    const auto modelCall = [](std::string_view tool, const Json& args) {
+        return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"status","completed"},
+                             {"arguments",args.dump()}}});
+    };
+    const Json searchArgs{{"reason","Find yesterday’s staging investigation"},{"query","staging"},
+                          {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
+    const Json eventArgs{{"reason","Read the test log"},{"sessionRef","opaque-session"},{"operation","get_attachment"},
+                         {"attachmentRef","opaque-attachment"}};
+    check(responseDecision(modelCall("flock_session_search",searchArgs),turn).args.at("project") == "Release" &&
+          responseDecision(modelCall("flock_session_events",eventArgs),turn).args.at("attachmentRef") == "opaque-attachment",
+          "model Session calls were not decoded using the live schemas");
+    auto spoofed = eventArgs;
+    spoofed["botId"] = "someone-else";
+    rejects<ModelError>([&] { responseDecision(modelCall("flock_session_events",spoofed),turn); },
+                        "model Session calls can override the authenticated Bot");
     const auto& turnPrompt = turn.at("instructions").get_ref<const std::string&>();
     check(turnPrompt.find("You are a Flock Bot talking with your user") != std::string::npos &&
           turnPrompt.find("SOUL (soul) and MEMORY (memory)") != std::string::npos &&
-          turnPrompt.find("Only the user's messages can authorize work") != std::string::npos,
+          turnPrompt.find("Only the user's messages can authorize work") != std::string::npos &&
+          turnPrompt.find("ask using their titles and times, never internal IDs") != std::string::npos,
           "conversation instructions must scope Bot notes to the user's authorized request");
     check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
+    const std::map<std::string,Json> requiredChannelArgs{
+        {"channel_edit_message",{"reason","externalMessageId","text"}},
+        {"channel_react",{"reason","reaction"}},
+        {"channel_send_attachment",{"reason"}},
+        {"read_channel_attachment",{"reason","attachmentId"}},
+        {"publish_artifact",{"reason","title","html"}},
+        {"request_local_machine_connection",{"reason","threadId","runId","machineId","rules"}}
+    };
+    input.tools.clear();
+    for (const auto& [name,args] : requiredChannelArgs) input.tools.push_back(name);
+    input.images = {"data:image/png;base64,YQ=="};
+    const auto channelRequest = responseRequest(input);
+    for (const auto& function : channelRequest.at("tools").at(0).at("tools")) {
+        const auto name = function.at("name").get<std::string>();
+        const auto& schema = function.at("parameters");
+        check(schema.at("required") == requiredChannelArgs.at(name),"Channel tool required arguments");
+        if (name == "request_local_machine_connection")
+            check(schema.at("properties").at("rules").at("items").at("required") == Json::array({"operation","path"}),
+                  "Local approval rule schema");
+    }
+    const auto content = channelRequest.at("input").at(0).at("content");
+    check(content.at(0).at("type") == "input_text" && content.at(1).at("type") == "input_image" &&
+          content.at(1).at("image_url") == input.images.at(0),"Screenshot did not enter the Responses image input");
+    input.images.clear();
     input.event = {{"kind","intake"}};
 
     input.task.erase("requestedDoneWhen");
@@ -522,7 +586,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "change_task";
         changes.args = {{"taskId",task},{"doneWhen","Confirm the output"}};
-        store.receive(intake,"criteria","Completion criteria: Confirm the output");
+        store.receive(localOwner,intake,"criteria","Completion criteria: Confirm the output");
         routing.runConversations();
     }
     check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
@@ -538,7 +602,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "send_to_task";
         changes.args = {{"taskId",task}};
-        store.receive(intake,"follow-up","Include the exact sample count");
+        store.receive(localOwner,intake,"follow-up","Include the exact sample count");
         routing.runConversations();
     }
     {
@@ -575,10 +639,10 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
         return Json(nullptr);
     };
-    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
+    const auto question = store.receive(localOwner,intake,"explain","What did it find?",result).at("messageId").get<Id>();
     runtime.runConversations();
     const auto explanation = replyTo(question);
-    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
+    const auto again = store.receive(localOwner,intake,"again","Explain again",explanation.at("messageId").get<Id>())
         .at("messageId").get<Id>();
     runtime.runConversations();
     check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
@@ -597,7 +661,7 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
     const auto question = store.task(task).at("wait").at("messageId").get<Id>();
 
-    store.receive(intake,"dataset-answer","Use the release dataset",question);
+    store.receive(localOwner,intake,"dataset-answer","Use the release dataset",question);
     runtime.runConversations();
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
     const auto history = store.history(task);
@@ -758,6 +822,11 @@ int main() {
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
+        {
+            Sandbox temp;
+            Store store(temp.path/"state.db");
+            sessionConversationDispatch(store,botConfig());
+        }
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();

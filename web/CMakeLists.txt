@@ -17,14 +17,23 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp access_routes.cpp memory_automation_routes.cpp identity.cpp views.cpp change_feed.cpp "${flock_web_asset_header}")
+add_library(flock_web server.cpp access_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp identity.cpp views.cpp change_feed.cpp
+                      channel_routes.cpp channel_bridge.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
 target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads)
 target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  add_executable(flock_web_tests tests/http.cpp)
+  find_program(FLOCK_NODE_EXECUTABLE node)
+  find_program(FLOCK_CHROME_EXECUTABLE NAMES chromium chromium-browser google-chrome "Google Chrome"
+    PATHS "/Applications/Google Chrome.app/Contents/MacOS")
+  if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
+    add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_board_inbox_dom PROPERTIES TIMEOUT 30)
+  endif()
+  add_executable(flock_web_tests tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web COMMAND flock_web_tests)
@@ -32,7 +41,6 @@ if(BUILD_TESTING)
   target_include_directories(flock_web_conversation_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
-  find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")

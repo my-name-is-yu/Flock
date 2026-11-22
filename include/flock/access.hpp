@@ -14,6 +14,7 @@ struct Person {
     bool adminRoot = false;
     auto operator<=>(const Person&) const = default;
 };
+inline const Person localOwner{"local-owner",true};
 struct Scope {
     std::string kind, resource, operation;
     static Scope sessionRead(std::string_view environment, std::string_view thread);
@@ -27,7 +28,6 @@ struct BotChange {
 struct BotChangePending : Conflict {
     BotChangePending() : Conflict("Approved Bot change still needs to be applied") {}
 };
-using ApplyBotChange = std::function<void(const BotChange&)>;
 
 class Access {
 public:
@@ -44,18 +44,25 @@ public:
     void personGrant(const Person&, std::string_view bot, std::string_view recipient, Role, GrantChange);
     void personScope(const Person& root, std::string_view person, const Scope&, GrantChange);
     void resourceGrant(const Person&, std::string_view bot, const Scope&, GrantChange);
-    Id request(std::string_view bot, const Scope&);
+    Id request(std::string_view bot, const Scope&, Id sourceMessage = 0);
     void decide(const Person&, std::string_view bot, Id request, bool approve);
     Json grants(std::string_view bot) const;
     Json administration(const Person&, std::string_view bot) const;
-    Id requestBotChange(std::string_view bot, std::string_view operation, std::string_view target, std::string_view name);
+    Id requestBotChange(std::string_view bot, std::string_view operation, std::string_view target,
+                        std::string_view name, Id sourceMessage = 0);
     void reviewBotChange(const Person&, std::string_view bot, Id request, bool approve, const ApplyBotChange&);
-    Id requestSecret(std::string_view bot, const SecretRef&);
+    Id requestSecret(std::string_view bot, const SecretRef&, Id sourceMessage = 0);
     void submitSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void useSecret(Id task, const SecretRef&, bool upstreamPermitted,
                    const std::function<void(std::string_view)>& adapter) const;
 private:
     explicit Access(Store::Impl& db) : db_(db) {}
+    void decideGrant(const Person&, std::string_view bot, Id request, bool approve);
+    void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
+    std::pair<BotChange,std::string> authorizedBotChange(
+        const Person&, std::string_view bot, Id request, bool approve, const ApplyBotChange&);
+    void decideBotChange(const Person&, std::string_view bot, Id request, bool approve, const BotChange&);
+    void applyApprovedBotChange(const Person&, std::string_view bot, Id request, const ApplyBotChange&);
     void addGrant(const Person&, std::string_view bot, const Scope&);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& scope);
     bool holds(const Person&, const Scope&) const;

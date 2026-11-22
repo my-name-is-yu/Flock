@@ -69,10 +69,14 @@ Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpo
     return last();
 }
 
-void Store::Impl::grantModelCall(std::string_view budget) {
+Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,
+                                     Id messageId, Id taskId, Id eventId) {
     exec("UPDATE model_budgets SET call_limit=call_limit+1 WHERE id=? AND call_limit<?",
          {budget,std::numeric_limits<Id>::max()});
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
+    const auto attempt = reserveModelCall(budget,purpose,messageId,taskId,eventId);
+    if (!attempt) throw Conflict("The approved model call could not be reserved");
+    return attempt;
 }
 
 Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
