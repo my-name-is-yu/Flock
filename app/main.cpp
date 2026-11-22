@@ -192,8 +192,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.botTools = loadBotTools(home);
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
-#ifdef FLOCK_WITH_T3
-    auto handoffSession = !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
+    options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
+#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+    auto handoffSession = web && !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
     std::shared_ptr<SessionHandoff> handoffs;
     SessionHandoff::People handoffPeople;
     if (handoffSession) {
@@ -227,12 +228,12 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         options.clock,
     };
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
-    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"))
         configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
 #ifdef FLOCK_WITH_T3
     std::jthread handoffWorker;
-    if (web && handoffSession && callbacks.configuredPerson) {
+    if (handoffSession && callbacks.configuredPerson) {
         handoffPeople = callbacks.configuredPerson;
         handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
         handoffs->recover();
@@ -279,6 +280,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+    handoffWorker.request_stop();
+#endif
+    runtime.requestStop();
 }
 
 void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {

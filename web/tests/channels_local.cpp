@@ -11,7 +11,7 @@ void channelEndpoints(const std::filesystem::path& database) {
         Delivery send(const Command&) override { return {Delivery::Kind::Accepted,{"thread-local","run-local",""},{}}; }
         Delivery reconcile(const Command&) override { return {}; }
         Observation observe(const std::string&, const Json&, const RunRef&) override { return {}; }
-        void interrupt(const std::string&, const Json&, const RunRef&) override {}
+        InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
     };
     struct Transport final : ChannelTransport {
         std::string preview;

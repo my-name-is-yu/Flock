@@ -348,15 +348,7 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
     if (current.deliveries.empty()) {
         const auto routing = intake(origin.botId,"");
         if (routing.botId != origin.botId) throw Conflict("Consultation Bot is unavailable");
-        const auto scrub = db.sharedRedactor();
         auto notes = db.loadNotes(origin.botId,soul,unixTime());
-        notes.soul = redactPairingCodes(scrub.text(notes.soul));
-        notes.memory = redactPairingCodes(scrub.text(notes.memory));
-        const ModelInput input{
-            {{"botId",origin.botId},{"request","Reply once to the paired Session's request."}},
-            {{"kind","session_consultation"},{"request",permit.channel.request}},
-            Json::array(),std::move(notes),{"reply"},{},Json::array(),routing.config
-        };
         Id attempt = 0;
         ModelAttemptState attemptState;
         {
@@ -369,8 +361,16 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
                 runtime_->freezeSpecialistWork(person,channel,current.generation);
             return;
         }
+        const auto scrub = db.sharedRedactor();
+        notes.soul = redactPairingCodes(scrub.text(notes.soul));
+        notes.memory = redactPairingCodes(scrub.text(notes.memory));
+        const ModelInput input{
+            {{"botId",origin.botId},{"request","Reply once to the paired Session's request."}},
+            {{"kind","session_consultation"},{"request",redactPairingCodes(scrub.text(permit.channel.request))}},
+            Json::array(),std::move(notes),{"reply"},{},Json::array(),routing.config
+        };
         const auto turn = db.callModel(origin.botId,model,input,attempt);
-        if (turn.calls.size() != 1 || turn.calls.front().tool != "reply")
+        if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty() || turn.calls.front().tool != "reply")
             throw Conflict("The Bot did not produce one consultation reply");
         const auto text = bounded(scrub.text(field(turn.calls.front().args,"text")),8192);
         if (trimSessionQuestionText(text).empty()) throw Conflict("The consultation reply is empty");
@@ -592,7 +592,8 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
         return view(person,channel);
     }
     const auto turn = db.callModel(bot,model,input,attempt);
-    if (turn.calls.size() != 1) throw Conflict("The coordinator did not choose one action");
+    if (turn.calls.size() != 1 || !turn.calls.front().rejection.empty())
+        throw Conflict("The coordinator did not choose one action");
     const auto& decision = turn.calls.front();
     const auto& kind = decision.tool;
     const auto text = bounded(clean(field(decision.args,"text")),8192);

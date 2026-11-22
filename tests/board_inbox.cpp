@@ -56,9 +56,7 @@ struct Database {
         const auto id = std::to_string(task);
         exec("INSERT INTO waits(task_id,data) VALUES("+id+",json_object('reason','"+std::string(reason)+
              "','text','Fixture approval'))");
-        const auto wait = std::to_string(sqlite3_last_insert_rowid(db));
-        exec("UPDATE tasks SET state='waiting',generation=generation+1,data=json_set(data,'$.wait',"
-             "json((SELECT json_set(data,'$.id',id) FROM waits WHERE id="+wait+"))) WHERE id="+id);
+        exec("UPDATE tasks SET state='waiting',generation=generation+1 WHERE id="+id);
     }
 };
 
@@ -129,7 +127,7 @@ struct Sessions : T3 {
         }
         return result;
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override { ++interrupts; }
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { ++interrupts; return InterruptOutcome::Requested; }
 };
 
 Intake intake(std::string bot, std::string text, std::string project, Json config = Json::object()) {
@@ -231,9 +229,22 @@ void exercise(const std::filesystem::path& path) {
           readerQuestion.at("waitId") != waitAnchor &&
           row(store.conversation("report"),"id",waitAnchor).at("kind") == "waiting",
           "view-only account got approval controls");
-    db.exec("UPDATE tasks SET data=json_remove(data,'$.wait.messageId') WHERE id="+std::to_string(question));
+    db.exec("UPDATE tasks SET data=json_set(data,'$.wait',json((SELECT data FROM journal WHERE id="+
+            waitAnchor.dump()+"))) WHERE id="+std::to_string(question));
+    db.exec(R"SQL(
+WITH RECURSIVE newer(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM newer WHERE n<129)
+INSERT INTO journal(task_id,time,kind,data)
+SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
+    check(store.task(question).at("wait").at("messageId") == waitAnchor,
+          "task detail lost the legacy wait anchor after 129 newer events");
     check(row(store.inbox(reader),"itemKind","user_question") == readerQuestion,
-          "a legacy wait did not resolve to its waiting event");
+          "Inbox disagreed with task detail about the legacy wait anchor");
+    db.exec("UPDATE tasks SET data=json_set(data,'$.wait.text','Stale Task copy') WHERE id="+std::to_string(question));
+    check(store.task(question).at("wait") == report.at("wait") &&
+          row(store.tasks("report"),"id",question).at("wait") == report.at("wait") &&
+          row(store.activeTasks("report"),"id",question).at("wait") == report.at("wait"),
+          "a stale Task copy overrode the authoritative wait payload");
+    db.exec("DELETE FROM journal WHERE kind='fixture_activity' AND task_id="+std::to_string(question));
     check(!row(inbox,"itemKind","model_budget").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
     const auto reviewEvent = row(store.conversation("report"),"id",row(inbox,"itemKind","pr_review").at("conversationEventId"));

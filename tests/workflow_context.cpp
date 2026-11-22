@@ -22,6 +22,7 @@ struct SessionService : T3 {
     std::map<std::string,RunRef> runs;
     bool loseReceipt = false, receiptVisible = true;
     std::function<void()> onObserve;
+    std::function<RunEvidence(const RunRef&)> recoverEvidence;
 
     std::string authGeneration(const std::string&,const Json&) override { return "test"; }
     Delivery send(const Command& command) override {
@@ -43,7 +44,10 @@ struct SessionService : T3 {
         if (auto callback = std::exchange(onObserve,{})) callback();
         return observations[run.runId];
     }
-    void interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); }
+    RunEvidence readRunEvidence(const std::string& env,const Json& config,const RunRef& run,std::string_view status) override {
+        return recoverEvidence ? recoverEvidence(run) : T3::readRunEvidence(env,config,run,status);
+    }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); return InterruptOutcome::Requested; }
     void finish(std::string run, Json report, std::string status = "completed") {
         auto& observation = observations[run];
         observation.kind = Observation::Kind::Finished;
@@ -165,6 +169,96 @@ void expansionRedactsBeforeSearchAndPaging() {
     require(f.bot.history.front().at("summary")=="Notes: [redacted]","protected value reached the compacted model history");
     require(f.call("expand_context",{{"compactionId",compaction},{"query","value-for-compaction"}}).at("messages").empty(),
             "expansion search matched a fragment of the protected value");
+}
+
+void expansionRejectsStaleCursors() {
+    Fixture f;
+    const std::string secret = "fixture-" + std::string(64,'k');
+    const std::string instruction = " DO-NOT-PUBLISH ";
+    const auto original = f.turn(secret + std::string(1928,'x') + "根" + instruction + std::string(2500,'y'));
+    const auto saved = f.call("compact_conversation",{{"endMessageId",original},{"summary","Keep the instruction"}});
+    const auto compaction = saved.at("compaction").at("compactionId");
+    const Json range{{"compactionId",compaction},{"startMessageId",original},{"endMessageId",original}};
+    const auto first = f.call("expand_context",range);
+    auto legacy = range;
+    legacy["offset"] = first.at("nextOffset");
+    auto continuation = range;
+    continuation["cursor"] = first.at("nextCursor");
+    f.restart();
+    require(f.call("expand_context",continuation).at("messages").at(0).at("text") ==
+            f.call("expand_context",legacy).at("messages").at(0).at("text"),
+            "An unchanged projection did not support both continuation forms after restart");
+
+    bool checked = false;
+    f.bot.conversation = [&](const ModelInput& input) -> Decision {
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"expand_context",range,"Read the first page"};
+        if (steps.size()==1) {
+            auto access = f.store->access();
+            access.submitSecret({"owner",true},"bot",access.requestSecret("bot",{"paging-fixture"}),secret);
+            return {"expand_context",continuation,"Continue the first page"};
+        }
+        require(steps.at(0).at("result").at("cursorStale")==true &&
+                !steps.at(0).at("result").contains("messages") && steps.at(1).at("result").at("ok")==false,
+                "A saved page was replayed after the active redaction view changed");
+        checked = true;
+        return {"reply",{{"text","I will start a fresh read"}},"Acknowledge the stale cursor"};
+    };
+    f.turn("Detect redaction changes within the turn");
+    f.bot.conversation = {};
+    require(checked,"The test did not reach the model with the stale page");
+    for (const auto& cursor : {continuation,legacy}) {
+        f.turn("Continue the saved expansion","expand_context",cursor);
+        require(f.bot.result.at("ok")==false && !f.bot.result.contains("messages"),
+                "A cursor from a different redaction view returned a page");
+    }
+    const auto redacted = f.call("expand_context",range);
+    require(redacted.at("nextOffset")==first.at("nextOffset"),"The test did not reissue the same legacy offset");
+    f.turn("Continue with the ambiguous offset","expand_context",legacy);
+    require(f.bot.result.at("ok")==false,"A reused numeric offset accepted an ambiguous continuation");
+    continuation["cursor"] = redacted.at("nextCursor");
+    const auto second = f.call("expand_context",continuation);
+    const auto third = f.call("expand_context",{{"compactionId",compaction},{"endMessageId",original},
+                                                {"cursor",second.at("nextCursor")}});
+    const auto text = [](const Json& page) { return page.at("messages").at(0).at("text").get<std::string>(); };
+    require(text(redacted)+text(second)+text(third) == "[redacted]" + std::string(1928,'x') + "根" +
+                instruction + std::string(2500,'y') && redacted.at("nextCursor").is_number_integer(),
+            "A fresh expansion skipped an instruction, included secret text, or embedded text in its reference");
+}
+
+void expansionCursorKeepsItsSearchRange() {
+    Fixture f;
+    f.turn("ALPHA evidence one");
+    const auto lastMatch = f.turn("ALPHA evidence two");
+    const auto boundary = f.turn("Unrelated entry at the end");
+    f.call("compact_conversation",{{"endMessageId",boundary},{"summary","Collate the evidence"}});
+    const auto first = f.call("expand_context",{{"query","ALPHA"},{"limit",1}});
+    const auto cursor = first.at("nextCursor");
+    require(first.at("nextMessageId")==lastMatch && !first.contains("nextOffset"),
+            "A page between messages did not return a continuation");
+    const auto wider = f.turn("ALPHA evidence added later");
+    f.call("compact_conversation",{{"endMessageId",wider},{"summary","Collate the new evidence"}});
+    f.turn("Continue with a smaller range","expand_context",{{"cursor",cursor},{"endMessageId",lastMatch}});
+    require(f.bot.result.at("ok") == false,"A cursor accepted a smaller search range");
+    const auto continued = f.call("expand_context",{{"cursor",cursor}});
+    require(continued.at("messages").size()==1 && continued.at("messages").at(0).at("messageId")==lastMatch &&
+            !continued.contains("nextCursor"),"A cursor resumed a wider range or lost its search filter");
+}
+
+void legacyOffsetsCannotSelectBetweenSearches() {
+    Fixture f;
+    const auto message = f.turn("ALPHA BETA " + std::string(3000,'x'));
+    const auto end = f.turn("ALPHA detail");
+    f.call("compact_conversation",{{"endMessageId",end},{"summary","Two searches"}});
+    const auto alpha = f.call("expand_context",{{"query","ALPHA"}});
+    const auto beta = f.call("expand_context",{{"query","BETA"}});
+    require(alpha.at("nextOffset") == beta.at("nextOffset") && alpha.at("nextMessageId") == message,
+            "the fixture did not issue the same byte position for two searches");
+    f.turn("Continue overlapping search","expand_context",
+           {{"startMessageId",message},{"offset",alpha.at("nextOffset")}});
+    require(f.bot.result.at("ok") == false,"an ambiguous offset resumed the wrong search");
+    const auto exact = f.call("expand_context",{{"cursor",alpha.at("nextCursor")}});
+    require(exact.at("messages").back().at("messageId") == end,"the exact cursor did not recover its original filter");
 }
 
 void freshStandaloneSessionIncludesEarlierEvidence() {
@@ -420,6 +514,47 @@ void uncertainLaunchAndStageStop() {
     require(f.status()["stages"][0]["status"]=="stopped" && f.t3.commands.size()==1,"dependent of stopped stage ran");
 }
 
+void missingStageReportCannotAdvanceWorkflow() {
+    for (const bool recover : {false,true}) {
+        Fixture f;
+        f.call("start_workflow",{{"request","Review and publish"},{"stages",Json::array({
+            {{"stageId","collect"},{"role","collect"}},
+            {{"stageId","publish"},{"role","publish"},{"dependsOn",{"collect"}}}})}});
+        f.ticks(2);
+        f.t3.finish("run-1",{{"artifactVersion",shaA}});
+        auto& observation = f.t3.observations.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.resultRunId = "collect-result";
+        observation.report.clear();
+        f.ticks(1);
+        const auto pending = f.status();
+        const Id task = pending["stages"][0]["taskId"];
+        require(f.store->task(task)["activeRun"].is_null() && pending["stages"][0]["lastConfirmedState"]=="completed" &&
+                pending["stages"][0]["needsAttention"]==true && pending["stages"][1]["taskId"]==0 &&
+                pending["artifacts"].empty(),"workflow either lost settlement or advanced without the stage report");
+        if (recover) f.t3.recoverEvidence = [&](const RunRef& source) {
+            require(source.runId=="collect-result" && source.threadId=="thread-1","workflow retried an unrelated result");
+            return RunEvidence{RunEvidence::Availability::Available,Json{{"artifactVersion",shaA}}.dump(),"collected","",false};
+        };
+        f.restart();
+        f.now += 5;
+        f.ticks(1);
+        f.now += 10;
+        f.ticks(3);
+        const auto status = f.status();
+        if (recover) {
+            require(status["stages"][0]["status"]=="completed" && status["stages"][1]["taskId"]!=0 &&
+                    status["artifacts"].size()==1 && status["artifacts"][0]["artifactVersion"]==shaA &&
+                    status["artifacts"][0]["resultRunId"]=="collect-result",
+                    "restored stage report did not unlock the dependent stage with its artifact provenance");
+        } else {
+            require(status["stages"][0]["status"]=="failed" && status["stages"][1]["taskId"]==0 &&
+                    status["artifacts"].empty() && f.t3.commands.size()==1,
+                    "a stage without required report evidence produced an artifact or admitted a dependent");
+        }
+    }
+}
+
 void stopDuringUnconfirmedStart() {
     Fixture f;
     f.t3.loseReceipt = true;
@@ -658,6 +793,14 @@ void compactAndContinue() {
         "unbounded expansion or missing cursor");
     f.turn("Invalid boundary","compact_conversation",{{"endMessageId",first},{"summary","Discard coverage"}});
     require(f.bot.result.at("ok")==false,"accepted shrinking boundary");
+    f.turn("Same boundary","compact_conversation",{{"endMessageId",end},{"summary",std::string(3200,'z')}});
+    require(f.bot.result.at("ok")==false && f.store->compactions("bot").size()==1 &&
+            f.store->compactions("bot").at(0)==compact.at("compaction"),
+            "A same-boundary summary replaced the durable compaction");
+    const auto nextBoundary = f.turn("New evidence to include");
+    const auto advanced = f.call("compact_conversation",{{"endMessageId",nextBoundary},{"summary","Include newer evidence"}});
+    require(advanced.at("compaction").at("endMessageId")==nextBoundary &&
+            f.store->compactions("bot").size()==2,"a valid compaction did not advance coverage");
 
     f.call("start_workflow",{{"request","Implement feature"}});
     f.ticks(2);
@@ -683,6 +826,9 @@ int main() {
     try {
         workflowLaunchUsesGrantsAndRedactsQueuedPrompt();
         expansionRedactsBeforeSearchAndPaging();
+        expansionRejectsStaleCursors();
+        expansionCursorKeepsItsSearchRange();
+        legacyOffsetsCannotSelectBetweenSearches();
         freshStandaloneSessionIncludesEarlierEvidence();
         verifyAfterRestart(false);
         verifyAfterRestart(true);
@@ -692,6 +838,7 @@ int main() {
         rejectInvalidGraphAndArtifact();
         stopAndDeadline();
         uncertainLaunchAndStageStop();
+        missingStageReportCannotAdvanceWorkflow();
         stopDuringUnconfirmedStart();
         reopenedStageWaitsForProject();
         invalidateDependencyChain();

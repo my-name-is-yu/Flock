@@ -123,13 +123,20 @@ function prPreviewCard(rawUrl, title) {
   copyBtn.setAttribute('aria-label', 'Copy pull request link');
   copyBtn.title = 'Copy link';
   copyBtn.append(iconSpan(svgIcons.copy));
+  let copyTimer = null;
   copyBtn.addEventListener('click', async (event) => {
     event.preventDefault();
     event.stopPropagation();
     try {
       await navigator.clipboard?.writeText(info.href);
+      clearTimeout(copyTimer);
+      copyBtn.classList.remove('is-copied');
       copyBtn.replaceChildren(iconSpan(svgIcons.check));
-      setTimeout(() => { copyBtn.replaceChildren(iconSpan(svgIcons.copy)); }, 1200);
+      copyBtn.classList.add('is-copied');
+      copyTimer = setTimeout(() => {
+        copyBtn.classList.remove('is-copied');
+        copyBtn.replaceChildren(iconSpan(svgIcons.copy));
+      }, 1200);
     } catch {}
   });
   tools.append(openBtn, copyBtn);
@@ -250,7 +257,9 @@ function decisionCard(item, submit, source, question, saving) {
   return article;
 }
 
-export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCompose, focusComposer, canDismiss = () => true }) {
+export function mountBoardInbox({
+  api, sourceAction, onChange, onAccepted, onRefreshError, canCompose, focusComposer, canDismiss = () => true,
+}) {
   const byId = (id) => document.getElementById(id);
   const main = byId('main');
   const trigger = byId('needs-you');
@@ -305,18 +314,42 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
     panel.animate([
       { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '14px', opacity: .88 },
       { transform: 'translate(0, 0) scale(1, 1)', borderRadius: '20px', opacity: 1 },
-    ], { duration: 220, easing: 'cubic-bezier(0.2, 0.9, 0.25, 1)' });
+    ], { duration: 240, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
     if (panelBody?.animate) {
       panelBody.getAnimations().forEach((anim) => anim.cancel());
       panelBody.animate([
-        { opacity: 0, filter: 'blur(7px)' },
-        { opacity: 1, filter: 'blur(0px)' },
-      ], { duration: 200, easing: 'ease-out', delay: 25, fill: 'backwards' });
+        { opacity: 0, filter: 'blur(2.5px)', transform: 'translateY(6px)' },
+        { opacity: 1, filter: 'blur(0px)', transform: 'translateY(0)' },
+      ], { duration: 210, easing: 'cubic-bezier(0.23, 1, 0.32, 1)', delay: 25, fill: 'backwards' });
     }
     if (shade?.animate) {
       shade.getAnimations().forEach((anim) => anim.cancel());
       shade.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 190, easing: 'ease-out' });
     }
+  }
+
+  function animateStep(direction) {
+    if (reducedMotion?.matches || !host?.animate) return;
+    host.getAnimations?.().forEach((anim) => anim.cancel());
+    host.animate([
+      { opacity: .2, transform: `translateX(${direction * 18}px)` },
+      { opacity: 1, transform: 'translateX(0)' },
+    ], { duration: 200, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+  }
+
+  function animateHistoryCards(cards) {
+    if (reducedMotion?.matches) return;
+    cards.forEach((card, index) => {
+      card.animate?.([
+        { opacity: 0, transform: 'translateY(6px)' },
+        { opacity: 1, transform: 'none' },
+      ], {
+        duration: 200,
+        easing: 'ease-out',
+        delay: Math.min(index, 12) * 35,
+        fill: 'backwards',
+      });
+    });
   }
 
   function animateCloseToPill(cardRect, pillRect) {
@@ -352,9 +385,9 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
     }
     const cardAnim = ghostCard.animate([
       { transform: 'translate(0, 0) scale(1, 1)', borderRadius: '20px', opacity: 1 },
-      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '14px', opacity: .25 },
-    ], { duration: 185, easing: 'cubic-bezier(0.4, 0, 0.2, 1)', fill: 'forwards' });
-    ghostShade.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 185, easing: 'ease-out', fill: 'forwards' });
+      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '14px', opacity: .2 },
+    ], { duration: 195, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', fill: 'forwards' });
+    ghostShade.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 195, easing: 'ease-out', fill: 'forwards' });
     cardAnim.onfinish = finish;
     cardAnim.oncancel = finish;
   }
@@ -589,9 +622,11 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
     try {
       const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, request.signal);
       if (!sameView()) return;
-      host.replaceChildren(...decisions.map((entry) => historyCard(labels[entry.itemKind],
-        `${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)));
+      const cards = decisions.map((entry) => historyCard(labels[entry.itemKind],
+        `${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`));
+      host.replaceChildren(...cards);
       message.textContent = decisions.length ? '' : 'No recorded decisions.';
+      animateHistoryCards(cards);
     } catch {
       if (!sameView()) return;
       message.textContent = 'Could not load recent decisions.';
@@ -608,6 +643,7 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
     composerSuppressed = false;
     historyRequest?.abort();
     historyRequest = null;
+    host?.getAnimations?.().forEach((anim) => anim.cancel());
     layer.hidden = true;
     transcript.inert = false;
     host.replaceChildren();
@@ -638,6 +674,7 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
     message.textContent = '';
     panel.scrollTop = 0;
     renderPending();
+    animateStep(direction);
     onChange();
     if (focused?.disabled) panel.focus({ preventScroll: true });
   }
@@ -661,14 +698,17 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
 
   async function refresh() {
     const stamp = ++epoch;
+    let latest;
     try {
-      const { items: latest } = await api('inbox');
-      if (stamp !== epoch || !Array.isArray(latest)) return;
-      if (JSON.stringify(items) !== JSON.stringify(latest)) apply(latest);
+      ({ items: latest } = await api('inbox'));
     } catch (error) {
       if (stamp !== epoch) return;
       if (error.status === 401 || error.status === 403) apply([]);
+      else onRefreshError();
+      return;
     }
+    if (stamp !== epoch || !Array.isArray(latest)) return;
+    if (JSON.stringify(items) !== JSON.stringify(latest)) apply(latest);
   }
 
   function setContext(botId, viewerId) {

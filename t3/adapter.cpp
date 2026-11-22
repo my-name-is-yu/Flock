@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -15,7 +16,6 @@ using Position = Id;
 using Clock = std::chrono::steady_clock;
 constexpr int ExcerptChars = 2730; // T3 uses UTF-16 offsets. 2730 code units occupy at most 8190 UTF-8 bytes.
 constexpr int PageSize = 30;
-constexpr auto ThreadRead = "t3_thread_read";
 constexpr auto PendingRequest = "t3_pending_request";
 
 struct Scan {
@@ -63,12 +63,6 @@ Position readCursor(const std::string& text) {
     if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > maxHistoryPosition)
         throw Failure(Failure::Kind::Settings, "Invalid T3 history cursor");
     return parsed;
-}
-
-const Json& detail(const Json& response, const std::string& threadId) {
-    const auto& thread = member(response, "thread");
-    if (str(thread, "threadId") != threadId) invalidResponse();
-    return thread;
 }
 
 Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
@@ -340,49 +334,49 @@ void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_v
         run.link = std::string(origin) + "/" + encode(environment) + "/" + encode(run.threadId);
 }
 
-Json launchArgs(const Command& command) {
-    Json args = {{"projectId", command.projectId}, {"title", "Flock task"},
-                 {"message", sessionPrompt(command.actionId,command.instruction)}, {"clientRequestId", command.actionId}};
-    if (!command.config.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-    const auto settings = command.config.value("session", Json::object());
-    if (!settings.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-    for (const auto field : {"runtimeMode", "interactionMode", "workspaceStrategy"}) {
-        if (settings.contains(field) && !settings[field].is_null()) args[field] = settings[field];
-    }
-    if (args.contains("runtimeMode")) {
-        const auto mode = str(args, "runtimeMode");
-        if (mode != "approval-required" && mode != "auto-accept-edits" && mode != "auto" && mode != "full-access")
-            throw Failure(Failure::Kind::Settings, "Invalid T3 runtime mode");
-    }
-    if (args.contains("interactionMode") && args["interactionMode"] != "default" && args["interactionMode"] != "plan")
-        throw Failure(Failure::Kind::Settings, "Invalid T3 interaction mode");
-    if (settings.contains("providerInstanceId") || settings.contains("model")) {
-        const auto provider = str(settings, "providerInstanceId");
-        const auto model = str(settings, "model");
-        if (trim(provider).empty() || trim(model).empty())
-            throw Failure(Failure::Kind::Settings, "Specify both the T3 provider instance and Session model");
-        args["modelSelection"] = {{"instanceId", provider}, {"model", model}};
-    }
-    if (args.contains("workspaceStrategy")) {
-        const auto& workspace = args["workspaceStrategy"];
-        const auto type = str(workspace, "type");
-        if (type != "root" && (type != "worktree" || trim(str(workspace, "baseRef")).empty()) &&
-            (type != "existing_worktree" || trim(str(workspace, "worktreePath")).empty()))
-            throw Failure(Failure::Kind::Settings, "Invalid T3 workspace strategy");
-    }
-    return args;
-}
+struct LaunchArguments {
+    Json parameters;
+    std::string pin;
+};
 
-std::string pinnedCommit(const Json& args) {
-    const auto workspace = args.find("workspaceStrategy");
-    if (workspace == args.end() || !workspace->contains("expectedCommit")) return {};
-    const auto pin = str(*workspace,"expectedCommit");
-    if (!gitCommit(pin) || str(*workspace,"type") != "worktree" || str(*workspace,"baseRef") != pin ||
-        workspace->value("startFromOrigin",Json(nullptr)) != Json(false) ||
-        str(args,"runtimeMode") != "approval-required" ||
-        str(args,"clientRequestId").size() > 250)
-        throw Failure(Failure::Kind::Settings, "Invalid pinned specialist workspace");
-    return pin;
+LaunchArguments launchArgs(const Command& command) {
+    if (!command.config.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
+    auto settings = command.config.value("session", Json::object());
+    // The direct adapter API also supports interaction mode for T3 callers.
+    Json interactionMode;
+    if (settings.contains("interactionMode")) {
+        interactionMode = std::move(settings["interactionMode"]);
+        settings.erase("interactionMode");
+    }
+    if (!interactionMode.is_null() && interactionMode != "default" && interactionMode != "plan")
+        throw Failure(Failure::Kind::Settings, "Invalid T3 interaction mode");
+    std::optional<std::string> pin;
+    if (const auto workspace = settings.find("workspaceStrategy");
+        workspace != settings.end() && workspace->contains("expectedCommit")) {
+        pin = str(*workspace,"expectedCommit");
+        workspace->erase("expectedCommit");
+    }
+    Json args;
+    try { args = normalizeSessionSettings(settings); }
+    catch (const Conflict& error) { throw Failure(Failure::Kind::Settings, error.what()); }
+    if (pin) {
+        const auto& workspace = args.at("workspaceStrategy");
+        if (!gitCommit(*pin) || str(workspace,"type") != "worktree" || str(workspace,"baseRef") != *pin ||
+            workspace.value("startFromOrigin",Json(nullptr)) != Json(false) ||
+            str(args,"runtimeMode") != "approval-required" || command.actionId.size() > 250)
+            throw Failure(Failure::Kind::Settings, "Invalid pinned specialist workspace");
+    }
+    if (args.contains("model")) {
+        args["modelSelection"] = {{"instanceId", std::move(args["providerInstanceId"])}, {"model", std::move(args["model"])}};
+        args.erase("providerInstanceId");
+        args.erase("model");
+    }
+    if (!interactionMode.is_null()) args["interactionMode"] = std::move(interactionMode);
+    args["projectId"] = command.projectId;
+    args["title"] = "Flock task";
+    args["message"] = sessionPrompt(command.actionId,command.instruction);
+    args["clientRequestId"] = command.actionId;
+    return {std::move(args),std::move(pin).value_or(std::string{})};
 }
 
 void verifyCommand(const Command& command) {
@@ -456,7 +450,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
     for (const auto& threadId : threads) {
         scan.step();
         const auto head = threadHead(client, threadId);
-        const auto& thread = detail(head, threadId);
+        const auto& thread = head.at("thread");
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
@@ -490,12 +484,10 @@ Delivery reconcileWork(Client& client, const Command& command) {
 struct Report { std::string text, itemId; bool truncated = false; };
 Report readReport(Client& client, const RunRef& run, std::string_view view, std::string_view type) {
     Scan scan;
-    Position before = 9007199254740991;
+    Position before = maxHistoryPosition;
     for (;;) {
         scan.step();
-        const auto page = client.call(ThreadRead, {{"threadId", run.threadId}, {"view", view}, {"limit", PageSize},
-            {"runLimit", 1}, {"maxCharsPerItem", ExcerptChars}, {"beforePosition", before}});
-        detail(page, run.threadId);
+        const auto page = readThread(client,run.threadId,view,PageSize,ExcerptChars,{{"beforePosition",before}});
         const auto& items = array(page, "items");
         for (auto it = items.rbegin(); it != items.rend(); ++it) {
             if (!fromRun(*it, run) || str(*it, "type") != type || str(*it, "text").empty()) continue;
@@ -519,6 +511,65 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
     }
 }
 
+RunEvidence unavailableReport(const Failure& failure) {
+    RunEvidence evidence;
+    evidence.availability = RunEvidence::Availability::ReportUnavailable;
+    evidence.detail = "Could not read the T3 Run report: " + std::string(failure.what());
+    return evidence;
+}
+
+std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& config, const RunRef& source,
+                                                std::string_view status, std::string_view origin) {
+    if (status != "completed") return {};
+    const auto settings = config.value("session",Json::object());
+    const auto workspace = settings.find("workspaceStrategy");
+    if (workspace == settings.end() || !workspace->contains("expectedCommit")) return {};
+    const auto pin = str(*workspace,"expectedCommit");
+    RunEvidence problem;
+    problem.availability = RunEvidence::Availability::ReportUnavailable;
+    problem.detail = "Could not verify the specialist's pinned workspace";
+    if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
+    const auto head = threadHead(client,source.threadId);
+    const auto& thread = detail(head,source.threadId);
+    const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
+    if (!actual) return problem;
+    if (actual->clean && actual->commit == pin) return {};
+    problem.availability = RunEvidence::Availability::Available;
+    problem.detail = "The specialist worktree changed from the saved commit";
+    problem.report = problem.detail;
+    return problem;
+}
+
+RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::string_view status) {
+    Report report;
+    try {
+        report = readReport(client, source, "messages", "assistant_message");
+    } catch (const Failure& failure) {
+        return unavailableReport(failure);
+    }
+
+    RunEvidence evidence;
+    if (status != "completed") {
+        evidence.detail = "T3 Run ended as " + std::string(status);
+        try {
+            const auto error = readReport(client, source, "activity", "error");
+            if (!error.text.empty()) {
+                evidence.detail = bounded(error.text,2048);
+                if (report.itemId.empty()) report.itemId = error.itemId;
+                report.truncated = report.truncated || error.truncated;
+            }
+        } catch (const Failure& failure) {
+            evidence.availability = RunEvidence::Availability::DiagnosticUnavailable;
+            evidence.detail += ". Could not read T3 error history: " + std::string(failure.what());
+        }
+    }
+    if (report.text.empty()) report.text = "T3 Run " + std::string(status) + " without a written report.";
+    evidence.report = bounded(report.text, 8192);
+    evidence.truncated = report.truncated || evidence.report.size() < report.text.size();
+    evidence.itemId = std::move(report.itemId);
+    return evidence;
+}
+
 bool followUpReady(Client& client, const Command& command) {
     const auto settled = wait(client, command.target, true, 1);
     const auto effective = str(settled, "runId");
@@ -526,7 +577,7 @@ bool followUpReady(Client& client, const Command& command) {
     if (boolean(settled, "timedOut") || !terminal(str(settled, "status")) || resultRun.empty() ||
         !ownsResult(client, command.target, effective, resultRun)) return false;
     const auto response = threadHead(client, command.target.threadId);
-    const auto& info = detail(response, command.target.threadId);
+    const auto& info = response.at("thread");
     if (str(info, "projectId") != command.projectId || !member(info, "activeRunId").is_null() ||
         boolean(info, "archived") || position(member(info, "pendingRequestCount")) != 0 ||
         (str(info, "latestRunId") != effective && str(info, "latestRunId") != resultRun)) return false;
@@ -535,7 +586,7 @@ bool followUpReady(Client& client, const Command& command) {
     if (!array(queue, "items").empty()) return false;
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
-    const auto& current = detail(checked, command.target.threadId);
+    const auto& current = checked.at("thread");
     return member(current, "activeRunId").is_null() && !boolean(current, "archived") &&
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
@@ -544,7 +595,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     const auto current = wait(client, command.target, false, 1);
     const auto effective = str(current, "runId");
     const auto head = threadHead(client, command.target.threadId);
-    const auto& info = detail(head, command.target.threadId);
+    const auto& info = head.at("thread");
     if (!active(str(current, "status")) || str(info, "projectId") != command.projectId || boolean(info, "archived") ||
         member(info, "activeRunId") != Json(effective))
         return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
@@ -562,7 +613,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     return result(Outcome::Accepted, {}, std::move(received));
 }
 
-Delivery answer(Client& client, const Command& command) {
+Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
     const auto watching = wait(client, command.target, false, 1);
@@ -581,6 +632,7 @@ Delivery answer(Client& client, const Command& command) {
     try {
         if (readQuestion(client, thread, command.questionId) != attribution.raw)
             return result(Outcome::NotAccepted, "The T3 question changed before the saved answer could be sent");
+        invoked = true;
         const auto responded = client.call(PendingRequest, {{"action", "respond"}, {"threadId", thread},
             {"requestId", command.questionId}, {"answers", answers}});
         position(member(responded, "sequence"));
@@ -594,7 +646,6 @@ Delivery answer(Client& client, const Command& command) {
 Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin) {
     auto prompt = str(args,"message");
     args.erase("message");
-    args["workspaceStrategy"].erase("expectedCommit");
     const auto launched = client.call("t3_thread_launch",std::move(args));
     const auto threadId = str(launched,"threadId");
     if (threadId.empty() || str(launched,"projectId") != command.projectId ||
@@ -635,11 +686,12 @@ public:
     std::optional<Delivery> preflight(const Command& command) override {
         try {
             verifyCommand(command);
+            const bool launch = command.tool == "delegate";
+            const auto pin = launch ? launchArgs(command).pin : std::string{};
             auto connection = credential(command.environmentId, command.config);
             requireOperate(connection);
-            if (command.tool == "delegate") {
-                const auto args = launchArgs(command);
-                if (!pinnedCommit(args).empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
+            if (launch) {
+                if (!pin.empty() && !loopbackGitHost(checkedUrl(connection.mcpUrl).origin))
                     return result(Outcome::Settings,"Pinned specialist worktrees require a local T3 environment");
                 Client client(std::move(connection));
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
@@ -656,29 +708,28 @@ public:
         bool invoked = false;
         try {
             verifyCommand(command);
+            const bool launch = command.tool == "delegate";
+            auto launchArguments = launch ? launchArgs(command) : LaunchArguments{};
             auto connection = credential(command.environmentId, command.config);
             if (command.authGeneration.empty() || connection.generation != command.authGeneration)
                 return {Outcome::Auth, {}, "The T3 sign-in changed before Flock sent this action", true};
             requireOperate(connection);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            if (command.tool == "answer_session_question") return answer(client, command);
+            if (command.tool == "answer_session_question") return answer(client, command, invoked);
             if (command.tool == "steer") return steer(client, command, invoked);
-            const bool launch = command.tool == "delegate";
             Json reply;
             if (launch) {
-                auto args = launchArgs(command);
-                const auto pin = pinnedCommit(args);
-                if (!pin.empty()) {
+                if (!launchArguments.pin.empty()) {
                     if (!loopbackGitHost(origin))
                         return {Outcome::Settings,{},"Pinned specialist worktrees require a local T3 environment",true};
                     invoked = true;
-                    auto delivery = launchPinned(client,command,std::move(args),pin);
+                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin);
                     useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
                 }
                 invoked = true;
-                reply = client.call("t3_thread_launch", std::move(args));
+                reply = client.call("t3_thread_launch", std::move(launchArguments.parameters));
                 if (str(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 if (!followUpReady(client, command))
@@ -695,9 +746,9 @@ public:
             if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
             return result(Outcome::Accepted, {}, std::move(run));
         } catch (const Failure& failure) {
-            if (invoked) return workReply(failure);
+            if (invoked && command.tool != "answer_session_question") return workReply(failure);
             auto refused = failureDelivery(failure);
-            if (command.tool != "answer_session_question") refused.definitelyUnsent = true;
+            refused.definitelyUnsent = !invoked;
             return refused;
         }
     }
@@ -712,7 +763,7 @@ public:
             if (command.tool == "delegate" || command.tool == "follow_up") {
                 auto recovered = reconcileWork(client, command);
                 if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
-                    const auto pin = pinnedCommit(launchArgs(command));
+                    const auto pin = launchArgs(command).pin;
                     if (!pin.empty()) {
                         if (!loopbackGitHost(origin))
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
@@ -758,44 +809,22 @@ public:
                     source.runId = laterId;
                     observed.status = str(later, "status");
                 }
-                const auto settings = config.value("session",Json::object());
-                const auto workspace = settings.find("workspaceStrategy");
-                const auto pin = workspace == settings.end() ? std::string() : str(*workspace,"expectedCommit");
-                if (observed.status == "completed" && !pin.empty()) {
-                    if (!gitCommit(pin) || !loopbackGitHost(origin))
-                        return state(Observed::Unavailable,"Could not verify the specialist's pinned workspace");
-                    const auto head = threadHead(client,run.threadId);
-                    const auto& thread = detail(head,run.threadId);
-                    const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
-                    if (!actual) return state(Observed::Unavailable,"Could not verify the specialist's pinned workspace");
-                    if (!actual->clean || actual->commit != pin) {
-                        observed.status = "failed";
-                        observed.detail = "The specialist worktree changed from the saved commit";
-                        observed.report = observed.detail;
-                        observed.resultRunId = source.runId;
-                        return observed;
-                    }
-                }
-                auto report = readReport(client, source, "messages", "assistant_message");
-                if (observed.status != "completed") {
-                    const auto error = readReport(client, source, "activity", "error");
-                    observed.detail = "T3 Run ended as " + observed.status;
-                    if (!error.text.empty()) {
-                        observed.detail = bounded(error.text,2048);
-                        if (report.itemId.empty()) report.itemId = error.itemId;
-                        report.truncated = report.truncated || error.truncated;
-                    }
-                }
-                if (report.text.empty()) report.text = "T3 Run " + observed.status + " without a written report.";
-                observed.report = bounded(report.text, 8192);
-                observed.truncated = report.truncated || observed.report.size() < report.text.size();
-                observed.itemId = std::move(report.itemId);
+                auto problem = pinnedEvidenceProblem(client,config,source,observed.status,origin);
+                if (problem && problem->availability == RunEvidence::Availability::ReportUnavailable)
+                    return state(Observed::Unavailable,std::move(problem->detail));
+                if (problem) observed.status = "failed";
+                auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client,source,observed.status);
+                observed.evidence = evidence.availability;
+                observed.report = std::move(evidence.report);
+                observed.itemId = std::move(evidence.itemId);
+                observed.detail = std::move(evidence.detail);
+                observed.truncated = evidence.truncated;
                 observed.resultRunId = source.runId;
                 return observed;
             }
             if (!finished && !active(status)) invalidResponse();
             const auto head = threadHead(client, run.threadId);
-            const auto& thread = detail(head, run.threadId);
+            const auto& thread = head.at("thread");
             const auto count = position(member(thread, "pendingRequestCount"));
             if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
             if (!finished && count == 1) {
@@ -818,7 +847,20 @@ public:
         }
     }
 
-    void interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
+    RunEvidence readRunEvidence(const std::string& environmentId, const Json& config, const RunRef& source,
+                                std::string_view status) override {
+        try {
+            auto connection = credential(environmentId,config);
+            const auto origin = checkedUrl(connection.mcpUrl).origin;
+            Client client(std::move(connection));
+            if (auto problem = pinnedEvidenceProblem(client,config,source,status,origin)) return std::move(*problem);
+            return readTerminalEvidence(client,source,status);
+        } catch (const Failure& failure) {
+            return unavailableReport(failure);
+        }
+    }
+
+    InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
         if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
         auto connection = credential(environmentId, config);
         requireOperate(connection);
@@ -826,13 +868,16 @@ public:
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
         const auto current = wait(client, run, false, 1);
         const auto effective = str(current, "runId");
-        if (terminal(str(current, "status"))) return;
+        if (terminal(str(current, "status"))) return InterruptOutcome::AlreadyTerminal;
         if (!active(str(current, "status"))) invalidResponse();
         const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
         const auto status = str(reply, "status");
-        if (str(reply, "threadId") != run.threadId ||
-            (status != "no_active_run" && (str(reply, "runId") != effective || (status != "interrupt_requested" && !terminal(status)))))
-            invalidResponse();
+        if (str(reply, "threadId") != run.threadId) invalidResponse();
+        if (status == "no_active_run") return InterruptOutcome::NoActiveRun;
+        if (str(reply, "runId") != effective) invalidResponse();
+        if (status == "interrupt_requested") return InterruptOutcome::Requested;
+        if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
+        invalidResponse();
     }
 
     Excerpt read(const ReadRequest& request) override {
@@ -872,8 +917,9 @@ public:
         return excerpt;
     }
 
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
-        return t3detail::sessionMetadata(directory_,target,includeMessages);
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
+                                                  SessionReadDeadline deadline) override {
+        return t3detail::sessionMetadata(directory_,target,includeMessages,deadline);
     }
     std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
         return t3detail::sessionEvents(directory_,target,filter);

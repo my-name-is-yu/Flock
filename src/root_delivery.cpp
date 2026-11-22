@@ -173,9 +173,9 @@ WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
                  (delivery.message.empty() && event.text.starts_with(header + "\n")))) {
                 delivery.observedRun = event.runId;
                 delivery.inputPosition = event.position;
-            } else if (event.kind == "assistant_message" && !event.text.empty() && !delivery.observedRun.empty() &&
+            } else if (event.kind == "assistant_message" && !delivery.observedRun.empty() &&
                        event.runId == delivery.observedRun && event.position > delivery.inputPosition) {
-                if (event.status == "completed") state = State::Observed;
+                if (event.status == "completed" && !event.text.empty()) state = State::Observed;
                 else if (event.status == "failed" || event.status == "cancelled" || event.status == "interrupted")
                     state = State::Failed;
                 if (state != delivery.state) break;

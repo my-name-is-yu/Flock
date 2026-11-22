@@ -13,12 +13,17 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
+void Store::setWebIdentityResolver(WebIdentityResolver resolver) {
+    std::lock_guard lock(p_->mutex);
+    p_->resolveWebIdentity = std::move(resolver);
+}
+
 void Store::Impl::initializeConversationSchema() {
     Transaction transaction(db);
+    const bool initializeTurnState = !query("SELECT 1 FROM sqlite_schema WHERE type='view'"
+                                           " AND name='conversation_input_status'").next();
     if (sqlite3_exec(db,R"SQL(
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,id)
-WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
@@ -33,12 +38,25 @@ CREATE TABLE IF NOT EXISTS messages(
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
   person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
+  principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3)),
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
   pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
+CREATE INDEX IF NOT EXISTS conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
+CREATE VIEW IF NOT EXISTS conversation_input_status AS
+SELECT t.message_id,
+  CASE t.status WHEN 'paused' THEN 'needs_you'
+                WHEN 'done' THEN coalesce(
+                  (SELECT json_extract(data,'$.status') FROM journal WHERE id=t.reply_id),'access_revoked')
+  END AS status
+FROM conversation_turns t;
+CREATE TABLE IF NOT EXISTS conversation_retries(
+  message_id INTEGER PRIMARY KEY REFERENCES conversation_turns(message_id),
+  failures INTEGER NOT NULL CHECK(failures BETWEEN 1 AND 7),
+  retry_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
   attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
@@ -50,7 +68,17 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   source_message_id INTEGER REFERENCES messages(id),
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db));
+        throw StorageError(db);
+    if (!query("SELECT 1 FROM pragma_table_info('messages') WHERE name='principal_source'").next())
+        exec("ALTER TABLE messages ADD COLUMN principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3))");
+    if (initializeTurnState || query("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='journal_pending_turn'").next()) {
+        exec(R"SQL(
+INSERT OR IGNORE INTO conversation_turns(message_id,status)
+SELECT j.id,'running' FROM journal j JOIN messages m ON m.id=j.id
+WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
+)SQL");
+        exec("DROP INDEX IF EXISTS journal_pending_turn");
+    }
     transaction.commit();
 }
 
@@ -75,8 +103,11 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 }
 
 bool Store::Impl::conversationPending(std::string_view bot) const {
-    return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
-                 " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
+    // Start with the running-turn index so long Bot histories do not add work.
+    return query(R"SQL(
+SELECT 1 FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id JOIN journal j ON j.id=m.id
+WHERE t.status='running' AND m.bot_id=? AND j.kind='conversation_message' LIMIT 1
+)SQL",{bot}).next();
 }
 
 std::optional<Json> Store::Impl::messageReceipt(const Person& actor, std::string_view bot, std::string_view clientId,
@@ -101,11 +132,19 @@ std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, st
 
 Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
                     const Json& attachments) {
-    return receive(actor,routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; },attachments);
+    return receive(actor,routing.botId,clientId,text,replyTo,conversation::PrincipalSource::trusted,
+                   nullptr,[&] { return routing; },attachments);
+}
+
+Json Store::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                       const Json& attachments) {
+    return receive(actor,routing.botId,clientId,text,replyTo,conversation::PrincipalSource::web,
+                   nullptr,[&] { return routing; },attachments);
 }
 
 Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route, const Json& attachments) {
+                    conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
+                    const std::function<Intake()>& route, const Json& attachments) {
     if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0)
@@ -129,10 +168,12 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
                      {unixTime(),routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
-        actor.id,actor.adminRoot ? 1 : 0,routing.botId});
+        actor.id,source == conversation::PrincipalSource::trusted && actor.adminRoot ? 1 : 0,
+        static_cast<int>(source),routing.botId});
+            p_->exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
             p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }
@@ -142,16 +183,38 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
     return receipt;
 }
 
-std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit) const {
+std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit, Seconds now) const {
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
-SELECT j.conversation_bot_id,min(j.id) FROM journal j
-WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
-GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
-)SQL",{limit});
+WITH heads AS (
+  SELECT m.bot_id AS bot,min(t.message_id) AS id
+  FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id
+  WHERE t.status='running' GROUP BY m.bot_id
+)
+SELECT h.bot,h.id FROM heads h LEFT JOIN conversation_retries r ON r.message_id=h.id
+WHERE r.retry_at IS NULL OR r.retry_at<=? ORDER BY h.id LIMIT ?
+)SQL",{now,limit});
     std::vector<std::pair<std::string,Id>> result;
     while (next.next()) result.emplace_back(next.string(0),next.number(1));
     return result;
+}
+
+bool Store::Impl::isNextTurn(Id id) const {
+    return query(R"SQL(
+SELECT 1 WHERE ?1=(
+  SELECT t.message_id FROM conversation_turns t CROSS JOIN messages m ON m.id=t.message_id
+  WHERE t.status='running' AND t.message_id<=?1 AND m.bot_id=(SELECT bot_id FROM messages WHERE id=?1)
+  ORDER BY t.message_id LIMIT 1)
+)SQL",{id}).next();
+}
+
+void Store::Impl::deferConversation(Id id, Seconds now) {
+    // Consecutive failures back off by 1, 2, 4, 8, 16, 32, then at most 60 seconds.
+    exec(R"SQL(
+INSERT INTO conversation_retries(message_id,failures,retry_at) VALUES(?,1,?+1)
+ON CONFLICT(message_id) DO UPDATE SET
+  failures=min(failures+1,7), retry_at=?+min(1 << failures,60)
+)SQL",{id,now,now});
 }
 
 }

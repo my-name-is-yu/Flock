@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sys/socket.h>
 
@@ -103,8 +104,9 @@ Response http(const std::string& url, bool publicOnly, const std::vector<std::st
     set(CURLOPT_PROXY,"");
     set(CURLOPT_FOLLOWLOCATION,0L);
     set(CURLOPT_NOSIGNAL,1L);
-    set(CURLOPT_CONNECTTIMEOUT_MS,2000L);
-    set(CURLOPT_TIMEOUT_MS,4000L);
+    const long timeout = closeSession ? 750L : 4000L;
+    set(CURLOPT_CONNECTTIMEOUT_MS,std::min(2000L,timeout));
+    set(CURLOPT_TIMEOUT_MS,timeout);
     set(CURLOPT_HTTPHEADER,list.list);
     set(CURLOPT_USERAGENT,"Flock/0.1");
     if (closeSession) set(CURLOPT_CUSTOMREQUEST,"DELETE");
@@ -223,6 +225,67 @@ Json rpcResult(const Response& response, int id) {
     return std::move(message["result"]);
 }
 
+bool stringMember(const Json& object, const char* key) {
+    const auto field = object.find(key);
+    return field != object.end() && field->is_string();
+}
+
+bool optionalMember(const Json& object, const char* key, auto valid) {
+    const auto field = object.find(key);
+    return field == object.end() || std::invoke(valid,*field);
+}
+
+bool stringArray(const Json& value) {
+    return value.is_array() && std::ranges::all_of(value,&Json::is_string);
+}
+
+bool validMcpAnnotations(const Json& value, std::string_view version) {
+    return value.is_object() && optionalMember(value,"audience",stringArray) &&
+           optionalMember(value,"priority",&Json::is_number) &&
+           (version == protocol || optionalMember(value,"lastModified",&Json::is_string));
+}
+
+bool validMcpIcons(const Json& value) {
+    return value.is_array() && std::ranges::all_of(value,[](const Json& icon) {
+        return stringMember(icon,"src") && optionalMember(icon,"mimeType",&Json::is_string) &&
+               optionalMember(icon,"sizes",stringArray) && optionalMember(icon,"theme",&Json::is_string);
+    });
+}
+
+bool validMcpContentBlock(const Json& block, std::string_view version) {
+    const auto type = block.find("type");
+    if (type == block.end() || !type->is_string()) return false;
+    const auto& name = type->get_ref<const std::string&>();
+    const auto validMetadata = [&] {
+        return optionalMember(block,"annotations",[&](const Json& value) { return validMcpAnnotations(value,version); }) &&
+               (version == protocol || optionalMember(block,"_meta",&Json::is_object));
+    };
+    if (name == "text") return stringMember(block,"text") && validMetadata();
+    if (name == "image" || name == "audio")
+        return stringMember(block,"data") && stringMember(block,"mimeType") && validMetadata();
+    if (name == "resource_link")
+        return stringMember(block,"uri") && stringMember(block,"name") && validMetadata() &&
+               optionalMember(block,"title",&Json::is_string) && optionalMember(block,"description",&Json::is_string) &&
+               optionalMember(block,"mimeType",&Json::is_string) && optionalMember(block,"size",&Json::is_number) &&
+               (version != "2025-11-25" || optionalMember(block,"icons",validMcpIcons));
+    if (name == "resource") {
+        const auto resource = block.find("resource");
+        return resource != block.end() && stringMember(*resource,"uri") && validMetadata() &&
+               (stringMember(*resource,"text") || stringMember(*resource,"blob")) &&
+               optionalMember(*resource,"mimeType",&Json::is_string) &&
+               (version == protocol || optionalMember(*resource,"_meta",&Json::is_object));
+    }
+    return !name.empty();
+}
+
+void validateMcpToolContent(const Json& result, std::string_view version) {
+    const auto content = result.find("content");
+    const auto validBlock = [&](const Json& block) { return validMcpContentBlock(block,version); };
+    if (content == result.end() || !content->is_array() || !std::ranges::all_of(*content,validBlock) ||
+        !optionalMember(result,"structuredContent",&Json::is_object) || !optionalMember(result,"_meta",&Json::is_object))
+        throw Conflict("Invalid MCP tool content");
+}
+
 struct Server {
     std::string url, token;
 };
@@ -230,6 +293,7 @@ struct Server {
 struct McpSession {
     const Server& server;
     std::vector<std::string> headers{"Accept: application/json, text/event-stream","Content-Type: application/json"};
+    std::string version;
     bool tools = false, resources = false, stateful = false;
     int id = 0;
 
@@ -243,7 +307,7 @@ struct McpSession {
                           {"params",{{"protocolVersion",protocol},{"capabilities",Json::object()},
                                      {"clientInfo",{{"name","Flock"},{"version","0.1"}}}}}});
         const auto result = rpcResult(init,id);
-        auto version = result.value("protocolVersion","");
+        version = result.value("protocolVersion","");
         if (version != protocol && version != "2025-06-18" && version != "2025-11-25")
             throw Conflict("MCP server selected an unsupported protocol version");
         headers.push_back("MCP-Protocol-Version: " + version);
@@ -252,16 +316,23 @@ struct McpSession {
             headers.push_back("Mcp-Session-Id: " + init.session);
             stateful = true;
         }
-        const auto caps = result.value("capabilities",Json::object());
-        tools = caps.contains("tools");
-        resources = caps.contains("resources");
-        post({{"jsonrpc","2.0"},{"method","notifications/initialized"}});
+        try {
+            const auto caps = result.value("capabilities",Json::object());
+            tools = caps.contains("tools");
+            resources = caps.contains("resources");
+            post({{"jsonrpc","2.0"},{"method","notifications/initialized"}});
+        } catch (...) {
+            close();
+            throw;
+        }
     }
 
-    ~McpSession() {
+    ~McpSession() { close(); }
+
+    void close() noexcept {
         if (!stateful) return;
         try { http(server.url,false,headers,nullptr,false,true); }
-        catch (const std::exception&) {}
+        catch (...) {}
     }
 
     Json callRaw(std::string_view method, Json params) {
@@ -336,14 +407,14 @@ public:
         result["nextCursor"] = next;
         return result;
     }
-    Json invoke(std::string_view server, std::string_view name, const Json& args) override {
+    McpToolResult invoke(std::string_view server, std::string_view name, const Json& args) override {
         McpSession session(servers_.at(std::string(server)));
         if (!session.tools) throw Conflict("MCP server does not offer tools");
         try {
-            auto result = session.call("tools/call",{{"name",name},{"arguments",args}});
-            if (result.contains("isError") && !result.at("isError").is_boolean())
-                throw Conflict("Invalid MCP tool outcome");
-            return result;
+            auto result = session.callRaw("tools/call",{{"name",name},{"arguments",args}});
+            validateMcpToolContent(result,session.version);
+            const bool isError = result.value("isError",false);
+            return {session.scrub(std::move(result)),isError};
         }
         catch (const McpRejected&) { throw; }
         catch (const std::exception&) { throw ToolOutcomeUnknown("The MCP tool outcome is unknown"); }

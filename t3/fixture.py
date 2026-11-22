@@ -25,8 +25,12 @@ class Fixture(BaseHTTPRequestHandler):
         for key, item in headers.items():
             for header_value in item if isinstance(item, list) else [item]:
                 self.send_header(key.replace("_", "-"), header_value)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Deadline tests deliberately disconnect before a delayed reply.
+            pass
 
     def do_GET(self):
         origin = self.server.origin
@@ -147,6 +151,10 @@ class Fixture(BaseHTTPRequestHandler):
                 self.reply(envelope)
                 return
             content = self.tool(tool["name"], tool["arguments"])
+            if (tool["name"] == "t3_pending_request" and tool["arguments"]["action"] == "respond"
+                    and state.get("dropAnswerReply")):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -171,7 +179,8 @@ class Fixture(BaseHTTPRequestHandler):
             {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
              "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
         ]
-        if (name in ("t3_thread_read", "t3_thread_list", "t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+        if (name in ("t3_project_read", "t3_thread_read", "t3_thread_list", "t3_thread_launch",
+                     "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
@@ -180,6 +189,9 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
+            if args["projectId"] == "slow-search-project":
+                time.sleep(4)
+                return {"id": "slow-search-project", "title": "Release Pipeline"}
             assert args["projectId"] == "project"
             failure = state.get("projectReadFailure")
             if failure is not None:
@@ -187,14 +199,11 @@ class Fixture(BaseHTTPRequestHandler):
             return {"id": "project", "code": "project-code", "title": "Release Pipeline", "defaultModelSelection": None}
         if name == "t3_thread_launch":
             assert args["projectId"] == "project"
-            assert "modelSelection" not in args and "workspaceStrategy" not in args
+            assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
             if self.server.peer_recovery:
                 state["launches"].append(args["clientRequestId"])
                 assert len(state["launches"]) == 1, "Runtime sent a second launch"
                 assert "Verify the fixture" in args["message"]
-            else:
-                assert args["clientRequestId"] == "flock-action-0123"
-                assert args["message"].count("[Flock action") == 1
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
@@ -220,18 +229,23 @@ class Fixture(BaseHTTPRequestHandler):
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
+            if state.get("waitFailure"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "Wait is unavailable."}
             if scenario == "resumed":
                 return {"threadId": "thread", "runId": "continued", "timedOut": True, "status": "running"}
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
             timed_out = active or scenario in ("settling", "settling-input", "manual-active")
+            terminal_status = state.get("terminalStatus", "completed")
             reply = {"threadId": "thread", "runId": "root", "timedOut": timed_out,
-                     "status": "running" if scenario == "running" else "waiting" if active else "completed"}
+                     "status": "running" if scenario == "running" else "waiting" if active else terminal_status}
             if not timed_out and args["untilDelegatedWorkSettled"]:
-                reply["resultRun"] = {"runId": "later" if scenario.endswith("-result") else "root", "status": "completed"}
+                reply["resultRun"] = {"runId": "later" if scenario.endswith("-result") else "root",
+                                      "status": terminal_status}
             return reply
         if name == "t3_thread_interrupt":
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
-            return {"threadId": "thread", "runId": "root", "status": "interrupt_requested"}
+            status = state.get("interruptReply") or "interrupt_requested"
+            return {"threadId": "thread", "runId": None if status == "no_active_run" else "root", "status": status}
         if name == "t3_pending_request":
             assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
@@ -239,6 +253,11 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
+                if state.get("failAnswerRecheck"):
+                    reads = state.get("answerReads", 0) + 1
+                    state["answerReads"] = reads
+                    if reads == 2:
+                        return {"_tag": "OrchestratorMcpFailure", "code": "internal_error"}
                 return {"requestId": "request", "questions": questions}
             assert action == "respond" and scenario != "ambiguous"
             state["scenario"] = "running"
@@ -247,6 +266,9 @@ class Fixture(BaseHTTPRequestHandler):
                         "message": "The user-input request was already answered."}
             return {"sequence": 10}
         assert name == "t3_thread_read", name
+        if (("beforePosition" in args and state.get("reportReadFailure") == args["view"]) or
+                ("afterPosition" in args and state.get("ownershipReadFailure"))):
+            return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "History is unavailable."}
         thread_id = args["threadId"]
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
@@ -256,6 +278,11 @@ class Fixture(BaseHTTPRequestHandler):
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
+        if scenario == "paged-report":
+            rows[1]["text"] = "x" * 7000 + "end of report"
+            rows.extend(self.item(thread_id, i, "other", "assistant_message", "unrelated report") for i in range(2, 5))
+            if "itemId" in args and state.get("changeReportDuringRead"):
+                rows[1]["updatedAt"] = "2026-11-22T00:00:01.000Z"
         if scenario.endswith("-result"):
             self.result_history(thread_id, scenario, recent, rows)
         if scenario in ("question", "ambiguous", "race"):
@@ -264,6 +291,20 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 6, "later", "user_input_request", json.dumps(questions)))
         if "followup" in state:
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
+        if scenario == "sparse-session-search":
+            if thread_id in state.get("missingSearchThreads", []):
+                return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found",
+                        "message": "The thread was not found."}
+            title = state["searchTitles"].get(thread_id, "Background investigation")
+            summary |= {"title": title, "status": "failed", "createdAt": "2026-11-21T01:00:00Z",
+                        "updatedAt": "2026-11-21T13:00:00Z"}
+            delay = state.get("searchReadDelays", {}).get(thread_id, 0)
+            if thread_id == state.get("slowSearchThread"):
+                delay = 1.6
+                summary["projectId"] = "slow-search-project"
+            if delay:
+                time.sleep(delay)
+            rows = [self.item(thread_id, 0, "root", "user_message", "Check the logs", source="web")]
         if scenario == "session-read":
             failure = state.get("threadReadErrors", {}).get(thread_id)
             if failure is not None:

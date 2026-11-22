@@ -189,6 +189,7 @@ Json eventView(const Json& event) {
         }
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
+        if (data.contains("evidenceStatus")) copyFields(details,data,{"evidenceStatus","detail"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
@@ -446,6 +447,17 @@ Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std
     result["workflows"] = store.workflows(id);
     result["compactions"] = store.compactions(id,0,1);
     result["bot"] = settingsView(bot);
+    auto& schedules = result["bot"]["cron"];
+    if (!schedules.empty()) {
+        const auto active = store.activeConfiguredSchedules(id);
+        for (auto& schedule : schedules) {
+            const auto saved = active.find(field(schedule,"id"));
+            schedule["active"] = saved != active.end() &&
+                field(*saved,"cron") == field(schedule,"schedule") &&
+                field(*saved,"timezone") == field(schedule,"timezone") &&
+                field(*saved,"request") == field(schedule,"request");
+        }
+    }
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();

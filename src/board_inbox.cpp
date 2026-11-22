@@ -28,11 +28,6 @@ std::string taskTitle(const Json& task) {
     return title(intent.empty() ? field(task,"request") : intent);
 }
 
-Id storedId(const Json& data, const char* name) {
-    const auto value = data.find(name);
-    return value != data.end() && value->is_number_integer() ? value->get<Id>() : 0;
-}
-
 Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     if (message <= 0) return 0;
     auto row = store.query("SELECT id FROM journal WHERE id=? AND conversation_bot_id=?"
@@ -40,35 +35,8 @@ Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     return row.next() ? row.number(0) : 0;
 }
 
-Id waitAnchor(const auto& store, Id task, Id wait, const Json& data) {
-    if (const auto message = storedId(data,"messageId"); message > 0) {
-        auto row = store.query(R"SQL(
-SELECT id FROM journal WHERE id=? AND task_id=? AND conversation_bot_id IS NULL
-AND kind='waiting' AND json_extract(data,'$.id')=?
-)SQL",{message,task,wait});
-        if (row.next()) return row.number(0);
-    }
-    // Older tasks may keep only the wait ID. Limit the lookup to recent entries for this task.
-    auto row = store.query(R"SQL(
-SELECT id FROM (
-    SELECT id,kind,data,conversation_bot_id FROM journal WHERE task_id=? ORDER BY id DESC LIMIT 128
-)
-WHERE conversation_bot_id IS NULL AND kind='waiting' AND json_extract(data,'$.id')=?
-ORDER BY id DESC LIMIT 1
-)SQL",{task,wait});
-    return row.next() ? row.number(0) : 0;
-}
-
 void addAnchor(Json& view, Id anchor) {
     if (anchor > 0) view["conversationEventId"] = anchor;
-}
-
-Json publicWait(const Json& wait) {
-    if (!wait.is_object()) return nullptr;
-    const auto reason = field(wait,"reason");
-    Json view{{"id",wait.at("id")},{"reason",reason},{"text",field(wait,"text")}};
-    if (reason == "user_question") view["choices"] = wait.value("choices",Json::array());
-    return view;
 }
 
 bool validDecision(InboxKind kind, std::string_view decision) {
@@ -198,16 +166,14 @@ ORDER BY w.id DESC
 )SQL",{id});
         while (waits.next()) {
             const auto task = waits.json(2);
-            auto wait = waits.json(4);
+            const auto wait = waits.json(4);
             const auto kind = inboxWaitKind(field(wait,"reason"));
             if (!kind || !p_->waitIsActionable(task)) continue;
             const auto waitId = waits.number(3);
-            wait["id"] = waitId;
-            const auto view = publicWait(wait);
             add({id,*kind,waitId,waitId,waits.number(0),task.value("currentRevision",Id{0}),waits.number(1)},
-                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",view.at("text")},
-                 {"choices",view.value("choices",Json::array())}},
-                waitAnchor(*p_,waits.number(0),waitId,task.value("wait",Json(nullptr))));
+                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",field(wait,"text")},
+                 {"choices",*kind == user_question ? wait.value("choices",Json::array()) : Json::array()}},
+                p_->waitAnchor(waits.number(0),waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
@@ -247,20 +213,21 @@ WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
                       (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
                       changes.number(5));
         auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates,j.id
+SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
-WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
-AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-AND (p.operation_id IS NOT NULL OR NOT coalesce(json_extract(t.data,'$.replanning'),0)) ORDER BY p.id DESC
+WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
+    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
+    AND (p.git_key IS NOT NULL OR p.target_generation=t.generation)
+    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
 )SQL",{id});
         while (reviews.next()) {
-            const auto task = reviews.json(7);
-            const auto kind = reviews.string(8).empty() ? pr_review : pr_reconciliation;
-            add({id,kind,reviews.number(0),0,reviews.number(1),reviews.number(2),reviews.number(3)},
+            const auto task = reviews.json(3);
+            const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
+            add({id,kind,reviews.number(0),0,reviews.number(1),task.value("currentRevision",Id{0}),reviews.number(2)},
                 {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
-                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(9)}},reviews.number(10));
+                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(8)}},reviews.number(9));
         }
     }
     snapshot.commit();
@@ -349,15 +316,17 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
-        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id"
+        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id IS NOT NULL,git_key IS NOT NULL"
                                 " FROM pr_review_items WHERE id=? AND task_id=?",
                                 {item.itemId,item.taskId});
         if (!review.next()) throw RequestChanged{};
         if (review.string(2) != "pending") throw DecisionUnavailable{};
-        if (review.string(3).empty() != (kind == pr_review)) throw RequestChanged{};
-        if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration ||
-            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration ||
-            (kind == pr_review && task.value("replanning",false))) throw RequestChanged{};
+        if (review.number(3) != (kind == pr_reconciliation) || item.waitId ||
+            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration)
+            throw RequestChanged{};
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false) ||
+                                  (!review.number(4) && review.number(1) != item.targetGeneration)))
+            throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
         else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
                       {decision == "approve" ? "approved" : "changes_requested",item.itemId});

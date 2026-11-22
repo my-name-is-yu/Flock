@@ -6,6 +6,7 @@
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/base64.hpp"
 #include "channel_routes.hpp"
 #include "session_handoff_routes.hpp"
 
@@ -85,43 +86,6 @@ const Json* botById(const Json& bots, std::string_view id) {
     return bot == bots.end() ? nullptr : &*bot;
 }
 
-int base64Digit(unsigned char ch) {
-    if (ch >= 'A' && ch <= 'Z') return ch - 'A';
-    if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
-    if (ch >= '0' && ch <= '9') return ch - '0' + 52;
-    if (ch == '+') return 62;
-    if (ch == '/') return 63;
-    return -1;
-}
-
-std::string decodeBase64(std::string_view input, std::size_t maxBytes) {
-    if (input.empty() || input.size() % 4 != 0) throw InputError("invalid_image");
-    std::size_t padding = 0;
-    if (input.back() == '=') {
-        ++padding;
-        if (input[input.size() - 2] == '=') ++padding;
-    }
-    const std::size_t decodedSize = (input.size() / 4) * 3 - padding;
-    if (decodedSize == 0 || decodedSize > maxBytes) throw InputError("invalid_image");
-    std::string out;
-    out.reserve(decodedSize);
-    for (std::size_t i = 0; i < input.size(); i += 4) {
-        const int a = base64Digit(static_cast<unsigned char>(input[i]));
-        const int b = base64Digit(static_cast<unsigned char>(input[i + 1]));
-        const bool padC = input[i + 2] == '=';
-        const bool padD = input[i + 3] == '=';
-        if (a < 0 || b < 0 || (padC && !padD)) throw InputError("invalid_image");
-        if ((padC || padD) && i + 4 != input.size()) throw InputError("invalid_image");
-        const int c = padC ? 0 : base64Digit(static_cast<unsigned char>(input[i + 2]));
-        const int d = padD ? 0 : base64Digit(static_cast<unsigned char>(input[i + 3]));
-        if (c < 0 || d < 0) throw InputError("invalid_image");
-        out.push_back(static_cast<char>((a << 2) | (b >> 4)));
-        if (!padC) out.push_back(static_cast<char>(((b & 0x0F) << 4) | (c >> 2)));
-        if (!padD) out.push_back(static_cast<char>(((c & 0x03) << 6) | d));
-    }
-    return out;
-}
-
 struct ParsedProfile {
     Json profile;
     std::optional<AvatarImage> image;
@@ -147,7 +111,14 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         }
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
-            image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),AvatarImage::maxBytes));
+            try {
+                image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),
+                                           AvatarImage::maxBytes,Base64Padding::AllowUnusedBits));
+            } catch (const std::invalid_argument&) {
+                throw InputError("invalid_image");
+            } catch (const std::length_error&) {
+                throw InputError("invalid_image");
+            }
         } else if (creating) {
             throw InputError("invalid_image");
         }
@@ -199,7 +170,10 @@ public:
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
-        if (callbacks_.authenticate) store_.access().requireWebIdentity();
+        if (callbacks_.authenticate) {
+            store_.access().requireWebIdentity();
+            store_.setWebIdentityResolver(callbacks_.resolveIdentity);
+        }
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
@@ -599,6 +573,8 @@ private:
                 if (message) {
                     const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
                     if (previous) return json(res,201,*previous);
+                    if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                        return error(res,503,"message_identity_unavailable");
                 }
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
@@ -608,7 +584,12 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo,attachments));
+                if (message) {
+                    const auto receipt = callbacks_.authenticate
+                        ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
+                        : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
+                    return json(res,201,receipt);
+                }
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);

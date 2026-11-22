@@ -22,6 +22,12 @@ header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
 identity for initial grants. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
 
+Queued and resumed shared Web messages use the sender's current identity and
+Bot access. If a person has multiple credentials, their queued messages have
+root authority only when all of those credentials currently have `adminRoot`.
+Send the message again if it was queued before Flock recorded the source of
+shared Web messages and is rejected after an upgrade.
+
 ## Session handoffs
 
 Use stock T3 Code v0.1.11 or a compatible version. Sign in to T3 from Flock

@@ -15,7 +15,7 @@ import { mountConversationFind } from '/conversation-find.mjs';
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar', 'profile-avatar-button',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target', 'decision-cancel-reply',
@@ -27,11 +27,38 @@ const elements = Object.fromEntries([
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const motionAnimations = new WeakMap();
+const motionEaseOut = 'cubic-bezier(0.23, 1, 0.32, 1)';
+const motionSpring = 'cubic-bezier(0.22, 1.2, 0.36, 1)';
+function cancelMotion(el) {
+  const prev = el && motionAnimations.get(el);
+  if (!prev) return;
+  motionAnimations.delete(el);
+  prev.cancel();
+}
+function runMotion(el, keyframes, options) {
+  if (!el?.animate || reducedMotion.matches) return null;
+  cancelMotion(el);
+  const animation = el.animate(keyframes, options);
+  motionAnimations.set(el, animation);
+  const clear = () => {
+    if (motionAnimations.get(el) === animation) motionAnimations.delete(el);
+  };
+  animation.addEventListener('finish', clear, { once: true });
+  animation.addEventListener('cancel', clear, { once: true });
+  return animation;
+}
 function animateLiveReply(id) {
-  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
-    { opacity: .76, transform: 'translateY(4px)' },
+  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
+    { opacity: .5, transform: 'translateY(8px) scale(.975)' },
     { opacity: 1, transform: 'none' },
-  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+  ], { duration: 200, easing: motionSpring });
+}
+function animateSentMessage(id) {
+  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
+    { opacity: 0, transform: 'translateY(10px) scale(.96)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 210, easing: motionSpring });
 }
 const workspace = document.querySelector('.workspace');
 const conversationActions = byId('conversation-actions');
@@ -197,20 +224,70 @@ function setConnection(state) {
   elements['connection-text'].textContent = state === 'offline' ? 'Could not connect to the runtime' : '';
   renderHeader();
 }
-function renderTheme(mode) {
+let themeSwitchTimer = 0;
+function resolvedTheme(mode) {
+  return mode === 'system'
+    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : mode;
+}
+function syncThemeIndicator(animate = false) {
+  const group = elements['theme-switch'];
+  const active = group?.querySelector('button[aria-pressed="true"]');
+  if (!group || !active || !active.offsetWidth) return;
+  const x = `${active.offsetLeft}px`;
+  const w = `${active.offsetWidth}px`;
+  const wasReady = group.classList.contains('seg-ready');
+  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
+    return;
+  }
+  if (animate && wasReady && !reducedMotion.matches) {
+    if (!group.classList.contains('seg-animated')) {
+      group.classList.add('seg-animated');
+      void group.offsetWidth;
+    }
+  } else {
+    group.classList.remove('seg-animated');
+  }
+  group.style.setProperty('--seg-x', x);
+  group.style.setProperty('--seg-w', w);
+  group.classList.add('seg-ready');
+}
+function renderTheme(mode, animate = false) {
   for (const option of elements['theme-switch'].querySelectorAll('button')) {
     option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
   }
+  syncThemeIndicator(animate);
 }
 function setTheme(mode) {
+  const group = elements['theme-switch'];
+  const active = group.querySelector('button[aria-pressed="true"]');
+  const prevMode = active?.dataset.themeMode ?? 'system';
+  const prevResolved = resolvedTheme(prevMode);
+  const nextResolved = resolvedTheme(mode);
   save('flock-theme', mode);
+  if (!reducedMotion.matches) {
+    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
+    if (prevResolved !== nextResolved) {
+      const root = document.documentElement;
+      root.classList.add('theme-switching');
+      clearTimeout(themeSwitchTimer);
+      themeSwitchTimer = setTimeout(() => {
+        root.classList.remove('theme-switching');
+        themeSwitchTimer = 0;
+      }, 260);
+    }
+    void document.documentElement.offsetWidth;
+  }
   document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
-  renderTheme(mode);
+  renderTheme(mode, true);
 }
+const mainElement = byId('main');
+const navBackdrop = byId('nav-backdrop');
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
   const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
+  if (mainElement) mainElement.inert = expanded;
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
   if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
@@ -229,41 +306,74 @@ function conversationUrl(botId, peerId, anchor) {
   else url.searchParams.delete('anchor');
   return url;
 }
-function animateViewTransition(kind) {
+function animateTimelineContent(kind) {
   if (reducedMotion.matches) return;
   const inner = elements.conversation.querySelector('.conversation-inner');
-  const ease = 'cubic-bezier(.2, .9, .25, 1)';
+  cancelMotion(inner);
+  cancelMotion(elements.timeline);
   if (kind === 'dm-enter') {
-    inner?.animate?.([
-      { opacity: 0, transform: 'scale(.985) translateY(8px)' },
+    runMotion(inner, [
+      { opacity: 0, transform: 'translateX(18px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 210, easing: ease });
-    elements['peer-heading']?.animate?.([
-      { opacity: 0, transform: 'scale(.94)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 185, easing: ease });
-    elements['peer-back']?.animate?.([
-      { opacity: 0, transform: 'translateX(-6px)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 185, easing: ease });
+    ], { duration: 220, easing: motionEaseOut });
   } else if (kind === 'dm-exit') {
-    inner?.animate?.([
-      { opacity: 0, transform: 'scale(1.015)' },
+    runMotion(inner, [
+      { opacity: 0, transform: 'translateX(-18px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 190, easing: ease });
-    byId('profile-heading')?.animate?.([
-      { opacity: 0, transform: 'scale(.96)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 170, easing: ease });
+    ], { duration: 220, easing: motionEaseOut });
   } else if (kind === 'bot-switch') {
-    elements.timeline?.animate?.([
-      { opacity: .2, transform: 'translateY(6px)' },
+    runMotion(elements.timeline, [
+      { opacity: .15, transform: 'translateY(8px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 175, easing: ease });
-    elements['profile-avatar-button']?.animate?.([
-      { opacity: .65, transform: 'scale(.92)' },
+    ], { duration: 210, easing: motionEaseOut });
+  }
+}
+function animateViewTransition(kind) {
+  const inner = elements.conversation.querySelector('.conversation-inner');
+  const profileHeading = byId('profile-heading');
+  for (const target of [inner, elements.timeline, elements['peer-faces'], elements['peer-heading'],
+      elements['peer-back'], elements['profile-avatar-button'], profileHeading]) {
+    cancelMotion(target);
+  }
+  if (reducedMotion.matches) return;
+  const context = timelineContext();
+  if (elements.timeline?.childElementCount > 0) {
+    animateTimelineContent(kind);
+    if (context) context.pendingViewMotion = null;
+  } else if (context) {
+    context.pendingViewMotion = kind;
+  }
+  if (kind === 'dm-enter') {
+    runMotion(elements['peer-faces'], [
+      { opacity: 0, transform: 'translateX(12px) scale(.92)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 180, easing: ease });
+    ], { duration: 220, easing: motionSpring });
+    runMotion(elements['peer-heading'], [
+      { opacity: 0, transform: 'translateX(14px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionEaseOut });
+    runMotion(elements['peer-back'], [
+      { opacity: 0, transform: 'translateX(-10px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 200, easing: motionEaseOut });
+  } else if (kind === 'dm-exit') {
+    runMotion(elements['profile-avatar-button'], [
+      { opacity: 0, transform: 'translateX(-10px) scale(.92)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionSpring });
+    runMotion(profileHeading, [
+      { opacity: 0, transform: 'translateX(-12px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionEaseOut });
+  } else if (kind === 'bot-switch') {
+    runMotion(elements['profile-avatar-button'], [
+      { opacity: .6, transform: 'scale(.88) translateY(3px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 230, easing: motionSpring });
+    runMotion(profileHeading, [
+      { opacity: .5, transform: 'translateY(4px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionSpring });
   }
 }
 function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fromPeerLink = false } = {}) {
@@ -530,11 +640,12 @@ function createSidebarEntry(botId) {
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
       if (!previousBot || previousBot.preview !== bot.preview) {
-        previewText.data = bot.preview || 'No conversation yet';
+        previewText.data = bot.preview || '';
       }
       const hasPresence = activePresence.has(bot.presence);
       presenceDot.hidden = bot.presence !== 'waiting';
       dots.hidden = !busyPresence.has(bot.presence);
+      preview.hidden = !bot.preview && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
       const unread = hasUnread(bot);
@@ -591,20 +702,45 @@ function draftRow(draft) {
   const name = node('span', 'bot-name');
   name.append(node('span', 'bot-name-text', draft.name));
   const text = node('span', 'bot-text');
-  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  text.append(name);
   select.append(avatar(draft, 'bot-avatar'), text);
   row.append(select);
   return row;
 }
 
+const rowRevealTimers = new WeakMap();
+function triggerRowReveal(container) {
+  if (reducedMotion.matches) return;
+  clearTimeout(rowRevealTimers.get(container));
+  container.classList.remove('rows-reveal');
+  void container.offsetWidth;
+  container.classList.add('rows-reveal');
+  rowRevealTimers.set(container, setTimeout(() => {
+    container.classList.remove('rows-reveal');
+    rowRevealTimers.delete(container);
+  }, 400));
+}
+function clearRowReveal(container) {
+  clearTimeout(rowRevealTimers.get(container));
+  rowRevealTimers.delete(container);
+  container.classList.remove('rows-reveal');
+}
+
 let previousPinsKey = null;
+let previousListLoaded = false;
 function renderBots() {
   const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds,
     bots.map(({ id }) => decisions.count(id)))) return;
+  const revealedFromSkeleton = !previousListLoaded && listLoaded;
+  previousListLoaded = listLoaded;
   const pinsKey = JSON.stringify([...pins]);
   const animateFlip = previousPinsKey !== null && previousPinsKey !== pinsKey && !reducedMotion.matches;
   previousPinsKey = pinsKey;
+  if (animateFlip || menu) {
+    clearRowReveal(elements['bot-list']);
+    clearRowReveal(elements.pinned);
+  }
   const beforeRects = new Map();
   if (animateFlip) {
     for (const entry of sidebarEntries.values()) {
@@ -640,6 +776,10 @@ function renderBots() {
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (revealedFromSkeleton) {
+    if (unpinned.length) triggerRowReveal(list);
+    if (pinned.length) triggerRowReveal(elements.pinned);
+  }
   if (animateFlip) {
     for (const [el, before] of beforeRects) {
       if (!el.isConnected || el.hidden) continue;
@@ -691,7 +831,7 @@ function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
   conversationFind.setContext(view?.data && !dm ? view : null);
-  const profile = elements.profile;
+  const profile = elements['profile-avatar-button'];
   const identity = elements['profile-identity'];
   identity.hidden = !bot || !!dm;
   elements['profile-toolbar'].hidden = !bot;
@@ -748,7 +888,6 @@ function renderHeader() {
   const name = elements['profile-name'];
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
-  elements['profile-avatar-button']?.setAttribute('aria-label', settingsLabel);
   name.textContent = bot.name;
   name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
@@ -827,11 +966,18 @@ const decisionKindLabels = {
   protected_input: 'Protected input',
   bot_change: 'Bot change',
 };
+let activityBotId = null;
+let activitySeen = false;
+let activityReveal = null;
+let previousWaitsLoading = false;
+let previousSessionsLoading = false;
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
   const pending = view?.id ? decisions.itemsFor(view.id) : [];
   if (changed('waits', view?.id, loading, pending)) {
+    const revealedWaits = previousWaitsLoading && !loading;
+    previousWaitsLoading = loading;
     elements['wait-count'].textContent = pending.length;
     elements['wait-count'].hidden = !pending.length;
     elements['wait-list'].setAttribute('aria-busy', loading);
@@ -848,6 +994,7 @@ function renderActivity() {
     });
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
+    else if (revealedWaits && rows.length) triggerRowReveal(elements['wait-list']);
     elements['wait-list'].closest('section').hidden = !loading && !rows.length;
   }
   const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
@@ -855,41 +1002,60 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions)) return;
-  const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
-  const activeKeys = new Set();
-  const live = [];
-  for (const run of active) {
-    const identity = key(run.taskId, run);
-    if (activeKeys.has(identity)) continue;
-    activeKeys.add(identity);
-    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
-      run.state === 'waiting' ? 'waiting' : 'live'));
+  if (changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions)) {
+    const revealedSessions = previousSessionsLoading && !loading;
+    previousSessionsLoading = loading;
+    const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
+    const activeKeys = new Set();
+    const live = [];
+    for (const run of active) {
+      const identity = key(run.taskId, run);
+      if (activeKeys.has(identity)) continue;
+      activeKeys.add(identity);
+      live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
+        run.state === 'waiting' ? 'waiting' : 'live'));
+    }
+    const ended = [];
+    for (const task of groups.sort((a, b) => b.id - a.id)) {
+      for (const session of task.sessions) {
+        if (activeKeys.has(key(task.id, session))) continue;
+        const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+        ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+      }
+    }
+    const rows = [];
+    const grouped = live.length > 0 && ended.length > 0;
+    for (const [label, items] of [['Active', live], ['Ended', ended]]) {
+      if (!items.length) continue;
+      if (!grouped) { rows.push(...items); continue; }
+      const heading = node('h3', 'activity-group');
+      heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
+      rows.push(heading, ...items);
+    }
+    const list = elements['session-list'];
+    const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
+    rows.push(...workflowInspectors(data, open));
+    list.setAttribute('aria-busy', loading);
+    list.replaceChildren(...rows);
+    if (loading) list.append(...skeletonRows(2));
+    else if (revealedSessions && rows.length) triggerRowReveal(list);
+    list.closest('section').hidden = !loading && !rows.length && more.hidden;
   }
-  const ended = [];
-  for (const task of groups.sort((a, b) => b.id - a.id)) {
-    for (const session of task.sessions) {
-      if (activeKeys.has(key(task.id, session))) continue;
-      const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-      ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+  const nextActivityBotId = view && !view.dm ? view.id : null;
+  if (nextActivityBotId !== activityBotId) {
+    const shouldReveal = activitySeen && !!nextActivityBotId;
+    activityBotId = nextActivityBotId;
+    if (nextActivityBotId) activitySeen = true;
+    activityReveal?.cancel();
+    activityReveal = null;
+    const panel = elements['bot-activity'];
+    if (shouldReveal && !panel.hidden && !reducedMotion.matches) {
+      activityReveal = panel.animate?.([
+        { opacity: 0, transform: 'translateY(6px)' },
+        { opacity: 1, transform: 'none' },
+      ], { duration: 190, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }) ?? null;
     }
   }
-  const rows = [];
-  const grouped = live.length > 0 && ended.length > 0;
-  for (const [label, items] of [['Active', live], ['Ended', ended]]) {
-    if (!items.length) continue;
-    if (!grouped) { rows.push(...items); continue; }
-    const heading = node('h3', 'activity-group');
-    heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
-    rows.push(heading, ...items);
-  }
-  const list = elements['session-list'];
-  const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
-  rows.push(...workflowInspectors(data, open));
-  list.setAttribute('aria-busy', loading);
-  list.replaceChildren(...rows);
-  if (loading) list.append(...skeletonRows(2));
-  list.closest('section').hidden = !loading && !rows.length && more.hidden;
 }
 
 function beginReply(target, text = '') {
@@ -928,10 +1094,15 @@ function iconButton(name, label, click) {
 async function copyMessage(control, text) {
   try {
     await navigator.clipboard.writeText(text);
+    clearTimeout(control._copyTimer);
+    delete control.dataset.copied;
+    void control.offsetWidth;
+    control.dataset.copied = 'true';
     control.replaceChildren(icon('copied'));
     control.setAttribute('aria-label', 'Copied');
     control.title = 'Copied';
-    setTimeout(() => {
+    control._copyTimer = setTimeout(() => {
+      delete control.dataset.copied;
       control.replaceChildren(icon('copy'));
       control.setAttribute('aria-label', 'Copy text');
       control.title = 'Copy text';
@@ -1129,7 +1300,12 @@ function focusConversationMessage(target) {
   const bottom = viewport.bottom - returnSpace;
   const center = top + Math.max(0, (bottom - top - message.height) / 2);
   row.focus({ preventScroll: true });
-  scroller.scrollTop += message.top - center;
+  const nextTop = Math.max(0, scroller.scrollTop + message.top - center);
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: nextTop, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = nextTop;
+  }
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
@@ -1168,6 +1344,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     return;
   }
   elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  void target.offsetWidth;
   target.classList.add('conversation-source-target');
   focusConversationMessage(target);
   updateJumpToLatest();
@@ -1220,13 +1397,9 @@ function eventCard(event, context, place, report) {
       ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
       : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const showMeta = side === 'bot' && place.groupStart;
-  const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const author = side === 'external' ? 'Other sender' : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
-  const name = node('span', showMeta ? 'msg-name' : 'msg-name sr-only', author);
   const time = eventTime(event, scheduled);
-  meta.append(name);
-  row.append(meta);
+  row.append(node('span', 'msg-name sr-only', author));
 
   const line = node('div', 'msg-line');
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
@@ -1264,6 +1437,7 @@ function eventCard(event, context, place, report) {
     }
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
+    text.classList.add('foldable-text');
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
     if (paused && context.canDecide) extras.push(pausedActions(paused));
@@ -1285,8 +1459,10 @@ function eventCard(event, context, place, report) {
     }
     replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
-    copy = data.report || 'The session submitted a report.';
+    copy = data.evidenceStatus === 'report_unavailable' ? 'The Run ended and its report is unavailable.'
+      : data.report || 'The session submitted a report.';
     text.textContent = copy;
+    text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
@@ -1294,6 +1470,7 @@ function eventCard(event, context, place, report) {
     if (data.status && data.status !== 'completed') {
       bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
     }
+    if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
@@ -1313,6 +1490,7 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
+    text.classList.add('foldable-text');
     if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
       const count = data.imageAttachmentCount;
       bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
@@ -1403,7 +1581,7 @@ function workingLine(data) {
   }
   const text = node('span', 'working-label', label);
   text.title = label;
-  line.append(avatar(data.bot, 'msg-avatar'), dots, text);
+  line.append(dots, text);
   row.append(line);
   return row;
 }
@@ -1434,7 +1612,7 @@ function leavePeerConversation(updateHistory = true) {
   const anchor = dm.fromPeerLink && readingPositions.has(timelineKey(id)) ? dm.anchor : 0;
   selectBot(id, null, { updateHistory });
   const picker = elements['peer-picker'];
-  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements.profile : picker);
+  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements['profile-avatar-button'] : picker);
   target.focus({ preventScroll: true });
 }
 
@@ -1568,7 +1746,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
-  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
+  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
   const peerStatus = elements['peer-status'];
   const olderFailed = view?.dm?.olderFailed;
   peerStatus.hidden = !olderFailed;
@@ -1597,19 +1775,91 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     scroller.setAttribute('aria-label', 'Bot DM history');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
+    if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
+      const pending = dm.pendingViewMotion;
+      dm.pendingViewMotion = null;
+      animateTimelineContent(pending);
+    }
     return;
   }
   if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
     data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
+    foldLongMessages();
     moveScroll();
+    if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
+      const pending = context.pendingViewMotion;
+      context.pendingViewMotion = null;
+      animateTimelineContent(pending);
+    }
   }
-  const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
-    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  const motionAllowed = !source && !document.hidden && !reducedMotion.matches && !document.querySelector('dialog[open]');
+  const canAnimate = motionAllowed && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom;
   if (canAnimate) {
     const id = replyArrivalId(events, liveAfterId);
     if (id != null) animateLiveReply(id);
+  }
+  const sentAfterId = context?.pendingSentAfterId;
+  const messageAfterId = canAnimate ? liveAfterId : (sentAfterId != null ? sentAfterId : null);
+  if (messageAfterId != null) {
+    const addedMessages = events.filter((event) => event.id > messageAfterId && event.kind === 'conversation_message');
+    if (addedMessages.length > 0) {
+      if (motionAllowed && addedMessages.length <= 2) {
+        for (const event of addedMessages) animateSentMessage(event.id);
+      }
+      if (sentAfterId != null) context.pendingSentAfterId = null;
+    }
+  }
+}
+
+// Like ChatGPT, fold any very long message to its first lines behind Show more.
+const foldLines = 12;
+const unfoldedMessages = new Set();
+function foldLongMessages() {
+  for (const text of elements.timeline.querySelectorAll('.foldable-text:not([data-fold-checked])')) {
+    text.dataset.foldChecked = '';
+    const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+    if (!(text.scrollHeight > lineHeight * (foldLines + 2))) continue;
+    const bubble = text.closest('.bubble');
+    const id = text.closest('.event-message')?.id;
+    const setFold = (folded) => {
+      bubble.dataset.fold = folded ? 'folded' : 'unfolded';
+      toggle.textContent = folded ? 'Show more' : 'Show less';
+      toggle.setAttribute('aria-expanded', String(!folded));
+    };
+    const toggle = button(null, 'fold-toggle', () => {
+      const nextFolded = bubble.dataset.fold !== 'folded';
+      const startHeight = text.getBoundingClientRect().height;
+      cancelMotion(text);
+      setFold(nextFolded);
+      if (nextFolded) unfoldedMessages.delete(id);
+      else unfoldedMessages.add(id);
+      const endHeight = nextFolded ? text.getBoundingClientRect().height : text.scrollHeight;
+      if (!reducedMotion.matches && text.animate && Math.abs(endHeight - startHeight) > 1) {
+        text.style.overflow = 'hidden';
+        const duration = Math.min(340, Math.max(200, Math.round(180 + Math.abs(endHeight - startHeight) * 0.18)));
+        const anim = runMotion(text, [
+          { maxHeight: `${startHeight}px` },
+          { maxHeight: `${endHeight}px` },
+        ], { duration, easing: motionEaseOut });
+        if (anim) {
+          const cleanup = () => {
+            if (!motionAnimations.has(text)) text.style.overflow = '';
+          };
+          anim.addEventListener('finish', () => {
+            cleanup();
+            if (nextFolded) bubble.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          }, { once: true });
+          anim.addEventListener('cancel', cleanup, { once: true });
+          return;
+        }
+        text.style.overflow = '';
+      }
+      if (nextFolded) bubble.scrollIntoView({ block: 'nearest' });
+    });
+    text.after(toggle);
+    setFold(!unfoldedMessages.has(id));
   }
 }
 
@@ -1674,13 +1924,13 @@ function conversationRows(data, events, keep, source) {
     previous = event;
   });
   appendPeerMessages();
-  if (!rows.length) {
-    const loaded = !!data || (!view && listLoaded);
-    rows.push(keep('empty', [!!data, loaded, !bots.length, botVersion], () => {
+  // A new chat stays blank: the header already shows the Bot's avatar and name.
+  if (!rows.length && !data) {
+    const loaded = !view && listLoaded;
+    rows.push(keep('empty', [loaded, !bots.length], () => {
       const empty = node('div', 'empty-state');
-      if (data?.bot) empty.append(avatar(data.bot));
-      empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
-      if (!data && loaded && !bots.length) {
+      empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
+      if (loaded && !bots.length) {
         empty.append(node('p', null, 'Create a Bot to get started.'));
         empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       }
@@ -1873,14 +2123,22 @@ function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
+let detailSectionTimer = 0;
+function clearDetailSectionTransition() {
+  clearTimeout(detailSectionTimer);
+  detailSectionTimer = 0;
+  elements['detail-body'].classList.remove('section-switching');
+}
 function closeDetail() {
   detail = null;
+  clearDetailSectionTransition();
   releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
 }
 function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
+  clearDetailSectionTransition();
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -1891,67 +2149,13 @@ function openDetail(selection) {
 }
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
+  clearDetailSectionTransition();
   releaseDetailAvatar();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
-
-const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-function cronValues(field, min, max, names = {}) {
-  const value = (text) => {
-    const number = /^\d+$/.test(text) ? Number(text) : names[text.toLowerCase()];
-    return number >= min && number <= max ? number : null;
-  };
-  const values = new Set();
-  for (const part of field.split(',')) {
-    const [from, to, extra] = part.split('-').map(value);
-    if (extra !== undefined || from == null || (part.includes('-') && (to == null || to < from))) return null;
-    for (let item = from; item <= (to ?? from); item += 1) values.add(item);
-  }
-  return [...values].sort((a, b) => a - b);
-}
-function describeCron(expression) {
-  const fields = String(expression).trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  const [minute, hour, day, month, weekday] = fields;
-  const interval = (field, cycle) => {
-    const step = Number(/^\*\/([1-9]\d?)$/.exec(field)?.[1]);
-    return cycle % step === 0 ? step : null;
-  };
-  const daily = day === '*' && month === '*' && weekday === '*';
-  if (daily && hour === '*' && minute === '*') return 'Every minute';
-  const minuteInterval = interval(minute, 60);
-  if (daily && hour === '*' && minuteInterval) return `Every ${minuteInterval} minutes`;
-  if (!/^\d+$/.test(minute) || Number(minute) > 59) return null;
-  const mm = minute.padStart(2, '0');
-  if (daily && hour === '*') return `Hourly at :${mm}`;
-  const hourInterval = interval(hour, 24);
-  if (daily && hourInterval) return `Every ${hourInterval} hours${minute === '0' ? '' : ` at :${mm}`}`;
-  const hours = cronValues(hour, 0, 23);
-  if (!hours || hours.length > 4) return null;
-  const times = hours.map((item) => `${item}:${mm}`).join(', ');
-  if (day === '*' && month === '*') {
-    if (weekday === '*') return `Daily at ${times}`;
-    const days = cronValues(weekday, 0, 7, cronNames);
-    if (!days) return null;
-    const unique = [...new Set(days.map((item) => item % 7))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
-    const key = unique.join(',');
-    if (unique.length === 7) return `Daily at ${times}`;
-    if (key === '1,2,3,4,5') return `Weekdays at ${times}`;
-    if (key === '6,0') return `Weekends at ${times}`;
-    return `Every ${unique.map((item) => weekdayNames[item]).join(', ')} at ${times}`;
-  }
-  if (weekday !== '*') return null;
-  const days = cronValues(day, 1, 31);
-  if (!days || days.length > 4) return null;
-  if (month === '*') return `Monthly on ${days.join(', ')} at ${times}`;
-  const months = cronValues(month, 1, 12);
-  if (!months || months.length !== 1 || days.length !== 1) return null;
-  return `Yearly on ${months[0]}/${days[0]} at ${times}`;
-}
 
 function sectionsFor(bot) {
   return bot.cron.length ? ['general', 'cron'] : ['general'];
@@ -1960,7 +2164,17 @@ function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
   detail.section = section;
   renderDetail();
-  elements['detail-body'].scrollTop = 0;
+  const body = elements['detail-body'];
+  body.scrollTop = 0;
+  clearDetailSectionTransition();
+  if (!reducedMotion.matches) {
+    void body.offsetWidth;
+    body.classList.add('section-switching');
+    detailSectionTimer = setTimeout(() => {
+      body.classList.remove('section-switching');
+      detailSectionTimer = 0;
+    }, 220);
+  }
   if (focus) byId(`detail-tab-${section}`)?.focus();
 }
 function renderDetailNav(sections, current) {
@@ -2046,10 +2260,15 @@ function openNewBot(origin = elements['new-bot-button']) {
   botEditor.openCreate({ bots, origin });
 }
 
+// The header avatar is hidden in a Bot DM; the conversation menu stays visible there.
+function headerFocusTarget() {
+  return elements['profile-identity'].hidden ? conversationActionsTrigger : elements['profile-avatar-button'];
+}
+
 function openEditAppearance(bot) {
   reopenSettingsOnClose = true;
   closeDetail();
-  botEditor.openEdit(bot, { bots, origin: elements.profile });
+  botEditor.openEdit(bot, { bots, origin: headerFocusTarget() });
 }
 
 const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
@@ -2150,13 +2369,13 @@ function generalContent(bot) {
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
   for (const item of bot.cron) {
-    const expression = item.schedule;
-    const readable = describeCron(expression);
     const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression));
-    when.append(node('span', 'cron-zone', item.timezone));
-    if (readable) when.append(node('code', 'cron-expression', expression));
+    when.append(
+      node('span', null, item.active ? 'Active' : 'Configured only'),
+      node('code', 'cron-expression', item.schedule),
+      node('span', 'cron-zone', item.timezone),
+    );
     row.append(when, node('p', 'cron-request', item.request));
     list.append(row);
   }
@@ -2568,6 +2787,7 @@ async function submit(event) {
       payload = prepared.payload;
       screenshots.pending = prepared.pending;
     } else payload = composer.prepareSend(reply);
+    context.pendingSentAfterId = context.newestEvent ?? 0;
     await api('messages', payload);
     if (attachments.length) {
       composer.settleScreenshotSend(payload);
@@ -2580,6 +2800,7 @@ async function submit(event) {
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
+    context.pendingSentAfterId = null;
     if (payload && error.status >= 400 && error.status < 500) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
@@ -2615,10 +2836,11 @@ new ResizeObserver(updateFindOverlap).observe(findPanel);
 const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
+  onRefreshError: retrySync,
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {
-    const target = elements.composer.hidden || elements['composer-container'].hidden ? elements.profile : elements.message;
+    const target = elements.composer.hidden || elements['composer-container'].hidden ? headerFocusTarget() : elements.message;
     target.focus({ preventScroll: true });
   },
   onChange() {
@@ -2637,7 +2859,10 @@ const decisions = mountBoardInbox({
 });
 
 const savedTheme = saved('flock-theme', 'system');
-renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
+renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system', false);
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
+}
 elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);
@@ -2645,6 +2870,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
+navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
@@ -2711,8 +2937,7 @@ function openCurrentBotSettings() {
   closeConversationActions();
   openDetail({ kind: 'settings' });
 }
-elements.profile.addEventListener('click', openCurrentBotSettings);
-elements['profile-avatar-button']?.addEventListener('click', openCurrentBotSettings);
+elements['profile-avatar-button'].addEventListener('click', openCurrentBotSettings);
 elements['peer-picker'].addEventListener('click', () => {
   closeConversationActions(true);
   openDetail({ kind: 'peers' });
@@ -2745,6 +2970,10 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
+// Like Messages, reaching the top of the history loads the previous page; the button stays for keyboard and assistive use.
+new IntersectionObserver((entries) => {
+  if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
+}, { root: elements.conversation, rootMargin: '200px 0px 0px' }).observe(elements.older);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
@@ -2762,7 +2991,11 @@ elements['jump-to-latest'].addEventListener('click', () => {
     scroller.focus({ preventScroll: true });
     return;
   }
-  scroller.scrollTop = scroller.scrollHeight;
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
   updateJumpToLatest();
 });
 elements.conversation.addEventListener('keydown', (event) => {

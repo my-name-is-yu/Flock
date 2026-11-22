@@ -43,6 +43,7 @@ INSERT INTO git_pr_heads SELECT ?1,?2,value,?3,?4,1 FROM json_each(?5) WHERE tru
 )SQL",{repo.host,repo.repo,p_->last(),sha,event.prNumbers});
     }
     transaction.commit();
+    p_->gitWebhooksDrainedAt.reset();
     return true;
 }
 
@@ -65,6 +66,9 @@ AND t.state NOT IN ('cancelled','cancelling')
 
 void Store::Impl::deliverGitWebhooks() {
     std::lock_guard lock(mutex);
+    const auto version = dataVersion();
+    if (gitWebhooksDrainedAt == version) return;
+    constexpr unsigned batchSize = 100;
     Transaction transaction(db);
     auto rows = query(R"SQL(
 WITH matches AS (
@@ -86,8 +90,8 @@ SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches 
 WHERE (explicit_pr OR watch_count=1)
  AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d
                  WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
-ORDER BY id,pr_number LIMIT 100
-)SQL");
+ORDER BY id,pr_number LIMIT ?
+)SQL",{batchSize});
     Json deliveries = Json::array();
     while (rows.next()) {
         auto event = rows.json(4);
@@ -130,7 +134,9 @@ ORDER BY id,pr_number LIMIT 100
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0 FROM messages WHERE bot_id=?
 )SQL",{message,bot,key,routing,bot});
+        exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{message});
     }
     transaction.commit();
+    if (deliveries.size() < batchSize) gitWebhooksDrainedAt = version;
 }
 }

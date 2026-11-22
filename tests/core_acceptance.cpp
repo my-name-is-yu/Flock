@@ -93,13 +93,16 @@ struct SimulatedT3 : T3 {
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
     bool failBeforeWorkSend = false;
+    bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
+    std::string expectedBranch = "main";
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
     std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
+    std::function<RunEvidence(const RunRef&,std::string_view)> recoverEvidence;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
     std::function<bool(const Command&)> rejectWork;
@@ -113,8 +116,10 @@ struct SimulatedT3 : T3 {
         seen.push_back(cmd);
         check(cmd.authGeneration == generation,"OAuth generation missing from committed send");
         if (cmd.tool == "answer_session_question") {
+            if (std::exchange(failNextAnswerRead,false))
+                return {Delivery::Kind::Unknown,{},"T3 question read failed",true};
             ++replies;
-            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == "main","wrong T3 answer");
+            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == expectedBranch,"wrong T3 answer");
             runs.at(cmd.target.runId) = {};
             if (std::exchange(loseAcknowledgement,false)) return {};
             return {Delivery::Kind::Accepted,{},{}};
@@ -150,10 +155,14 @@ struct SimulatedT3 : T3 {
         ++polls;
         return runs.at(ref.runId);
     }
-    void interrupt(const std::string&,const Json&,const RunRef& ref) override {
+    RunEvidence readRunEvidence(const std::string& env,const Json& config,const RunRef& ref,std::string_view status) override {
+        return recoverEvidence ? recoverEvidence(ref,status) : T3::readRunEvidence(env,config,ref,status);
+    }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& ref) override {
         check(runs.contains(ref.runId),"interrupted unrelated Run");
         interruptedRuns.push_back(ref);
         ++interrupts;
+        return InterruptOutcome::Requested;
     }
     Excerpt read(const ReadRequest& req) override {
         const bool reported = std::any_of(runs.begin(),runs.end(),[&](const auto& entry) {
@@ -348,25 +357,30 @@ void correctInvalidTaskArguments() {
     f.reach(id,"running");
 }
 
-void replayQuestionDecision() {
+void replayQuestionDecision(std::string_view outage = {}) {
     for (const bool stillOpen : {true,false}) {
         Fixture f;
         const auto id = f.store->submit({"alpha","Use main","e","p",{{"modelCallLimit",2}}});
         f.model.script = [&](const ModelInput& input) {
             if (input.event.at("kind") == "intake") return work();
             // Lose T3 visibility at the post-inference liveness check, before any reply can commit.
-            f.t3.runs.at("run-1").kind = Observation::Kind::Unavailable;
+            f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = std::string(outage)};
             return reply();
         };
         f.reach(id,"running");
         f.t3.question("run-1");
         f.reach(id,"deciding");
         f.runtime->tick();
-        check(f.model.calls == 2 && f.task(id)["state"] == "deciding" && !f.t3.replies,
+        check(f.model.calls == 2 && f.task(id)["state"] == (outage.empty() ? "deciding" : "waiting") && !f.t3.replies,
               "reply did not stop between inference and effect");
         f.restart();
+        if (outage == "settings") {
+            const auto task = f.task(id);
+            f.store->operate(localOwner,TaskTarget::from(task,task.at("wait").at("id")),"reconcile");
+        }
         if (stillOpen) f.t3.question("run-1");
         else f.t3.runs.at("run-1") = {};
+        if (outage == "settings") f.runtime->tick();
         f.reach(id,"running");
         check(f.model.calls == 2 && f.t3.replies == int(stillOpen) && !f.task(id).contains("pendingDecision"),
               "restart repeated inference or applied a stale question reply");
@@ -550,6 +564,140 @@ void waitsExpireWithReality() {
           "stale waiting operation executed");
 }
 
+void connectionRecoveryRestoresSessionQuestion() {
+    for (const auto* outage : {"auth","settings"}) {
+        for (const bool manual : {false,true}) {
+            Fixture f;
+            const auto id = f.submit();
+            f.model.script = [](const ModelInput& i) {
+                if (i.event.at("kind") == "intake") return work();
+                if (i.event.contains("userAnswer")) return reply();
+                auto question = ask();
+                question.args["choices"] = {"main","dev"};
+                return question;
+            };
+            f.reach(id,"running");
+            f.t3.question("run-1");
+            const auto old = f.wait(id,"user_question");
+            f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = outage};
+            f.runtime->tick();
+            const auto connection = f.wait(id,outage);
+            check(f.store->inbox(localOwner,"alpha").empty(),"question remained actionable during the outage");
+            f.rejects(id,old,"answer",{{"text","dev"}});
+            if (manual) f.store->operate(localOwner,TaskTarget::from(f.task(id),connection),"reconcile");
+            if (manual && std::string_view(outage) == "settings")
+                executeSql(f.store->path(),"UPDATE tasks SET data=json_remove(data,'$.question.suspendedWaitId')");
+            f.restart();
+            f.t3.question("run-1");
+            f.runtime->tick();
+            const auto restored = f.wait(id,"user_question");
+            const auto inbox = f.store->inbox(localOwner,"alpha");
+            check(restored != old && restored != connection && inbox.size() == 1 && inbox[0]["waitId"] == restored &&
+                  inbox[0]["prompt"] == "Which branch?" && inbox[0]["choices"] == Json::array({"main","dev"}) &&
+                  f.model.calls == 2,"the live question did not return with its clarification and a fresh target");
+            f.rejects(id,old,"answer",{{"text","dev"}});
+            f.rejects(id,connection,"reconcile");
+            f.store->operate(localOwner,TaskTarget::from(f.task(id),restored),"answer",{{"text","main"}});
+            f.reach(id,"running");
+            check(f.t3.replies == 1 && f.t3.seen.back().target.runId == "run-1" && f.t3.launches == 1 &&
+                  f.logs(id,"session_question") == 1 && f.logs(id,"user_answer") == 1,
+                  "recovered question did not resume the original Run exactly once");
+        }
+    }
+}
+
+void connectionRecoveryDiscardsExpiredSessionQuestion() {
+    for (const bool replaced : {false,true}) {
+        Fixture f;
+        const auto id = f.submit();
+        f.model.script = [](const ModelInput& i) {
+            if (i.event.at("kind") == "intake") return work();
+            if (i.event.at("question").at("requestId") == "replacement")
+                return Decision{"ask_user",{{"question","Which new branch?"}},"Confirm the new question"};
+            return ask();
+        };
+        f.reach(id,"running");
+        f.t3.question("run-1");
+        const auto old = f.wait(id,"user_question");
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = "auth"};
+        f.runtime->tick();
+        f.wait(id,"auth");
+        f.restart();
+        if (replaced) {
+            f.t3.question("run-1");
+            f.t3.runs.at("run-1").question.requestId = "replacement";
+            f.runtime->tick();
+            f.wait(id,"user_question");
+            const auto inbox = f.store->inbox(localOwner,"alpha");
+            check(inbox.size() == 1 && inbox[0]["prompt"] == "Which new branch?",
+                  "recovery restored an eclipsed clarification");
+        } else {
+            f.t3.runs.at("run-1") = {};
+            f.reach(id,"running");
+            check(f.store->inbox(localOwner,"alpha").empty(),"recovery restored a remotely resolved question");
+        }
+        f.rejects(id,old,"answer",{{"text","main"}});
+        check(f.t3.replies == 0 && f.logs(id,"session_question_closed") == 1,
+              "a closed question was answered or remained open");
+    }
+}
+
+void connectionRecoveryReconsidersNewDirections() {
+    Fixture f;
+    const auto id = f.submit("Check main initially");
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = "auth"};
+        return reply();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.wait(id,"auth");
+    check(f.t3.replies == 0,"the original answer escaped before recovery");
+
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "conversation_turn")
+            return converse(input,"send_to_task",id,Json::object());
+        check(input.task.at("userInstructions").dump().find("Use dev") != std::string::npos,
+              "question inference lost the new direction");
+        auto answer = reply();
+        answer.args["answers"]["branch"] = "dev";
+        return answer;
+    };
+    f.store->receive(localOwner,{"alpha","","e","p"},"new-direction-during-outage","Use dev");
+    f.runtime->runConversations();
+    f.restart();
+    f.t3.expectedBranch = "dev";
+    f.t3.question("run-1");
+    f.runtime->tick();
+    f.reach(id,"running");
+    check(f.t3.replies == 1 && f.t3.seen.back().answers.at("branch") == "dev",
+          "connection recovery applied the old Session answer");
+}
+
+void connectionRecoveryRestoresQuestionModelApproval() {
+    Fixture f;
+    const auto id = f.store->submit({"alpha","Check main","e","p",{{"modelCallLimit",1}}});
+    f.model.script = [](const ModelInput& i) { return i.event.at("kind") == "intake" ? work() : reply(); };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    const auto old = f.wait(id,"model_budget");
+    for (const auto* outage : {"auth","settings"}) {
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = outage};
+        f.runtime->tick();
+        f.wait(id,outage);
+    }
+    f.restart();
+    f.t3.question("run-1");
+    f.runtime->tick();
+    const auto restored = f.wait(id,"model_budget");
+    check(restored != old && f.model.calls == 1,"recovery bypassed the pending model approval");
+    f.rejects(id,old,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),restored),"approve");
+    f.reach(id,"running");
+    check(f.model.calls == 2 && f.t3.replies == 1,"restored approval could not resume the open question");
+}
+
 void failedPreflightIsUnsent() {
     Fixture f;
     const auto id = f.submit();
@@ -617,6 +765,32 @@ void recoveredDelivery() {
     f.reach(id,"running");
     check(f.t3.replies==1 && f.t3.launches==1 && f.t3.reconciles==1 && f.task(id)["additionalUsed"]==0,
           "recovered answer created duplicate work");
+}
+
+void unsentAnswerRemainsRetryable() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput& i) { return i.event["kind"] == "intake" ? work() : reply(); };
+    f.reach(id,"running");
+    const auto run = f.task(id).at("activeRun");
+    f.t3.question("run-1");
+    f.reach(id,"sending");
+    f.t3.failNextAnswerRead = true;
+    const auto wait = f.wait(id,"unknown_delivery");
+    const auto answer = f.t3.seen.back();
+    check(f.t3.replies == 0 && f.task(id)["wait"]["text"].get<std::string>().find("was not sent") != std::string::npos,
+          "the user was not told the Session answer was unsent");
+
+    f.restart();
+    f.rejects(id,wait,"reconcile",{{"questionId","another-question"}});
+    check(f.task(id).at("wait").at("id") == wait && f.t3.replies == 0,
+          "a mismatched reconciliation hint allowed an unsent answer to proceed");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile",{{"questionId",answer.questionId}});
+    f.reach(id,"running");
+    const auto retry = f.t3.seen.back();
+    check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 0 && f.task(id)["activeRun"] == run &&
+          f.logs(id,"session_answered") == 1 && retry.actionId == answer.actionId && retry.questionId == answer.questionId,
+          "the unsent Session answer was not retried once for the same Run and question");
 }
 
 void cancelDuringDelivery() {
@@ -688,6 +862,207 @@ void settleWhileAnswerDeliveryIsUnknown() {
         f.reach(id,"cancelled");
         check(f.logs(id,"report") == 1 && f.t3.replies == 1 && f.t3.launches == 1,
               "settled Run duplicated its answer or report");
+    }
+}
+
+void settledReportCanRecoverAfterRestart() {
+    for (const bool available : {false,true}) {
+        Fixture f;
+        const std::string secret = "private-report-diagnostic";
+        auto access = f.store->access();
+        access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"diagnostic"}),secret);
+        const auto id = f.submit();
+        f.model.script = [&](const ModelInput& i) {
+            if (i.event.at("kind") == "intake") return work();
+            check(i.event.at("kind") == "result" && i.event.at("resultRunId") == "run-1-result" &&
+                  i.event.at("status") == "completed","report recovery lost the terminal result identity");
+            check(hasTool(i,"complete") == available,"completion did not require the settled Run's report");
+            if (available) {
+                check(i.event.at("report") == "Recovered report","recovered report did not reach the Bot");
+                return complete();
+            }
+            check(i.event.at("evidenceStatus") == "report_unavailable" && i.event.at("detail") == "[redacted]" &&
+                  i.event.at("report") == "","the missing report or redacted diagnostic was misrepresented");
+            return ask();
+        };
+        f.reach(id,"running");
+        f.t3.finish("run-1");
+        auto& observation = f.t3.runs.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.report.clear();
+        observation.itemId.clear();
+        observation.detail = secret;
+        f.runtime->tick();
+        check(f.task(id)["activeRun"].is_null() && f.task(id)["lastRun"]["runId"] == "run-1" &&
+              f.store->sessionTasks("alpha",0,1).at(0).at("runs").at(0).at("status") == "completed" &&
+              f.store->history(id).dump().find(secret) == std::string::npos,"missing evidence kept the Run active or leaked diagnostics");
+        const auto polls = f.t3.polls;
+        int attempts = 0;
+        f.t3.recoverEvidence = [&](const RunRef& source,std::string_view status) {
+            check(source.threadId == "thread-1" && source.runId == "run-1-result" && status == "completed",
+                  "recovery used an unproven evidence source");
+            ++attempts;
+            if (available) return RunEvidence{RunEvidence::Availability::Available,"Recovered report","recovered-item","",false};
+            return RunEvidence{RunEvidence::Availability::ReportUnavailable,"","",secret,false};
+        };
+        f.restart();
+        f.runtime->tick();
+        check(f.model.calls == 1 && attempts == 0,"recovery spent model allowance or retried before the scheduled time");
+        f.now += 5;
+        f.runtime->tick();
+        if (!available) {
+            f.now += 10;
+            f.runtime->tick();
+            f.wait(id,"user_question");
+        } else f.reach(id,"completed");
+        check(attempts == (available ? 1 : 2) && f.t3.polls == polls && f.logs(id,"report") == 1 &&
+              f.logs(id,"completed") == int(available),"evidence retry repeated Run observation or published an unsupported completion");
+    }
+}
+
+void lateReportCanRestoreCompletion() {
+    Fixture f;
+    const auto id = f.submit();
+    int reportReads = 0;
+    bool reportAvailable = false;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view status) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result" && status == "completed",
+              "report recovery used a different Run");
+        ++reportReads;
+        if (reportAvailable)
+            return RunEvidence{RunEvidence::Availability::Available,"Late report","late-item","",false};
+        return RunEvidence{RunEvidence::Availability::ReportUnavailable,"","","Unavailable",false};
+    };
+    Id resumedEvent = 0;
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (event.at("kind") == "intake") return work();
+        check(event.at("resultRunId") == "run-1-result","lost the settled result Run");
+        if (event.value("report","") == "Late report") {
+            check(hasTool(input,"complete") && !hasTool(input,"session_read") &&
+                  !event.contains("evidenceStatus") && event.at("itemId") == "late-item" &&
+                  event.at("id") == resumedEvent && event.at("userAnswer") == "Try again",
+                  "late recovery changed the result event or failed to restore completion");
+            return complete();
+        }
+        check(!hasTool(input,"complete") && hasTool(input,"session_read") &&
+              event.at("sessionReadViews") == Json::array({"report"}),"missing report was not recoverable in default mode");
+        if (!input.evidence.empty()) {
+            check(input.evidence.at(0).at("reportAvailable") == false &&
+                  input.task.at("remainingEvidenceReads") == 2,"failed report read did not use the event allowance");
+            return ask();
+        }
+        auto run = "run-1-result";
+        if (event.contains("userAnswer")) {
+            resumedEvent = event.at("id");
+            if (event.at("decisionFeedback").empty()) run = "run-1";
+        }
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId",run}},
+                        "Retry the terminal report"};
+    };
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    check(reportReads == 2 && f.logs(id,"report") == 1,"scheduled retries did not exhaust before recovery");
+    const auto wait = f.wait(id,"user_question");
+    check(reportReads == 3,"initial on-demand retry was not attempted exactly once");
+    const auto polls = f.t3.polls;
+    reportAvailable = true;
+    f.restart();
+    f.runtime->tick();
+    check(reportReads == 3 && f.task(id).at("wait").at("id") == wait,"waiting repeated terminal report reads");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"answer",{{"text","Try again"}});
+    f.runtime->tick();
+    check(reportReads == 3 && f.logs(id,"tool_error") == 1,"the assigned Run was accepted as the result source");
+    setSessionReadJournalFailure(f.store->path(),true);
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.store->history(id).dump().find("Late report") == std::string::npos &&
+          f.logs(id,"session_read") == 1,
+          "a failed evidence transaction left a partially recovered report");
+    setSessionReadJournalFailure(f.store->path(),false);
+    f.runtime->tick();
+    f.restart();
+    f.reach(id,"completed");
+    const auto history = f.store->history(id);
+    const auto report = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "report"; });
+    const auto completed = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "completed"; });
+    check(report != history.end() && report->at("data").at("report") == "Late report" &&
+          completed != history.end() && completed->at("data").at("source").at("itemId") == "late-item" &&
+          reportReads == 5 && f.t3.reads == 0 && f.t3.polls == polls && f.t3.launches == 1 && f.t3.follows == 0 &&
+          f.logs(id,"report") == 1,"late recovery did not persist the report and its source on the same task");
+}
+
+void lateReportCanRestorePeerResult() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit();
+    int reportReads = 0;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result","peer recovery lost the result source");
+        if (++reportReads <= 2) return RunEvidence{RunEvidence::Availability::ReportUnavailable};
+        return RunEvidence{RunEvidence::Availability::Available,"Peer report","peer-item","",false};
+    };
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (input.task.at("id") == sender) {
+            if (event.at("kind") == "intake") return botRequest("beta","work","Verify the release");
+            check(event.at("kind") == "bot_result" && event.at("references").at(0).at("itemId") == "peer-item",
+                  "the peer result referenced stale evidence");
+            return complete();
+        }
+        if (event.at("kind") == "bot_request") return work();
+        const auto& kinds = input.task.at("peer").at("replyKinds");
+        const bool hasResult = std::ranges::find(kinds,"result") != kinds.end();
+        if (event.at("report") == "Peer report") {
+            check(hasResult,"recovered evidence did not permit a peer result");
+            return botReply("result","Verified the release");
+        }
+        check(!hasResult && hasTool(input,"session_read"),"missing report did not gate the peer result");
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId","run-1-result"}},
+                        "Retry the peer's terminal report"};
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    f.reach(sender,"completed");
+    check(f.task(recipient).at("state") == "completed" && reportReads == 3 && f.t3.launches == 1 && f.t3.follows == 0,
+          "a late report did not close the original peer exchange");
+}
+
+void missingReportDoesNotBlockCancellation() {
+    for (const bool settledBeforeCancel : {false,true}) {
+        Fixture f;
+        const auto id = f.submit();
+        const auto next = f.submit("Next task");
+        f.model.script = [=](const ModelInput& i) { return i.task.at("id") == id ? work() : ask(); };
+        f.reach(id,"running");
+        f.t3.finish("run-1","interrupted");
+        auto& observation = f.t3.runs.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.report.clear();
+        if (settledBeforeCancel) f.runtime->tick();
+        f.restart();
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
+        f.reach(id,"cancelled");
+        f.wait(next,"user_question");
+        check(f.t3.interrupts == 0 && f.t3.launches == 1 && f.logs(id,"report") == 1 &&
+              f.task(id)["activeRun"].is_null(),"missing report held cancellation or the next task's project slot");
     }
 }
 
@@ -874,6 +1249,18 @@ void peerWorkAndRestart() {
     check(f.store->tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 &&
           f.task(root)["additionalUsed"] == 0 && f.logs(root,"user_answer") == 1 && f.logs(root,"completed") == 1,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
+    const auto result = f.botMessages("alpha").back();
+    const auto completion = f.store->latestTaskResult(root).at("data");
+    check(!completion.contains("source") && completion.at("dependency") == Json{
+              {"exchangeId",result.at("exchangeId")},{"messageId",result.at("messageId")},{"taskId",recipient},
+              {"botId","beta"},{"requestKind","work"},{"status","completed"}},
+          "the completion did not retain the peer result as its dependency");
+    check(completion.at("evidenceRefs") == Json::array({
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","final-answer"},
+               {"kind","peer_report"},{"messageId",result.at("messageId")}},
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","item-1"},
+               {"kind","session_read"},{"messageId",result.at("messageId")}}}),
+          "the completion lost the scoped references for the peer report and history item");
     const struct Message {
         const char* type;
         const char* from;
@@ -942,6 +1329,33 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     const auto& wait = paused.at("wait");
     check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
           wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
+}
+
+void peerCompletionKeepsEvidenceWithinTheReadGrant() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit("Decide whether the PR can ship");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto kind = input.event.at("kind");
+        if (input.task.at("id") == sender) {
+            if (kind == "intake") return botRequest("beta","work","Verify the PR");
+            return complete();
+        }
+        if (kind == "bot_request") return work();
+        return botReply("result","Verified the PR");
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.store->access().resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    f.t3.finish("run-1");
+    f.reach(recipient,"completed");
+    f.restart();
+    f.reach(sender,"completed");
+    const auto completion = f.store->latestTaskResult(sender).at("data");
+    check(completion.at("dependency").at("taskId") == recipient &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "completion exposed peer Run provenance outside its Session read grant");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
@@ -1485,6 +1899,11 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
+    const auto completion = f.store->latestTaskResult(consultation).at("data");
+    check(completion.at("dependency").at("messageId") == messages.back().at("messageId") &&
+          completion.at("dependency").at("requestKind") == "consult" &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "the consultation lost its peer dependency or attributed the reply to a Session");
 }
 
 void requestedCriteriaApplyToFirstPeerWork() {
@@ -1786,9 +2205,13 @@ void prefillPersistenceFailureDoesNotProceed() {
           f.t3.reads == 1 && f.logs(source,"report") == 1,
           "test did not reach a settled report with an incoming peer result");
     setSessionReadJournalFailure(f.directory/"state.db",true);
-    f.runtime->tick();
-    check(f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
-          f.logs(source,"model_failure") == 1 && f.logs(source,"completed") == 0 &&
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
+          f.logs(source,"model_failure") == 0 && f.logs(source,"completed") == 0 &&
           f.task(source)["state"] == "deciding",
           "the model proceeded with a prefill excerpt that SQLite did not durably save");
     setSessionReadJournalFailure(f.directory/"state.db",false);
@@ -1867,6 +2290,154 @@ void peerProjectCycle() {
     const auto messages = f.botMessages("alpha");
     check(messages.size() == 2 && messages.back()["status"] == "failed" && f.logs(alpha,"completed") == 0,
           "the original exchange hid the failed outcome or completed the sender's work");
+}
+
+struct PeerMoveCycleFixture : Fixture {
+    const Intake verifier{"beta","","cloud","p",
+        {{"conversationEnvironments",{{"desktop","e"},{"remote","remote"},{"backup","backup"}}}}};
+    Intake specialist{"alpha","","e","p",verifier.config};
+    Id desktopSender = 0, cloudRecipient = 0, remoteSender = 0;
+
+    PeerMoveCycleFixture() {
+        peers["alpha"] = {{"Verifier",verifier}};
+        model.script = [&](const ModelInput& input) -> Decision {
+            const auto& kind = input.event.at("kind");
+            if (kind == "intake") {
+                if (input.task.at("id") == desktopSender) return botRequest("beta","work","Verify the release");
+                check(input.task.at("id") == remoteSender,"Unexpected task intake");
+                return botRequest("alpha","work","Check the deployment");
+            }
+            if (kind == "bot_request") return work();
+            if (kind == "bot_result") return input.event.at("status") == "completed" ? complete() : ask();
+            if (kind == "result" && input.task.contains("userInstructions")) return work("delegate",false);
+            check(kind == "result","Unexpected recipient event");
+            return botReply("result","Verification complete");
+        };
+        desktopSender = submit("Release check");
+        reach(desktopSender,"peer_waiting");
+        cloudRecipient = store->tasks("beta").front().at("id");
+        reach(cloudRecipient,"running");
+    }
+
+    void startRemoteSender(std::string destination = "e") {
+        specialist.environmentId = std::move(destination);
+        peers["beta"] = {{"Specialist",specialist}};
+        remoteSender = store->submit({"beta","Deployment check","remote","p"});
+    }
+
+    Json move(Id recipient, const Intake& routing, std::string_view environment) {
+        constexpr auto revision = "Check the deployment logs";
+        const auto decideWork = model.script;
+        Json result;
+        model.script = [&](const ModelInput& input) {
+            if (input.event.at("kind") != "conversation_turn") return decideWork(input);
+            if (!input.event.at("turn").empty()) result = input.event.at("turn").back().at("result");
+            return converse(input,"change_task",recipient,{{"environment",environment},{"doneWhen",revision}});
+        };
+        const std::string instruction = "Move the verification to " + std::string(environment) + " and " + revision;
+        store->receive(localOwner,routing,instruction,instruction);
+        runtime->runConversations();
+        model.script = decideWork;
+        return result;
+    }
+};
+
+void cyclicPeerMoveIsRejected() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender();
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
+    const auto originalRun = f.task(f.cloudRecipient).at("activeRun");
+    const auto rejected = f.move(f.cloudRecipient,f.verifier,"remote");
+    check(rejected.at("ok") == false && rejected.at("error").get<std::string>().find("project queues") != std::string::npos,
+          "the conversation admitted a move that cycles back to the sender's queue");
+    f.restart();
+    check(f.task(f.cloudRecipient).at("activeRun") == originalRun && f.task(f.cloudRecipient).at("doneWhen") == Evidence &&
+          f.logs(f.cloudRecipient,"instruction_accepted") == 0 && f.task(queued).at("blockedBy").at("id") == f.desktopSender,
+          "the rejected move changed the run, criteria, or exchange after restart");
+
+    check(f.move(f.cloudRecipient,f.verifier,"desktop").at("effect") == "replanning",
+          "the recipient could not move into the sender's own queue");
+    f.restart();
+    f.t3.finish(originalRun.at("runId"));
+    for (int tick = 0; tick < 12 && f.t3.launches == 1; ++tick) f.runtime->tick();
+    check(f.t3.launches == 2 && f.t3.interrupts == 0 && f.t3.seen.back().environmentId == "e" &&
+          f.task(queued).at("blockedBy").at("id") == f.cloudRecipient,
+          "the valid move did not inherit its sender's slot and launch once");
+    f.t3.finish("run-2");
+    f.reach(f.desktopSender,"completed");
+    f.reach(queued,"running");
+    f.t3.finish("run-3");
+    f.reach(f.remoteSender,"completed");
+    check(f.logs(f.cloudRecipient,"peer_completed") == 1 && f.logs(queued,"peer_completed") == 1,
+          "the valid move did not let both original exchanges close once");
+}
+
+void pendingPeerMovePreventsNewExchange() {
+    PeerMoveCycleFixture f;
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("effect") == "replanning",
+          "the first move could not reserve a free destination");
+    f.restart();
+    f.startRemoteSender();
+    f.wait(f.remoteSender,"model_failure");
+    check(f.task(f.remoteSender).at("wait").at("text").get<std::string>().find("project queues") != std::string::npos &&
+          f.store->tasks("alpha").size() == 1 && f.botMessages("alpha").size() == 1,
+          "a new exchange was opened against the already accepted destination");
+}
+
+void pendingPeerMovePreventsAnotherMove() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender("backup");
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
+          "the first move could not reserve the desktop destination");
+    check(f.move(f.remoteSender,f.verifier,"backup").at("effect") == "replanning",
+          "the sender could not request a move for after its exchange");
+    f.restart();
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("ok") == false &&
+          f.logs(f.cloudRecipient,"instruction_accepted") == 0 && f.logs(backupRecipient,"instruction_accepted") == 1,
+          "the second move introduced a cycle against an already accepted move");
+}
+
+void cancelledPeerMoveFreesItsPendingDestination() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender("backup");
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("effect") == "replanning",
+          "the first move could not reserve the remote destination");
+    f.store->operate(localOwner,TaskTarget::from(f.task(f.cloudRecipient),0),"cancel");
+    check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
+          f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
+          "a cancelling recipient retained its abandoned destination");
+}
+
+void recoverLegacyPeerMoveCycle() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender();
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(f.cloudRecipient,f.verifier,"backup").at("ok") == true,"could not prepare the legacy move");
+    f.t3.finish("run-1");
+    f.runtime->tick();
+    f.runtime.reset();
+    // Seed the destination that the old runtime could persist after releasing the original queue.
+    const auto legacyMove = "UPDATE tasks SET data=json_set(data,'$.pendingEnvironmentId','remote',"
+        "'$.environmentReleased',json('true')) WHERE id=" + std::to_string(f.cloudRecipient);
+    executeSql(f.directory/"state.db",legacyMove.c_str());
+    f.restart();
+    f.reach(f.cloudRecipient,"cancelled");
+    f.wait(f.desktopSender,"user_question");
+    const auto messages = f.botMessages("alpha");
+    check(messages.back().at("status") == "cancelled" && f.t3.launches == 1 &&
+          f.task(f.cloudRecipient).at("environmentId") == "cloud",
+          "legacy recovery lost the exchange outcome or sent work to an unsafe destination");
+    f.store->operate(localOwner,TaskTarget::from(f.task(f.desktopSender),0),"cancel");
+    f.reach(queued,"running");
+    f.t3.finish("run-2");
+    f.reach(f.remoteSender,"completed");
+    check(f.logs(f.cloudRecipient,"cancelled") == 1,"the legacy recipient was cancelled more than once");
 }
 
 void peerCancelWhileQueued() {
@@ -2669,15 +3240,27 @@ int main() {
     for (const auto& [name,run] : std::vector<std::pair<const char*, void(*)()>>{
             {"invalid decisions",invalidDecisions},{"correct invalid task arguments",correctInvalidTaskArguments},
             {"failed preflight",failedPreflightIsUnsent},
-            {"replay saved question decision",replayQuestionDecision},{"clarification and failure",ambiguityAndFailure},
+            {"replay saved question decision",[] { replayQuestionDecision(); }},{"clarification and failure",ambiguityAndFailure},
+            {"replay question decision after auth recovery",[] { replayQuestionDecision("auth"); }},
+            {"replay question decision after settings reconciliation",[] { replayQuestionDecision("settings"); }},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
-            {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
+            {"recover live question across auth and settings waits",connectionRecoveryRestoresSessionQuestion},
+            {"discard expired question after connection recovery",connectionRecoveryDiscardsExpiredSessionQuestion},
+            {"recover the question's model approval",connectionRecoveryRestoresQuestionModelApproval},
+            {"reconsider new directions after question recovery",connectionRecoveryReconsidersNewDirections},
+            {"delivery recovery",recoveredDelivery},{"retry unsent Session answer",unsentAnswerRemainsRetryable},
+            {"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
+            {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
+            {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},
+            {"late report recovery for a peer result",lateReportCanRestorePeerResult},
+            {"cancellation with unavailable report",missingReportDoesNotBlockCancellation},
             {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
+            {"Peer completion evidence follows the Session read grant",peerCompletionKeepsEvidenceWithinTheReadGrant},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
             {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
@@ -2699,6 +3282,11 @@ int main() {
             {"Fresh result prefill failure",freshResultSurvivesUnavailableHistory},
             {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
+            {"Cyclic recipient move is rejected",cyclicPeerMoveIsRejected},
+            {"Accepted peer move constrains new exchanges",pendingPeerMovePreventsNewExchange},
+            {"Accepted peer move constrains other moves",pendingPeerMovePreventsAnotherMove},
+            {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
+            {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
