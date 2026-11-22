@@ -4,6 +4,7 @@ import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
+import { createReplyArrival } from '/reply-arrival.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -16,6 +17,13 @@ const elements = Object.fromEntries([
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const animateLiveReply = createReplyArrival((id) => {
+  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
+    { opacity: .76, transform: 'translateY(4px)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+});
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -1128,6 +1136,9 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   scroller.setAttribute('aria-label', 'Conversation history');
   updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
   moveScroll();
+  const canAnimate = scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  animateLiveReply(context, events, canAnimate);
 }
 
 function conversationRows(data, events, keep) {

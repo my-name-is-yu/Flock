@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { refreshEventHistory } from '../assets/event-history.mjs';
+import { createReplyArrival } from '../assets/reply-arrival.mjs';
 
 const page = (ids, olderBefore) => ({ events: ids.map(id => ({ id })), olderBefore });
 const emptyHistory = () => ({ events: new Map(), olderBefore: 0 });
@@ -69,3 +70,22 @@ assert.deepEqual(loaded.events.get(4), resolved);
 assert.equal(loaded.events.has(1), false);
 assert.equal(loaded.olderBefore, 2);
 await refreshEventHistory(loaded, { ...latestAfterApproval, changedMessageIds: [] }, noPage, current);
+
+const arrivals = [];
+const showReply = createReplyArrival((id) => arrivals.push(id));
+const conversation = { newestEvent: 4 };
+const outgoing = (id) => ({ id, kind: 'conversation_message' });
+const reply = (id) => ({ id, kind: 'conversation_reply' });
+showReply(conversation, [reply(4)], true);
+conversation.newestEvent = 6;
+showReply(conversation, [reply(4), outgoing(5), reply(6)], true);
+showReply(conversation, [reply(4), outgoing(5), reply(6)], true);
+assert.deepEqual(arrivals, [6], 'Only the new live reply animates, once');
+
+conversation.newestEvent = 7;
+showReply(conversation, [reply(7)], false);
+showReply(conversation, [reply(7)], true);
+conversation.newestEvent = 10;
+showReply(conversation, [reply(8), reply(9), reply(10)], true);
+showReply({ newestEvent: 11 }, [reply(11)], true);
+assert.deepEqual(arrivals, [6], 'Hidden, reduced-motion, backlog, and newly opened history stay still');
