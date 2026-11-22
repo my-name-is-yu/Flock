@@ -30,8 +30,6 @@ Id modelCallLimit(const Json& config);
 struct Intake {
     std::string botId, request, environmentId, projectId;
     Json config = Json::object();
-    std::string scheduleId;
-    Seconds scheduledAt = 0;
 };
 struct BotNotes { std::string soul, memory; };
 struct PeerBot { std::string name; Intake intake; };
@@ -119,6 +117,8 @@ public:
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
+struct Person;
+struct ConfiguredSchedule;
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -127,6 +127,16 @@ public:
     Store& operator=(const Store&) = delete;
 
     Access access();
+    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args,
+                std::string_view initialMemory = {});
+    Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
+    Json automations(const Person&, std::string_view bot, Id before = 0) const;
+    Json cancelAutomation(const Person&, std::string_view bot, Id id);
+    void syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    void pruneSchedules(const std::vector<std::string>& configuredBots);
+    void fireDueAutomations(Seconds now);
+    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
+                        const Json& event, Seconds now);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,

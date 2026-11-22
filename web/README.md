@@ -35,3 +35,33 @@ for the resource operation to approve it. Approving a Bot change applies the
 saved name to the exact target ID. Creation requires a root identity. Rename
 requires admin access to the requesting and target Bots. If the profile write
 fails after approval, use **Apply approved change** to retry.
+
+
+## Memory and automation
+
+Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
+document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the
+same parameters and an optional `before` cursor, `revisionId` for the complete
+before and after text, or `proposalId` for a single proposal.
+
+Post to `/api/memory/propose`, `/api/memory/apply`, or `/api/memory/revert` with
+`botId`, optional `docId`, and the current `baseVersion`. A proposal takes
+`content` and `rationale`. Apply takes either `content` or `proposalId`.
+A revert takes `revisionId` and creates a new revision. Post `proposalId` with
+the same Bot and document identifiers to `/api/memory/reject` to dismiss a
+pending proposal. Shared documents require the corresponding person scope
+unless the caller is the local owner or a root identity.
+
+Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Create with
+`POST /api/schedules` and `botId`, `kind`, and `request`. A `schedule` takes
+`cron` and `timezone`. A `reminder` takes `fireAt` in Unix seconds, `timezone`,
+and optional `label`. A `trigger` takes `source` and an optional object
+`eventFilter` whose top-level fields must match the event exactly. Cancel with
+`DELETE /api/schedules?bot=ID&id=AUTOMATION_ID` and the usual origin and
+`X-Flock-Action: 1` headers.
+
+For a webhook, post JSON with `externalEventId` and an `event` object to
+`/api/webhooks/SOURCE` with `X-Flock-Action: 1`. Machine clients can omit
+`Origin`. Configured identities require the sender's authorization header and
+decide access to the Bots with active triggers for the source. Retries return
+the saved task receipts. The queued task includes the event and its provenance.

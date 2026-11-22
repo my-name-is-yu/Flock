@@ -84,7 +84,7 @@ WebCallbacks callbacks() {
         [](std::string_view bot, std::string_view request) -> Intake {
             if (bot == "broken") throw std::runtime_error(privateValue);
             return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
-                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
+                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}};
         }
     };
 }
@@ -199,7 +199,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
     expectedRequests.insert(earlierRequests.begin(),earlierRequests.end());
     for (int i = 0; i < 43; ++i) {
         const auto text = "Paged request " + std::to_string(i);
-        const auto id = cli.submit({"release",text,"local-env","release",Json::object(),"daily",1700000000 + i});
+        const auto id = cli.submit({"release",text,"local-env","release"});
         expectedRequests.emplace(id,text);
     }
 
@@ -232,8 +232,6 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
             const auto& data = event.at("data");
             check(request != expectedRequests.end() && data.at("text") == request->second,
                   "conversation returned an unexpected or repeated request");
-            if (task != release && task != next && !earlierRequests.contains(task))
-                check(data.at("source") == "cron" && data.at("scheduleId") == "daily","scheduled request lost its origin");
             expectedRequests.erase(request);
         }
         const auto before = page.at("olderBefore").get<Id>();
@@ -517,12 +515,12 @@ void exercise(const std::filesystem::path& path) {
     }),"question fixture did not cross a history page boundary");
 
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
-        {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
+        {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
-    check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
+    check(cli.task(next)["environmentId"] == "local-env" && !cli.task(next).contains("trigger"),"client changed routing or schedule");
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
@@ -612,7 +610,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         return list;
     };
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot),std::string(request),"local-env","proj",Json::object(),{},0};
+        return {std::string(bot),std::string(request),"local-env","proj",Json::object()};
     };
     cb.createBot = [&](const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
@@ -832,6 +830,67 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     browser.get("/api/conversation?bot=staging-triage");
     Browser::checked(browser.client.Get("/api/view?bot=release"),403);
 }
+
+void memoryAutomationEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    auto cb = callbacks();
+    cb.initialMemory = [](auto) { return "Initial convention"; };
+    cb.clock = [] { return Seconds{2'000'000'000}; };
+    cb.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer owner") return Person{"owner",true};
+        if (credential == "Bearer reader") return Person{"reader",false};
+        return Person{};
+    };
+    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    Browser::checked(browser.client.Get("/api/memory?bot=release"),401);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web memory seed missing");
+    const auto proposal = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",0},
+        {"content","New convention"},{"rationale","Use staging"}}).at("proposalId");
+    const auto revision = browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},
+        {"proposalId",proposal}}).at("revisionId").get<Id>();
+    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},{"content","Stale"}},409);
+    const auto detail = browser.get("/api/memory/history?bot=release&revisionId=" + std::to_string(revision));
+    check(detail.at("previousContent") == "Initial convention" && detail.at("newContent") == "New convention",
+          "Web revision did not expose the diff");
+    browser.post("/api/memory/revert",{{"botId","release"},{"baseVersion",1},{"revisionId",revision}});
+    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web revert failed");
+
+    const auto reminder = browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},
+        {"request","Check staging"},{"timezone","Asia/Tokyo"},{"fireAt",2'000'000'010}},201).at("id").get<Id>();
+    const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
+    Browser::checked(browser.client.Delete(cancelPath),403);
+    check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",
+          "Web schedule cancellation failed");
+    const auto trigger = browser.post("/api/schedules",{{"botId","release"},{"kind","trigger"},{"source","deploy"},
+        {"eventFilter",{{"branch","main"}}},{"request","Check the deployment"}},201).at("id");
+    check(browser.get("/api/schedules?bot=release").at("automations").size() == 2,"Web automation list incomplete");
+
+    const auto webhook = [&](std::string id, std::string branch) {
+        return Json{{"externalEventId",id},{"event",{{"branch",branch}}}}.dump();
+    };
+    Browser::checked(browser.client.Post("/api/webhooks/deploy",webhook("event-1","main"),"application/json"),403);
+    const httplib::Headers headers{{"X-Flock-Action","1"}};
+    const auto send = [&](const std::string& payload) {
+        return Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,payload,"application/json"),202);
+    };
+    check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
+    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
+    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",2},{"content","Unauthorized"}},403);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    const auto accepted = send(webhook("event-1","main")), replayed = send(webhook("event-1","main"));
+    check(accepted.at("duplicate") == false && replayed.at("duplicate") == true &&
+          accepted.at("tasks").size() == 1 && replayed.at("tasks") == accepted.at("tasks") && store.tasks().size() == 1,
+          "Webhook redelivery enqueued another task");
+    store.fireDueAutomations(cb.clock()+60);
+    check(store.tasks().size() == 1,"Canceled reminder fired after its due time");
+    const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
+    check(request.at("trigger").at("externalEventId") == "event-1" && request.at("trigger").at("triggerId") == trigger,
+          "Web conversation lost webhook provenance");
+}
 } // namespace
 
 int main() {
@@ -842,6 +901,7 @@ int main() {
         peerConversation(directory.path / "peer-conversations.db");
         accessEndpoints(directory.path / "access.db");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
+        memoryAutomationEndpoints(directory.path / "automation.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

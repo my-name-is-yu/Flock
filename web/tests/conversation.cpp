@@ -170,7 +170,7 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [intakeDisabled](std::string_view bot, std::string_view request) -> Intake {
             if (bot == "broken" || (intakeDisabled && intakeDisabled->load())) throw std::runtime_error(privateValue);
             return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
-                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
+                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}};
         }
     };
 }

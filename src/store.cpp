@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <random>
 #include <system_error>
 
@@ -49,6 +50,14 @@ std::string field(const Json& j, std::string_view key) {
     const auto found = j.find(key);
     return found != j.end() && found->is_string() ? found->get<std::string>() : std::string{};
 }
+Id requiredInteger(const Json& data, std::string_view key, Id minimum) {
+    const auto value = data.find(key);
+    if (value == data.end() || !value->is_number_integer() ||
+        (value->is_number_unsigned() && value->get<std::uint64_t>() > std::numeric_limits<Id>::max()) ||
+        value->get<Id>() < minimum)
+        throw Conflict("Invalid " + std::string(key));
+    return value->get<Id>();
+}
 bool terminal(const Json& j) { return j["state"] == "completed" || j["state"] == "cancelled"; }
 std::string actionId() {
     std::random_device random;
@@ -79,9 +88,7 @@ PRAGMA foreign_keys=ON;
 PRAGMA synchronous=FULL;
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
-  project_id TEXT NOT NULL, schedule_id TEXT, scheduled_at INTEGER,
-  state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL,
-  UNIQUE(bot_id,schedule_id,scheduled_at));
+  project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS tasks_bot ON tasks(bot_id,id DESC);
@@ -156,6 +163,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         migrateAccess();
         migrateConversation();
         migrateModelBudget();
+        migrateMemory();
+        migrateAutomation();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -297,17 +306,17 @@ Id Store::submit(const Intake& item) {
     return id;
 }
 
-Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceMessageId, const Json& source) {
+Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceMessageId, const Json& source, const Json& trigger) {
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
     const auto scrub = redactor(item.botId);
-    scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.scheduleId,item.config});
+    scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);
     Json data = {{"botId", item.botId}, {"request", scrub.text(item.request)}, {"environmentId", item.environmentId},
-        {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
-        {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
+        {"projectId", item.projectId}, {"config", item.config},
+        {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
         {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
     if (sourceMessageId) data["sourceMessageId"] = sourceMessageId;
@@ -315,21 +324,16 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         data["sourceTaskId"] = source.at("taskId");
         data["sourceResultRefs"] = Json::array({source});
     }
-    exec("INSERT OR IGNORE INTO tasks(bot_id,environment_id,project_id,schedule_id,scheduled_at,state,generation,data)"
-             " VALUES(?,?,?,?,?,'queued',0,?)",
-             {item.botId,item.environmentId,item.projectId,item.scheduleId.empty() ? Json(nullptr) : Json(item.scheduleId),
-              item.scheduledAt,data});
-    if (!sqlite3_changes(db)) {
-        auto row = query("SELECT id FROM tasks WHERE bot_id=? AND schedule_id=? AND scheduled_at=?",
-                             {item.botId,item.scheduleId,item.scheduledAt});
-        if (!row.next()) throw Conflict("Scheduled task could not be saved");
-        return row.number(0);
-    }
+    if (!trigger.is_null()) data["trigger"] = trigger;
+    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,'queued',0,?)",
+         {item.botId,item.environmentId,item.projectId,data});
     const auto id = last();
-    if (peerKind.empty())
-        journal(id, "request", {{"text",data.at("request")},
-            {"source",sourceMessageId ? "conversation" : (item.scheduleId.empty() ? "manual" : "cron")},
-            {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt},{"messageId",sourceMessageId}});
+    if (peerKind.empty()) {
+        Json entry = {{"text",data.at("request")},{"messageId",sourceMessageId},
+                      {"source",sourceMessageId ? "conversation" : trigger.is_null() ? "manual" : "automation"}};
+        if (!trigger.is_null()) entry["trigger"] = trigger;
+        journal(id,"request",entry);
+    }
     return id;
 }
 

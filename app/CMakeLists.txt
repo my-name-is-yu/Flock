@@ -1,15 +1,6 @@
-# libc++ on supported macOS versions does not ship the C++20 time-zone library.
-set(BUILD_TZ_LIB ON CACHE BOOL "Build the IANA time-zone library")
-set(USE_SYSTEM_TZ_DB ON CACHE BOOL "Read the host's IANA time-zone database")
-set(ENABLE_DATE_INSTALL OFF CACHE BOOL "Do not install the date dependency separately")
-FetchContent_Declare(date
-  URL https://codeload.github.com/HowardHinnant/date/tar.gz/refs/tags/v3.0.4
-  URL_HASH SHA256=56e05531ee8994124eeb498d0e6a5e1c3b9d4fccbecdf555fe266631368fb55f)
-FetchContent_MakeAvailable(date)
-
 configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
 add_library(flock_app_support bots.cpp model.cpp)
-target_link_libraries(flock_app_support PUBLIC flock_core date::date-tz)
+target_link_libraries(flock_app_support PUBLIC flock_core)
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)
 

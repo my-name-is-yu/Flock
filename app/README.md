@@ -51,10 +51,22 @@ and Verifier can reply within that request. Set `allowedBots` on Verifier
 separately if it should also initiate new requests to Release. When a request
 needs a Session, the receiving Bot uses its own configured route and settings.
 
-Omit `cron` or set it to an empty array for a manual-only Bot. Cron uses five
-numeric fields with wildcards, lists, ranges, and steps. In the weekday field,
-both 0 and 7 mean Sunday. Schedules use the configured IANA timezone and
-register each matching UTC minute during Runtime operation.
+Flock syncs configured `cron` entries into SQLite when Runtime starts. Keep each
+entry's `id` stable to preserve its next occurrence. Omit `cron` or use an empty
+array to remove configured schedules. A schedule canceled through Flock stays
+canceled across syncs. Cron accepts five numeric fields with wildcards, lists,
+ranges, and steps. In the weekday field, 0 and 7 both mean Sunday.
+
+A missed reminder fires once on restart. Missed recurring occurrences produce
+one task with their first and last scheduled times and occurrence count, then
+resume according to the configured IANA timezone.
+
+Ask a Bot in its conversation to remember a convention, manage a schedule or
+reminder, or follow up on a webhook. Reading private memory through the memory
+tools or Web API seeds it from `MEMORY.md`. Subsequent versions live in SQLite
+and supply the Bot's memory during conversation and task decisions. Shared
+playbooks and text documents use an explicit document ID and require a Bot
+grant for the requested `shared_memory` operation.
 
 ## Connect and run
 

@@ -14,19 +14,33 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
+# libc++ on supported macOS versions does not ship the C++20 time-zone library.
+set(BUILD_TZ_LIB ON CACHE BOOL "Build the IANA time-zone library")
+set(USE_SYSTEM_TZ_DB ON CACHE BOOL "Read the host's IANA time-zone database")
+set(ENABLE_DATE_INSTALL OFF CACHE BOOL "Do not install the date dependency separately")
+FetchContent_Declare(date
+  URL https://codeload.github.com/HowardHinnant/date/tar.gz/refs/tags/v3.0.4
+  URL_HASH SHA256=56e05531ee8994124eeb498d0e6a5e1c3b9d4fccbecdf555fe266631368fb55f)
+FetchContent_MakeAvailable(date)
+
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
-                       src/model_budget.cpp src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp)
+                       src/model_budget.cpp src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp
+                       src/memory_store.cpp src/automation.cpp)
 target_include_directories(flock_core PUBLIC include)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json PRIVATE date::date-tz)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(flock_memory_automation tests/memory_automation.cpp)
+  target_link_libraries(flock_memory_automation PRIVATE flock_core)
+  target_compile_options(flock_memory_automation PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_memory_automation COMMAND flock_memory_automation)
   add_executable(flock_access_secrets tests/access_secrets.cpp)
   target_link_libraries(flock_access_secrets PRIVATE flock_core)
   add_test(NAME flock_access_secrets COMMAND flock_access_secrets)

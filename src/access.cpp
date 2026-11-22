@@ -159,6 +159,11 @@ void Access::personGrant(const Person& actor, std::string_view bot, std::string_
     tx.commit();
 }
 
+bool Access::permitsPersonScope(const Person& actor, const Scope& scope) const {
+    std::lock_guard lock(db_.mutex);
+    return identifier(actor.id) && scope.valid() && holds(actor,scope);
+}
+
 bool Access::holds(const Person& actor, const Scope& scope) const {
     return actor.adminRoot || db_.query("SELECT 1 FROM person_resource_grants WHERE person=? AND kind=? AND resource=? AND op=?",
                                         {actor.id,scope.kind,scope.resource,scope.operation}).next();

@@ -12,7 +12,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     const auto destination = environment.empty() ? field(routing,"environmentId")
         : verifiedEnvironment(routing,routing,environment);
     const auto id = submit({std::string(bot),std::string(request),destination,field(routing,"projectId"),
-                            routing.at("config"),{},0},messageId,source);
+                            routing.at("config")},messageId,source);
     if (!resume) return id;
     const auto priorId = source.at("taskId").get<Id>();
     const auto prior = load(priorId);

@@ -37,6 +37,7 @@ public:
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;
+    bool permitsPersonScope(const Person&, const Scope&) const;
     bool permitsPerson(const Person&, std::string_view bot, Role) const;
     void personGrant(const Person&, std::string_view bot, std::string_view recipient, Role, GrantChange);
     void personScope(const Person& root, std::string_view person, const Scope&, GrantChange);

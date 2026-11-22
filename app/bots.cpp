@@ -1,6 +1,5 @@
 #include "bots.hpp"
 
-#include "date/tz.h"
 
 #include <algorithm>
 #include <array>
@@ -258,37 +257,6 @@ Json prepareAvatar(const Json& profile, const std::filesystem::path& botDir, con
     throw Conflict("Unsupported avatar kind");
 }
 
-int number(std::string_view value) {
-    int result = 0;
-    const auto [end,error] = std::from_chars(value.data(),value.data()+value.size(),result);
-    if (value.empty() || error != std::errc{} || end != value.data()+value.size())
-        throw Conflict("Invalid number in cron expression");
-    return result;
-}
-
-std::bitset<60> cronField(std::string_view input, int low, int high, bool weekday = false) {
-    std::bitset<60> values;
-    for (;;) {
-        const auto comma = input.find(',');
-        const auto entry = input.substr(0,comma);
-        const auto slash = entry.find('/');
-        const auto range = entry.substr(0,slash);
-        const int step = slash == std::string_view::npos ? 1 : number(entry.substr(slash+1));
-        int first = low, last = high;
-        if (range != "*") {
-            const auto dash = range.find('-');
-            first = number(range.substr(0,dash));
-            last = dash != std::string_view::npos ? number(range.substr(dash+1)) :
-                (slash != std::string_view::npos ? high : first);
-        }
-        if (first < low || last > high || first > last || step < 1 || step > high - low + 1)
-            throw Conflict("Cron field is outside its allowed range");
-        for (int n = first; n <= last; n += step) values.set(weekday && n == 7 ? 0 : n);
-        if (comma == std::string_view::npos) return values;
-        input.remove_prefix(comma+1);
-    }
-}
-
 std::string validatedString(const Json& object, const char* key) {
     const auto value = object.find(key);
     if (value == object.end() || !value->is_string() || !present(value->get_ref<const std::string&>()))
@@ -297,39 +265,8 @@ std::string validatedString(const Json& object, const char* key) {
 }
 }
 
-Cron::Cron(std::string expression, std::string timezone) : timezone_(std::move(timezone)) {
-    std::istringstream fields(expression);
-    std::array<std::string,5> value;
-    for (auto& field : value)
-        if (!(fields >> field)) throw Conflict("Cron requires five fields");
-    std::string extra;
-    if (fields >> extra) throw Conflict("Cron requires five fields");
-    minutes_ = cronField(value[0],0,59);
-    hours_ = cronField(value[1],0,23);
-    days_ = cronField(value[2],1,31);
-    months_ = cronField(value[3],1,12);
-    weekdays_ = cronField(value[4],0,7,true);
-    anyDay_ = value[2].starts_with("*");
-    anyWeekday_ = value[4].starts_with("*");
-    try { date::locate_zone(timezone_); }
-    catch (const std::exception&) { throw Conflict("Unknown IANA timezone: " + timezone_); }
-}
-
-bool Cron::matches(Seconds utc) const {
-    using namespace std::chrono;
-    const auto local = date::locate_zone(timezone_)->to_local(date::sys_seconds{seconds{utc}});
-    const auto day = date::floor<date::days>(local);
-    const date::year_month_day ymd{day};
-    const auto time = date::make_time(date::floor<minutes>(local - day));
-    const auto weekday = date::weekday{day}.c_encoding();
-    if (!months_.test(unsigned(ymd.month())) || !hours_.test(time.hours().count()) || !minutes_.test(time.minutes().count()))
-        return false;
-    const bool dom = days_.test(unsigned(ymd.day())), dow = weekdays_.test(weekday);
-    return anyDay_ || anyWeekday_ ? dom && dow : dom || dow;
-}
-
 Intake Bot::intake(std::string_view request) const {
-    return {id,std::string(request),environmentId,projectId,settings,{},0};
+    return {id,std::string(request),environmentId,projectId,settings};
 }
 
 Bots::Bots(std::filesystem::path directory) : directory_(std::move(directory)) {}
@@ -422,7 +359,8 @@ Bot Bots::get(std::string_view id) const {
         const auto request = validatedString(schedule,"request");
         if (!validBotId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
             throw Conflict("Cron IDs must be valid and unique, and requests must fit in 16,000 bytes");
-        bot.schedules.push_back({scheduleId,expression,timezone,request,Cron(expression,timezone)});
+        Cron(expression,timezone);
+        bot.schedules.push_back({scheduleId,expression,timezone,bot.intake(request)});
     }
     return bot;
 }
@@ -632,28 +570,14 @@ bool Bots::hasCron(std::string_view id) const {
     }
 }
 
-Scheduler::Scheduler(const Bots& bots, Store& store, Seconds startedAt, ErrorReporter report)
-    : bots_(bots), store_(store),
-      next_(std::chrono::ceil<std::chrono::minutes>(std::chrono::seconds{startedAt}).count()*60), report_(std::move(report)) {}
-
-void Scheduler::tick(Seconds now) {
-    if (next_ > now) return;
-    std::vector<Bot> configured;
-    for (const auto& id : bots_.ids()) {
-        if (!bots_.hasCron(id)) continue;
-        try { configured.push_back(bots_.get(id)); }
-        catch (const std::exception& error) { report_(id,error.what()); }
+void Bots::syncSchedules(Store& store, Seconds now,
+                         const std::function<void(std::string_view,std::string_view)>& report) const {
+    const auto botIds = ids();
+    for (const auto& id : botIds) {
+        try {
+            store.syncSchedules(id,hasCron(id) ? get(id).schedules : std::vector<ConfiguredSchedule>{},now);
+        } catch (const std::exception& error) { report(id,error.what()); }
     }
-    for (; next_ <= now; next_ += 60) {
-        for (const auto& bot : configured) {
-            for (const auto& schedule : bot.schedules) {
-                if (!schedule.cron.matches(next_)) continue;
-                auto item = bot.intake(schedule.request);
-                item.scheduleId = schedule.id;
-                item.scheduledAt = next_;
-                store_.submit(item);
-            }
-        }
-    }
+    store.pruneSchedules(botIds);
 }
 }

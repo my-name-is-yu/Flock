@@ -120,11 +120,11 @@ struct Runtime::Impl {
 
     Impl(Store& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
         : db(*store.p_), access(store.access()), model(m), t3(adapter),
-          notes([load = std::move(loader)](std::string_view botId) {
+          notes([&storage = db, load = std::move(loader)](std::string_view botId) {
               constexpr auto limit = 8192;
               auto bot = load(botId);
               bot.soul = bounded(bot.soul,limit);
-              bot.memory = bounded(bot.memory,limit);
+              bot.memory = bounded(storage.currentMemory(botId,bot.memory),limit);
               return bot;
           }), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
@@ -1047,8 +1047,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             ensureNoRouteCycle(sender,peer.intake);
         }
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
-        peer.intake.scheduleId.clear();
-        peer.intake.scheduledAt = 0;
         const auto id = db.submit(peer.intake,0,nullptr,true);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
@@ -1423,6 +1421,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 if (omitted) applicable.push_back({{"omittedInstructions",omitted}});
                 summary["userInstructions"] = applicable.dump();
             }
+            if (task.contains("trigger")) summary["trigger"] = task.at("trigger");
             if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
             if (!choices.empty()) summary["peers"] = std::move(choices);
             if (std::ranges::find(tools,"send_bot_message") != tools.end()) {
@@ -1511,14 +1510,16 @@ void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes,p_->options.clock)) break;
     }
 }
 void Runtime::tick() {
+    p_->db.fireDueAutomations(p_->options.clock());
     runConversations();
     for (auto id : p_->eligible()) p_->step(id);
 }
 void Runtime::tickConcurrent() {
+    p_->db.fireDueAutomations(p_->options.clock());
     const auto collect = [](auto& workers) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -1536,7 +1537,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes,p_->options.clock);
                 }));
             }
         }

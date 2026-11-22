@@ -102,26 +102,24 @@ void cronIntakeAndRestart() {
 
     {
         Store store(db);
-        Scheduler spring(bots,store,utc(2026,3,8,6,0),report);
-        spring.tick(utc(2026,3,8,9,0));
+        bots.syncSchedules(store,utc(2026,3,8,6,0),report);
+        store.fireDueAutomations(utc(2026,3,8,9,0));
         check(store.tasks().empty(),"nonexistent spring local time was submitted");
-        Scheduler fall(bots,store,utc(2026,11,1,5,0),report);
-        fall.tick(utc(2026,11,1,7,0));
-        fall.tick(utc(2026,11,1,7,0));
+        store.fireDueAutomations(utc(2026,11,1,5,30));
+        store.fireDueAutomations(utc(2026,11,1,6,30));
         const auto tasks = store.tasks();
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
-        check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
-              tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
+        check(tasks[0]["trigger"]["targetTime"] == utc(2026,11,1,6,30) &&
+              tasks[1]["trigger"]["targetTime"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
         check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
-        Scheduler repeated(bots,store,utc(2026,11,1,6,30),report);
-        repeated.tick(utc(2026,11,1,6,30));
-        check(store.tasks().size() == 2,"duplicate scheduled UTC instant registered after restart");
     }
     {
         Store store(db);
-        Scheduler resumed(bots,store,utc(2027,11,1,5,30,1),report);
-        resumed.tick(utc(2027,11,1,5,35));
-        check(store.tasks().size() == 2,"downtime schedule should be skipped and existing rows preserved");
+        bots.syncSchedules(store,utc(2026,11,1,6,30),report);
+        store.fireDueAutomations(utc(2026,11,1,6,30));
+        check(store.tasks().size() == 2,"duplicate scheduled UTC instant registered after restart");
+        store.fireDueAutomations(utc(2027,11,1,5,35));
+        check(store.tasks().size() == 4,"configured schedules did not retain their due time across restart");
     }
 }
 
@@ -451,7 +449,9 @@ void responseContract() {
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
                    "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
-                   "check_environment_readiness","update_bot_settings","request_bot_change"};
+                   "check_environment_readiness","update_bot_settings","request_bot_change",
+                   "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
+                   "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
@@ -459,7 +459,7 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 18 &&
+    check(turn.at("tools").at(0).at("tools").size() == 28 &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
@@ -478,6 +478,18 @@ void responseContract() {
           turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}) &&
           turnTool("request_access").at("properties").at("resourceKind").at("enum").size()==resourceOperations().size(),
           "access request and settings schemas do not match dispatch");
+    const std::map<std::string,Json> memoryAutomationRequired{
+        {"read_memory",{"reason"}}, {"memory_history",{"reason"}},
+        {"propose_memory_edit",{"reason","baseVersion","content","rationale"}},
+        {"apply_memory_edit",{"reason","baseVersion"}},
+        {"revert_memory_edit",{"reason","baseVersion","revisionId"}},
+        {"create_schedule",{"reason","request","cron","timezone"}}, {"list_schedules",{"reason"}},
+        {"remove_schedule",{"reason","id"}}, {"create_reminder",{"reason","request","fireAt","timezone"}},
+        {"create_trigger",{"reason","request","source"}}};
+    for (const auto& [name,required] : memoryAutomationRequired)
+        check(turnTool(name).at("required") == required,"memory or automation schema does not match dispatch");
+    check(turnTool("apply_memory_edit")["properties"]["baseVersion"]["minimum"] == 0 &&
+          turnTool("create_trigger")["properties"]["eventFilter"]["type"] == "object","incorrect schema constraints");
     const auto& turnPrompt = turn.at("instructions").get_ref<const std::string&>();
     check(turnPrompt.find("You are a Flock Bot talking with your user") != std::string::npos &&
           turnPrompt.find("SOUL (soul) and MEMORY (memory)") != std::string::npos &&
@@ -722,12 +734,11 @@ void botProfilesAndAvatars() {
     const auto cards = bots.cards();
     check(cards.size() == 3,"all created Bots should appear in cards()");
 
-    // Scheduler ignores Bots without cron schedules instead of failing on missing execution config.
     Store store(temp.path / "scheduler.db");
-    Scheduler scheduler(bots,store,utc(2026,11,21,0,0),[](std::string_view id,std::string_view err) {
+    bots.syncSchedules(store,utc(2026,11,21,0,0),[](std::string_view id,std::string_view err) {
         throw std::runtime_error(std::string(id) + ": " + std::string(err));
     });
-    scheduler.tick(utc(2026,11,21,0,2));
+    store.fireDueAutomations(utc(2026,11,21,0,2));
 
     // Upload a valid PNG avatar, preserve it on name-only edit, replace with GIF, then switch to icon.
     const std::string pngBytes = std::string("\x89PNG\r\n\x1a\n",8) + std::string(16,'\x01');

@@ -32,7 +32,9 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "cancel_task","message_session","interrupt_session","read_result",
                                          "find_tasks","reply","list_grants","request_access","list_secrets",
                                          "request_secret_input","list_connections",
-                                         "check_environment_readiness","update_bot_settings","request_bot_change"};
+                                         "check_environment_readiness","update_bot_settings","request_bot_change",
+                                         "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
+                                         "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -312,13 +314,22 @@ ORDER BY j.id DESC LIMIT ?
             {"history",std::move(history)}};
 }
 
-Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision) {
+Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
+                                std::string_view seed, Seconds now) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
     if (auto result = accessTool(bot,routing,decision); !result.is_null()) {
+        result["ok"] = true;
+        return result;
+    }
+    if (auto result = memory(bot,nullptr,tool,args,seed,now); !result.is_null()) {
+        result["ok"] = true;
+        return result;
+    }
+    if (auto result = automationTool(bot,routing,decision,now); !result.is_null()) {
         result["ok"] = true;
         return result;
     }
@@ -579,7 +590,8 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes) {
+bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes,
+                          const std::function<Seconds()>& clock) {
     std::optional<Message> message;
     {
         std::lock_guard lock(mutex);
@@ -751,7 +763,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         } else if (result.is_null()) {
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(*current,step,*decision);
+                result = applyTurnTool(*current,step,*decision,botNotes.memory,clock());
                 exec("RELEASE turn_tool");
             } catch (const std::exception& error) {
                 exec("ROLLBACK TO turn_tool");

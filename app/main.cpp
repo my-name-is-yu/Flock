@@ -180,9 +180,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 #else
     (void)home;
 #endif
-    const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
+    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+        std::cerr << "Flock Bot " << id << ": " << error << '\n';
+    });
 #ifdef FLOCK_WITH_WEB
     std::unique_ptr<WebServer> server;
     if (web) {
@@ -198,6 +200,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
             options.peers,
             identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
             [&](const BotChange& change) { bots.apply(change); },
+            [&](std::string_view botId) { return bots.notes(botId).memory; },
+            options.clock,
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
@@ -206,14 +210,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
-    Scheduler schedule(bots,store,startedAt,[](std::string_view id,std::string_view error) {
-        std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
     while (!stopRequested) {
-        try { schedule.tick(unixTime()); }
-        catch (const std::exception& error) {
-            std::cerr << "Unable to submit scheduled tasks: " << error.what() << '\n';
-        }
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }

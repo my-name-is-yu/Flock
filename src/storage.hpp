@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/access.hpp"
+#include "flock/memory_automation.hpp"
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -54,12 +55,24 @@ private:
     std::vector<std::string> values_;
 };
 
+Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     void migrateAccess();
+    void migrateMemory();
+    void migrateAutomation();
+    std::string currentMemory(std::string_view bot, std::string_view seed) const;
+    Json memory(std::string_view bot, const Person*, std::string_view operation, const Json&,
+                std::string_view seed, Seconds now);
+    Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
+    Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
+    Json automations(std::string_view bot, Id before) const;
+    Json cancelAutomation(std::string_view bot, Id id);
+    void fireDueAutomations(Seconds now);
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
@@ -81,11 +94,11 @@ struct Store::Impl {
     void grantModelCall(std::string_view budget);
     Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&, const std::function<Seconds()>&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     std::optional<conversation::Message> turnMessage(Id messageId) const;
     Json turnInput(const conversation::Message&, int step) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&);
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, std::string_view seed, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, std::string_view bot) const;
@@ -98,7 +111,7 @@ struct Store::Impl {
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
     Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
-              const Json& source = nullptr);
+              const Json& source = nullptr, const Json& trigger = nullptr);
     Id submit(const Intake&, Id sourceMessageId, const Json& source);
     Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
