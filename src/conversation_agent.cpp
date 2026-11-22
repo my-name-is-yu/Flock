@@ -378,7 +378,6 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                            {"$[" + std::to_string(index-1) + "].tool",message.id,sourceStep});
         if (!saved.next() || !conversation_storage::canRereadToolResult(saved.string(0)))
             throw ToolError("Unknown tool result in this turn");
-        // The model view resolves this reference against the currently authorized source.
         return {{"ok",true}};
     }
     if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;

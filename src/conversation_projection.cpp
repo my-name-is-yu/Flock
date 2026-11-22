@@ -68,7 +68,6 @@ void projectToolHistory(Json& turn, const Json& redactionRevision) {
         }
     }
 
-    // Reserve space for the identity and outcome of every call before admitting payloads.
     auto projection = Json::array();
     std::size_t used = 2;
     for (const auto& entry : turn) {
