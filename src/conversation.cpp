@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS conversation_turns(
   status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
   pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
+CREATE TABLE IF NOT EXISTS conversation_retries(
+  message_id INTEGER PRIMARY KEY REFERENCES conversation_turns(message_id),
+  failures INTEGER NOT NULL CHECK(failures BETWEEN 1 AND 7),
+  retry_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
   attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
@@ -56,7 +60,7 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   source_message_id INTEGER REFERENCES messages(id),
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
-        throw std::runtime_error(sqlite3_errmsg(db));
+        throw StorageError(db);
     if (!query("SELECT 1 FROM pragma_table_info('messages') WHERE name='principal_source'").next())
         exec("ALTER TABLE messages ADD COLUMN principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3))");
     transaction.commit();
@@ -159,16 +163,29 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=
     return receipt;
 }
 
-std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit) const {
+std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit, Seconds now) const {
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
-SELECT j.conversation_bot_id,min(j.id) FROM journal j
-WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
-GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
-)SQL",{limit});
+WITH heads AS (
+  SELECT conversation_bot_id AS bot,min(id) AS id FROM journal
+  WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL
+  GROUP BY conversation_bot_id
+)
+SELECT h.bot,h.id FROM heads h LEFT JOIN conversation_retries r ON r.message_id=h.id
+WHERE r.retry_at IS NULL OR r.retry_at<=? ORDER BY h.id LIMIT ?
+)SQL",{now,limit});
     std::vector<std::pair<std::string,Id>> result;
     while (next.next()) result.emplace_back(next.string(0),next.number(1));
     return result;
+}
+
+void Store::Impl::deferConversation(Id id, Seconds now) {
+    // Consecutive failures back off by 1, 2, 4, 8, 16, 32, then at most 60 seconds.
+    exec(R"SQL(
+INSERT INTO conversation_retries(message_id,failures,retry_at) VALUES(?,1,?+1)
+ON CONFLICT(message_id) DO UPDATE SET
+  failures=min(failures+1,7), retry_at=?+min(1 << failures,60)
+)SQL",{id,now,now});
 }
 
 }

@@ -1,6 +1,7 @@
 #include "storage.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <fcntl.h>
 #include <future>
@@ -61,6 +62,7 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
 
 struct TaskDecision : Decision {
     Json usage = Json::object();
+    Id attemptId = 0;
 };
 
 bool needsDoneWhen(const Json& task) {
@@ -82,6 +84,7 @@ struct Runtime::Impl {
     SoulLoader soul;
     RuntimeOptions options;
     std::future<void> channelWorker;
+    std::stop_source shutdown;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
@@ -89,10 +92,24 @@ struct Runtime::Impl {
 
     void fireDueAutomations() {
         try { db.fireDueAutomations(options.clock()); }
+        catch (const StorageError&) { throw; }
         catch (const std::exception& error) {
             if (!options.automationError) throw;
             options.automationError(error.what());
         }
+    }
+
+    void deferContendedWork(std::string_view operation, const auto& work) {
+        try { work(); }
+        catch (const StorageError& error) {
+            if (!error.contended()) throw;
+            if (options.storageContention)
+                options.storageContention(std::string(operation) + ": " + error.what());
+        }
+    }
+
+    void runTurn(Id id) {
+        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
@@ -109,10 +126,14 @@ struct Runtime::Impl {
         catch (...) { close(lockFd); throw; }
     }
     ~Impl() {
+        shutdown.request_stop();
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
-        db.stopWorkspace();
+        try { db.stopWorkspace(); }
+        catch (const std::exception& error) {
+            std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
+        }
         close(lockFd);
     }
 
@@ -208,7 +229,7 @@ ORDER BY id)SQL");
         }
     }
 
-    void cancelDone(Json& task) {
+    void cancelDone(Json& task, std::string_view detail = {}) {
         closeQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
             const auto action = db.outbox(task);
@@ -225,9 +246,10 @@ ORDER BY id)SQL");
         task.erase("pendingInstructions");
         task["activeRun"] = nullptr;
         task["state"] = "cancelled";
-        db.journal(task["id"],"cancelled",Json::object());
+        db.journal(task["id"],"cancelled",detail.empty() ? Json::object() : Json{{"detail",detail}});
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
-            finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
+            finishPeer(*peer,task,db.load(peer->sender),"cancelled",
+                       detail.empty() ? "The receiving Bot's task was cancelled." : detail,actionId());
     }
 
     void stopNote(const Json& snapshot, const std::string& detail) {
@@ -396,6 +418,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         if (now < stop.value("retryAt",Seconds{0})) return;
         Json requested;
         if (!change(task,[&](Json& current) {
+            if (shutdown.stop_requested()) return false;
             current["runStop"]["retryAt"] = now + 5;
             db.journal(current["id"],"interrupt_requested",stop);
             return true;
@@ -412,14 +435,23 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
+            const bool released = current.value("environmentReleased",false);
+            if (peer && (target != old || released) &&
+                db.peerWorkRouteWouldCycle(peer->sender,target,field(current,"projectId"))) {
+                // A legacy move can reach here after releasing its previous slot. Its Run is
+                // settled, and cancellation closes the exchange without sending work to either queue.
+                cancelDone(current,"The receiving Bot's task was cancelled because its saved destination "
+                                   "would make project queues wait for one another.");
+                return true;
+            }
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
-            if (target != old && !current.value("environmentReleased",false)) {
+            if (target != old && !released) {
                 current["environmentReleased"] = true;
                 return true;
             }
-            if (target != old || current.value("environmentReleased",false) || current["state"] == "queued") {
+            if (target != old || released || current["state"] == "queued") {
                 const auto blocker = db.queueBlocker(id);
                 if (!blocker.is_null()) {
                     const bool waitingSender = peer && blocker["id"] == peer->sender &&
@@ -637,6 +669,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     void deliver(const Json& task, Json action) {
+        if (shutdown.stop_requested()) return;
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
         Delivery outcome;
@@ -671,7 +704,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 return applyDelivery(id,action,*stopped);
             }
             if (!change(task,[&](Json& current) {
-                if (current["actionId"] != action["id"]) return false;
+                if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
                 db.exec("UPDATE outbox SET phase='started',auth_generation=?,data=json_set(data,'$.instruction',?)"
                         " WHERE id=? AND phase='ready'",{cmd.authGeneration,cmd.instruction,action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
@@ -1011,24 +1044,6 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
         return *peer;
     }
 
-    void ensureNoRouteCycle(const Json& sender, const Intake& target) const {
-        if (sender["environmentId"] == target.environmentId && sender["projectId"] == target.projectId) return;
-        auto cycle = db.query(R"SQL(
-WITH RECURSIVE dependencies(source_env,source_project,target_env,target_project) AS (
-  SELECT s.environment_id,s.project_id,t.environment_id,t.project_id
-  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks t ON t.id=p.recipient_task
-  WHERE p.kind='work' AND p.phase<>'closed'
-), reachable(env,project) AS (
-  VALUES(?,?)
-  UNION
-  SELECT target_env,target_project FROM dependencies JOIN reachable
-  ON source_env=env AND source_project=project
-)
-SELECT 1 FROM reachable WHERE env=? AND project=?
-)SQL",{target.environmentId,target.projectId,sender["environmentId"],sender["projectId"]});
-        if (cycle.next()) throw Conflict("This work request would make two project queues wait for one another");
-    }
-
     Json peerMessage(const PeerExchange& peer, const Json& from, const Json& to, std::string_view type,
                      std::string_view body, std::string_view messageId) {
         Json message = {{"exchangeId",peer.id},{"messageId",messageId},{"fromBotId",from["botId"]},
@@ -1101,7 +1116,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
                 throw Conflict("Let the assigned Run settle before requesting another Bot's work");
             if (!admitWork(sender,decision,charge)) return;
             establishCriteria(sender,args);
-            ensureNoRouteCycle(sender,peer.intake);
+            if (db.peerWorkRouteWouldCycle(sender.at("id"),peer.intake.environmentId,peer.intake.projectId))
+                throw Conflict("This work request would make two project queues wait for one another");
         }
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         const auto id = db.submit(peer.intake,0,nullptr,RequestJournal::skip);
@@ -1264,15 +1280,20 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (isGitTool(tool)) {
             Json result;
             try {
+                const auto invocation = decision.attemptId ? "attempt/" + std::to_string(decision.attemptId)
+                                                           : "event/" + event.at("id").dump();
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
-                                    "event/" + event.at("id").dump(),snapshot.at("generation").get<Id>());
-            } catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
+                                    invocation,snapshot.at("generation").get<Id>());
+            } catch (const StorageError&) { throw; }
+            catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
             change(snapshot,[&](Json& current) {
                 auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
                 if (!row.next()) return false;
                 auto data = row.json(0);
                 if (!data.contains("gitResults")) data["gitResults"] = Json::array();
-                data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
+                if (result.contains("readId"))
+                    data["gitResults"].push_back({{"tool",tool},{"readId",result.at("readId")}});
+                else data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
                     Json{{"tool",tool},{"result",std::move(result)}}));
                 if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
                 db.exec("UPDATE events SET data=? WHERE id=?",{data,event.at("id")});
@@ -1376,7 +1397,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage")};
+        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
+                            saved->value("attemptId",Id{0})};
     }
 
     std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
@@ -1416,6 +1438,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         {
             std::lock_guard lock(db.mutex);
             Transaction transaction(db.db);
+            if (shutdown.stop_requested()) return std::nullopt;
             auto current = db.load(task["id"]);
             if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
                 revision(current) != revision(task) || current["state"] != "deciding")
@@ -1432,14 +1455,17 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             transaction.commit();
         }
         if (!attempt) return std::nullopt;
+        if (options.gitHost && event.at("kind") == "result")
+            db.projectTaskGitReads(*options.gitHost,task,event);
         auto turn = db.callModel(field(task,"botId"),model,
             {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
              needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
         if (turn.calls.size() != 1) throw Conflict("Return one task action");
-        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage)};
+        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage),attempt};
         // Bookkeeping must not advance the generation observed by conversation turns.
         const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
-            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage},
+            {"attemptId",decision.attemptId}};
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
@@ -1453,6 +1479,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
 
     void decide(const Json& task) {
         if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
+        if (shutdown.stop_requested()) return;
         Json event, history = Json::array();
         std::optional<PeerExchange> peer;
         std::optional<TaskDecision> decision;
@@ -1508,12 +1535,12 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
             if (options.gitHost && task["activeRun"].is_null() && event["kind"] == "result")
-                tools.insert(tools.end(),gitTools().begin(),gitTools().end());
+                tools.insert(tools.end(),gitTools(false).begin(),gitTools(false).end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
             if (!decision)
                 decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
-            if (!decision) return;
+            if (!decision || shutdown.stop_requested()) return;
             if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
             try {
                 if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
@@ -1525,6 +1552,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             }
         } catch (const ModelError& e) {
             failure(task,event,e.what(),e.transient);
+        } catch (const StorageError&) {
+            throw;
         } catch (const std::exception& e) {
             failure(task,event,e.what(),false);
         }
@@ -1559,6 +1588,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     }
 
     void step(Id id) {
+        if (shutdown.stop_requested()) return;
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (task.contains("pendingStageReport"))
@@ -1591,57 +1621,65 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
     : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
+void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {
+    if (p_->shutdown.stop_requested()) return;
+    p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
-    p_->db.deliverChannels();
+    p_->db.deliverChannels(p_->shutdown.get_token());
     constexpr auto messagesPerTick = 20;
-    for (int i = 0; i < messagesPerTick; ++i) {
-        const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get())) break;
+    for (int i = 0; i < messagesPerTick && !p_->shutdown.stop_requested(); ++i) {
+        const auto pending = p_->db.pendingConversations(1,p_->options.clock());
+        if (pending.empty()) break;
+        p_->runTurn(pending.front().second);
     }
-    p_->db.deliverChannels();
+    p_->db.deliverChannels(p_->shutdown.get_token());
 }
 void Runtime::tick() {
+    if (p_->shutdown.stop_requested()) return;
+    p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
-    for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit))
-        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get());
+    for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
+        p_->runTurn(id);
     p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
-    p_->db.deliverChannels();
+    p_->db.deliverChannels(p_->shutdown.get_token());
 }
 void Runtime::tickConcurrent() {
-    p_->fireDueAutomations();
-    const auto collect = [](auto& workers) {
+    if (p_->shutdown.stop_requested()) return;
+    const auto collect = [this](auto& workers, std::string_view operation) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
                 auto result = std::move(it->second);
                 it = workers.erase(it);
-                result.get();
+                p_->deferContendedWork(operation,[&] { result.get(); });
             } else ++it;
         }
     };
-    collect(p_->conversationWorkers);
-    collect(p_->workers);
-    p_->db.deliverGitWebhooks();
+    collect(p_->conversationWorkers,"conversation worker");
+    collect(p_->workers,"task worker");
     if (p_->channelWorker.valid() &&
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-        p_->channelWorker.get();
+        p_->deferContendedWork("channel worker",[&] { p_->channelWorker.get(); });
+    p_->deferContendedWork("workspace outcomes",[&] { p_->db.persistWorkspaceResults(); });
+    p_->deferContendedWork("automations",[&] { p_->fireDueAutomations(); });
+    p_->deferContendedWork("Git webhooks",[&] { p_->db.deliverGitWebhooks(); });
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
-        p_->channelWorker = std::async(std::launch::async,[db = &p_->db] { db->deliverChannels(); });
+        p_->channelWorker = std::async(std::launch::async,[db = &p_->db,stop = p_->shutdown.get_token()] {
+            db->deliverChannels(stop);
+        });
     constexpr auto maxConversationWorkers = Impl::batchLimit;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {
-        for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {
+        for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers,p_->options.clock())) {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
-                p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get());
-                }));
+                p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[impl = p_.get(),id] { impl->runTurn(id); }));
             }
         }
     }
-    p_->db.advanceWorkflows(p_->options.clock());
+    p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
     for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
-        p_->workers.emplace(id,std::async(std::launch::async,[this,id] { p_->step(id); }));
+        p_->workers.emplace(id,std::async(std::launch::async,[impl = p_.get(),id] { impl->step(id); }));
 }
 } // namespace flockv0

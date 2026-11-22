@@ -46,6 +46,9 @@ public:
     virtual ~GitHost() = default;
     virtual std::string_view name() const = 0;
     virtual bool permits(const GitContext&, const GitRepository&, std::string_view operation) const = 0;
+    virtual bool permitsStoredRead(const GitContext& context, const GitRepository& repo, const Decision&) {
+        return permits(context,repo,"read");
+    }
     virtual GitPullRequest createPullRequest(const GitContext&, const GitOpenPr&) = 0;
     virtual std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget&) = 0;
     virtual GitLog readCiLogs(const GitContext&, const GitRepository&, Id jobId, std::size_t maxBytes) = 0;
@@ -60,7 +63,7 @@ struct GitWebhook {
     std::string payloadDigest = {};
 };
 
-const std::vector<std::string>& gitTools();
+const std::vector<std::string>& gitTools(bool conversation = true);
 bool isGitTool(std::string_view tool);
 Json gitToolSchema(std::string_view tool, bool conversation);
 

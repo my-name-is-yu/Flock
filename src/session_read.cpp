@@ -436,6 +436,8 @@ Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channel
         return decision.tool == "flock_session_search" ? evidence.search(decision.args) : evidence.events(decision.args);
     } catch (const Conflict& error) {
         return scopedResult(failure(error.what()));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception&) {
         return scopedResult(failure("Session evidence could not be read"));
     }

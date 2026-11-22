@@ -652,6 +652,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     exec("UPDATE journal SET task_id=?,data=json_set(data,'$.status',?) WHERE id=?",{linked,status,message.id});
     exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
          {reply,message.id});
+    exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -695,6 +696,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
         exec("UPDATE journal SET data=json_set(data,'$.status','access_revoked') WHERE id=?",{message.id});
         exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
+        exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
@@ -707,13 +709,16 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     return false;
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
-                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost) {
+void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
+                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
+                          std::stop_token shutdown) {
     Message message;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (!turnPending(id)) return true;
+        if (shutdown.stop_requested() || !turnPending(id) ||
+            query("SELECT 1 FROM conversation_retries WHERE message_id=? AND retry_at>?",{id,clock()}).next())
+            return;
         message = loadTurnMessage(id);
         exec("INSERT OR IGNORE INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
         transaction.commit();
@@ -736,14 +741,45 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     };
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
-    for (int step = 1; step <= maxSteps; ++step) {
-        if (!message.channelScope.empty()) deliverChannels();
+    const auto persistModelCheckpoint = [&] {
+        std::lock_guard lock(mutex);
+        const auto entry = conversationCheckpoints.find(id);
+        if (entry == conversationCheckpoints.end()) return true;
+        const auto& checkpoint = entry->second;
+        Transaction transaction(db);
+        const auto* decisions = std::get_if<std::vector<Decision>>(&checkpoint.outcome);
+        const bool isHead = turnPending(id);
+        // An approval can restore an older turn while this message is inferring.
+        if (!isHead && !decisions) return false;
+        if (!checkpoint.usage.empty())
+            exec("UPDATE model_attempts SET usage=? WHERE id=?",{checkpoint.usage,checkpoint.attempt});
+        bool hasDecision = false;
+        if (!isHead || authorizeTurn(message)) {
+            if (decisions) {
+                auto saved = Json::array();
+                for (const auto& call : *decisions)
+                    saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
+                exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
+                     {saved,id,checkpoint.step});
+                exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
+                hasDecision = true;
+            } else if (const auto retry = std::get<ConversationModelFailure>(checkpoint.outcome).retryFrom) {
+                deferConversation(id,*retry);
+            } else finishTurn(message,failure,nullptr,"error");
+        }
+        transaction.commit();
+        conversationCheckpoints.erase(entry);
+        return hasDecision;
+    };
+    if (!persistModelCheckpoint()) return;
+    for (int step = 1; step <= maxSteps && !shutdown.stop_requested(); ++step) {
+        if (!message.channelScope.empty()) deliverChannels(shutdown);
         std::vector<Decision> calls;
         bool hasWebEvidence = false;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return true; }
+            if (!authorizeTurn(message)) { transaction.commit(); return; }
             auto row = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step=?",{id,step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
@@ -766,20 +802,23 @@ LIMIT 1
             BotNotes botNotes;
             try {
                 if (!notification) botNotes = loadNotes(message.bot,soul,now);
+            } catch (const StorageError&) {
+                throw;
             } catch (const std::exception& error) {
                 const auto diagnostic = Json::parse(Json(error.what()).dump(
                     -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
                 finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
                           : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
                        "error");
-                return true;
+                return;
             }
             ModelInput input;
             Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
-                if (!authorizeTurn(message)) { transaction.commit(); return true; }
+                if (shutdown.stop_requested()) return;
+                if (!authorizeTurn(message)) { transaction.commit(); return; }
                 std::vector<ModelImage> images;
                 const auto context = turnInput(message,step,now,images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
@@ -800,7 +839,8 @@ LIMIT 1
                           " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                 transaction.commit();
             }
-            if (!attempt) return true;
+            if (!attempt) return;
+            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
@@ -810,47 +850,48 @@ LIMIT 1
                     const bool allowed = authorizeTurn(message);
                     if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
                     transaction.commit();
-                    if (!allowed) return true;
+                    if (!allowed) return;
                 }
-                calls = callModel(message.bot,model,input,attempt).calls;
+                auto response = callModel(message.bot,model,input,0);
+                checkpoint.usage = std::move(response.usage);
+                calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count",false);
                 if (calls.size() > 1 && !std::ranges::all_of(calls,[](const auto& call) { return isBotTool(call.tool); }))
                     throw ModelError("Parallel calls must be independent Bot tools",false);
+                checkpoint.outcome = calls;
             } catch (const ModelError& error) {
-                if (error.transient) return false;
-                finish(failure,"error");
-                return true;
+                if (!error.usage.empty()) checkpoint.usage = error.usage;
+                if (error.transient) checkpoint.outcome = ConversationModelFailure{clock()};
+            } catch (const StorageError&) {
+                throw;
             } catch (const std::exception&) {
-                finish(failure,"error");
-                return true;
+                // Preserve the terminal model error behavior for invalid responses.
             }
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            auto saved = Json::array();
-            if (turnPending(id) && !authorizeTurn(message)) { transaction.commit(); return true; }
-            for (const auto& call : calls)
-                saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
-            exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",{saved,id,step});
-            transaction.commit();
+            {
+                std::lock_guard lock(mutex);
+                conversationCheckpoints.insert_or_assign(id,std::move(checkpoint));
+            }
+            if (!persistModelCheckpoint()) return;
         }
 
+        if (shutdown.stop_requested()) return;
         const auto& decision = calls.front();
         if (notification && std::ranges::find(tools,decision.tool) == tools.end()) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return true; }
+            if (!authorizeTurn(message)) { transaction.commit(); return; }
             saveTurnResults(id,step,Json::array({toolFailure("Tool unavailable for a Git notification")}));
             transaction.commit();
             continue;
         }
         if (isBotTool(decision.tool)) {
             if (web) {
-                if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls)) return true;
+                if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             } else {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
-                if (!authorizeTurn(message)) { transaction.commit(); return true; }
+                if (!authorizeTurn(message)) { transaction.commit(); return; }
                 saveTurnResults(id,step,std::vector<Json>(calls.size(),toolFailure("Use Flock Web for this action")));
                 transaction.commit();
             }
@@ -859,7 +900,7 @@ LIMIT 1
         if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            if (!authorizeTurn(message)) { transaction.commit(); return true; }
+            if (!authorizeTurn(message)) { transaction.commit(); return; }
             saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
             transaction.commit();
             continue;
@@ -870,7 +911,8 @@ LIMIT 1
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
-                if (!authorizeTurn(message)) { transaction.commit(); return true; }
+                if (shutdown.stop_requested()) return;
+                if (!authorizeTurn(message)) { transaction.commit(); return; }
                 auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND effect IS NOT NULL",
                                    {id,step});
                 if (saved.next()) {
@@ -895,7 +937,7 @@ LIMIT 1
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
-                return true;
+                return;
             if (outcome.value("ok",false)) {
                 Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect.at("run"))}};
                 if (effect.contains("text")) entry["text"] = effect.at("text");
@@ -913,9 +955,10 @@ LIMIT 1
         if (git || readSession || checkEnvironment) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
+            if (shutdown.stop_requested()) return;
             const bool allowed = authorizeTurn(message);
             transaction.commit();
-            if (!allowed) return true;
+            if (!allowed) return;
         }
         if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
@@ -929,7 +972,7 @@ LIMIT 1
         }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (!authorizeTurn(message)) { transaction.commit(); return true; }
+        if (!authorizeTurn(message)) { transaction.commit(); return; }
         if (decision.tool == "reply") {
             try {
                 const auto& args = decision.args;
@@ -949,17 +992,20 @@ LIMIT 1
                 saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
                 finishTurn(message,std::move(reply),suggestions,"reply");
                 transaction.commit();
-                return true;
+                return;
             } catch (const ToolError& error) {
                 result = error.details;
                 result["ok"] = false;
                 result["error"] = error.what();
             }
         } else if (result.is_null()) {
+            if (shutdown.stop_requested()) return;
             exec("SAVEPOINT turn_tool");
             try {
                 result = applyTurnTool(message,step,decision,clock());
                 exec("RELEASE turn_tool");
+            } catch (const StorageError&) {
+                throw;
             } catch (const std::exception& error) {
                 exec("ROLLBACK TO turn_tool");
                 exec("RELEASE turn_tool");
@@ -972,10 +1018,10 @@ LIMIT 1
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
         transaction.commit();
     }
+    if (shutdown.stop_requested()) return;
     finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
               : "I stopped because handling this message took too many steps. Send it again if needed.",
            "error");
-    return true;
 }
 
 Json Store::pausedConversations(std::string_view bot) const {
