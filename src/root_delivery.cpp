@@ -154,8 +154,9 @@ void RootDelivery::reconcile(const Person& person, Id channel) {
         auto rows = db.query(R"SQL(
 SELECT d.command_id,d.text,d.message_id,d.observed_run_id,d.state,d.cursor,d.input_position
 FROM thread_deliveries d
-WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
-)SQL",{channel,static_cast<int>(State::Accepted),static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
+WHERE d.channel_id=? AND d.state IN (?,?,?,?) ORDER BY d.rowid LIMIT 16
+)SQL",{channel,static_cast<int>(State::Dispatching),static_cast<int>(State::Accepted),
+        static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
         while (rows.next())
             pending.push_back({rows.string(0),rows.string(1),rows.string(2),rows.string(3),
                                static_cast<State>(rows.number(4)),rows.number(5),rows.number(6)});
