@@ -262,10 +262,14 @@ void invalidDecisions() {
     f.runtime->tick();
     f.restart();
     const auto wait = f.wait(id,"model_failure");
-    check(f.model.calls == 5 && f.logs(id,"model_failure") == 3 && f.logs(id,"tool_error") == 2 && f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
+    check(f.model.calls == 5 && f.logs(id,"model_failure") == 3 && f.logs(id,"tool_error") == 2 &&
+          f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
     f.store->operate(id,wait,"retry");
     f.rejects(id,wait,"retry");
-    f.model.script = [](const ModelInput&) { return work(); };
+    f.model.script = [](const ModelInput& input) {
+        check(input.feedback.empty() && input.event.at("decisionFeedback").empty(),"retry kept prior errors");
+        return work();
+    };
     f.reach(id,"running");
     f.t3.question("run-1");
     f.model.script = [](const ModelInput&) { return work(); };
@@ -296,9 +300,15 @@ void correctInvalidTaskArguments() {
     f.reach(id,"deciding");
     f.runtime->tick();
     f.restart();
-    f.wait(id,"user_question");
+    const auto wait = f.wait(id,"user_question");
     check(f.model.calls == 2 && !f.logs(id,"model_failure") && f.logs(id,"decision") == 1,
           "correcting an invalid tool call consumed a model-failure strike");
+    f.store->operate(id,wait,"answer",{{"text","main"}});
+    f.model.script = [](const ModelInput& input) {
+        check(input.event.at("decisionFeedback").empty(),"validation errors leaked into the user's answer event");
+        return work();
+    };
+    f.reach(id,"running");
 }
 
 void replayQuestionDecision() {
@@ -1052,7 +1062,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
 
     f.t3.finish("run-1");
     for (int step = 0; step < 12 && !attemptedFailure; ++step) f.runtime->tick();
-    check(attemptedFailure && !f.task(recipient).contains("deferredTerminal") && f.logs(recipient,"tool_error") == 1 &&
+    check(attemptedFailure && !f.task(recipient).contains("pendingDecision") && f.logs(recipient,"tool_error") == 1 &&
           !f.logs(recipient,"peer_completed"),"failed reply bypassed the outstanding revision before deferral");
     for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
     check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" &&

@@ -943,12 +943,12 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
           "a received message failed to hold same-Bot completion or held another Bot's completion");
 
     const auto held = f.task(id);
-    check(held.at("deferredTerminal").at("eventId") == held.at("eventId") &&
-          held.at("deferredTerminal").at("generation") == held.at("generation") &&
-          held.at("deferredTerminal").at("tool") == "complete","deferred decision lost its task or event identity");
+    check(held.at("pendingDecision").at("eventId") == held.at("eventId") &&
+          held.at("pendingDecision").at("generation") == held.at("generation") &&
+          held.at("pendingDecision").at("tool") == "complete","deferred decision lost its task or event identity");
     f.restart();
     f.reach(id,"completed");
-    check(!f.task(id).contains("deferredTerminal") && f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
+    check(!f.task(id).contains("pendingDecision") && f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
           "the buffered completion was lost or requested another model call after the read-only turn");
 }
 
