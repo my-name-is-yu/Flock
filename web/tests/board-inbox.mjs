@@ -9,7 +9,6 @@ async function exercise(mountBoardInbox) {
   const check = (value, message) => { if (!value) throw new Error(message); };
   const settled = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
   const dialog = byId('board-inbox');
-  const filters = byId('work-view-status-label');
   const bots = byId('work-view-bot');
   const refresh = byId('work-view-refresh');
   const cards = byId('work-view-items');
@@ -42,7 +41,6 @@ async function exercise(mountBoardInbox) {
   mountBoardInbox(async (path, data) => {
     calls.push([path, data]);
     if (path === 'bots') return [{ id: 'release', name: 'Release' }, { id: 'docs', name: 'Docs' }];
-    if (path.startsWith('board')) return { tasks: [] };
     if (path === 'inbox/decide') {
       if (data.waitId === docs.waitId) {
         await new Promise((resolve) => { recordDocs = resolve; });
@@ -62,21 +60,12 @@ async function exercise(mountBoardInbox) {
   });
 
   check(!dialog.open && message.getAttribute('role') === 'status', 'Missing closed dialog or live status');
-  document.querySelector('[data-work-view="board"]').click();
-  await settled();
-  check(dialog.open && byId(dialog.getAttribute('aria-labelledby')).textContent === 'Task board' && !filters.hidden,
-    'The board lost its accessible title or status filter');
-  bots.value = 'release';
-  const status = byId('work-view-status');
-  status.value = 'blocked';
-  status.dispatchEvent(new Event('change'));
-  await settled();
-  check(calls.at(-1)[0] === 'board?bot=release&status=blocked', 'The filter did not narrow the board request');
-  byId('work-view-close').click();
-  await settled();
+  check(!document.querySelector('[data-work-view="board"]') && !byId('work-view-status'),
+    'The sidebar still offers the Task board');
   document.querySelector('[data-work-view="inbox"]').click();
   await settled();
-  check(filters.hidden && getComputedStyle(filters).display === 'none', 'Inbox showed the board status filter');
+  check(dialog.open && byId(dialog.getAttribute('aria-labelledby')).textContent === 'Decision inbox',
+    'The inbox lost its accessible title');
   check(cards.textContent.includes(text) && !cards.querySelector('img,a'), 'User text or an unsafe URL entered the DOM');
   check(!cards.lastElementChild.querySelector('form') && cards.lastElementChild.textContent.includes('View only'),
     'A view-only item showed decision controls');
@@ -149,6 +138,9 @@ async function exercise(mountBoardInbox) {
   await settled();
   check(message.textContent === 'No recorded decisions.' && byId('work-view-title').textContent === 'Recent decisions',
     'The history view lost its accessible title or empty state');
+  filter('release');
+  await settled();
+  check(calls.at(-1)[0] === 'inbox/history?bot=release', 'The Bot filter did not narrow the request');
 }
 
 const assets = new URL('../assets/', import.meta.url);

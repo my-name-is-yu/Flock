@@ -846,7 +846,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.title = [event.taskId ? `#${event.taskId}` : null, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
 function sourceAction(source, label = 'Open source') {

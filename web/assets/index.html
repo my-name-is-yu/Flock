@@ -29,7 +29,6 @@
         <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">×</button>
       </div>
       <div class="board-inbox-nav" role="group" aria-label="Across Bots">
-        <button type="button" data-work-view="board" aria-haspopup="dialog">Task board</button>
         <button type="button" data-work-view="inbox" aria-haspopup="dialog">Decision inbox</button>
       </div>
       <div class="sidebar-scroll">
@@ -141,15 +140,6 @@
     <div class="dialog-body">
       <div class="board-inbox-filters">
         <label>Bot <select id="work-view-bot"><option value="">All Bots</option></select></label>
-        <label id="work-view-status-label">Status
-          <select id="work-view-status">
-            <option value="">All statuses</option><option value="active">Active</option>
-            <option value="running">Working</option><option value="waiting">Waiting</option>
-            <option value="peer_waiting">Waiting for another Bot</option><option value="blocked">Blocked</option>
-            <option value="queued">Queued</option><option value="replanning">Replanning</option>
-            <option value="terminal">Closed</option>
-          </select>
-        </label>
         <button id="work-view-refresh" type="button">Refresh</button>
         <button id="work-view-history" type="button">Recent decisions</button>
       </div>

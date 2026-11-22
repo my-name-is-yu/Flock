@@ -220,7 +220,6 @@ public:
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
                         const Json& event, Seconds now);
-    Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
