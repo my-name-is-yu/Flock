@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
   attempt_id INTEGER, decision TEXT, effect TEXT, result TEXT,
   PRIMARY KEY(message_id,step));
+UPDATE conversation_steps SET decision=json_array(json(decision)) WHERE json_type(decision)='object';
+UPDATE conversation_steps SET result=json_array(json(result)) WHERE json_type(result)='object';
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
@@ -78,15 +80,19 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
 }
 
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
-                                   std::string_view text, Id replyTo) const {
+                                   std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
     auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
                          {bot,clientId});
     if (!row.next()) return std::nullopt;
+    auto stored = p_->query("SELECT payload FROM message_attachments WHERE message_id=? ORDER BY attachment_id",{row.number(0)});
+    auto media = Json::array();
+    while (stored.next()) media.push_back(stored.json(0));
+    if (media != attachments) throw Conflict("This client message ID already has different attachments");
     return receiptRow(row,p_->redactor(bot).text(std::string(text)),replyTo);
 }
 
-Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
+Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo, const Json& attachments) {
     if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
         !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
         throw Conflict("Bot, client message ID and nonempty text are required");
@@ -94,7 +100,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        const auto existing = this->receipt(routing.botId,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {
             modelCallLimit(routing.config);
@@ -109,6 +115,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
+            p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }
         transaction.commit();

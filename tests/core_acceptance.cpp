@@ -79,7 +79,7 @@ bool hasTool(const ModelInput& input, std::string_view tool) {
 struct Script : Model {
     std::function<Decision(const ModelInput&)> script;
     int calls = 0;
-    Decision decide(const ModelInput& input) override { ++calls; return script(input); }
+    ModelTurn decide(const ModelInput& input) override { ++calls; return {{script(input)}}; }
 };
 
 struct SimulatedT3 : T3 {

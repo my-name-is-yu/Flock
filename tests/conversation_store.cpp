@@ -76,7 +76,8 @@ struct ScriptedModel : Model {
     std::function<Decision(const ModelInput&)> conversation;
     std::vector<ModelInput> turns;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.value("kind","") == "conversation_turn") {
             turns.push_back(input);
             return conversation(input);
@@ -184,7 +185,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     const auto id = std::to_string(message);
     fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
-                ",1,'{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}')");
+                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
     RuntimeFixture execution(store);
     unsigned calls = 0;
     execution.model.conversation = [&](const ModelInput& input) {
@@ -210,7 +211,8 @@ void sessionNoteIsNotResentAfterARestart() {
                          {"actionId","flock-turn-" + mid + "-1"}};
     fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
-                Json{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},{"reason","Saved"}}.dump() +
+                Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
+                              {"reason","Saved"}}}).dump() +
                 "','" + effect.dump() + "')");
     Json seen;
     execution.model.conversation = [&](const ModelInput& input) {

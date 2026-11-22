@@ -1,0 +1,42 @@
+#pragma once
+
+#include "flock/core.hpp"
+
+#include <map>
+
+namespace flockv0 {
+
+inline constexpr std::size_t maxToolCalls = 8;
+inline constexpr std::size_t workspaceOutputLimit = 8192;
+
+const std::vector<std::string>& botToolNames();
+bool isBotTool(std::string_view);
+Json botToolSchema(std::string_view);
+
+// Adapters can be called concurrently and must enforce their transport deadlines.
+class WebTools {
+public:
+    virtual ~WebTools() = default;
+    virtual Json search(std::string_view query) = 0;
+    virtual Json fetch(std::string_view url) = 0;
+};
+
+struct ToolOutcomeUnknown : Conflict { using Conflict::Conflict; };
+
+class McpTools {
+public:
+    virtual ~McpTools() = default;
+    virtual bool hasServer(std::string_view server) const = 0;
+    virtual Json discover(std::string_view server) = 0;
+    virtual Json invoke(std::string_view server, std::string_view tool, const Json& args) = 0;
+    virtual Json readResource(std::string_view server, std::string_view uri) = 0;
+};
+
+struct BotTools {
+    std::filesystem::path workspaceRoot;
+    std::map<std::string,std::filesystem::path,std::less<>> skills;
+    std::shared_ptr<WebTools> web;
+    std::shared_ptr<McpTools> mcp;
+};
+
+}

@@ -128,7 +128,8 @@ void cronIntakeAndRestart() {
 class NotesModel final : public Model {
 public:
     std::vector<ModelInput> inputs;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         inputs.push_back(input);
         if (input.event["kind"] == "result")
             return {"complete",{{"report","Original evidence confirmed"}},"The report meets the original acceptance criterion."};
@@ -238,7 +239,8 @@ void notesAcrossConversationAndWork() {
     static constexpr auto explanation = "The Session supplied the evidence required for completion.";
     struct ModelFixture final : Model {
         std::vector<Json> requests;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             requests.push_back(responseRequest(input));
             const auto context = requestContext(requests.back());
             const auto& event = context.at("event");
@@ -500,8 +502,8 @@ void responseContract() {
                           {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
     const Json eventArgs{{"reason","Read the test log"},{"sessionRef","opaque-session"},{"operation","get_attachment"},
                          {"attachmentRef","opaque-attachment"}};
-    check(responseDecision(modelCall("flock_session_search",searchArgs),turn).args.at("project") == "Release" &&
-          responseDecision(modelCall("flock_session_events",eventArgs),turn).args.at("attachmentRef") == "opaque-attachment",
+    check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
+          responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
     auto spoofed = eventArgs;
     spoofed["botId"] = "someone-else";
@@ -560,7 +562,7 @@ void responseContract() {
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
     input.tools = {"complete"};
     const auto completeRequest = responseRequest(input);
-    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest);
+    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest).calls.at(0);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
     rejects<ModelError>([&] { responseDecision(Json::array({call,call}),completeRequest); },"multiple tools accepted");
@@ -594,7 +596,8 @@ void sessionConversationDispatch() {
         bool paged = false, revoked = false;
         Json sessionRef;
         HistoryModel(Store& store, const Scope& shared) : store(store), shared(shared) {}
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
             std::string tool = "flock_session_search";
@@ -622,7 +625,7 @@ void sessionConversationDispatch() {
                 args = {{"text","The investigation is no longer readable."},{"reason","Explain the status"}};
             }
             return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},
-                                    {"name",tool},{"arguments",args.dump()}}}),request);
+                                    {"name",tool},{"arguments",args.dump()}}}),request).calls.at(0);
         }
     } model(store,shared);
     store.access().resourceGrant({"root",true},"release",shared,GrantChange::grant);
@@ -636,7 +639,8 @@ void sessionConversationDispatch() {
 class AcceptanceModel final : public Model {
 public:
     std::vector<Json> requests;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
             return {"follow_up",{{"instruction","Add the required test"}},"A regression test is missing."};
@@ -670,7 +674,8 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     struct ChangeModel final : Model {
         std::string tool;
         Json args;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             if (!input.event.at("turn").empty()) return {"reply",{{"text","Saved."}},"Confirm"};
             auto call = args;
             for (const auto& task : input.task.at("tasks")) {

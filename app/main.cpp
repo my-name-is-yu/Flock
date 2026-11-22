@@ -1,3 +1,4 @@
+#include "bot_tools.hpp"
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
@@ -177,6 +178,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 #else
     (void)home;
 #endif
+    options.botTools = loadBotTools(home);
     const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);

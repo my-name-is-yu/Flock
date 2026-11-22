@@ -20,7 +20,8 @@ constexpr auto sameQuestion =
 class TestModel final : public Model {
 public:
     unsigned calls = 0;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         ++calls;
         const auto request = input.task.at("request").get<std::string>();
         if (input.event.at("kind") == "intake") {

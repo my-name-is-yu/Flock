@@ -15,7 +15,8 @@ class PeerModel final : public Model {
 public:
     int received = 0;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         const auto& kind = input.event.at("kind");
         const auto& bot = input.task.at("botId");
         if (bot == "release" && kind == "intake")

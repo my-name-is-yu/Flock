@@ -40,7 +40,10 @@ struct Decision {
     std::string tool;
     Json args = Json::object();
     std::string reason;
-    Json usage = Json::object(); // Optional numeric measurements from the adapter.
+};
+struct ModelTurn {
+    std::vector<Decision> calls;
+    Json usage = Json::object();
 };
 struct ModelInput {
     Json task, event, history;
@@ -60,8 +63,8 @@ struct ModelError : std::runtime_error {
 class Model {
 public:
     virtual ~Model() = default;
-    // Return exactly one tool call. Throw ModelError for transport/format failures.
-    virtual Decision decide(const ModelInput&) = 0;
+    // Throw ModelError for transport or format failures.
+    virtual ModelTurn decide(const ModelInput&) = 0;
 };
 
 struct RunRef {
@@ -176,9 +179,9 @@ public:
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0);
+                 Id replyToMessageId = 0, const Json& attachments = Json::array());
     std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0) const;
+                                std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
     Json pausedConversations(std::string_view botId) const;
     // Approve one call for a conversation turn paused on the model call limit.
@@ -209,12 +212,14 @@ private:
     friend class Access;
 };
 
+struct BotTools;
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
     std::function<std::vector<PeerBot>(std::string_view)> peers;
+    std::shared_ptr<const BotTools> botTools;
 };
 class Runtime {
 public:

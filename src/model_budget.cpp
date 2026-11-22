@@ -75,9 +75,9 @@ void Store::Impl::grantModelCall(std::string_view budget) {
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
 }
 
-Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
     const auto scrub = redactor(bot);
-    Decision decision;
+    ModelTurn turn;
     try {
         auto safe = input;
         safe.task = scrub.record(input.task);
@@ -87,12 +87,14 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
         safe.config = scrub.record(input.config,SecretRedactor::Fields::external);
         safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
-        decision = model.decide(safe);
-        for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
-        decision.reason = scrub.text(decision.reason);
-        if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
-            decision.tool = scrub.text(decision.tool);
-        decision.usage = scrub.payload(decision.usage);
+        turn = model.decide(safe);
+        for (auto& decision : turn.calls) {
+            for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
+            decision.reason = scrub.text(decision.reason);
+            if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
+                decision.tool = scrub.text(decision.tool);
+        }
+        turn.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         auto usage = scrub.payload(error.usage);
         if (!usage.empty()) {
@@ -103,10 +105,10 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }
-    if (!decision.usage.empty()) {
+    if (!turn.usage.empty()) {
         std::lock_guard lock(mutex);
-        exec("UPDATE model_attempts SET usage=? WHERE id=?",{decision.usage,attemptId});
+        exec("UPDATE model_attempts SET usage=? WHERE id=?",{turn.usage,attemptId});
     }
-    return decision;
+    return turn;
 }
 }

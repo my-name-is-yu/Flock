@@ -267,6 +267,8 @@ ORDER BY j.id DESC LIMIT ?
             if (kind == "conversation_message") {
                 entry["role"] = "user";
                 body = rows.string(4);
+                const auto media = attachmentViews(rows.number(0));
+                if (!media.empty()) entry["attachments"] = media;
             } else if (kind == "conversation_reply") {
                 entry["role"] = "bot";
                 body = field(data,"text");
@@ -304,12 +306,15 @@ ORDER BY j.id DESC LIMIT ?
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
                        " AND result IS NOT NULL ORDER BY step",{message.id,step});
     while (steps.next()) {
-        const auto decision = steps.json(0);
-        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
+        const auto calls = steps.json(0);
+        const auto results = steps.json(1);
+        for (std::size_t i = 0; i < calls.size(); ++i)
+            turn.push_back({{"tool",calls[i].at("tool")},{"args",calls[i].at("args")},{"result",results.at(i)}});
     }
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
             {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
+                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)},
+                      {"attachments",attachmentViews(message.id)}}},
             {"history",std::move(history)}};
 }
 
@@ -540,10 +545,14 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND result IS NOT NULL"
                        " ORDER BY step",{message.id});
     while (steps.next()) {
-        const auto result = steps.json(1);
-        if (!result.value("ok",false) || !result.contains("effect")) continue;
-        actions.push_back({{"tool",steps.json(0).at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
-        touched.insert(result.at("taskId").get<Id>());
+        const auto calls = steps.json(0);
+        const auto results = steps.json(1);
+        for (std::size_t i = 0; i < results.size(); ++i) {
+            const auto& result = results[i];
+            if (!result.value("ok",false) || !result.contains("effect")) continue;
+            actions.push_back({{"tool",calls[i].at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
+            touched.insert(result.at("taskId").get<Id>());
+        }
     }
     if (route == "error" && !actions.empty()) {
         const bool ja = japanese(message.text);
@@ -580,7 +589,7 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes) {
+bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes, const BotTools& settings) {
     std::optional<Message> message;
     {
         std::lock_guard lock(mutex);
@@ -612,7 +621,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
-        std::optional<Decision> decision;
+        std::vector<Decision> calls;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db,Transaction::Mode::read);
@@ -621,13 +630,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
                 if (!row.string(0).empty()) {
-                    const auto saved = row.json(0);
-                    decision = Decision{saved.at("tool"),saved.at("args"),saved.value("reason",""),saved.value("usage",Json::object())};
+                    for (const auto& call : row.json(0))
+                        calls.push_back({call.at("tool"),call.at("args"),call.value("reason","")});
                 }
             }
             transaction.commit();
         }
-        if (!decision) {
+        if (calls.empty()) {
             ModelInput input;
             Id attempt = 0;
             {
@@ -637,6 +646,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 const auto context = turnInput(*message,step);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
+                input.tools.insert(input.tools.end(),botToolNames().begin(),botToolNames().end());
                 auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
                                       " AND reserved_attempt IS NOT NULL",{id});
                 if (reserved.next()) {
@@ -651,7 +661,11 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             if (!attempt) return true;
             try {
                 authorizeSessionHistory(message->bot,input.event.at("turn"),t3);
-                decision = callModel(message->bot,model,input,attempt);
+                calls = callModel(message->bot,model,input,attempt).calls;
+                if (calls.empty() || calls.size() > maxToolCalls)
+                    throw ModelError("Invalid Flock call count",false);
+                if (calls.size() > 1 && !std::ranges::all_of(calls,[](const auto& call) { return isBotTool(call.tool); }))
+                    throw ModelError("Parallel calls must be independent Bot tools",false);
             } catch (const ModelError& error) {
                 if (error.transient) return false;
                 finish(failure,"error");
@@ -662,13 +676,21 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             }
             std::lock_guard lock(mutex);
             Transaction transaction(db);
+            auto saved = Json::array();
+            for (const auto& call : calls)
+                saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
             exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
-                 {Json{{"tool",decision->tool},{"args",decision->args},{"reason",decision->reason},
-                       {"usage",decision->usage}},id,step});
+                 {saved,id,step});
             transaction.commit();
         }
 
-        if (decision->tool == "message_session" || decision->tool == "interrupt_session") {
+        const auto& decision = calls.front();
+        if (isBotTool(decision.tool)) {
+            runBotTools({message->bot,id,settings},step,calls);
+            continue;
+        }
+
+        if (decision.tool == "message_session" || decision.tool == "interrupt_session") {
             Json effect;
             {
                 std::lock_guard lock(mutex);
@@ -679,19 +701,19 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                                    {id,step});
                 if (saved.next()) {
                     // The earlier attempt may have reached T3 before the restart. Report it instead of sending again.
-                    exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=? AND result IS NULL",
-                         {Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},{"delivery","unknown"},
-                               {"error","Flock restarted while sending this, so T3 may have received it. "
-                                        "Check the Session before sending it again"}},id,step});
+                    const Json outcome{{"ok",false},{"taskId",saved.json(0).at("taskId")},{"delivery","unknown"},
+                        {"error","Flock restarted while sending this, so T3 may have received it. "
+                                 "Check the Session before sending it again"}};
+                    saveTurnResults(id,step,Json::array({outcome}));
                 } else {
                     try {
-                        effect = prepareSessionEffect(*current,step,*decision);
+                        effect = prepareSessionEffect(*current,step,decision);
                         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",{effect,id,step});
                     } catch (const ToolError& error) {
                         auto failed = error.details;
                         failed["ok"] = false;
                         failed["error"] = error.what();
-                        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{redactor(message->bot).record(failed),id,step});
+                        saveTurnResults(id,step,Json::array({redactor(message->bot).record(failed)}));
                     }
                 }
                 transaction.commit();
@@ -708,17 +730,17 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 if (effect.contains("text")) entry["text"] = effect.at("text");
                 journal(effect.at("taskId"),effect.at("kind") == "steer" ? "instruction_steered" : "interrupt_requested",entry);
             }
-            exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{outcome,id,step});
+            saveTurnResults(id,step,Json::array({outcome}));
             transaction.commit();
             continue;
         }
 
         Json result;
-        if (decision->tool == "flock_session_search" || decision->tool == "flock_session_events") {
-            result = sessionReadTool(message->bot,*decision,t3);
-        } else if (decision->tool == "check_environment_readiness") {
+        if (decision.tool == "flock_session_search" || decision.tool == "flock_session_events") {
+            result = sessionReadTool(message->bot,decision,t3);
+        } else if (decision.tool == "check_environment_readiness") {
             try {
-                result = readiness(message->bot,message->routing,decision->args,t3);
+                result = readiness(message->bot,message->routing,decision.args,t3);
                 result["ok"] = true;
             } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
         }
@@ -726,9 +748,9 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         Transaction transaction(db);
         const auto current = turnMessage(id);
         if (!current) return true;
-        if (decision->tool == "reply") {
+        if (decision.tool == "reply") {
             try {
-                const auto& args = decision->args;
+                const auto& args = decision.args;
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
                 auto reply = text(args,"text",8000,true);
                 Json suggestions = Json::array();
@@ -742,8 +764,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                         suggestions.push_back(item);
                     }
                 }
-                exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",
-                     {Json{{"ok",true}},id,step});
+                saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
                 finishTurn(*current,std::move(reply),suggestions,"reply");
                 transaction.commit();
                 return true;
@@ -755,7 +776,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         } else if (result.is_null()) {
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(*current,step,*decision);
+                result = applyTurnTool(*current,step,decision);
                 exec("RELEASE turn_tool");
             } catch (const std::exception& error) {
                 exec("ROLLBACK TO turn_tool");
@@ -766,7 +787,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 result["error"] = error.what();
             }
         }
-        exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{redactor(message->bot).record(result),id,step});
+        saveTurnResults(id,step,Json::array({redactor(message->bot).record(result)}));
         transaction.commit();
     }
     finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"

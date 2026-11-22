@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/access.hpp"
+#include "workspace_internal.hpp"
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -78,14 +79,27 @@ struct Store::Impl {
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
+    void migrateWorkspace();
+    void migrateAttachments();
+    void saveAttachments(Id, const Json&);
+    Json attachmentViews(Id) const;
+    void recoverWorkspace();
+    void stopWorkspace();
+    std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
+    void validateWorkspace(const ToolContext&, const Decision&);
+    Json workspaceTool(const ToolContext&, const Decision&);
+    void validateBotTool(const ToolContext&, const Decision&);
+    Json executeBotTool(const ToolContext&, const Decision&);
+    void saveTurnResults(Id, int step, const Json& results);
+    void runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     void grantModelCall(std::string_view budget);
-    Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
+    ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&, const BotTools&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     std::optional<conversation::Message> turnMessage(Id messageId) const;
     Json turnInput(const conversation::Message&, int step) const;

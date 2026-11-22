@@ -8,7 +8,7 @@ namespace flockv0::app {
 class ChatGPTModel final : public Model {
 public:
     explicit ChatGPTModel(std::filesystem::path directory);
-    Decision decide(const ModelInput&) override;
+    ModelTurn decide(const ModelInput&) override;
     Json login(bool printUrl, bool reconsent);
     Json status();
     Json models();
@@ -18,6 +18,6 @@ private:
 };
 
 Json responseRequest(const ModelInput&);
-Decision responseDecision(const Json& output, const Json& request);
+ModelTurn responseDecision(const Json& output, const Json& request);
 bool runModelAcceptance(Model&, const std::string& slug, std::ostream&);
 }

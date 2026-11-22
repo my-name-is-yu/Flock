@@ -18,7 +18,8 @@ constexpr auto credential = "sensitive-test-value";
 struct ToolModel : Model {
     Decision next;
     Json result;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         for (auto& data:{input.task,input.event,input.history,input.evidence,input.config,Json(input.notes.soul),Json(input.feedback)})
             check(data.dump().find(credential)==std::string::npos,"value reached model");
         if (next.tool.empty()) {
@@ -41,7 +42,8 @@ struct Adapter : T3 {
 const Person owner{"local-owner",true}, admin{"alice"}, viewer{"bob"};
 const Scope readRepo{"repository","private","read"}, writeRepo{"repository","private","write"};
 struct WorkModel : Model {
-    Decision decide(const ModelInput& in) override {
+    ModelTurn decide(const ModelInput& in) override { return {{choose(in)}}; }
+    Decision choose(const ModelInput& in) {
         if (in.task.value("request","") == "ask reviewer")
             return {"send_bot_message",{{"kind","work"},{"botId","Reviewer"},{"text","review repository"},{"doneWhen","reviewed"}},"Request peer review"};
         return {"delegate",{{"instruction","read repository"},{"doneWhen","read complete"}},"Read the requested repository"};

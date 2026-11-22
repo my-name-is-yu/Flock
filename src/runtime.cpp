@@ -127,16 +127,20 @@ struct Runtime::Impl {
               bot.memory = bounded(bot.memory,limit);
               return bot;
           }), options(std::move(opts)) {
+        if (!options.botTools) options.botTools = std::make_shared<BotTools>();
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
             if (lockFd >= 0) close(lockFd);
             throw Conflict("Cannot acquire the exclusive Runtime lock for this database");
         }
+        try { db.recoverWorkspace(); }
+        catch (...) { close(lockFd); throw; }
     }
     ~Impl() {
         conversationWorkers.clear();
         workers.clear();
+        db.stopWorkspace();
         close(lockFd);
     }
 
@@ -996,9 +1000,9 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         if (task["state"] != "queued") task["state"] = "deciding";
     }
 
-    void recordDecision(const Json& task, const Json& event, const Decision& decision, std::string_view action) {
+    void recordDecision(const Json& task, const Json& event, const Decision& decision, const Json& usage, std::string_view action) {
         db.journal(task["id"],"decision",{{"actionId",action},{"tool",decision.tool},{"args",decision.args},
-            {"reason",decision.reason},{"eventId",event["id"]},{"evidence",event["evidence"]},{"usage",decision.usage},
+            {"reason",decision.reason},{"eventId",event["id"]},{"evidence",event["evidence"]},{"usage",usage},
             {"revisionId",revision(task)}});
     }
 
@@ -1014,7 +1018,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         return {{"text",row.string(0)},{"time",row.number(1)}};
     }
 
-    void sendPeer(Json& sender, const Json& event, const Decision& decision, PeerBot peer, const std::string& action) {
+    void sendPeer(Json& sender, const Json& event, const Decision& decision, const Json& usage, PeerBot peer, const std::string& action) {
         if (db.peerExchange(sender["id"])) throw Conflict("Finish the current Bot exchange first");
         const auto& args = decision.args;
         const auto note = field(args,"text");
@@ -1037,7 +1041,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             }
             else if (sender["remaining"] == 0) {
                 db.wait(sender,"budget",{{"text","The additional work allowance is exhausted"},
-                    {"attempted",decision.tool},{"decisionReason",decision.reason},{"usage",decision.usage}});
+                    {"attempted",decision.tool},{"decisionReason",decision.reason},{"usage",usage}});
                 return;
             } else {
                 sender["remaining"] = sender["remaining"].get<int>() - 1;
@@ -1060,7 +1064,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         db.save(recipient);
         db.consumeEvent(sender);
         sender.erase("feedback");
-        recordDecision(sender,event,decision,action);
+        recordDecision(sender,event,decision,usage,action);
         sender["state"] = "peer_waiting";
     }
 
@@ -1103,7 +1107,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         }
     }
 
-    void replyPeer(Json& task, const Json& event, const Decision& decision, const std::string& action) {
+    void replyPeer(Json& task, const Json& event, const Decision& decision, const Json& usage, const std::string& action) {
         const auto peer = db.peerExchange(task["id"]);
         if (!peer) throw Conflict("The Bot exchange has closed");
         const auto type = field(decision.args,"kind");
@@ -1121,7 +1125,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
         db.consumeEvent(task);
         task.erase("feedback");
-        recordDecision(task,event,decision,action);
+        recordDecision(task,event,decision,usage,action);
         if (type == "result" || type == "failed") {
             const auto status = type == "result" ? "completed" : "failed";
             task["state"] = "completed";
@@ -1140,7 +1144,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         }
     }
 
-    void readPeerEvidence(const Json& task, const Json& event, const Decision& decision) {
+    void readPeerEvidence(const Json& task, const Json& event, const Decision& decision, const Json& usage) {
         const auto& args = decision.args;
         const auto messageId = field(args,"messageId");
         if (event["kind"] != "bot_result" || messageId.empty() || event["messageId"] != messageId)
@@ -1172,14 +1176,14 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             auto evidence = event["evidence"];
             evidence.push_back(entry);
             db.exec("UPDATE events SET evidence=? WHERE id=?",{evidence,event["id"]});
-            if (!decision.usage.empty()) entry["usage"] = decision.usage;
+            if (!usage.empty()) entry["usage"] = usage;
             db.journal(current["id"],"read_bot_evidence",entry);
             return true;
         });
     }
 
     // An unfinished conversation turn can still change any task of its Bot. Call alongside the closing write.
-    bool deferUntilTurnsFinish(const Json& current, Id eventId, const Decision& decision) {
+    bool deferUntilTurnsFinish(const Json& current, Id eventId, const Decision& decision, const Json& usage) {
         if (!db.conversationPending(field(current,"botId"))) return false;
         auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,current["id"]});
         if (!row.next()) return true;
@@ -1187,12 +1191,12 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         data["_flockDeferredCompletion"] = true;
         // Preserve the task generation and reuse the decision if the turn leaves the task unchanged.
         data["_flockSavedCompletion"] = {{"generation",current["generation"]},{"tool",decision.tool},
-            {"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+            {"args",decision.args},{"reason",decision.reason},{"usage",usage}};
         db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,current["id"]});
         return true;
     }
 
-    void acceptCompletion(const Json& snapshot, const Json& event, const Decision& decision) {
+    void acceptCompletion(const Json& snapshot, const Json& event, const Decision& decision, const Json& usage) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         const auto id = snapshot["id"].get<Id>();
@@ -1202,11 +1206,11 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             hasPending(current) || current.value("replanning",false) ||
             (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))) return;
 
-        if (deferUntilTurnsFinish(current,eventId,decision)) {
+        if (deferUntilTurnsFinish(current,eventId,decision,usage)) {
         } else {
             clearDeferredCompletionMarker(id,eventId);
             db.consumeEvent(current);
-            recordDecision(current,event,decision,actionId());
+            recordDecision(current,event,decision,usage,actionId());
             current.erase("feedback");
             current["state"] = "completed";
             db.journal(id,"completed",{{"text",field(decision.args,"report")},{"reason",decision.reason},
@@ -1220,7 +1224,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         transaction.commit();
     }
 
-    void accept(const Json& snapshot, const Json& event, const Decision& decision) {
+    void accept(const Json& snapshot, const Json& event, const Decision& decision, const Json& usage) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
         static const std::map<std::string_view,std::set<std::string_view>> arguments{
@@ -1238,10 +1242,10 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             if (!arguments.at(tool).contains(item.key())) throw Conflict("Unknown action argument");
         }
         if (tool == "session_read") {
-            readEvidence(snapshot,event,args,decision.usage);
+            readEvidence(snapshot,event,args,usage);
             return;
         }
-        if (tool == "read_bot_evidence") return readPeerEvidence(snapshot,event,decision);
+        if (tool == "read_bot_evidence") return readPeerEvidence(snapshot,event,decision,usage);
         if (tool == "send_bot_message" || tool == "reply_to_bot") {
             if (args.contains("forwardUserMessage") && !args.at("forwardUserMessage").is_boolean())
                 throw Conflict("forwardUserMessage must be a boolean");
@@ -1257,11 +1261,11 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 auto current = db.load(snapshot["id"]);
                 if (current["generation"] != snapshot["generation"]) return;
                 if ((kind == "result" || kind == "failed") &&
-                    deferUntilTurnsFinish(current,event["id"].get<Id>(),decision)) {
+                    deferUntilTurnsFinish(current,event["id"].get<Id>(),decision,usage)) {
                     transaction.commit();
                     return;
                 }
-                replyPeer(current,event,decision,actionId());
+                replyPeer(current,event,decision,usage,actionId());
                 db.save(current);
                 transaction.commit();
                 return;
@@ -1272,7 +1276,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             if ((requiresCondition && !present(field(args,"doneWhen"))) || (!requiresCondition && args.contains("doneWhen")))
                 throw Conflict("Only the first work request sets the task's acceptance criteria");
             auto peer = allowedPeer(snapshot,field(args,"botId"));
-            change(snapshot,[&](Json& current) { sendPeer(current,event,decision,std::move(peer),actionId()); return true; });
+            change(snapshot,[&](Json& current) { sendPeer(current,event,decision,usage,std::move(peer),actionId()); return true; });
             return;
         }
         const bool work = tool == "delegate" || tool == "follow_up";
@@ -1295,7 +1299,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         }
         if (tool == "complete") {
             if (!present(field(args,"report"))) throw Conflict("A completion report is required");
-            return acceptCompletion(snapshot,event,decision);
+            return acceptCompletion(snapshot,event,decision,usage);
         }
         if (tool == "answer_session_question") {
             if (field(args,"requestId") != field(snapshot["question"],"requestId"))
@@ -1308,7 +1312,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 throw Conflict("Start a new Session in the current environment");
             const bool charge = work && (!current["lastRun"].is_null() || db.query(
                 "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{id}).next());
-            if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
+            if (charge && needsBudget(current,tool,decision.reason,usage)) return true;
             if (initial && work) {
                 const auto source = current.value("criteriaSourceMessageId",current.value("sourceMessageId",Id{0}));
                 db.addRevision(current,intent(current),doneWhen,source);
@@ -1318,7 +1322,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             clearDeferredCompletionMarker(id,event["id"].get<Id>());
             db.consumeEvent(current);
             const auto action = actionId();
-            recordDecision(current,event,decision,action);
+            recordDecision(current,event,decision,usage,action);
             current.erase("feedback");
             if (tool == "ask_user") {
                 db.wait(current,"user_question",{{"text",field(args,"question")},{"decisionReason",decision.reason},
@@ -1351,6 +1355,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         Json event, history = Json::array();
         std::optional<PeerExchange> peer;
         std::optional<Decision> savedCompletion;
+        Json savedUsage;
         {
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
@@ -1360,7 +1365,8 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             event.erase("_flockSavedCompletion");
             if (deferred.is_object() && deferred["generation"] == task["generation"]) {
                 if (db.conversationPending(field(task,"botId"))) return;
-                savedCompletion = Decision{deferred.value("tool","complete"),deferred["args"],deferred["reason"],deferred["usage"]};
+                savedCompletion = Decision{deferred.value("tool","complete"),deferred["args"],deferred["reason"]};
+                savedUsage = deferred["usage"];
             } else {
                 peer = db.peerExchange(task["id"]);
                 if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
@@ -1387,8 +1393,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
         try {
             if (savedCompletion) {
-                if (savedCompletion->tool == "complete") return acceptCompletion(task,event,*savedCompletion);
-                return accept(task,event,*savedCompletion);
+                if (savedCompletion->tool == "complete") return acceptCompletion(task,event,*savedCompletion,savedUsage);
+                return accept(task,event,*savedCompletion,savedUsage);
             }
             auto choices = Json::array();
             bool canRead = false;
@@ -1450,8 +1456,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 transaction.commit();
             }
             if (!attempt) return;
-            const Decision decision = db.callModel(field(task,"botId"),model,
+            const auto turn = db.callModel(field(task,"botId"),model,
                 {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]},attempt);
+            if (turn.calls.size() != 1) throw Conflict("Return one task action");
+            const auto& decision = turn.calls.front();
             event["evidence"] = evidence;
             if (!task["activeRun"].is_null()) {
                 const auto observed = observe(task);
@@ -1460,7 +1468,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (!decision.args.is_object() || decision.args.dump().size() > 20000 || !present(decision.reason,4000) ||
                 std::find(tools.begin(),tools.end(),decision.tool) == tools.end())
                 throw Conflict("Return exactly one permitted action, valid arguments and a reason");
-            accept(task,event,decision);
+            accept(task,event,decision,turn.usage);
         } catch (const ModelError& e) {
             failure(task,event,e.what(),e.transient);
         } catch (const std::exception& e) {
@@ -1510,7 +1518,8 @@ void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes,
+            *p_->options.botTools)) break;
     }
 }
 void Runtime::tick() {
@@ -1535,7 +1544,8 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes,
+                        *p_->options.botTools);
                 }));
             }
         }

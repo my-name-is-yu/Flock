@@ -120,7 +120,8 @@ struct Backend : T3 {
 struct Agent : Model {
     Decision next;
     Json result;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.at("kind") == "intake")
             return {"delegate",{{"instruction","Investigate staging"},{"doneWhen","Report failure"}},"Investigate"};
         const auto& steps = input.event.at("turn");
