@@ -351,13 +351,15 @@ void workspaceAndLifecycle(Fixture& f) {
           stderrStages.at("stderr").get<std::string>().find("missing-stage-one") != std::string::npos &&
           stderrStages.at("stderr").get<std::string>().find("missing-stage-two") != std::string::npos,
           "Pipeline did not capture last-stage stdout and all-stage stderr");
+    // Each stream stays below the cap on its own, but their combined output exceeds it.
     const std::string longMissing(2000,'m');
     const auto capped = f.until(f.pipeline(Json::array({
         Json::array({"cat","missing-"+longMissing}),Json::array({"cat","missing-"+longMissing}),
-        Json::array({"cat","missing-"+longMissing}),Json::array({"printf","%10000s","x"})})),
-        [](const Json& state) { return state.at("state") == "exited"; },5s);
-    check(capped.at("truncated") == true &&
-          capped.at("stdout").get<std::string>().size()+capped.at("stderr").get<std::string>().size() <= workspaceOutputLimit,
+        Json::array({"cat","missing-"+longMissing}),Json::array({"printf","%04096d","0"})})),finished,5s);
+    const auto stdoutBytes = capped.at("stdout").get_ref<const std::string&>().size();
+    const auto stderrBytes = capped.at("stderr").get_ref<const std::string&>().size();
+    check(capped.at("truncated") == true && stdoutBytes > 0 && stderrBytes > 0 &&
+          stdoutBytes + stderrBytes <= workspaceOutputLimit,
           "Pipeline output did not enforce the shared stdout/stderr cap");
     const int processMarkerBase = 100000 + static_cast<int>(getpid()%100000)*10;
     const std::array<std::string,4> stoppedArguments{
