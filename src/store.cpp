@@ -796,7 +796,7 @@ FROM (
     j.conversation_bot_id
   FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
     AND j.conversation_bot_id IS NULL
-    AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message')
+    AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
     AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
     AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
@@ -806,7 +806,7 @@ FROM (
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
 WHERE (?=0 OR page.id<?)
-  AND (?=0 OR page.kind IN ('conversation_reply','report','completed')
+  AND (?=0 OR page.kind IN ('conversation_reply','report','completed','pr_review_requested')
        OR (page.kind='waiting' AND json_extract(page.data,'$.reason')='user_question'))
 ORDER BY page.id DESC LIMIT ?)SQL",
         {bot,bot,before,before,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});

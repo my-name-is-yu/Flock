@@ -5,7 +5,7 @@ const matchesPerView = 5;
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
 const textFields = new Map([
   ['conversation_message', 'text'], ['conversation_reply', 'text'], ['request', 'text'],
-  ['user_answer', 'text'], ['waiting', 'text'], ['report', 'report'], ['completed', 'text'],
+  ['user_answer', 'text'], ['waiting', 'text'], ['report', 'report'], ['completed', 'text'], ['pr_review_requested', 'text'],
 ]);
 
 function snippetFor(event, pattern) {
@@ -29,7 +29,7 @@ function element(tag, className, text = '') {
   return item;
 }
 
-export function mountConversationFind({ toggle, panel, readPage, describeAuthor, openMatch }) {
+export function mountConversationFind({ toggle, panel, readPage, describeAuthor, openMatch, beforeOpen }) {
   const input = panel.querySelector('input');
   const previous = panel.querySelector('.find-previous');
   const next = panel.querySelector('.find-next');
@@ -120,15 +120,17 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     toggle.setAttribute('aria-expanded', 'false');
     render();
     if (returnFocus) {
-      const target = origin?.isConnected && origin.getClientRects().length ? origin : toggle;
+      const target = origin?.isConnected && origin.getClientRects().length ? origin :
+        toggle.closest('details')?.querySelector('summary') ?? toggle;
       target.focus({ preventScroll: true });
     }
     origin = null;
   }
 
   function open() {
-    if (!context || !toggle.getClientRects().length || document.querySelector('dialog[open]')) return false;
+    if (!context || toggle.hidden || document.querySelector('dialog[open]')) return false;
     if (panel.hidden) origin = document.activeElement;
+    beforeOpen?.();
     panel.hidden = false;
     toggle.setAttribute('aria-expanded', 'true');
     input.focus({ preventScroll: true });
@@ -224,6 +226,7 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
   });
 
   return {
+    close,
     setContext(nextContext) {
       if (context === nextContext) return;
       close(false);

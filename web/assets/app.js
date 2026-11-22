@@ -4,7 +4,7 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
-import { mountBoardInbox } from '/board-inbox.js';
+import { mountBoardInbox, pullRequestLink } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
@@ -15,14 +15,15 @@ import { mountConversationFind } from '/conversation-find.mjs';
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
-  'profile-name', 'profile-status', 'profile-identity', 'profile-placeholder', 'conversation', 'older',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar', 'profile-avatar-button',
+  'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'decision-reply-context', 'decision-reply-label', 'decision-reply-target', 'decision-cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-identity', 'peer-heading', 'peer-faces', 'peer-name-first', 'peer-name-second',
-  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
+  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -33,6 +34,8 @@ function animateLiveReply(id) {
   ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
 }
 const workspace = document.querySelector('.workspace');
+const conversationActions = byId('conversation-actions');
+const conversationActionsTrigger = conversationActions.querySelector('summary');
 const narrow = matchMedia('(max-width: 700px)');
 const noHover = matchMedia('(hover: none)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -211,6 +214,11 @@ function openNavigation(open, focus = true) {
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
   if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
+function closeConversationActions(focus = false) {
+  if (!conversationActions.open) return;
+  conversationActions.open = false;
+  if (focus) conversationActionsTrigger.focus({ preventScroll: true });
+}
 function conversationUrl(botId, peerId, anchor) {
   const url = new URL(location.href);
   if (botId) url.searchParams.set('bot', botId);
@@ -221,14 +229,55 @@ function conversationUrl(botId, peerId, anchor) {
   else url.searchParams.delete('anchor');
   return url;
 }
+function animateViewTransition(kind) {
+  if (reducedMotion.matches) return;
+  const inner = elements.conversation.querySelector('.conversation-inner');
+  const ease = 'cubic-bezier(.2, .9, .25, 1)';
+  if (kind === 'dm-enter') {
+    inner?.animate?.([
+      { opacity: 0, transform: 'scale(.985) translateY(8px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 210, easing: ease });
+    elements['peer-heading']?.animate?.([
+      { opacity: 0, transform: 'scale(.94)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 185, easing: ease });
+    elements['peer-back']?.animate?.([
+      { opacity: 0, transform: 'translateX(-6px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 185, easing: ease });
+  } else if (kind === 'dm-exit') {
+    inner?.animate?.([
+      { opacity: 0, transform: 'scale(1.015)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 190, easing: ease });
+    byId('profile-heading')?.animate?.([
+      { opacity: 0, transform: 'scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 170, easing: ease });
+  } else if (kind === 'bot-switch') {
+    elements.timeline?.animate?.([
+      { opacity: .2, transform: 'translateY(6px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 175, easing: ease });
+    elements['profile-avatar-button']?.animate?.([
+      { opacity: .65, transform: 'scale(.92)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 180, easing: ease });
+  }
+}
 function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fromPeerLink = false } = {}) {
   menu = null;
+  closeConversationActions();
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId && (view?.dm?.anchor ?? 0) === anchor) {
     if (view.source || view.pendingSource) backToLatest();
     else renderBots();
     return;
   }
+  const prevBotId = view?.id ?? null;
+  const wasDm = !!view?.dm;
+  const isDm = !!peerId;
   resetConversationJump(view);
   rememberReadingPosition(fromPeerLink && !view?.dm && view?.id === botId);
   closeDetail();
@@ -243,6 +292,9 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
   }
   save('flock-selected-bot', botId);
   render('bottom');
+  if (!wasDm && isDm) animateViewTransition('dm-enter');
+  else if (wasDm && !isDm) animateViewTransition('dm-exit');
+  else if (prevBotId && prevBotId !== botId && !isDm) animateViewTransition('bot-switch');
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
@@ -288,6 +340,7 @@ function peerLink(botId, peerId, label, className, anchor = 0) {
 const sidebarIcons = {
   more: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5Z"/><path d="M12 14v6"/></svg>',
+  inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>',
   open: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 16 16 8M10 8h6v6"/></svg>',
 };
@@ -359,6 +412,10 @@ function menuPopover(bot) {
   list.setAttribute('aria-label', `${bot.name} menu`);
   const actions = [
     [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot.id)],
+    ['Recent decisions', sidebarIcons.inbox, () => {
+      selectBot(bot.id);
+      void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
+    }],
     ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   actions.forEach(([label, icon, run], index) => {
@@ -387,7 +444,10 @@ function menuPopover(bot) {
 }
 function createSidebarEntry(botId) {
   const row = node('div');
-  const select = button(null, '', () => selectBot(botId));
+  const select = button(null, '', () => {
+    decisions.close({ focus: false });
+    selectBot(botId);
+  });
   select.dataset.focus = `bot:${botId}`;
   const face = node('span');
   const avatarHost = node('span', 'avatar');
@@ -420,7 +480,17 @@ function createSidebarEntry(botId) {
   const shortcutLabel = node('kbd');
   tooltip.append(tooltipName, shortcutLabel);
   const toggle = menuButton(botId);
-  row.append(select, tooltip, toggle);
+  const decisionCount = button(null, 'decision-count', () => {
+    selectBot(botId);
+    decisions.open(decisionCount);
+  });
+  decisionCount.dataset.focus = `decisions:${botId}`;
+  decisionCount.setAttribute('aria-controls', 'decision-panel');
+  row.append(select, tooltip, decisionCount, toggle);
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    setMenu(botId, 'first');
+  });
 
   let previousBot;
   let avatarHandle;
@@ -437,6 +507,10 @@ function createSidebarEntry(botId) {
       select.className = pinned ? 'pin' : 'bot-select';
       if (active) select.setAttribute('aria-current', 'true');
       else select.removeAttribute('aria-current');
+      const count = decisions.count(botId);
+      decisionCount.hidden = !count;
+      decisionCount.textContent = count;
+      decisionCount.setAttribute('aria-label', `${bot.name}: ${count} pending ${count === 1 ? 'decision' : 'decisions'}`);
 
       face.className = pinned ? 'pin-face' : '';
       avatarHost.classList.toggle('pin-avatar', pinned);
@@ -523,9 +597,23 @@ function draftRow(draft) {
   return row;
 }
 
+let previousPinsKey = null;
 function renderBots() {
   const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds)) return;
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds,
+    bots.map(({ id }) => decisions.count(id)))) return;
+  const pinsKey = JSON.stringify([...pins]);
+  const animateFlip = previousPinsKey !== null && previousPinsKey !== pinsKey && !reducedMotion.matches;
+  previousPinsKey = pinsKey;
+  const beforeRects = new Map();
+  if (animateFlip) {
+    for (const entry of sidebarEntries.values()) {
+      if (entry.row.isConnected) beforeRects.set(entry.row, entry.row.getBoundingClientRect());
+    }
+    if (!elements['bot-activity'].hidden) {
+      beforeRects.set(elements['bot-activity'], elements['bot-activity'].getBoundingClientRect());
+    }
+  }
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const source = sidebarBots();
   const pinned = pinnedBotsInShortcutOrder(source);
@@ -552,6 +640,21 @@ function renderBots() {
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (animateFlip) {
+    for (const [el, before] of beforeRects) {
+      if (!el.isConnected || el.hidden) continue;
+      const after = el.getBoundingClientRect();
+      if (!after.width || !after.height) continue;
+      const dx = before.left - after.left;
+      const dy = before.top - after.top;
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        el.animate?.([
+          { transform: `translate(${dx}px, ${dy}px)` },
+          { transform: 'none' },
+        ], { duration: 230, easing: 'cubic-bezier(.2, .9, .25, 1)' });
+      }
+    }
+  }
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -565,7 +668,7 @@ function scheduleReadCheck() {
   readCheckFrame ??= requestAnimationFrame(() => {
     readCheckFrame = undefined;
     if (!view?.data || view.dm || sidebarViewer === null || responseViewers.get(view.data) !== sidebarViewer ||
-        document.hidden || document.querySelector('dialog[open]')) return;
+        document.hidden || decisions.isOpen() || document.querySelector('dialog[open]')) return;
     const state = readState.get(view.id);
     if (!state || state.incoming <= state.readThrough) return;
     const scroller = elements.conversation;
@@ -591,19 +694,24 @@ function renderHeader() {
   const profile = elements.profile;
   const identity = elements['profile-identity'];
   identity.hidden = !bot || !!dm;
+  elements['profile-toolbar'].hidden = !bot;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
   elements['peer-identity'].hidden = !dm;
   if (dm) {
-    elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
-    const pair = [dm.id, dm.peerId].sort().map(participant);
-    if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot, 'avatar-profile')));
-      elements['peer-name-first'].textContent = pair[0].name;
-      elements['peer-name-second'].textContent = pair[1].name;
-      elements['peer-heading'].title = pair.map(({ name }) => name).join(' & ');
+    const owner = participant(dm.id);
+    const peer = participant(dm.peerId);
+    const backLabel = `Back to ${owner.name}`;
+    elements['peer-back-label'].textContent = backLabel;
+    elements['peer-back'].setAttribute('aria-label', backLabel);
+    elements['peer-back'].title = `${backLabel} (Esc)`;
+    if (changed('peer-heading', [owner.id, owner.name, owner.avatar, peer.id, peer.name])) {
+      elements['peer-faces'].replaceChildren(avatar(owner, 'avatar-profile'));
+      elements['peer-name-first'].textContent = owner.name;
+      elements['peer-name-second'].textContent = peer.name;
+      elements['peer-heading'].title = `${owner.name} › ${peer.name}`;
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -635,12 +743,12 @@ function renderHeader() {
   profileMotion = motion;
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
-  const showStatus = offline || presence !== 'idle';
+  const showStatus = offline || (presence !== 'idle' && !(presence === 'waiting' && decisions.count(bot.id)));
   const settingsLabel = `${bot.name} settings`;
   const name = elements['profile-name'];
-  profile.dataset.presence = presence;
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
+  elements['profile-avatar-button']?.setAttribute('aria-label', settingsLabel);
   name.textContent = bot.name;
   name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
@@ -706,38 +814,38 @@ function workflowInspectors(data, open) {
   }
   return sections;
 }
+const decisionKindLabels = {
+  user_question: 'Question from the Bot',
+  pr_review: 'Pull request review',
+  pr_reconciliation: 'Pull request reconciliation',
+  extra_run: 'Extra run',
+  deadline: 'Deadline extension',
+  model_budget: 'Extra model call',
+  conversation_model_budget: 'Extra model call',
+  unknown_delivery: 'Delivery confirmation',
+  grant_request: 'Access request',
+  protected_input: 'Protected input',
+  bot_change: 'Bot change',
+};
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
-  const waits = data?.waits ?? [];
-  const paused = data?.pausedConversations ?? [];
-  if (changed('waits', view?.id, loading, waits, paused)) {
-    elements['wait-count'].textContent = waits.length + paused.length;
-    elements['wait-count'].hidden = !(waits.length + paused.length);
+  const pending = view?.id ? decisions.itemsFor(view.id) : [];
+  if (changed('waits', view?.id, loading, pending)) {
+    elements['wait-count'].textContent = pending.length;
+    elements['wait-count'].hidden = !pending.length;
     elements['wait-list'].setAttribute('aria-busy', loading);
-    const repeated = repeatedRequests(waits);
-    const rows = waits.map((task) => {
-      const status = [waitLabel(task.wait.reason), repeated.has(task.request) ? startedText(task.createdAt) : '']
-        .filter(Boolean).join(' · ');
-      const row = activityRow('button', 'wait-row', task.request, status, 'waiting');
+    const rows = pending.map((item) => {
+      const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
+      const row = activityRow('button', 'wait-row', item.requestTitle || item.request, status, 'waiting');
       row.type = 'button';
-      row.title = waitText(task.wait);
+      row.title = item.prompt || item.requestTitle;
       row.addEventListener('click', () => {
         openNavigation(false);
-        openDetail({ kind: 'wait', taskId: task.id, waitId: task.wait.id });
+        decisions.openItem(item, row);
       });
       return row;
     });
-    for (const turn of paused) {
-      const row = activityRow('button', 'wait-row', turn.text, waitLabel('model_budget'), 'waiting');
-      row.type = 'button';
-      row.title = turn.text;
-      row.addEventListener('click', () => {
-        openNavigation(false);
-        openDetail({ kind: 'paused', messageId: turn.messageId });
-      });
-      rows.push(row);
-    }
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
     elements['wait-list'].closest('section').hidden = !loading && !rows.length;
@@ -997,9 +1105,13 @@ function updateFindOverlap() {
   if (previousOverlap !== overlap) {
     const top = scroller.scrollTop;
     const atBottom = scroller.scrollHeight - top - scroller.clientHeight <= 4;
+    const before = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
     scroller.style.setProperty('--find-overlap', `${overlap}px`);
     if (atBottom && !view?.source) scroller.scrollTop = scroller.scrollHeight;
-    else scroller.scrollTop = top + overlap - previousOverlap;
+    else {
+      const after = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
+      scroller.scrollTop = top + after - before;
+    }
   }
   return overlap;
 }
@@ -1008,11 +1120,12 @@ function focusConversationMessage(target) {
   if (!row) return;
   // Scroll within the conversation and keep the message clear of the floating controls.
   const scroller = elements.conversation;
-  const overlap = updateFindOverlap();
+  updateFindOverlap();
   const viewport = scroller.getBoundingClientRect();
+  const topSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockStart) || 0;
   const returnSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockEnd) || 0;
   const message = (row.querySelector('.bubble') ?? row).getBoundingClientRect();
-  const top = viewport.top + overlap + 8;
+  const top = viewport.top + topSpace;
   const bottom = viewport.bottom - returnSpace;
   const center = top + Math.max(0, (bottom - top - message.height) / 2);
   row.focus({ preventScroll: true });
@@ -1059,14 +1172,12 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
   focusConversationMessage(target);
   updateJumpToLatest();
 }
-function cardSourceAction(bot, id, close) {
-  const botId = bot.id;
-  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
-  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', () => {
+function cardSourceAction(item, close) {
+  const id = item.conversationEventId;
+  if (!Number.isSafeInteger(id) || id <= 0 || id >= Number.MAX_SAFE_INTEGER) return null;
+  return button('Show in conversation', 'text-button board-inbox-source', () => {
     close();
-    selectBot(botId);
-    if (exact) void showConversationMessage(view, id, { bot });
-    else backToLatest();
+    void showConversationMessage(view, id, { bot: participant(item.botId), preferLoaded: true });
   });
 }
 function runIcon(run) {
@@ -1161,6 +1272,18 @@ function eventCard(event, context, place, report) {
       else bubble.append(readOnlyChoices(data.suggestions));
     }
     if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
+  } else if (event.kind === 'pr_review_requested') {
+    text.textContent = data.title;
+    bubble.append(text);
+    if (data.text && data.text !== data.title) bubble.append(node('p', 'event-reason', data.text));
+    if (data.prUrl) {
+      const link = pullRequestLink(data.prUrl, 'View pull request');
+      if (link instanceof HTMLAnchorElement) {
+        link.className = 'link';
+        bubble.append(link);
+      }
+    }
+    replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
     text.textContent = copy;
@@ -1576,6 +1699,7 @@ function setNotice(context, text, isError = false) {
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const activeReply = (composer) => decisions.reviewReply() ?? composer.reply;
 const screenshotAnchor = (reply) => reply?.messageId ?? 0;
 const screenshotsFor = (composer) => screenshotDrafts.get(composer);
 let pickerTarget = null;
@@ -1592,7 +1716,7 @@ function clearScreenshots(composer, reply) {
 async function addScreenshots(context, composer, reply, files) {
   const anchor = screenshotAnchor(reply);
   const isCurrent = () => view === context && context.composer === composer && context.data.canDecide === true && !context.dm &&
-    screenshotAnchor(composer.reply) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
+    !decisions.composer() && screenshotAnchor(activeReply(composer)) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
   if (!files.length || !composer || !isCurrent()) return;
   let drafts = screenshotsFor(composer);
   if (!drafts) screenshotDrafts.set(composer, drafts = new Map());
@@ -1679,40 +1803,55 @@ function renderComposer() {
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
   elements['view-only-notice'].hidden = !available || canDecide;
+  const decision = canDecide ? decisions.composer() : null;
+  const review = canDecide ? decisions.reviewReply() : null;
+  elements['decision-reply-context'].hidden = !decision && !review;
   if (!canDecide || !context.composer) {
     composition = null;
     elements.message.value = '';
     return renderScreenshots(null, true);
   }
   const { composer } = context;
-  const reply = composer.reply;
-  if (composition && (composition.composer !== composer || composition.anchor !== reply?.messageId)) composition = null;
-  const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
+  const reply = decision ? null : review ?? composer.reply;
+  const anchor = decision?.key ?? reply?.messageId;
+  if (composition && (composition.composer !== composer || composition.anchor !== anchor)) composition = null;
+  const screenshots = decision ? null : screenshotsFor(composer)?.get(screenshotAnchor(reply));
   const notice = notices.get(context.id);
-  const body = composer.text;
-  const busy = sendingMessages.has(composer);
+  const body = decision?.text ?? composer.textAt(screenshotAnchor(reply));
+  const busy = !!decision?.busy || sendingMessages.has(composer);
   const closedReply = closedQuestion(context, reply);
   const source = reply && context.events.get(reply.messageId)?.data;
   const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
-  elements['reply-context'].hidden = !reply;
+  if (decision || review) {
+    elements['decision-reply-label'].textContent = 'Replying to';
+    elements['decision-reply-target'].textContent = decision?.item.requestTitle ?? review.summary;
+  }
+  elements['reply-context'].hidden = !reply || !!review;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
-  elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
+  elements['compose-label'].textContent = decision ? `Replying to ${decision.item.requestTitle}` :
+    review ? `Replying to ${review.summary}` : reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
-  elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
+  elements['decision-cancel-reply'].disabled = busy;
+  elements['decision-cancel-reply'].hidden = true;
+  elements.message.placeholder = (decision || review) ? 'Ask a question or give direction' :
+    reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
   if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
-  elements['attach-screenshots'].disabled = busy || closedReply;
+  elements['attach-screenshots'].hidden = !!decision;
+  elements['attach-screenshots'].disabled = !!decision || busy || closedReply;
   elements['attach-screenshots'].setAttribute('aria-disabled', String(!!screenshots?.loading));
   renderScreenshots(screenshots, busy || !!screenshots?.loading);
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !!composition || closedReply || !!screenshots?.loading || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || !!composition || closedReply || !!decision?.blocked || !!screenshots?.loading ||
+    !body.trim() || byteLength(body) > (decision ? 8000 : composerLimit(reply));
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
-  elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
-  elements.send.title = reply ? 'Reply' : 'Send';
+  const sendLabel = decision ? 'Send written answer' : reply ? 'Send reply' : 'Send message';
+  elements.send.setAttribute('aria-label', sendLabel);
+  elements.send.title = sendLabel;
   const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
@@ -1741,6 +1880,7 @@ function closeDetail() {
 }
 function openDetail(selection) {
   if (!view?.data) return;
+  decisions.close({ focus: false });
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -1912,20 +2052,84 @@ function openEditAppearance(bot) {
   botEditor.openEdit(bot, { bots, origin: elements.profile });
 }
 
+const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
   const hero = node('div', 'settings-hero');
+  const avatarButton = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
+  avatarButton.setAttribute('aria-label', 'Change avatar');
   const face = node('span', 'settings-avatar');
+  const avatarTip = node('span', 'settings-avatar-tooltip', 'Change avatar');
+  avatarTip.setAttribute('aria-hidden', 'true');
+  avatarButton.append(face, avatarTip);
   detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
-  hero.append(
-    face,
-    node('p', 'settings-name', bot.name),
-    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
-  );
-  if (detail?.status) {
-    const note = node('p', 'settings-status', detail.status);
-    note.setAttribute('role', 'status');
-    hero.append(note);
+
+  const nameWrap = node('div', 'settings-name-wrap');
+  const statusNote = node('p', 'settings-status', detail?.status ?? '');
+  statusNote.setAttribute('role', 'status');
+  statusNote.hidden = !detail?.status;
+
+  function renderNameDisplay() {
+    const nameBtn = button(null, 'settings-name-button', beginInlineRename);
+    nameBtn.title = 'Rename Bot';
+    nameBtn.append(node('span', 'settings-name', bot.name));
+    nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
+    nameWrap.replaceChildren(nameBtn);
   }
+  function beginInlineRename() {
+    const input = node('input', 'settings-name-input');
+    input.type = 'text';
+    input.maxLength = 32;
+    input.value = bot.name;
+    input.setAttribute('aria-label', 'Bot name');
+    let settled = false;
+    async function commit() {
+      if (settled) return;
+      settled = true;
+      const trimmed = input.value.trim();
+      if (!trimmed || trimmed === bot.name) {
+        renderNameDisplay();
+        return;
+      }
+      input.disabled = true;
+      statusNote.classList.remove('error');
+      statusNote.textContent = 'Saving name…';
+      statusNote.hidden = false;
+      try {
+        await api('bots/profile', { botId: bot.id, name: trimmed });
+        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
+        if (detail?.kind === 'settings') {
+          detail = { ...detail, status: 'Name updated' };
+          signatures.delete('detail');
+          renderDetail();
+        }
+      } catch (error) {
+        statusNote.classList.add('error');
+        statusNote.textContent = error.message === 'invalid_name'
+          ? 'Enter a name between 1 and 32 characters.'
+          : 'Could not rename this Bot.';
+        statusNote.hidden = false;
+        renderNameDisplay();
+      }
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void commit();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        settled = true;
+        renderNameDisplay();
+        nameWrap.querySelector('button')?.focus();
+      }
+    });
+    input.addEventListener('blur', () => { void commit(); });
+    nameWrap.replaceChildren(input);
+    input.focus();
+    input.select();
+  }
+  renderNameDisplay();
+  hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   if (!bot.soul) rows.append(settingsRow('Role', 'None'));
   rows.append(bot.cron.length
@@ -2120,6 +2324,7 @@ function renderDetail() {
   if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
 }
 function render(scroll, liveAfterId) {
+  decisions.setContext(view?.dm ? null : view?.id, sidebarViewer);
   renderBots();
   renderHeader();
   renderActivity();
@@ -2248,7 +2453,13 @@ const refreshBots = coalescedRefresh(async () => {
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
     render();
-  } catch {
+    await decisions.refresh();
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) {
+      sidebarViewer = null;
+      decisions.setContext(null, null);
+      render();
+    }
     setConnection('offline');
     retrySync();
   }
@@ -2337,12 +2548,14 @@ async function submit(event) {
   if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
+  if (decisions.composer()) return decisions.submitAnswer();
   if (leaveConversationSource(context)) {
     render('bottom');
   }
   const { composer } = context;
-  const reply = composer.reply;
-  const fields = { botId: context.id, text: composer.text };
+  const review = decisions.reviewReply();
+  const reply = review ?? composer.reply;
+  const fields = { botId: context.id, text: composer.textAt(screenshotAnchor(reply)) };
   if (reply) fields.replyToMessageId = reply.messageId;
   const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
   const attachments = screenshots?.images.map((image) => image.attachment) ?? [];
@@ -2354,12 +2567,15 @@ async function submit(event) {
       const prepared = await screenshotMessage(fields, attachments, screenshots.pending);
       payload = prepared.payload;
       screenshots.pending = prepared.pending;
-    } else payload = composer.prepareSend();
+    } else payload = composer.prepareSend(reply);
     await api('messages', payload);
     if (attachments.length) {
       composer.settleScreenshotSend(payload);
       clearScreenshots(composer, reply);
     } else composer.settleSend(payload, true);
+    if (review && view === context && decisions.reviewReply()?.messageId === review.messageId) {
+      decisions.close({ focus: false });
+    }
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
@@ -2389,8 +2605,36 @@ const conversationFind = mountConversationFind({
   openMatch(context, id, signal) {
     return showConversationMessage(context, id, { signal, preferLoaded: true });
   },
+  beforeOpen() {
+    closeConversationActions();
+    decisions.close({ focus: false });
+  },
 });
 new ResizeObserver(updateFindOverlap).observe(findPanel);
+
+const decisions = mountBoardInbox({
+  api,
+  sourceAction: cardSourceAction,
+  canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
+  canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
+  focusComposer() {
+    const target = elements.composer.hidden || elements['composer-container'].hidden ? elements.profile : elements.message;
+    target.focus({ preventScroll: true });
+  },
+  onChange() {
+    if (decisions.isOpen()) conversationFind.close(false);
+    renderBots();
+    renderHeader();
+    renderActivity();
+    renderComposer();
+    scheduleReadCheck();
+  },
+  onAccepted(item, message) {
+    if (view?.id !== item.botId) return;
+    setNotice(view, message);
+    void view.refresh();
+  },
+});
 
 const savedTheme = saved('flock-theme', 'system');
 renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
@@ -2402,10 +2646,97 @@ elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
-elements.profile.addEventListener('click', () => openDetail({ kind: 'settings' }));
-elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
+const sidebarToggle = byId('toggle-chat-sidebar');
+const sidebarResizer = elements['sidebar-resizer'];
+const sidebarMinWidth = 216;
+const sidebarMaxWidth = 416;
+const sidebarCollapseThreshold = 160;
+function setSidebarWidth(px, persist = false) {
+  const clamped = Math.round(Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, px)));
+  workspace.style.setProperty('--sidebar-width', `${clamped}px`);
+  if (persist) save('flock-sidebar-width', clamped);
+}
+function setSidebarCollapsed(collapsed) {
+  workspace.classList.toggle('sidebar-collapsed', collapsed);
+  const label = collapsed ? 'Show Bot sidebar' : 'Hide Bot sidebar';
+  sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+  sidebarToggle.setAttribute('aria-label', label);
+  sidebarToggle.title = label;
+}
+const storedSidebarWidth = saved('flock-sidebar-width', null);
+if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {
+  setSidebarWidth(storedSidebarWidth, false);
+}
+sidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!workspace.classList.contains('sidebar-collapsed'));
+});
+if (sidebarResizer) {
+  let dragPointer = null;
+  let lastWidth = storedSidebarWidth ?? 296;
+  sidebarResizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || narrow.matches) return;
+    event.preventDefault();
+    dragPointer = event.pointerId;
+    sidebarResizer.setPointerCapture(dragPointer);
+    workspace.classList.add('sidebar-resizing');
+  });
+  sidebarResizer.addEventListener('pointermove', (event) => {
+    if (event.pointerId !== dragPointer) return;
+    const width = event.clientX - workspace.getBoundingClientRect().left;
+    if (width < sidebarCollapseThreshold) {
+      workspace.classList.remove('sidebar-resizing');
+      setSidebarCollapsed(true);
+      dragPointer = null;
+      return;
+    }
+    if (workspace.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+    lastWidth = Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, width));
+    setSidebarWidth(lastWidth, false);
+  });
+  const endResize = (event) => {
+    if (event.pointerId !== dragPointer) return;
+    dragPointer = null;
+    workspace.classList.remove('sidebar-resizing');
+    if (!workspace.classList.contains('sidebar-collapsed')) setSidebarWidth(lastWidth, true);
+  };
+  sidebarResizer.addEventListener('pointerup', endResize);
+  sidebarResizer.addEventListener('pointercancel', endResize);
+  sidebarResizer.addEventListener('dblclick', () => {
+    workspace.style.removeProperty('--sidebar-width');
+    save('flock-sidebar-width', null);
+    setSidebarCollapsed(false);
+  });
+}
+function openCurrentBotSettings() {
+  closeConversationActions();
+  openDetail({ kind: 'settings' });
+}
+elements.profile.addEventListener('click', openCurrentBotSettings);
+elements['profile-avatar-button']?.addEventListener('click', openCurrentBotSettings);
+elements['peer-picker'].addEventListener('click', () => {
+  closeConversationActions(true);
+  openDetail({ kind: 'peers' });
+});
+byId('conversation-recent-decisions').addEventListener('click', () => {
+  closeConversationActions();
+  void decisions.openHistory(conversationActionsTrigger);
+});
 elements['peer-back'].addEventListener('click', () => leavePeerConversation());
+elements['peer-parent-link']?.addEventListener('click', () => leavePeerConversation());
+elements.conversation.addEventListener('click', (event) => {
+  if (!view?.dm || window.getSelection?.()?.toString()) return;
+  if (!event.target.closest('.bubble, button, a, input, textarea, summary, .msg-actions, .msg-meta, .peer-exchange-link, .older, .empty-state')) {
+    leavePeerConversation();
+  }
+});
 elements['close-detail'].addEventListener('click', closeDetail);
+elements.detail.addEventListener('click', (event) => {
+  if (event.target !== elements.detail) return;
+  const rect = elements.detail.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+    closeDetail();
+  }
+});
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
@@ -2448,9 +2779,10 @@ elements['cancel-reply'].addEventListener('click', () => {
   renderComposer();
   elements.message.focus();
 });
+elements['decision-cancel-reply'].addEventListener('click', () => decisions.suppressComposer());
 elements['attach-screenshots'].addEventListener('click', () => {
   if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
-  pickerTarget = { context: view, composer: view.composer, reply: view.composer.reply };
+  pickerTarget = { context: view, composer: view.composer, reply: activeReply(view.composer) };
   elements['screenshot-input'].click();
 });
 elements['screenshot-input'].addEventListener('change', (event) => {
@@ -2463,22 +2795,25 @@ elements['screenshot-input'].addEventListener('change', (event) => {
 elements['screenshot-input'].addEventListener('cancel', () => { pickerTarget = null; });
 elements.message.addEventListener('paste', (event) => {
   const files = Array.from(event.clipboardData?.files ?? []);
-  if (!files.length || elements.message.readOnly) return;
+  if (!files.length || elements.message.readOnly || decisions.composer()) return;
   event.preventDefault();
-  void addScreenshots(view, view.composer, view.composer.reply, files);
+  void addScreenshots(view, view.composer, activeReply(view.composer), files);
 });
 function updateDraft() {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
-  view.composer.edit(elements.message.value);
+  const decision = decisions.composer();
+  const reply = activeReply(view.composer);
+  if (decision) decisions.edit(elements.message.value);
+  else view.composer.edit(elements.message.value, reply);
   fitMessage();
   notices.delete(view.id);
-  const limit = composerLimit(view.composer.reply);
+  const limit = decision ? 8000 : composerLimit(reply);
   if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
 }
 elements.message.addEventListener('compositionstart', () => {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
-  composition = { composer: view.composer, anchor: view.composer.reply?.messageId };
+  composition = { composer: view.composer, anchor: decisions.composer()?.key ?? activeReply(view.composer)?.messageId };
   renderComposer();
 });
 elements.message.addEventListener('compositionend', () => {
@@ -2559,6 +2894,7 @@ if (visualViewport) {
 }
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
+  if (!conversationActions.contains(event.target)) closeConversationActions();
 });
 document.addEventListener('keydown', (event) => {
   const digit = event.altKey && event.shiftKey && !event.ctrlKey && !event.metaKey && /^Digit([1-9])$/.exec(event.code);
@@ -2571,9 +2907,14 @@ document.addEventListener('keydown', (event) => {
     }
     return;
   }
-  if (event.key !== 'Escape') return;
-  if (menu) closeMenu();
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+  if (conversationActions.open) closeConversationActions(true);
+  else if (menu) closeMenu();
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
+  else if (view?.dm && !elements.detail.open && !elements['bot-editor'].open && !decisions.isOpen()) {
+    event.preventDefault();
+    leavePeerConversation();
+  }
 });
 
 let syncRetry;
@@ -2629,5 +2970,3 @@ window.addEventListener('pagehide', () => {
 });
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
-
-mountBoardInbox(api, cardSourceAction);

@@ -301,6 +301,11 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 replyTo.update({{"kind","result"},{"taskId",taskId},
                     {"text",bounded(field(data,kind == "report" ? "report" : "text"),2000)}});
                 addTask(taskId);
+            } else if (kind == "pr_review_requested") {
+                replyTo.update({{"kind","pr_review"},{"taskId",taskId},{"itemId",integer(data,"itemId")},
+                    {"title",scrub.text(field(data,"title"))},{"text",bounded(scrub.text(field(data,"text")),2000)},
+                    {"prUrl",scrub.text(field(data,"prUrl"))}});
+                addTask(taskId);
             } else if (kind == "conversation_reply") {
                 replyTo.update({{"kind","bot_message"},{"text",bounded(field(data,"text"),2000)}});
                 if (data.contains("suggestions")) replyTo["suggestions"] = data.at("suggestions");

@@ -491,7 +491,9 @@ private:
         return store_.hasPeerExchange(bot,peer);
     }
 
-    Json snapshot(const Person& person, const ChangeFeed::BotList&) const { return botList(person); }
+    Json snapshot(const Person& person, const ChangeFeed::BotList&) const {
+        return {{"bots",botList(person)},{"inbox",store_.inbox(person,{})}};
+    }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
         view["canDecide"] = store_.access().permitsPerson(actor,bot,Role::decide);
