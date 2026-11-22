@@ -116,7 +116,7 @@ void pairingAndRecovery(const std::filesystem::path& path) {
         Store store(path);
         access(store,first);
         access(store,second);
-        SessionHandoff handoff(store,sessions,resolve);
+        SessionHandoff handoff(store,sessions,resolve,intake);
         denied([&] { handoff.pair(visitor,first,"planner",{}); });
         denied([&] { handoff.pair(owner,{"desktop","other","first"},"planner",{}); });
         denied([&] { handoff.intake("unpaired","client-request","Run a check"); });
@@ -135,9 +135,9 @@ void pairingAndRecovery(const std::filesystem::path& path) {
         Bot bot;
         bot.decision = {"reply","reply"};
         sessions.uncertain = true;
-        handoff.consult(owner,a.channel,bot,intake,soul);
+        handoff.consult(owner,a.channel,bot,soul);
         sessions.uncertain = false;
-        handoff.consult(owner,b.channel,bot,intake,soul);
+        handoff.consult(owner,b.channel,bot,soul);
         check(sessions.sent.size() == 2 && sessions.sent[0].target == first && sessions.sent[1].target == second,
               "consultations lost their immutable return Thread");
         check(handoff.view(owner,a.channel).deliveries.front().state == RootDeliveryState::Unknown,
@@ -147,13 +147,13 @@ void pairingAndRecovery(const std::filesystem::path& path) {
         lost = a.channel;
     }
     Store restarted(path);
-    SessionHandoff handoff(restarted,sessions,resolve);
+    SessionHandoff handoff(restarted,sessions,resolve,intake);
     handoff.recover();
     Bot bot;
-    handoff.consult(owner,lost,bot,intake,soul);
+    handoff.consult(owner,lost,bot,soul);
     check(bot.seen.empty() && sessions.sent.size() == 2,"restart blindly repeated an uncertain reply");
     sessions.consumed(sessions.sent.front());
-    handoff.consult(owner,lost,bot,intake,soul);
+    handoff.consult(owner,lost,bot,soul);
     const auto reconciled = handoff.view(owner,lost);
     check(reconciled.state == "completed" && reconciled.deliveries.front().state == RootDeliveryState::Observed &&
           reconciled.deliveries.front().observedRunId == "new-run","history did not reconcile delivery in a later Run");
@@ -162,7 +162,7 @@ void pairingAndRecovery(const std::filesystem::path& path) {
 void reconcileAfterReceiptWriteContention(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     access(store,first);
     const auto ticket = handoff.pair(owner,first,"planner",{});
     const auto channel = handoff.intake(ticket.code,"receipt-contention","Check the fixture.").channel;
@@ -178,14 +178,14 @@ void reconcileAfterReceiptWriteContention(const std::filesystem::path& path) {
     Bot bot;
     bot.decision = {"reply"};
     bool contended = false;
-    try { handoff.consult(owner,channel,bot,intake,soul); }
+    try { handoff.consult(owner,channel,bot,soul); }
     catch (const std::runtime_error& error) {
         check(std::string_view(error.what()) == "database is locked","Unexpected receipt write error");
         contended = true;
     }
     check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK && contended,
           "The accepted send did not contend at receipt storage");
-    handoff.consult(owner,channel,bot,intake,soul);
+    handoff.consult(owner,channel,bot,soul);
     const auto view = handoff.view(owner,channel);
     check(view.state == "completed" && view.deliveries.front().state == RootDeliveryState::Observed &&
           sessions.sent.size() == 1 && bot.seen.size() == 1,
@@ -195,7 +195,7 @@ void reconcileAfterReceiptWriteContention(const std::filesystem::path& path) {
 void coordinate(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     access(store,first);
     const CoordinationRequest goal{"Run two checks and report",false};
     const auto ticket = handoff.pair(owner,first,"planner",goal);
@@ -204,43 +204,43 @@ void coordinate(const std::filesystem::path& path) {
     denied([&] { handoff.intake(duplicate.code,"another","Start over."); });
     Bot bot;
     bot.decision = {"root_guidance","root_guidance","handoff_question","complete_handoff"};
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(sessions.sent.size() == 1,"first autonomous input was not sent");
     const auto firstSend = sessions.sent.front();
     sessions.event(first,"user_message","agent","mcp",firstSend.id,firstSend.text);
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.size() == 1 && sessions.sent.size() == 1,"own input triggered another decision");
     sessions.event(first,"assistant_message","agent","provider","","Finished step one.");
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(sessions.sent.size() == 2,"agent progress did not trigger step two");
     sessions.consumed(sessions.sent.back());
-    auto question = handoff.step(owner,channel,bot,intake,soul);
+    auto question = handoff.step(owner,channel,bot,soul);
     check(!question.pendingQuestion.is_null(),"human question was not saved");
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.size() == 3,"coordination continued through a human decision");
     handoff.answer(owner,channel,question.generation,question.pendingQuestion.at("eventId").get<std::string>(),"Finish.");
-    const auto done = handoff.step(owner,channel,bot,intake,soul);
+    const auto done = handoff.step(owner,channel,bot,soul);
     check(done.state == "completed" && sessions.sent.size() == 2,"completion created another input");
 
     const auto fresh = handoff.pair(owner,first,"planner",goal);
     const auto stopped = handoff.intake(fresh.code,"stop-test","Check again.").channel;
     sessions.beforeSend = [&] { handoff.pause(owner,stopped); };
     bot.decision = {"root_guidance","root_guidance"};
-    const auto paused = handoff.step(owner,stopped,bot,intake,soul);
+    const auto paused = handoff.step(owner,stopped,bot,soul);
     check(paused.state == "paused" && paused.residualCommandIds.size() == 1,"pause lost an admitted residual");
     denied([&]{ handoff.resume(owner,stopped); });
     sessions.consumed(sessions.sent.back());
     const auto resumed = handoff.resume(owner,stopped);
     check(resumed.state == "active" && resumed.generation == paused.generation,"resume changed the wrong generation");
     handoff.freeze(owner,stopped);
-    const auto halted = handoff.step(owner,stopped,bot,intake,soul);
+    const auto halted = handoff.step(owner,stopped,bot,soul);
     check(halted.state == "stopped" && sessions.sent.size() == 3,"stop admitted a new effect");
 }
 void concurrentHumanAndBudget(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
-    SessionHandoff handoff(store,sessions,resolve);
     const auto routing = intakeWithLimit(30);
+    SessionHandoff handoff(store,sessions,resolve,routing);
     access(store,first);
     const auto pairing = handoff.pair(owner,first,"planner",CoordinationRequest{"Observe progress only",false});
     const auto channel = handoff.intake(pairing.code,"request","Begin.").channel;
@@ -249,26 +249,26 @@ void concurrentHumanAndBudget(const std::filesystem::path& path) {
     bot.beforeDecision = [&] {
         sessions.event(first,"user_message","user","web","","New priority from the person.");
     };
-    auto changed = handoff.step(owner,channel,bot,routing,soul);
+    auto changed = handoff.step(owner,channel,bot,soul);
     check(sessions.sent.empty() && changed.deliveries.front().state == RootDeliveryState::Rejected,
           "coordinator sent guidance from before a newer human message");
     bot.beforeDecision = {};
     bot.decision.assign(23,"wait_for_root");
-    handoff.step(owner,channel,bot,routing,soul);
+    handoff.step(owner,channel,bot,soul);
     check(bot.seen.back().event.at("progress").dump().find("New priority") != std::string::npos,
           "coordinator did not re-evaluate newer human input");
     for (int i = 0; i < 22; ++i) {
         sessions.event(first,"assistant_message","agent","provider","","Progress update.");
-        handoff.step(owner,channel,bot,routing,soul);
+        handoff.step(owner,channel,bot,soul);
     }
-    const auto stopped = handoff.step(owner,channel,bot,routing,soul);
+    const auto stopped = handoff.step(owner,channel,bot,soul);
     check(stopped.state == "budget_exhausted" && bot.seen.size() == 24,
           "the cumulative planning budget did not stop further actions");
 
     const auto consult = handoff.pair(owner,first,"planner",{});
     const auto request = handoff.intake(consult.code,"request","Reply once.").channel;
     store.access().resourceGrant(owner,"planner",Scope::consultReply(first.environmentId,first.threadId),GrantChange::revoke);
-    denied([&] { handoff.consult(owner,request,bot,routing,soul); });
+    denied([&] { handoff.consult(owner,request,bot,soul); });
     check(handoff.freeze(owner,request).state == "stopped" && sessions.sent.empty(),
           "revoking the Bot's scope removed the owner's ability to stop the request");
 }
@@ -279,14 +279,14 @@ void dispatchHistoryCoverage(const std::filesystem::path& path) {
         Store store(path/(name+".sqlite3"));
         Sessions sessions;
         sessions.dispatchUnavailable = !available;
-        SessionHandoff handoff(store,sessions,resolve);
+        SessionHandoff handoff(store,sessions,resolve,intake);
         access(store,first);
         const auto pairing = handoff.pair(owner,first,"planner",CoordinationRequest{"Check progress",false});
         const auto channel = handoff.intake(pairing.code,name,"Recheck before dispatch.").channel;
         populate(sessions);
         Bot bot;
         bot.decision = {"root_guidance"};
-        const auto view = handoff.step(owner,channel,bot,intake,soul);
+        const auto view = handoff.step(owner,channel,bot,soul);
         check(sessions.sent.size()==static_cast<std::size_t>(sent) && !view.deliveries.empty() &&
               view.deliveries.front().state==expected,"dispatch did not honor the complete-history result");
     };
@@ -312,7 +312,7 @@ void lateRedactionProjection(const std::filesystem::path& path) {
     Store store(path/"late-redaction.sqlite3");
     Sessions sessions;
     access(store,first);
-    SessionHandoff handoff(store,sessions,resolve);
+    SessionHandoff handoff(store,sessions,resolve,intake);
     const std::string secret="late-secret-value-007";
     const auto pairing=handoff.pair(owner,first,"planner",CoordinationRequest{"Goal "+secret,false});
     const auto channel=handoff.intake(pairing.code,"opaque-request-id","Request "+secret).channel;
@@ -322,7 +322,7 @@ void lateRedactionProjection(const std::filesystem::path& path) {
         turn.calls.push_back({"handoff_question",{{"text","Question "+secret}},""});
         return turn;
     };
-    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,soul);
     const auto secretRequest=store.access().requestSecret("planner",{"late-secret"});
     store.access().submitSecret(owner,"planner",secretRequest,secret);
     const auto view=handoff.view(owner,channel);
@@ -356,7 +356,7 @@ void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bo
     {
         Store store(path);
         access(store,first);
-        SessionHandoff handoff(store,sessions,resolve);
+        SessionHandoff handoff(store,sessions,resolve,routing);
         std::optional<CoordinationRequest> permission;
         if (coordination) permission=CoordinationRequest{"Bounded decision attempts",false};
         const auto pairing = handoff.pair(owner,first,"planner",permission);
@@ -364,8 +364,8 @@ void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bo
         for (std::size_t call=1;call<=2;++call) {
             bool failed = false;
             try {
-                if (coordination) handoff.step(owner,channel,bot,routing,soul);
-                else handoff.consult(owner,channel,bot,routing,soul);
+                if (coordination) handoff.step(owner,channel,bot,soul);
+                else handoff.consult(owner,channel,bot,soul);
             } catch (const std::exception&) { failed = true; }
             check(failed && bot.seen.size()==call && bot.seen.back().config.at("modelCallLimit")==2 &&
                   handoff.view(owner,channel).state=="active",
@@ -373,13 +373,13 @@ void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bo
         }
     }
     Store restarted(path);
-    SessionHandoff handoff(restarted,sessions,resolve);
-    if (coordination) handoff.step(owner,channel,bot,routing,soul);
-    else handoff.consult(owner,channel,bot,routing,soul);
+    SessionHandoff handoff(restarted,sessions,resolve,routing);
+    if (coordination) handoff.step(owner,channel,bot,soul);
+    else handoff.consult(owner,channel,bot,soul);
     check(handoff.view(owner,channel).state=="budget_exhausted" && bot.seen.size()==2,
           "the exhausted session budget was not persisted across restart");
-    if (coordination) handoff.step(owner,channel,bot,routing,soul);
-    else handoff.consult(owner,channel,bot,routing,soul);
+    if (coordination) handoff.step(owner,channel,bot,soul);
+    else handoff.consult(owner,channel,bot,soul);
     check(bot.seen.size()==2,"an exhausted handoff called the model again");
 }
 

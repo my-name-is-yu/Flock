@@ -2517,7 +2517,8 @@ void specialistAdmission(SpecialistMode mode) {
     f.specialistPerson = [&](std::string_view id) -> std::optional<Person> {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
-    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,f.runtime.get()); };
+    const auto routing = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,routing,f.runtime.get()); };
     auto access = f.store->access();
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
@@ -2883,11 +2884,8 @@ void specialistAdmission(SpecialistMode mode) {
             check(hasTool(input,"complete_handoff"),"the cancelled prelaunch assignment blocked queue progress");
             return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
-        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+        check(handoffs().step(person,channel,f.model,soul).state=="completed" && f.t3.launches==0,
               "the unrelated coordinator queue did not progress after prelaunch cancellation");
         return;
     }
@@ -2909,11 +2907,8 @@ void specialistAdmission(SpecialistMode mode) {
             check(hasTool(input,"complete_handoff"),"the recovered cancellation blocked queue progress");
             return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
-        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+        check(handoffs().step(person,channel,f.model,soul).state=="completed" && f.t3.launches==0,
               "queue progress was stranded after recovered prelaunch cancellation");
         return;
     }
@@ -3057,17 +3052,14 @@ void specialistAdmission(SpecialistMode mode) {
             }
             return {"complete_handoff",{{"text","Complete using the rechecked report"}},"The report is complete"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
         const auto before=handoffs().view(person,channel);
-        const auto stale=handoffs().step(person,channel,f.model,routing,soul);
+        const auto stale=handoffs().step(person,channel,f.model,soul);
         check(stale.state=="active" && stale.eventCursor==before.eventCursor && stale.latestDecision.is_null() && decisions==1 &&
               stale.work.front().contains("result"),
               "a completion decision consumed evidence after the root pin changed during inference");
         session.pin=pin;
-        const auto completed=handoffs().step(person,channel,f.model,routing,soul);
+        const auto completed=handoffs().step(person,channel,f.model,soul);
         check(completed.state=="completed" && decisions==2,
               "the unconsumed specialist result was not reconsidered after the pin became available");
         return;
@@ -3138,9 +3130,10 @@ void exhaustedSavedSpecialistEffect() {
     access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
-    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson).pair(person,target,"alpha",scope);
-    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
-    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson).view(person,channel).generation;
+    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson,route).pair(person,target,"alpha",scope);
+    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson,route).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
+    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson,route).view(person,channel).generation;
     int modelCalls=0;
     f.model.script=[&](const ModelInput& input)->Decision {
         ++modelCalls;
@@ -3152,22 +3145,21 @@ void exhaustedSavedSpecialistEffect() {
         return {"delegate_specialist",{{"botId","beta"},{"text","Review the pinned project"},
             {"doneWhen","Report the result"}},"Delegate the scoped review"};
     };
-    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
     const auto soul=[](std::string_view) { return std::string{}; };
     {
         const auto peers=[&](std::string_view bot) { return f.peers.at(std::string(bot)); };
-        SessionHandoff handoff(*f.store,session,f.specialistPerson,f.runtime.get(),peers);
-        const auto waiting=handoff.step(person,channel,f.model,route,soul);
+        SessionHandoff handoff(*f.store,session,f.specialistPerson,route,f.runtime.get(),peers);
+        const auto waiting=handoff.step(person,channel,f.model,soul);
         check(waiting.state=="active" && !waiting.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
               "a transient unavailable input pin settled an outstanding specialist effect");
         session.pin=pin;
-        const auto view=handoff.step(person,channel,f.model,route,soul);
+        const auto view=handoff.step(person,channel,f.model,soul);
         check(view.state=="budget_exhausted" && view.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
               "a permanent saved delegation refusal left coordination active or retried its model action");
     }
     f.restart();
-    SessionHandoff restarted(*f.store,session,f.specialistPerson,f.runtime.get());
-    const auto view=restarted.step(person,channel,f.model,route,soul);
+    SessionHandoff restarted(*f.store,session,f.specialistPerson,route,f.runtime.get());
+    const auto view=restarted.step(person,channel,f.model,soul);
     check(view.state=="budget_exhausted" && modelCalls==1 && f.t3.launches==0,
           "a saved budget refusal admitted work again after restart");
 }

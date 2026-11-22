@@ -226,11 +226,6 @@ void sessionHandoffRoutes(httplib::Server& server, const WebCallbacks& callbacks
                 if (body.size() != 5 || delegate == body.end() || !delegate->is_boolean()) throw InvalidHandoffInput{};
                 permission = CoordinationRequest{requestText(body,"goal"),delegate->get<bool>()};
             } else if (mode != "consult" || body.size() != 3) throw InvalidHandoffInput{};
-            const auto bots = callbacks.bots();
-            if (!std::ranges::any_of(bots,[&](const auto& entry) {
-                return entry.is_object() && entry.value("id",Json(nullptr)) == bot;
-            })) throw Conflict("Unknown Bot");
-            if (callbacks.intake(bot,"").botId != bot) throw Conflict("Session Bot is unavailable");
             const auto ticket = handoff.pair(actor,destination,bot,permission);
             reply(res,201,{{"code",ticket.code},{"expiresAt",ticket.expiresAt}});
         });

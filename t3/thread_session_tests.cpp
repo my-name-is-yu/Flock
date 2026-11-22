@@ -157,33 +157,33 @@ int main(int argc, char** argv) {
             Store store(database);
             store.access().resourceGrant(owner,"planner",Scope::consultReply(target.environmentId,target.threadId),
                                          GrantChange::grant);
-            SessionHandoff handoff(store,*session,people);
+            SessionHandoff handoff(store,*session,people,intake);
             const auto pair = handoff.pair(owner,target,"planner",{});
             channel = handoff.intake(pair.code,"failed-root-run","Check the fixture.").channel;
-            handoff.consult(owner,channel,bot,intake,soul);
+            handoff.consult(owner,channel,bot,soul);
             check(handoff.view(owner,channel).deliveries.front().state == RootDeliveryState::Unknown,
                   "a dropped send response was reported as confirmed");
         }
         fixture({{"stockDropSendReply",false},{"stockRootWait","wrong-run"}});
         auto reconnected = makeT3ThreadSession(directory);
         Store reopened(database);
-        SessionHandoff recovered(reopened,*reconnected,people);
+        SessionHandoff recovered(reopened,*reconnected,people,intake);
         recovered.recover();
-        recovered.consult(owner,channel,bot,intake,soul);
+        recovered.consult(owner,channel,bot,soul);
         check(recovered.view(owner,channel).deliveries.front().observedRunId == "next-run",
               "history did not identify the run after the lost reply");
         for (const auto wait : {"wrong-thread","wrong-run","timed-out","cancelled"}) {
             fixture({{"stockRootWait",wait}});
-            recovered.consult(owner,channel,bot,intake,soul);
+            recovered.consult(owner,channel,bot,soul);
             const auto pending = recovered.view(owner,channel);
             check(pending.state == "active" && pending.deliveries.front().state == RootDeliveryState::Unknown,
                   "unproven failure settled the delivery");
         }
         fixture({{"stockRootWait","failed"},{"stockRootExtraHistory",true}});
-        recovered.consult(owner,channel,bot,intake,soul);
+        recovered.consult(owner,channel,bot,soul);
         check(recovered.view(owner,channel).deliveries.front().state == RootDeliveryState::Unknown,
               "run failure settled delivery before checking all available messages");
-        recovered.consult(owner,channel,bot,intake,soul);
+        recovered.consult(owner,channel,bot,soul);
         const auto settled = recovered.view(owner,channel);
         check(settled.state == "failed" && settled.deliveries.front().state == RootDeliveryState::Failed,
               "confirmed root run failure without an assistant message left delivery unresolved");
