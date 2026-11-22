@@ -100,7 +100,9 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                 result = toolFailure("Bot tool target is unavailable");
                 continue;
             }
-            const auto resource = authorizedBotToolScope(ctx.bot,calls[i]);
+            auto resource = authorizedBotToolScope(ctx.bot,calls[i]);
+            if (resource->action == Action::mcp_invoke)
+                resource->routine = ctx.settings.mcp->readOnlyHint(resource->target,field(calls[i].args,"name"));
             const auto key = "turn/" + std::to_string(ctx.messageId) + "/" + std::to_string(step) + "/" + std::to_string(i);
             const auto payload = Json::array({calls[i].tool,calls[i].args});
             const auto now = policyClock();
