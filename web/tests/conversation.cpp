@@ -652,6 +652,43 @@ void chatGPTConversation(const std::filesystem::path& home) {
 }
 #endif
 
+void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
+    Store store(path);
+    auto cb = callbacks();
+    cb.bots = [] {
+        return Json::array({{{"id","release"},{"name","Release"}},
+                            {{"id","staging-triage"},{"name","Staging"},{"soul","Check staging"}}});
+    };
+    cb.authenticate = [](std::string_view auth) {
+        if (auth == "Bearer fixture-owner") return Person{"owner",true};
+        if (auth == "Bearer fixture-alice") return Person{"alice"};
+        return Person{};
+    };
+    cb.updateBot = [](std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
+        return Json{{"id",id},{"name",profile.at("name")}};
+    };
+    const Person owner{"owner",true};
+    auto access = store.access();
+    access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
+    const auto request = access.requestSecret("release",{"fixture-token"});
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    access.resourceGrant(owner,"staging-triage",{"secret","fixture-token","use"},GrantChange::grant);
+    const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
+    check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
+
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto bots = browser.get("/api/bots");
+    check(bots.size()==1 && bots.at(0).at("id")=="staging-triage","secret redaction hid or renamed an authorized Bot");
+    const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
+    check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
+          "Bot view must preserve its ID and redact display text");
+    browser.get("/api/conversation?bot=staging-triage");
+    Browser::checked(browser.client.Get("/api/view?bot=release"),403);
+}
+
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
     webStore.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
@@ -733,6 +770,7 @@ int main(int argc,char** argv) {
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+        secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
