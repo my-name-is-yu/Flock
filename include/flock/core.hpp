@@ -31,8 +31,6 @@ Id modelCallLimit(const Json& config);
 struct Intake {
     std::string botId, request, environmentId, projectId;
     Json config = Json::object();
-    std::string scheduleId{};
-    Seconds scheduledAt = 0;
 };
 using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
 // Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
@@ -117,6 +115,46 @@ struct Excerpt {
     std::size_t nextOffset = 0;
     bool more = false;
 };
+inline constexpr unsigned sessionPageLimit = 20;
+
+struct SessionTarget {
+    std::string environmentId, threadId;
+    bool operator==(const SessionTarget&) const = default;
+};
+struct SessionPreview {
+    std::string text;
+    bool truncated = false;
+};
+struct SessionMetadata {
+    std::string title, project, projectId, status, createdAt, updatedAt;
+    std::vector<SessionPreview> messages;
+    bool moreMessages = false;
+};
+struct SessionAttachment {
+    std::string id, name, mimeType;
+    std::optional<std::string> content;
+    bool truncated = false;
+};
+struct SessionEvent {
+    std::string id, time, kind, status, title, text;
+    std::vector<SessionAttachment> attachments;
+    bool textTruncated = false, attachmentsTruncated = false;
+};
+struct SessionEventFilter {
+    std::string kind, fromTime, toTime;
+    unsigned limit = 10;
+    std::optional<Id> afterPosition;
+    std::function<bool(const SessionEvent&)> matchText;
+};
+struct SessionEventPage {
+    std::vector<SessionEvent> items;
+    std::optional<Id> nextPosition;
+    bool truncated = false;
+};
+struct SessionCounts {
+    Id messages = 0, runs = 0;
+};
+
 class T3 {
 public:
     virtual ~T3() = default;
@@ -128,37 +166,69 @@ public:
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool) { return {}; }
+    virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
+    virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
+    virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
+    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view,
+                                                               std::string_view) { return {}; }
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
+struct Person;
+struct ConfiguredSchedule;
+struct ScheduleImportError;
+struct InboxTarget;
+struct BotChange;
+struct TaskTarget {
+    std::string botId;
+    Id taskId, waitId, revision, generation;
+    static TaskTarget from(const Json& task, Id waitId);
+};
+using ApplyBotChange = std::function<void(const BotChange&)>;
 struct ChannelConnector;
 class LocalMachine;
 enum class ChannelKind;
-struct Person;
 struct ChannelResource;
 struct VerifiedChannelMessage;
 class Store {
 public:
-    explicit Store(std::filesystem::path database);
+    using MemorySeed = std::function<std::string(std::string_view)>;
+    explicit Store(std::filesystem::path database, MemorySeed = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
     Access access();
+    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
+    Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
+    Json automations(const Person&, std::string_view bot, Id before = 0) const;
+    Json cancelAutomation(const Person&, std::string_view bot, Id id);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    void pruneAutomations(const std::vector<std::string>& configuredBots);
+    void fireDueAutomations(Seconds now);
+    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
+                        const Json& event, Seconds now);
+    Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
+    Json inbox(const Person&, std::string_view bot = {}) const;
+    Json decisionHistory(const Person&, std::string_view bot = {}) const;
+    void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
+                     const Json& data = Json::object(), const ApplyBotChange& = {});
+    Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
+                       std::string_view title, std::string_view prompt);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
-    Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
+    Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0);
-    std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
+    std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
                                 std::string_view text, Id replyToMessageId = 0) const;
     // Conversation turns paused on the model call limit, newest first.
     Json pausedConversations(std::string_view botId) const;
-    // Approve one call for a conversation turn paused on the model call limit.
-    void approveMessageModelCall(std::string_view botId, Id waitMessageId);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
-    void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
+    void operate(const Person&, const TaskTarget&, std::string_view operation, const Json& data = Json::object());
     Json task(Id taskId) const;
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
@@ -206,7 +276,7 @@ public:
     const std::filesystem::path& path() const;
 
 private:
-    Json receive(std::string_view botId, std::string_view clientMessageId, std::string_view text,
+    Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&);
     struct Impl;
     std::unique_ptr<Impl> p_;
@@ -220,11 +290,12 @@ struct RuntimeOptions {
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
     std::function<std::vector<PeerBot>(std::string_view)> peers = {};
+    std::function<void(std::string_view)> automationError = {};
 };
 class Runtime {
 public:
-    using NotesLoader = std::function<BotNotes(std::string_view)>;
-    Runtime(Store&, Model&, T3&, NotesLoader, RuntimeOptions = {});
+    using SoulLoader = std::function<std::string(std::string_view)>;
+    Runtime(Store&, Model&, T3&, SoulLoader, RuntimeOptions = {});
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;

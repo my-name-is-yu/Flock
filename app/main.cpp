@@ -29,12 +29,12 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   tasks [BOT] [--before ID] [--limit N]
   status TASK
   history TASK [--after ID] [--limit N]
-  answer TASK WAIT TEXT
-  approve TASK WAIT
-  retry TASK WAIT
-  extend TASK WAIT NEW_UNIX_DEADLINE
-  reconcile TASK WAIT [--thread ID] [--run ID] [--question ID]
-  cancel TASK [WAIT]
+  answer TASK WAIT REVISION GENERATION TEXT
+  approve TASK WAIT REVISION GENERATION
+  retry TASK WAIT REVISION GENERATION
+  extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
+  reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
+  cancel TASK [WAIT REVISION GENERATION]
   t3 login ENVIRONMENT MCP_URL
   model login [--print-url] [--reconsent]
   model status
@@ -169,7 +169,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 #ifndef FLOCK_WITH_T3
     if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
 #endif
-    auto store = openStore(home);
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
@@ -182,9 +182,12 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
 #endif
-    const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
-    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
+    options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
+    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
+    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+        std::cerr << "Flock Bot " << id << ": " << error << '\n';
+    });
 #ifdef FLOCK_WITH_WEB
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
@@ -197,6 +200,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         options.peers,
         {},
         [&](const BotChange& change) { bots.apply(change); },
+        options.clock,
     };
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
@@ -212,14 +216,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
-    Scheduler schedule(bots,store,startedAt,[](std::string_view id,std::string_view error) {
-        std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
     while (!stopRequested) {
-        try { schedule.tick(unixTime()); }
-        catch (const std::exception& error) {
-            std::cerr << "Unable to submit scheduled tasks: " << error.what() << '\n';
-        }
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -227,9 +224,15 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 
 void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args,"task ID");
-    Id wait = 0;
+    auto store = openStore(home);
+    const auto status = store.task(task);
+    auto target = TaskTarget::from(status,0);
+    if (operation != "cancel" || !args.empty()) {
+        target.waitId = number(args,"wait ID");
+        target.revision = number(args,"revision ID",0);
+        target.generation = number(args,"generation",0);
+    }
     Json details = Json::object();
-    if (operation != "cancel" || !args.empty()) wait = number(args,"wait ID");
     if (operation == "answer") details["text"] = args.pop("answer");
     else if (operation == "extend") details["deadline"] = number(args,"new Unix deadline");
     else if (operation == "reconcile") {
@@ -243,14 +246,12 @@ void operate(const std::filesystem::path& home, const Bots& bots, const std::str
     }
     args.end();
 
-    auto store = openStore(home);
     if (operation == "reconcile") {
-        const auto status = store.task(task);
-        details = reconciliationData(status,wait,std::move(details),[&](std::string_view id, std::string_view request) {
+        details = reconciliationData(status,target.waitId,std::move(details),[&](std::string_view id, std::string_view request) {
             return bots.get(id).intake(request);
         });
     }
-    store.operate(task,wait,operation,details);
+    store.operate(localOwner,target,operation,details);
     print(store.task(task));
 }
 

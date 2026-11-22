@@ -99,12 +99,12 @@ struct Fixture {
         store = std::make_unique<Store>(dir/"state.db");
         RuntimeOptions options;
         options.clock = [this]{return now;};
-        runtime = std::make_unique<Runtime>(*store,bot,t3,[](auto){return BotNotes{};},options);
+        runtime = std::make_unique<Runtime>(*store,bot,t3,[](auto){return std::string{};},options);
     }
     Id turn(std::string text, std::string tool = {}, Json args = Json::object()) {
         bot.action = {tool,args,"Execute the requested operation"};
         bot.result = nullptr;
-        auto receipt = store->receive({"bot","","env","project",Json::object(),{},0},std::to_string(++sequence),text);
+        auto receipt = store->receive({"owner",true},{"bot","","env","project",Json::object()},std::to_string(++sequence),text);
         runtime->runConversations();
         return receipt.at("messageId");
     }
@@ -134,7 +134,7 @@ void workflowLaunchUsesGrantsAndRedactsQueuedPrompt() {
     const auto input = access.requestSecret("bot",{"workflow-credential"});
     access.submitSecret(owner,"bot",input,secret);
     access.decide(owner,"bot",grant,true);
-    f.store->operate(task,wait.at("id"),"reconcile");
+    f.store->operate(owner,TaskTarget::from(f.store->task(task),wait.at("id")),"reconcile");
     f.t3.loseReceipt = true;
     f.ticks(1);
     require(f.t3.commands.size()==1 && f.t3.commands[0].instruction.find(secret)==std::string::npos &&
@@ -489,7 +489,7 @@ void settledWhileReadingInstruction() {
     const Id task = f.status()["stages"][0]["taskId"];
     f.t3.finish("run-1",{{"artifactVersion",shaA},{"finding","Keep the original row count"}});
     f.t3.onObserve = [&] {
-        f.store->receive({"bot","","env","project",Json::object(),{},0},"fresh","Continue in a fresh Session");
+        f.store->receive({"owner",true},{"bot","","env","project",Json::object()},"fresh","Continue in a fresh Session");
         f.bot.action = {"continue_fresh_session",{{"taskId",task}},"Continue the same task"};
     };
     f.ticks(1);
@@ -552,7 +552,7 @@ void scopedCompactionPages() {
     const auto summary = f.call("compact_conversation",{{"endMessageId",end},{"summary","Keep the original evidence"}});
     require(summary["compaction"]["originalCount"]==3,"summary counted messages outside its boundary");
     f.bot.action = {"expand_context",{{"compactionId",summary["compaction"]["compactionId"]}},"Look up original evidence"};
-    f.store->receive({"other","","env","project",Json::object(),{},0},"read","Read first Bot's evidence");
+    f.store->receive({"owner",true},{"other","","env","project",Json::object()},"read","Read first Bot's evidence");
     f.runtime->runConversations();
     require(f.bot.result.at("ok")==false && f.bot.history.empty(),"compaction crossed Bot histories");
     f.turn("Bad offset","expand_context",{{"startMessageId",first},{"offset",1}});

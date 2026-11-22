@@ -69,10 +69,14 @@ Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpo
     return last();
 }
 
-void Store::Impl::grantModelCall(std::string_view budget) {
+Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,
+                                     Id messageId, Id taskId, Id eventId) {
     exec("UPDATE model_budgets SET call_limit=call_limit+1 WHERE id=? AND call_limit<?",
          {budget,std::numeric_limits<Id>::max()});
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
+    const auto attempt = reserveModelCall(budget,purpose,messageId,taskId,eventId);
+    if (!attempt) throw Conflict("The approved model call could not be reserved");
+    return attempt;
 }
 
 Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
@@ -90,6 +94,13 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
         decision = model.decide(safe);
         for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
         decision.reason = scrub.text(decision.reason);
+        if (decision.args.contains("docId")) {
+            const auto shared = sharedRedactor();
+            const auto document = decision.args.at("docId");
+            decision.args = shared.record(std::move(decision.args),SecretRedactor::Fields::external);
+            if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
+            decision.reason = shared.text(decision.reason);
+        }
         if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
             decision.tool = scrub.text(decision.tool);
         decision.usage = scrub.payload(decision.usage);

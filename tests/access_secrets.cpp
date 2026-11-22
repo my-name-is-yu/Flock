@@ -68,7 +68,7 @@ void runningSessions(const std::filesystem::path& path) {
         if (sender == "Ernest") return {{"Reviewer",{"Reviewer","","env","peer-project"}}};
         return {};
     };
-    Runtime runtime(store,model,adapter,[](auto){return BotNotes{};},options);
+    Runtime runtime(store,model,adapter,[](auto){return std::string{};},options);
     store.submit({"Ernest","read repository","env","project"});
     store.submit({"Ernest","ask reviewer","env","other-project"});
     for(int i=0; i<30 && adapter.running.size()<2; ++i) runtime.tick();
@@ -136,7 +136,7 @@ void freshLaunch(const std::filesystem::path& path) {
     Store store(path);
     RunningAdapter adapter;
     WorkModel model;
-    Runtime runtime(store,model,adapter,[](auto){ return BotNotes{}; });
+    Runtime runtime(store,model,adapter,[](auto){ return std::string{}; });
     auto task = store.submit({"Fresh","read repository","env","project"});
     store.access().request("Fresh",{"environment","env","launch"});
     for (int i=0;i<6;++i) runtime.tick();
@@ -182,11 +182,11 @@ void exercise(const std::filesystem::path& dir) {
     auto child=store.submit(ernest), peerChild=store.submit(reviewer);
     ToolModel model;
     Adapter t3;
-    Runtime runtime(store,model,t3,[](std::string_view){return BotNotes{};});
+    Runtime runtime(store,model,t3,[](std::string_view){return std::string{};});
     unsigned message=0;
     auto turn=[&](std::string name, Json args=Json::object(),std::string text="acknowledged") {
         model.next={std::move(name),std::move(args),""};
-        store.receive(ernest,std::to_string(++message),text);
+        store.receive(localOwner,ernest,std::to_string(++message),text);
         runtime.runConversations();
         return model.result.dump();
     };
@@ -275,7 +275,7 @@ void exercise(const std::filesystem::path& dir) {
     std::filesystem::remove(dir/"secrets");
     std::filesystem::rename(dir/"original-vault",dir/"secrets");
     model.next={"list_secrets",Json::object(),"list"};
-    store.receive(reviewer,"peer-names","show names",0);
+    store.receive(localOwner,reviewer,"peer-names","show names",0);
     runtime.runConversations();
     check(model.result.at("turn").at(0).at("result").at("names").empty(),"other Bot's secret names visible");
     check(access.redactSecrets("Reviewer",Json(credential))==credential &&

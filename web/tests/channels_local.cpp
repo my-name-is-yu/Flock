@@ -68,7 +68,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     WebCallbacks cb{
         .bots = [] { return Json::array({{{"id","release"},{"name","Release"}}}); },
         .intake = [](std::string_view bot, std::string_view request) -> Intake {
-            return {std::string(bot),std::string(request),"local-env","release",Json::object(),{},0};
+            return {std::string(bot),std::string(request),"local-env","release",Json::object()};
         },
     };
     const auto identities = database.parent_path() / "channel-identities.json";
@@ -102,7 +102,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     check(Browser::checked(bridge.Post(imessage,credential,event.dump(),"application/json"),201) == b,"HTTP replay changed receipt");
     ChannelModel model;
     Session t3;
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     runtime.runConversations();
     check(transport->replies.size() == 2 && transport->replies[0]["payload"]["suggestions"].size() == 1,
           "Channel replies or getting-started suggestions missing");

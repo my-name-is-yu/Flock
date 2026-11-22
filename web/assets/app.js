@@ -2,6 +2,7 @@ import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { mountBoardInbox } from '/board-inbox.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -39,13 +40,16 @@ const waitLabels = {
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question',
+  session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
   intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
+  request_changed: 'The request changed. Review its current details before acting again.',
+  already_closed: 'This request was already decided or closed.',
+  access_denied: 'You do not have permission to make this decision.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -794,8 +798,10 @@ function pausedActions(turn) {
   const actions = node('div', 'event-actions');
   const waitMessageId = turn.messageId;
   const key = `message/${waitMessageId}`;
-  const approve = button('Approve one more model call', 'button',
-    () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+  const approve = button('Approve one more model call', 'button', () => void submitOperation(view, key, {
+    itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: waitMessageId,
+    taskId: 0, targetRevision: 0, targetGeneration: waitMessageId, decision: 'approve',
+  }));
   approve.disabled = pendingWaits.has(key);
   actions.append(approve);
   return actions;
@@ -809,7 +815,7 @@ function suggestionActions(event) {
 }
 function messageSide(event) {
   if (event.kind === 'cancelled') return 'system';
-  return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'cron') ? 'user' : 'bot';
+  return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
 }
 function reasonText(text) {
   const reason = node('p', 'event-reason');
@@ -873,8 +879,13 @@ function eventCard(event, context, place) {
   row.tabIndex = -1;
   row.classList.toggle('group-start', place.groupStart);
   row.classList.toggle('task-start', place.taskStart);
-  const cron = event.kind === 'request' && data.source === 'cron';
-  const scheduled = cron && data.scheduledAt ? `Scheduled for ${fullTime.format(data.scheduledAt * 1000)}` : '';
+  const trigger = event.kind === 'request' ? data.trigger : null;
+  let scheduled = '';
+  if (trigger?.targetTime) {
+    scheduled = trigger.occurrenceCount > 1
+      ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
+      : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
+  } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
   const showMeta = side === 'bot' ? place.groupStart || place.taskStart : place.taskStart;
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
@@ -939,7 +950,7 @@ function eventCard(event, context, place) {
     if (data.text) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.text }];
     if (data.reason) bubble.append(reasonText(data.reason));
   } else {
-    if (cron) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Recurring request: '));
+    if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
     if (event.kind === 'user_answer') {
@@ -1239,7 +1250,7 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  cron: ['Configured recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
@@ -1447,19 +1458,21 @@ function generalContent(bot) {
   role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
   const schedules = node('div', 'settings-card settings-rows');
   schedules.append(bot.cron.length
-    ? settingsRow('Recurring requests', `${bot.cron.length} scheduled`, () => selectSection('cron', true))
-    : settingsRow('Recurring requests', 'None'));
+    ? settingsRow('Configured recurring requests', `${bot.cron.length} entries`, () => selectSection('cron', true))
+    : settingsRow('Configured recurring requests', 'None'));
   return [hero, role, schedules];
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
-  for (const { schedule, timezone, request } of bot.cron) {
-    const readable = describeCron(schedule);
+  for (const item of bot.cron) {
+    const expression = item.schedule;
+    const readable = describeCron(expression);
     const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    if (readable) when.append(readable);
-    when.append(node('code', 'cron-expression', schedule), node('span', 'cron-zone', timezone));
-    row.append(when, node('p', 'cron-request', request));
+    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression));
+    when.append(node('span', 'cron-zone', item.timezone));
+    if (readable) when.append(node('code', 'cron-expression', expression));
+    row.append(when, node('p', 'cron-request', item.request));
     list.append(row);
   }
   return [list];
@@ -1779,19 +1792,20 @@ async function loadSessions() {
 
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
-  await submitOperation(context, waitId, { taskId: task.id, waitId, operation, ...fields });
+  await submitOperation(context, waitId, { taskId: task.id, waitId, operation,
+    targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
 }
 async function submitOperation(context, key, payload) {
   if (!context || pendingWaits.has(key)) return;
-  const isOpen = () => view === context && (payload.waitMessageId
-    ? detail?.kind === 'paused' && detail.messageId === payload.waitMessageId
+  const isOpen = () => view === context && (payload.itemKind
+    ? detail?.kind === 'paused' && detail.messageId === payload.waitId
     : detail?.waitId === payload.waitId);
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   let failed = false;
   try {
-    await api('operations', { botId: context.id, ...payload });
+    await api(payload.itemKind ? 'inbox/decide' : 'operations', { botId: context.id, ...payload });
     setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
     if (isOpen()) closeDetail();
   } catch (error) {
@@ -1968,3 +1982,5 @@ document.addEventListener('visibilitychange', resumeUpdates);
 window.addEventListener('pagehide', () => liveUpdates.use(null));
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
+
+mountBoardInbox(api);

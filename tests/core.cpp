@@ -62,7 +62,7 @@ int main() {
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
-        auto notes = [](std::string_view) { return BotNotes{"Check the branch",""}; };
+        auto notes = [](std::string_view) { return std::string("Check the branch"); };
         Id id;
         {
             Store store(db);

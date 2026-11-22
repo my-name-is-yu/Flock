@@ -93,11 +93,14 @@ SecretRedactor::SecretRedactor(std::vector<std::string> values) : values_(std::m
     std::sort(values_.begin(),values_.end(),[](const auto& a,const auto& b){return a.size()>b.size();});
 }
 
-std::string SecretRedactor::text(const std::string& source) const {
-    if (values_.empty()) return source;
+std::string SecretRedactor::text(std::string_view source, bool truncated) const {
+    if (values_.empty()) return std::string(source);
     std::string out;
     for (size_t i=0; i<source.size();) {
-        const auto found = std::find_if(values_.begin(),values_.end(),[&](const auto& v){return source.compare(i,v.size(),v)==0;});
+        const auto tail = source.substr(i);
+        const auto found = std::find_if(values_.begin(),values_.end(),[&](const auto& value) {
+            return tail.starts_with(value) || (truncated && value.starts_with(tail));
+        });
         if (found == values_.end()) out += source[i++];
         else { out += "[redacted]"; i += found->size(); }
     }
@@ -146,16 +149,24 @@ void SecretRedactor::requirePublic(const Json& metadata) const {
     if (record(metadata,Fields::external) != metadata) throw Conflict("Secret values cannot be used as metadata");
 }
 
-SecretRedactor Store::Impl::redactor(std::string_view bot) const {
-    std::lock_guard lock(mutex);
-    auto rows = query(R"SQL(
-SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
- AND (p.bot=? OR EXISTS (SELECT 1 FROM grant_audit_log a WHERE a.bot=? AND a.action IN ('approve','grant')
-      AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
-)SQL",{bot,bot});
+static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets) {
     std::vector<std::string> values;
     while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
     return SecretRedactor(std::move(values));
+}
+
+SecretRedactor Store::Impl::redactor(std::string_view bot) const {
+    std::lock_guard lock(mutex);
+    return readRedactor(query(R"SQL(
+SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
+ AND (p.bot=? OR EXISTS (SELECT 1 FROM grant_audit_log a WHERE a.bot=? AND a.action IN ('approve','grant')
+      AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
+)SQL",{bot,bot}),secrets);
+}
+
+SecretRedactor Store::Impl::sharedRedactor() const {
+    std::lock_guard lock(mutex);
+    return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets);
 }
 
 Json Access::redactSecrets(std::string_view bot, const Json& data) const {

@@ -45,7 +45,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 }
 ```
 
-In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` for assumptions that carry across tasks. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
 Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. The Bot asks in the conversation when the destination is unclear.
 
@@ -73,7 +73,7 @@ build/app/flock --help
 build/app/flock tasks
 build/app/flock status <task-id>
 build/app/flock history <task-id>
-build/app/flock answer <task-id> <wait-id> 'main'
+build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 ```
 
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.

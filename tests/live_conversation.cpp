@@ -108,14 +108,14 @@ struct Scene {
     Json config;
     Scene(Mixed& mixed, const std::string& slug)
         : store(directory.path / "state.db"), model(mixed),
-          runtime(store,model,t3,[](std::string_view) { return BotNotes{}; }),
+          runtime(store,model,t3,[](std::string_view) { return std::string{}; }),
           config({{"modelProvider","chatgpt"},{"model",slug},{"conversationEnvironments",{{"cloud Mac","cloud"}}}}) {
         for (const auto* environment : {"desktop","cloud"})
             store.access().resourceGrant({"fixture",true},"release",{"environment",environment,"launch"},GrantChange::grant);
     }
 
     Intake intake(std::string request = {}, std::string project = "project") const {
-        return {"release",std::move(request),"desktop",std::move(project),config,{},0};
+        return {"release",std::move(request),"desktop",std::move(project),config};
     }
     void reach(Id id, std::string_view expected) {
         constexpr int tickLimit = 20;
@@ -153,7 +153,7 @@ struct Scene {
         auto before = snapshot();
         const auto steerCount = t3.notes.size();
         const auto interruptCount = t3.interrupted.size();
-        const auto receipt = store.receive(intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
+        const auto receipt = store.receive(localOwner,intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
                                            text,replyTo);
         runtime.runConversations();
         for (const auto& row : store.conversation("release",0,200)) {
@@ -600,12 +600,10 @@ struct Script : Model {
         const auto task = std::ranges::find_if(tasks,[&](const Json& item) { return item.at("request") == request; });
         check(task != tasks.end(),"scripted task was missing: " + request.dump());
         decision.args["taskId"] = task->at("taskId");
-        if (decision.tool == "answer_task_question") {
-            decision.args["waitId"] = task->at("wait").at("waitId");
-        } else {
-            decision.args["generation"] = task->at("generation");
-            if (decision.tool == "change_task") decision.args["revisionId"] = task->at("revisionId");
-        }
+        decision.args["generation"] = task->at("generation");
+        if (decision.tool == "answer_task_question") decision.args["waitId"] = task->at("wait").at("waitId");
+        if (decision.tool == "change_task" || decision.tool == "answer_task_question")
+            decision.args["revisionId"] = task->at("revisionId");
         return decision;
     }
 };

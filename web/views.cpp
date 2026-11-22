@@ -25,6 +25,14 @@ void copyFields(Json& output, const Json& source, std::initializer_list<const ch
     }
 }
 
+void copyTrigger(Json& output, const Json& source) {
+    const auto trigger = source.find("trigger");
+    if (trigger == source.end() || !trigger->is_object()) return;
+    copyFields(output["trigger"] = Json::object(),*trigger,
+               {"triggerKind","triggerId","targetTime","coveredFrom","coveredTo","occurrenceCount",
+                "firedAt","timezone","label","source"});
+}
+
 // The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.
 std::string threadSegment(std::string_view id) {
     constexpr std::string_view hex = "0123456789ABCDEF";
@@ -149,8 +157,10 @@ Json eventView(const Json& event) {
     const auto& data = event.at("data");
     Json details = Json::object();
     if (kind == "waiting") details = waitView(data);
-    else if (kind == "request") copyFields(details,data,{"text","source","scheduleId","scheduledAt","messageId"});
-    else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
+    else if (kind == "request") {
+        copyFields(details,data,{"text","source","messageId"});
+        copyTrigger(details,data);
+    } else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "cancelled") copyFields(details,data,{"request"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "completed") {
@@ -226,7 +236,7 @@ std::string displayState(const Json& task) {
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt","workflowId","stageId","inputArtifactVersion"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","generation","sourceTaskId","createdAt","workflowId","stageId","inputArtifactVersion"});
     return result;
 }
 
@@ -360,7 +370,8 @@ Json sessions(Store& store, std::string_view bot, Id before) {
 
 Json taskDetail(const Json& task, const Json& latestResult) {
     auto result = taskSummary(task);
-    copyFields(result,task,{"doneWhen","intent"});
+    copyFields(result,task,{"doneWhen","intent","blockerReason"});
+    copyTrigger(result,task);
     result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
     auto& revisions = result["revisions"] = Json::array();
     if (task.contains("revisions") && task["revisions"].is_array()) {
@@ -409,7 +420,7 @@ Json botView(Store& store, const Json& bot, const Json* changedSessionTasks) {
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();
-        copyFields(view,turn,{"messageId","text","route"});
+        copyFields(view,turn,{"messageId","replyToMessageId","text","route"});
         paused.push_back(std::move(view));
     }
     if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))

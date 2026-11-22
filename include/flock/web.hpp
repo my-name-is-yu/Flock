@@ -18,6 +18,7 @@ struct WebCallbacks {
     std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
     std::function<Person(std::string_view authorization)> authenticate = {};
     ApplyBotChange applyBotChange = {};
+    std::function<Seconds()> clock = unixTime;
     std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);

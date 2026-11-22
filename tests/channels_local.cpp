@@ -33,6 +33,7 @@ struct Temp {
 struct SessionAdapter final : T3 {
     int launches = 0;
     std::function<Observation(const RunRef&)> observeRun;
+    std::vector<SessionTarget> evidenceReads;
     std::string authGeneration(const std::string&, const Json&) override { return "auth"; }
     Delivery send(const Command& command) override {
         ++launches;
@@ -44,6 +45,14 @@ struct SessionAdapter final : T3 {
         return observeRun ? observeRun(run) : Observation{};
     }
     void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool) override {
+        evidenceReads.push_back(target);
+        return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};
+    }
+    std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
+        evidenceReads.push_back(target);
+        return SessionCounts{2,1};
+    }
 };
 
 class Script final : public Model {
@@ -80,7 +89,7 @@ struct RecordedTransport final : ChannelTransport {
 };
 
 Intake intake(std::string_view bot, std::string_view text) {
-    return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}},{},0};
+    return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}}};
 }
 
 void grant(Store& store, std::string_view bot) {
@@ -109,6 +118,11 @@ Decision reply(std::string text) {
     return {"reply",{{"text",text},{"suggestions",{"Start here","Show me more"}}},{}};
 }
 
+Decision answerQuestion(const Json& task, std::string_view text) {
+    return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},
+        {"revisionId",task.at("currentRevision")},{"generation",task.at("generation")},{"text",text}},{}};
+}
+
 Observation finished() {
     Observation result;
     result.kind = Observation::Kind::Finished;
@@ -122,7 +136,7 @@ void channels(const std::filesystem::path& database) {
     Script model;
     SessionAdapter t3;
     auto transport = std::make_shared<RecordedTransport>();
-    const auto notes = [](auto) { return BotNotes{}; };
+    const auto notes = [](auto) { return std::string{}; };
     const auto slack = ChannelKind::slack, imessage = ChannelKind::imessage;
     auto screenshot = event("slack-thread","same-id","What is in this screenshot?");
     screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
@@ -297,7 +311,7 @@ void taskUpdates(const std::filesystem::path& database) {
     grant(store,"release");
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     auto original = event("private-origin","start","Start the private release task");
     auto publish = event("private-origin","publish","Publish the preview");
 
@@ -334,7 +348,6 @@ void taskUpdates(const std::filesystem::path& database) {
         return reply("Unexpected turn");
     };
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const auto wait = store.task(taskId).at("wait");
     check(transport->effects.size() == 4 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
           transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
           "Task question was not delivered to the originating thread");
@@ -354,13 +367,14 @@ void taskUpdates(const std::filesystem::path& database) {
         if (input.event.at("kind") == "result")
             return {"complete",{{"report","Private release completed."}},"The Session confirmed the release"};
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"answer_task_question",{{"taskId",taskId},{"waitId",wait.at("id")},{"text","Preview"}},{}};
+        if (steps.empty()) return answerQuestion(store.task(taskId),"Preview");
         check(steps.at(0).at("result").at("ok") == true,"Originating thread could not answer its question");
         return reply("Answer received.");
     };
     const auto answer = event("private-origin","answer","Preview");
     store.receiveChannel(channel,"fixture-auth",answer,intake);
     runtime.runConversations();
+    check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id,"Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
     check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 7 &&
@@ -383,10 +397,10 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     grant(store,"release");
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
 
     model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
-    const auto original = store.receive(intake("release",""),"web-original","Original Web evidence").at("messageId");
+    const auto original = store.receive(owner,intake("release",""),"web-original","Original Web evidence").at("messageId");
     runtime.runConversations();
 
     Json compaction, workflow;
@@ -400,7 +414,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
         workflow = steps.at(1).at("result").at("workflowId");
         return reply("Started in Web");
     };
-    store.receive(intake("release",""),"web-workflow","Summarize and start a workflow");
+    store.receive(owner,intake("release",""),"web-workflow","Summarize and start a workflow");
     runtime.runConversations();
     check(compaction.is_number() && workflow.is_number(),"Web workflow or compaction tool failed");
 
@@ -410,7 +424,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
                      input.task.at("workflows").at(0).at("workflowId") == workflow;
         return reply("Loaded in Web");
     };
-    store.receive(intake("release",""),"web-context","Check the workflow");
+    store.receive(owner,intake("release",""),"web-context","Check the workflow");
     runtime.runConversations();
     check(webContext,"Web turn lost the workflow or compacted summary");
 
@@ -432,6 +446,64 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     check(channelContextIsolated,"Channel called Web tools by ID or received Web context");
 }
 
+void sessionEvidence(const std::filesystem::path& database) {
+    Store store(database);
+    SessionAdapter t3;
+    Script model;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    connect(store,transport);
+    grant(store,"release");
+    const auto channel = ChannelKind::slack;
+    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
+    store.access().resourceGrant(root,"release",Scope::sessionRead("env","shared-from-web"),GrantChange::grant);
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    model.decideNext = [](const ModelInput& input) -> Decision {
+        if (input.event.at("turn").empty()) return {"start_task",{{"request","Private task"}},{}};
+        return reply("Started");
+    };
+    store.receiveChannel(channel,"fixture-auth",event("private-origin","start","Start work"),intake);
+    for (int i = 0; i < 4; ++i) runtime.tick();
+    check(t3.launches == 1,"Expected a Session in the originating thread");
+
+    Json ref, result;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& steps = input.event.at("turn");
+        if (!steps.empty()) {
+            result = steps.back().at("result");
+            return reply("Checked");
+        }
+        if (input.event.at("text") == "Count events")
+            return {"flock_session_events",{{"sessionRef",ref},{"operation","counts"}},{}};
+        if (input.event.at("text") == "Read memory") {
+            check(std::ranges::find(input.tools,"read_memory") == input.tools.end() &&
+                  std::ranges::find(input.tools,"create_schedule") == input.tools.end(),
+                  "Bot-wide memory or scheduling was offered in a channel thread");
+            return {"read_memory",Json::object(),{}};
+        }
+        return {"flock_session_search",Json::object(),{}};
+    };
+    const auto call = [&](std::string thread, std::string id, std::string request) {
+        result = nullptr;
+        store.receiveChannel(channel,"fixture-auth",event(std::move(thread),std::move(id),std::move(request)),intake);
+        runtime.runConversations();
+        check(result.is_object(),"Expected Session evidence tool result");
+        return result;
+    };
+    auto found = call("private-origin","search","Search Sessions");
+    check(found.at("sessions").size() == 1 && found.at("sessions").at(0).at("title") == "thread-1",
+          "Originating thread did not see exactly its own Session");
+    ref = found.at("sessions").at(0).at("sessionRef");
+    check(call("private-origin","count","Count events").at("counts").at("runs") == 1,
+          "Originating thread could not read its Session");
+    t3.evidenceReads.clear();
+    check(call("other-thread","search","Search Sessions").at("sessions").empty(),"Session search crossed channel threads");
+    check(call("other-thread","count","Count events").at("ok") == false && t3.evidenceReads.empty(),
+          "A Session reference bypassed channel scope");
+    check(call("private-origin","memory","Read memory").at("ok") == false,
+          "An unlisted tool could access Bot-wide memory in a channel thread");
+}
+
 void taskQuestionChoices(const std::filesystem::path& database) {
     Store store(database);
     SessionAdapter t3;
@@ -442,7 +514,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     grant(store,"release");
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     t3.observeRun = [](const RunRef& run) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -484,12 +556,9 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         check(anchor.at("taskId") == first.at("id") && anchor.at("messageId") == first.at("wait").at("messageId") &&
               anchor.at("waitId") == first.at("wait").at("id"),"Posted choice lost its exact journal target");
         const auto& turn = input.event.at("turn");
-        const auto apply = [&](const Json& task) -> Decision {
-            return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},{"text","Yes"}},{}};
-        };
-        if (turn.empty()) return apply(second);
+        if (turn.empty()) return answerQuestion(second,"Yes");
         check(turn.at(0).at("result").at("ok") == false,"Selection was applied to the other open question");
-        if (turn.size() == 1) return apply(first);
+        if (turn.size() == 1) return answerQuestion(first,"Yes");
         answered = turn.at(1).at("result").at("ok") == true;
         return reply("Answer received.");
     };
@@ -515,8 +584,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
               anchor.at("inReplyTo").at("replyToMessageId") == second.at("wait").at("messageId"),
               "Clarification reply lost the channel question it followed");
         const auto& turn = input.event.at("turn");
-        if (turn.empty())
-            return {"answer_task_question",{{"taskId",second.at("id")},{"waitId",second.at("wait").at("id")},{"text","Yes"}},{}};
+        if (turn.empty()) return answerQuestion(second,"Yes");
         followed = turn.at(0).at("result").at("ok") == true;
         return reply("Answer received.");
     };
@@ -533,7 +601,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     store.connectLocalMachine("laptop",hostLocalMachine(owner.id));
     Script model;
     SessionAdapter t3;
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     int project = 0;
     const auto session = [&](auto bot) {
         auto route = intake(bot,"Prepare");
@@ -569,7 +637,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
             observed = true;
             return reply("Chat is available");
         };
-        store.receive(intake(bot,""),std::to_string(++count),"Local connection");
+        store.receive(localOwner,intake(bot,""),std::to_string(++count),"Local connection");
         runtime.runConversations();
         check(observed,"Local tool result was not delivered");
     };
@@ -617,7 +685,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId","env"}}});
         return reply("Chat is available");
     };
-    store.receive(intake("release",""),std::to_string(++count),"List reusable environments");
+    store.receive(localOwner,intake("release",""),std::to_string(++count),"List reusable environments");
     runtime.runConversations();
     check(unchanged,"Local connections added a reusable environment");
     check(store.conversation("release").back()["data"]["text"] == "Chat is available","Chat disabled after local decline");
@@ -632,6 +700,7 @@ int main() {
         channels(temp.path / "channels.db");
         taskUpdates(temp.path / "task-updates.db");
         workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
+        sessionEvidence(temp.path / "session-evidence.db");
         taskQuestionChoices(temp.path / "task-question-choices.db");
         local(temp.path / "local.db",std::filesystem::canonical(path).string());
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

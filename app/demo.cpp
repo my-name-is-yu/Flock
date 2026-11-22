@@ -23,6 +23,7 @@ class DemoModel final : public Model {
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
                 return {"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
+                    {"revisionId",reply["revisionId"]},{"generation",reply["generation"]},
                     {"text",in.event.value("text","")}},"The user replied to the demo question."};
             }
             if (reply.is_object() && reply.value("kind","") == "result")

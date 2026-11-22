@@ -10,6 +10,7 @@ struct Message {
     Id id = 0, replyTo = 0;
     std::string bot, text, channelScope;
     Json routing;
+    Person actor;
     Id questionMessageId = 0, questionTaskId = 0;
 };
 }
