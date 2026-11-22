@@ -2,6 +2,7 @@ import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { messagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox } from '/board-inbox.js';
 
 const byId = (id) => document.getElementById(id);
@@ -813,10 +814,6 @@ function suggestionActions(event) {
     actions.append(button(suggestion, 'button', () => beginReply(target, suggestion)));
   return actions;
 }
-function messageSide(event) {
-  if (event.kind === 'cancelled') return 'system';
-  return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
-}
 function reasonText(text) {
   const reason = node('p', 'event-reason');
   reason.append(node('span', 'sr-only', 'Reason: '), document.createTextNode(text));
@@ -865,7 +862,7 @@ function runIcon(run) {
 function eventCard(event, context, place) {
   const data = event.data;
   const bot = context.bot;
-  const side = messageSide(event);
+  const { side } = place;
   if (side === 'system') {
     const stopped = data.request ? `“${data.request.split('\n')[0]}” was stopped` : 'A request was stopped';
     const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · ${stopped} · `);
@@ -874,10 +871,11 @@ function eventCard(event, context, place) {
     note.append(eventTime(event));
     return note;
   }
-  const row = node('article', `msg ${side}`);
+  const row = node('article', `msg event-message ${side}`);
   row.id = `event-${event.id}`;
   row.tabIndex = -1;
   row.classList.toggle('group-start', place.groupStart);
+  row.classList.toggle('group-continues', !place.groupEnd);
   row.classList.toggle('task-start', place.taskStart);
   const trigger = event.kind === 'request' ? data.trigger : null;
   let scheduled = '';
@@ -890,7 +888,9 @@ function eventCard(event, context, place) {
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
     side === 'bot' ? bot?.name ?? 'Bot' : 'You');
-  meta.append(name, eventTime(event, scheduled));
+  const time = eventTime(event, scheduled);
+  meta.append(name);
+  if (showMeta) meta.append(time);
   row.append(meta);
 
   const line = node('div', 'msg-line');
@@ -898,11 +898,7 @@ function eventCard(event, context, place) {
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
-  if (!showMeta) {
-    const hoverTime = eventTime(event, scheduled);
-    hoverTime.setAttribute('aria-hidden', 'true');
-    actions.append(hoverTime);
-  }
+  if (!showMeta) actions.append(time);
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
@@ -1008,6 +1004,7 @@ function eventCard(event, context, place) {
     const [label, target] = replyTarget;
     actions.append(iconButton('reply', label, () => beginReply(target)));
   }
+  if (!showMeta && !actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
   line.append(bubble, actions);
   row.append(line, ...extras);
   return row;
@@ -1157,16 +1154,15 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
       previous = null;
     }
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
-    const side = messageSide(event);
-    const next = shown[index + 1];
-    const place = {
-      groupStart: previous?.side !== side,
-      groupEnd: !next || next.kind === 'bot_message' || messageSide(next) !== side || dayLabel(next.time) !== day,
-      taskStart: previous?.taskId !== event.taskId,
-      afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
-    };
+    const place = messagePlacement(previous, event, shown[index + 1]);
+    if (place.timeBreak) {
+      const separator = node('p', 'day chat-time-break');
+      separator.setAttribute('aria-hidden', 'true');
+      separator.append(eventTime(event));
+      fragment.append(separator);
+    }
     fragment.append(eventCard(event, timeline, place));
-    previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
+    previous = event;
   });
   appendPeerMessages();
   if (!fragment.childElementCount) {
