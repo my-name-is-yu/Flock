@@ -598,14 +598,39 @@ function draftRow(draft) {
   return row;
 }
 
+const rowRevealTimers = new WeakMap();
+function triggerRowReveal(container) {
+  if (reducedMotion.matches) return;
+  clearTimeout(rowRevealTimers.get(container));
+  container.classList.remove('rows-reveal');
+  void container.offsetWidth;
+  container.classList.add('rows-reveal');
+  rowRevealTimers.set(container, setTimeout(() => {
+    container.classList.remove('rows-reveal');
+    rowRevealTimers.delete(container);
+  }, 400));
+}
+function clearRowReveal(container) {
+  clearTimeout(rowRevealTimers.get(container));
+  rowRevealTimers.delete(container);
+  container.classList.remove('rows-reveal');
+}
+
 let previousPinsKey = null;
+let previousListLoaded = false;
 function renderBots() {
   const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds,
     bots.map(({ id }) => decisions.count(id)))) return;
+  const revealedFromSkeleton = !previousListLoaded && listLoaded;
+  previousListLoaded = listLoaded;
   const pinsKey = JSON.stringify([...pins]);
   const animateFlip = previousPinsKey !== null && previousPinsKey !== pinsKey && !reducedMotion.matches;
   previousPinsKey = pinsKey;
+  if (animateFlip || menu) {
+    clearRowReveal(elements['bot-list']);
+    clearRowReveal(elements.pinned);
+  }
   const beforeRects = new Map();
   if (animateFlip) {
     for (const entry of sidebarEntries.values()) {
@@ -641,6 +666,10 @@ function renderBots() {
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (revealedFromSkeleton) {
+    if (unpinned.length) triggerRowReveal(list);
+    if (pinned.length) triggerRowReveal(elements.pinned);
+  }
   if (animateFlip) {
     for (const [el, before] of beforeRects) {
       if (!el.isConnected || el.hidden) continue;
@@ -827,11 +856,18 @@ const decisionKindLabels = {
   protected_input: 'Protected input',
   bot_change: 'Bot change',
 };
+let activityBotId = null;
+let activitySeen = false;
+let activityReveal = null;
+let previousWaitsLoading = false;
+let previousSessionsLoading = false;
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
   const pending = view?.id ? decisions.itemsFor(view.id) : [];
   if (changed('waits', view?.id, loading, pending)) {
+    const revealedWaits = previousWaitsLoading && !loading;
+    previousWaitsLoading = loading;
     elements['wait-count'].textContent = pending.length;
     elements['wait-count'].hidden = !pending.length;
     elements['wait-list'].setAttribute('aria-busy', loading);
@@ -848,6 +884,7 @@ function renderActivity() {
     });
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
+    else if (revealedWaits && rows.length) triggerRowReveal(elements['wait-list']);
     elements['wait-list'].closest('section').hidden = !loading && !rows.length;
   }
   const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
@@ -855,41 +892,60 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions)) return;
-  const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
-  const activeKeys = new Set();
-  const live = [];
-  for (const run of active) {
-    const identity = key(run.taskId, run);
-    if (activeKeys.has(identity)) continue;
-    activeKeys.add(identity);
-    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
-      run.state === 'waiting' ? 'waiting' : 'live'));
+  if (changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions)) {
+    const revealedSessions = previousSessionsLoading && !loading;
+    previousSessionsLoading = loading;
+    const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
+    const activeKeys = new Set();
+    const live = [];
+    for (const run of active) {
+      const identity = key(run.taskId, run);
+      if (activeKeys.has(identity)) continue;
+      activeKeys.add(identity);
+      live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
+        run.state === 'waiting' ? 'waiting' : 'live'));
+    }
+    const ended = [];
+    for (const task of groups.sort((a, b) => b.id - a.id)) {
+      for (const session of task.sessions) {
+        if (activeKeys.has(key(task.id, session))) continue;
+        const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+        ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+      }
+    }
+    const rows = [];
+    const grouped = live.length > 0 && ended.length > 0;
+    for (const [label, items] of [['Active', live], ['Ended', ended]]) {
+      if (!items.length) continue;
+      if (!grouped) { rows.push(...items); continue; }
+      const heading = node('h3', 'activity-group');
+      heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
+      rows.push(heading, ...items);
+    }
+    const list = elements['session-list'];
+    const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
+    rows.push(...workflowInspectors(data, open));
+    list.setAttribute('aria-busy', loading);
+    list.replaceChildren(...rows);
+    if (loading) list.append(...skeletonRows(2));
+    else if (revealedSessions && rows.length) triggerRowReveal(list);
+    list.closest('section').hidden = !loading && !rows.length && more.hidden;
   }
-  const ended = [];
-  for (const task of groups.sort((a, b) => b.id - a.id)) {
-    for (const session of task.sessions) {
-      if (activeKeys.has(key(task.id, session))) continue;
-      const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-      ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+  const nextActivityBotId = view && !view.dm ? view.id : null;
+  if (nextActivityBotId !== activityBotId) {
+    const shouldReveal = activitySeen && !!nextActivityBotId;
+    activityBotId = nextActivityBotId;
+    if (nextActivityBotId) activitySeen = true;
+    activityReveal?.cancel();
+    activityReveal = null;
+    const panel = elements['bot-activity'];
+    if (shouldReveal && !panel.hidden && !reducedMotion.matches) {
+      activityReveal = panel.animate?.([
+        { opacity: 0, transform: 'translateY(6px)' },
+        { opacity: 1, transform: 'none' },
+      ], { duration: 190, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' }) ?? null;
     }
   }
-  const rows = [];
-  const grouped = live.length > 0 && ended.length > 0;
-  for (const [label, items] of [['Active', live], ['Ended', ended]]) {
-    if (!items.length) continue;
-    if (!grouped) { rows.push(...items); continue; }
-    const heading = node('h3', 'activity-group');
-    heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
-    rows.push(heading, ...items);
-  }
-  const list = elements['session-list'];
-  const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
-  rows.push(...workflowInspectors(data, open));
-  list.setAttribute('aria-busy', loading);
-  list.replaceChildren(...rows);
-  if (loading) list.append(...skeletonRows(2));
-  list.closest('section').hidden = !loading && !rows.length && more.hidden;
 }
 
 function beginReply(target, text = '') {
