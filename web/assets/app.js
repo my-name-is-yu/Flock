@@ -1566,7 +1566,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
-  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
+  older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier messages';
   const peerStatus = elements['peer-status'];
   const olderFailed = view?.dm?.olderFailed;
   peerStatus.hidden = !olderFailed;
@@ -2693,6 +2693,10 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
+// Like Messages, reaching the top of the history loads the previous page; the button stays for keyboard and assistive use.
+new IntersectionObserver((entries) => {
+  if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
+}, { root: elements.conversation, rootMargin: '200px 0px 0px' }).observe(elements.older);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
