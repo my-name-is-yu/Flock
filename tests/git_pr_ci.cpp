@@ -55,7 +55,7 @@ private:
                 check(input.task.empty() && input.history.empty(),"Notification received unrelated task context");
                 if (checkOriginatingSession)
                     check(gitEvent.at("run").at("threadId") == "thread-project","Webhook lost its originating Session");
-                std::vector<std::string> expected{"reply","git_pr_status"};
+                std::vector<std::string> expected{"reply","read_tool_result","git_pr_status"};
                 if (gitEvent.at("headSha") != "") expected.push_back("git_commit_status");
                 if (gitEvent.at("jobId") != 0) expected.push_back("git_read_ci_logs");
                 check(input.tools == expected,"Webhook supplied unexpected tools or changed their order");
