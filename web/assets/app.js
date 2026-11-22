@@ -888,8 +888,14 @@ function cardSourceAction(bot, id, close) {
     context.source = { id, bot, events: page.events };
     renderTimeline();
     const target = byId(`event-${id}`);
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: 'center' });
+    if (target) {
+      // Scroll only the conversation; scrollIntoView would also shift the page around it.
+      const scroller = elements.conversation;
+      const box = scroller.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      scroller.scrollTop += row.top - box.top - (box.height - row.height) / 2;
+      target.focus({ preventScroll: true });
+    }
     updateJumpToLatest();
   });
 }
@@ -1188,6 +1194,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const data = source ? null : view?.data;
   const context = timelineContext();
   const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
+  elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';

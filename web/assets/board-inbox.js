@@ -204,7 +204,7 @@ export function mountBoardInbox(api, sourceAction) {
       if (displayed !== version) return;
       const cards = result[key].map((item) => {
         const card = render(item);
-        if (key !== 'decisions') {
+        if (key === 'items') {
           const bot = configured.find(({ id }) => id === item.botId);
           if (bot && sourceAction) card.insertBefore(
             sourceAction(bot, item.conversationEventId, () => dialog.close()), card.querySelector('form'));

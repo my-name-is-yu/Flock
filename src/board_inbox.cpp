@@ -40,16 +40,6 @@ Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     return row.next() ? row.number(0) : 0;
 }
 
-Id taskAnchor(const auto& store, std::string_view bot, Id task, const Json& data) {
-    if (const auto anchor = messageAnchor(store,bot,storedId(data,"sourceMessageId")); anchor > 0) return anchor;
-    auto row = store.query(R"SQL(
-SELECT id FROM journal WHERE task_id=? AND conversation_bot_id IS NULL
-AND kind='request' AND json_extract(data,'$.source') IS NOT 'conversation'
-ORDER BY id LIMIT 1
-)SQL",{task});
-    return row.next() ? row.number(0) : 0;
-}
-
 Id waitAnchor(const auto& store, Id task, Id wait, const Json& data) {
     if (const auto message = storedId(data,"messageId"); message > 0) {
         auto row = store.query(R"SQL(
@@ -211,7 +201,6 @@ WHERE t.bot_id=? ORDER BY t.id DESC
                 {"deadlineAt",due > 0 ? Json(due) : Json(nullptr)},{"updatedAt",rows.number(7)}});
             row["botId"] = id;
             row["botName"] = id;
-            addAnchor(row,taskAnchor(*p_,id,rows.number(0),task));
             if (row["wait"].is_object()) row["wait"]["reason"] = field(task.at("wait"),"reason");
             result.push_back(std::move(row));
         }

@@ -65,6 +65,8 @@
   background: var(--raised); color: var(--text-2); font-weight: 500;
 }
 .older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
+/* Keep the last opened message clear of the floating Jump to latest control. */
+.viewing-source .timeline { padding-block-end: 4rem; }
 .conversation-source-target .bubble { outline: 2px solid transparent; outline-offset: 3px; animation: source-highlight 2.4s ease-out; }
 @keyframes source-highlight { 0%, 40% { outline-color: var(--accent); } }
 
