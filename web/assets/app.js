@@ -1161,11 +1161,15 @@ function eventHistoryForRefresh(context) {
 }
 
 function updateJumpToLatest() {
+  const scroller = elements.conversation;
+  const frame = scroller.parentElement;
+  const { height, top, atBottom } = timelineScrollPosition();
+  frame.toggleAttribute('data-history-above', top > 1);
+  frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
   const control = elements['jump-to-latest'];
-  const hidden = timelineScrollPosition().atBottom;
-  if (control.hidden === hidden) return;
-  if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
-  control.hidden = hidden;
+  if (control.hidden === atBottom) return;
+  if (atBottom && document.activeElement === control) scroller.focus({ preventScroll: true });
+  control.hidden = atBottom;
 }
 
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
@@ -2000,7 +2004,9 @@ elements.detail.addEventListener('close', () => {
 });
 elements.older.addEventListener('click', loadOlder);
 elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
-new ResizeObserver(updateJumpToLatest).observe(elements.conversation);
+const timelineSize = new ResizeObserver(updateJumpToLatest);
+timelineSize.observe(elements.conversation);
+timelineSize.observe(elements.timeline);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
