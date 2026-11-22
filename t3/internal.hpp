@@ -67,6 +67,10 @@ struct Credential {
     Seconds expiresAt = 0;
     bool operate = false;
 };
+struct WorkspaceHead {
+    std::string commit;
+    bool clean = true;
+};
 Credential loadCredential(const std::filesystem::path&, const std::string& environmentId);
 
 class Client {
@@ -88,6 +92,10 @@ private:
 Json readThread(Client&, std::string_view threadId, std::string_view view, unsigned limit, int chars,
                 Json args = Json::object(), int runLimit = 1);
 void advancePosition(const Json&, Id&);
+bool gitCommit(std::string_view sha);
+bool loopbackGitHost(std::string_view origin);
+std::optional<WorkspaceHead> workspaceHead(Client&, std::string_view projectId, const Json& thread,
+                                            bool requireSeparateWorktree);
 bool moreHistory(const Json&, Id after, Id start);
 std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path&, const SessionTarget&, bool includeMessages,
                                                SessionReadDeadline);

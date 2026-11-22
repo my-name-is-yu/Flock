@@ -5,6 +5,7 @@
 #include "git_github.hpp"
 
 #ifdef FLOCK_WITH_T3
+#include "flock/root_delivery.hpp"
 #include "flock/t3_mcp.hpp"
 #endif
 #ifdef FLOCK_WITH_WEB
@@ -192,6 +193,22 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
+#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+    auto handoffSession = web && !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
+    std::shared_ptr<SessionHandoff> handoffs;
+    SessionHandoff::People handoffPeople;
+    if (handoffSession) {
+        options.resolveSpecialistPerson = [&](std::string_view person) -> std::optional<Person> {
+            return handoffPeople ? handoffPeople(person) : std::nullopt;
+        };
+        options.observeSpecialistInput = [&](const Person& person, Id channel) -> std::optional<std::string> {
+            if (!handoffs) return {};
+            const auto view = handoffs->view(person,channel);
+            if (!view.coordination) return {};
+            return handoffSession->inputCommit(view.origin.invitation.target);
+        };
+    }
+#endif
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
@@ -214,6 +231,40 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"))
         configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
+#ifdef FLOCK_WITH_T3
+    std::jthread handoffWorker;
+    if (handoffSession && callbacks.configuredPerson) {
+        handoffPeople = callbacks.configuredPerson;
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
+        handoffs->recover();
+        callbacks.sessionHandoffs = handoffs;
+        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
+                                     soul=[&](std::string_view botId) { return bots.soul(botId); },
+                                     &model](std::stop_token stop) {
+            Id after = 0;
+            while (!stop.stop_requested()) {
+                try {
+                    const auto pending = handoffs->pending(after);
+                    if (pending.empty()) after = 0;
+                    for (const auto& [channel, personId] : pending) {
+                        if (stop.stop_requested()) return;
+                        after = channel;
+                        const auto actor = person ? person(personId) : std::nullopt;
+                        if (!actor) continue;
+                        try {
+                            const auto view = handoffs->view(*actor,channel);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
+                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                        } catch (const std::exception&) {
+                        }
+                    }
+                } catch (const std::exception&) {
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        });
+    }
+#endif
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
@@ -229,6 +280,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+    handoffWorker.request_stop();
+#endif
     runtime.requestStop();
 }
 

@@ -1,7 +1,7 @@
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
-add_library(flock_t3 mcp.cpp oauth.cpp adapter.cpp session_read.cpp)
+add_library(flock_t3 mcp.cpp oauth.cpp adapter.cpp session_read.cpp thread_session.cpp)
 target_link_libraries(flock_t3 PUBLIC flock_core PRIVATE CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock_t3 PRIVATE -Wall -Wextra -Wpedantic)
 
@@ -14,4 +14,8 @@ if(BUILD_TESTING)
   target_link_libraries(flock_t3_peer_recovery_tests PRIVATE flock_t3)
   add_test(NAME flock_t3_peer_recovery COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
     $<TARGET_FILE:flock_t3_peer_recovery_tests> peer-recovery)
+  add_executable(flock_t3_thread_session_tests thread_session_tests.cpp)
+  target_link_libraries(flock_t3_thread_session_tests PRIVATE flock_t3)
+  add_test(NAME flock_t3_thread_session COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture.py"
+    $<TARGET_FILE:flock_t3_thread_session_tests> stock-thread)
 endif()

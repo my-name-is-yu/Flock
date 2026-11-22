@@ -43,6 +43,11 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
         if (found == identities.end()) return std::nullopt;
         return found->second;
     };
+    callbacks.configuredPerson = [resolve=callbacks.resolveIdentity](std::string_view id) -> std::optional<Person> {
+        const auto root = resolve(id);
+        if (!root) return std::nullopt;
+        return Person{std::string(id),*root};
+    };
     store.setWebIdentityResolver(callbacks.resolveIdentity);
     callbacks.authenticate = [people=std::move(people)](std::string_view authorization) -> Person {
         auto found=people.find(authorization);

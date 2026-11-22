@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Session handoffs</title>
+  <link rel="stylesheet" href="/access.css">
+  <link rel="stylesheet" href="/session-handoff.css">
+  <script type="module" src="/session-handoff.js"></script>
+</head>
+<body><main>
+  <a href="/">Conversations</a>
+  <h1>Session handoffs</h1>
+  <p id="status" role="status"></p>
+  <section aria-labelledby="new-heading">
+    <h2 id="new-heading">Pair a T3 Session</h2>
+    <form id="pair" autocomplete="off">
+      <div class="pair-fields">
+        <label>Environment ID <input name="environmentId" required spellcheck="false" maxlength="1024"></label>
+        <label>Project ID <input name="projectId" required spellcheck="false" maxlength="1024"></label>
+        <label>Thread ID <input name="threadId" required spellcheck="false" maxlength="1024"></label>
+        <label>Bot <select name="botId" required><option value="">Select a Bot</option></select></label>
+        <label>Permission
+          <select name="mode">
+            <option value="consult">One consultation reply</option>
+            <option value="coordinate">Ongoing coordination</option>
+          </select>
+        </label>
+      </div>
+      <div id="coordination-scope" hidden>
+        <label>Coordination goal <textarea name="goal" rows="3" maxlength="8192"></textarea></label>
+        <label class="check-label"><input type="checkbox" name="allowDelegation"> Allow specialist checks</label>
+      </div>
+      <button>Create pairing code</button>
+    </form>
+    <div id="pairing" hidden>
+      <label>Single-use code <input id="pairing-code" readonly spellcheck="false" autocomplete="off"></label>
+      <button id="copy-code" type="button">Copy code</button>
+      <p id="pairing-help"></p>
+    </div>
+  </section>
+  <section id="recent" aria-labelledby="recent-heading" hidden>
+    <h2 id="recent-heading">Recent handoffs</h2>
+    <ul id="recent-links"></ul>
+  </section>
+  <section id="handoff" aria-labelledby="handoff-heading" hidden>
+    <h2 id="handoff-heading">Handoff</h2>
+    <p id="state"></p>
+    <div class="handoff-actions">
+      <button id="refresh" type="button">Refresh</button>
+      <button id="pause" type="button" hidden>Pause coordination</button>
+      <button id="resume" type="button" hidden>Resume coordination</button>
+      <button id="stop" type="button" hidden>Stop coordination</button>
+    </div>
+    <dl id="origin"></dl>
+    <details id="residual" hidden><summary id="residual-count"></summary><ul id="residual-commands"></ul></details>
+    <details id="residual-work" hidden><summary id="residual-work-count"></summary><ul id="residual-children"></ul></details>
+    <section aria-labelledby="delivery-heading">
+      <h3 id="delivery-heading">Messages to T3</h3>
+      <p id="no-deliveries">No messages yet.</p>
+      <ul id="deliveries"></ul>
+    </section>
+    <section id="decision" aria-labelledby="decision-heading" hidden>
+      <h3 id="decision-heading">Latest coordination decision</h3>
+      <p id="decision-text"></p>
+    </section>
+    <form id="answer" autocomplete="off" hidden>
+      <label><span id="question"></span><textarea name="text" rows="3" maxlength="8192" required></textarea></label>
+      <button>Send answer</button>
+    </form>
+    <section id="delegated" aria-labelledby="work-heading" hidden>
+      <h3 id="work-heading">Delegated checks</h3>
+      <ul id="work-list"></ul>
+    </section>
+  </section>
+</main></body>
+</html>

@@ -28,6 +28,54 @@ root authority only when all of those credentials currently have `adminRoot`.
 Send the message again if it was queued before Flock recorded the source of
 shared Web messages and is rejected after an upgrade.
 
+## Session handoffs
+
+Use stock T3 Code v0.1.11 or a compatible version. Sign in to T3 from Flock
+with its existing MCP authorization, and configure a Web identity in Flock.
+On the machine running the T3 provider, add the Flock MCP endpoint to the
+provider's normal MCP configuration. Set a stable Flock port, for example
+`flock run --port 4173`, and use it in the URL.
+
+```sh
+codex mcp add flock --url http://127.0.0.1:4173/mcp/flock
+claude mcp add --scope user --transport http flock http://127.0.0.1:4173/mcp/flock
+```
+
+Configure the provider instance that T3 uses before starting its Session. For
+a configured Claude project, project-local HTTP MCP registration also works.
+The endpoint runs on Flock's loopback listener.
+
+1. In Flock, open **Session handoffs**, enter the destination environment,
+   project, and Thread IDs, and select a Bot. The T3 Session link contains the
+   environment and Thread IDs. Run `t3 thread list --json` from the T3 project
+   directory to find its project ID and Threads.
+2. Choose **One consultation reply** or **Ongoing coordination**. Coordination
+   requires a goal and can separately permit specialist checks.
+3. Copy the short-lived pairing code and give it to the agent in that Thread.
+   Ask the agent to call `request_flock_bot` with the code, a unique
+   `requestId`, and the request text. The tool acknowledges the request. Flock
+   sends replies back through ordinary T3 input when they are ready. An
+   identical retry uses the same request ID and payload. Keep the code private
+   until you give it to the intended agent.
+
+Grant the person Session read and Bot decision access. Grant the Bot
+`consult:reply-once` or `session:coordinate` for the environment and Thread.
+A coordinator also needs `session:read` to observe progress and
+`work:delegate` to select a specialist. Configure a role
+for each specialist, include it in the requester's `allowedBots`, and grant
+it permission to launch in the same project.
+
+Flock queues Bot messages through the T3 API, so someone can keep typing in the
+T3 composer. T3 orders submitted inputs. Flock rechecks observed human progress
+before sending guidance, but a human submission can still race a send.
+Pause in Flock before intervening if you need to halt new coordinator messages
+and work. **Resume coordination** continues observation. **Stop coordination**
+ends the local coordination. Already-dispatched messages may still reach T3,
+and admitted specialist work may still finish. The handoff view shows the
+queued or unresolved messages and admitted work separately from local state.
+
+## Access administration
+
 An administrator can GET `/api/access?bot=ID` and POST to `/api/access/person`,
 `resource`, `decision`, `secret` and `bot-change` under the same prefix. These
 routes require the usual same-origin JSON mutation headers. Grant mutations use

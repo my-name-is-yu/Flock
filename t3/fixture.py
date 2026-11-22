@@ -13,7 +13,6 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -37,6 +36,9 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
+        elif self.path == "/fixture/stock":
+            self.reply({key: self.server.state[key] for key in ("stockPin", "stockHead")} |
+                       {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
         elif self.path == "/protected,resource":
             if self.server.state.get("oauthFailure") == "discovery":
                 self.reply({"error": "invalid_resource"}, code=400)
@@ -74,6 +76,25 @@ class Fixture(BaseHTTPRequestHandler):
             return
         args = json.loads(raw)
         if self.path == "/fixture":
+            if args.get("advanceStockWorker"):
+                assert self.server.stock_thread
+                subprocess.run(["/usr/bin/git","-C",state["stockTree"],"checkout","--detach",state["stockHead"]],
+                               stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+            if "stockTrackedEdit" in args:
+                assert self.server.stock_thread
+                source = state["stockSource"]
+                baseline = state["stockSourceContents"]
+                with open(source,"w",encoding="utf-8") as tracked:
+                    tracked.write(baseline)
+                subprocess.run(["/usr/bin/git","-C",state["stockTree"],"add","tracked.txt"],check=True)
+                mode = args["stockTrackedEdit"]
+                if mode in ("staged","unstaged"):
+                    with open(source,"w",encoding="utf-8") as tracked:
+                        tracked.write("edited " + mode + "\n")
+                    if mode == "staged":
+                        subprocess.run(["/usr/bin/git","-C",state["stockTree"],"add","tracked.txt"],check=True)
+                else:
+                    assert mode == "clean"
             state.update(args)
             if "authorization" in args:
                 auth = urllib.parse.parse_qs(urllib.parse.urlsplit(args["authorization"]).query)
@@ -163,6 +184,8 @@ class Fixture(BaseHTTPRequestHandler):
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
+        if self.server.stock_thread:
+            return self.stock_tool(name, args)
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
@@ -352,6 +375,94 @@ class Fixture(BaseHTTPRequestHandler):
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}
 
+    def stock_tool(self, name, args):
+        state = self.server.state
+        if name == "t3_environment_read":
+            return {"environmentId": state.get("claimedEnvironment", "env-1")}
+        if name == "t3_project_read":
+            return {"id": "project", "workspaceRoot": state["stockRoot"]}
+        if name == "t3_thread_launch":
+            assert args["projectId"] == "project" and "message" not in args
+            assert args["runtimeMode"] == "approval-required"
+            assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["stockPin"],
+                                                 "startFromOrigin": False}
+            assert set(args) == {"projectId", "title", "clientRequestId", "runtimeMode", "workspaceStrategy"}
+            key = args["projectId"] + ":" + args["clientRequestId"]
+            launches = state.setdefault("stockLaunches", {})
+            payload = {name: args[name] for name in sorted(args)}
+            if key in launches:
+                assert launches[key]["payload"] == payload, "same-key launch retry changed its payload"
+                launches[key]["replays"] += 1
+                return launches[key]["response"]
+            response = {"projectId": "project", "threadId": args["clientRequestId"], "runId": None}
+            launches[key] = {"payload": payload, "response": response, "replays": 0}
+            return response
+        if name == "t3_thread_send":
+            assert args["mode"] == "queue"
+            assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
+            thread = args["threadId"]
+            if thread == "human":
+                assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+            else:
+                assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
+                assert "Check fixture" in args["message"]
+            if thread != "human":
+                prompts = state.setdefault("stockPromptSends", {})
+                key = thread + ":" + args["clientRequestId"]
+                payload = {name: args[name] for name in sorted(args)}
+                if key in prompts:
+                    assert prompts[key]["payload"] == payload, "same-key first-prompt retry changed its payload"
+                    prompts[key]["replays"] += 1
+                else:
+                    prompts[key] = {"payload": payload, "replays": 0}
+            return {"threadId": "wrong" if state.get("badReceipt") else thread,
+                    "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
+        if name == "t3_thread_wait":
+            assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
+            return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
+                    "resultRun": {"runId": "next-run", "status": "completed"}}
+        assert name == "t3_thread_read"
+        thread = args["threadId"]
+        is_root = thread == "human"
+        summary = self.summary(thread) | {
+            "activeRunId": "root-run" if is_root else None,
+            "latestRunId": "root-run" if is_root else None,
+            "archived": False,
+            "projectId": state.get("claimedProject", "project"),
+            "worktreePath": None if is_root else state["stockWrongTree" if thread == "wrong-worker" else "stockTree"],
+        }
+        rows = [] if not is_root else [
+            self.item("human", 3, "root-run", "user_message", "Human progress", "web") | {"messageId": "human-id"},
+            self.item("other", 4, "other-run", "assistant_message", "Inherited secret") | {"visibility": "inherited"},
+            self.item("human", 5, "root-run", "assistant_message", "Streaming content",
+                      status="completed" if state.get("finalized") else "running") | {"messageId": "reply-id"},
+            self.item("human", 6, "root-run", "user_message", "[Flock result] Complete.", "mcp") |
+                {"messageId": "sent-id"},
+        ]
+        if is_root and state.get("stockHistory") == "late-human":
+            rows = [self.item("human", position, "root-run", "assistant_message", f"Progress {position}")
+                    for position in range(1, 26)]
+            rows.append(self.item("human", 26, "root-run", "user_message", "Later human input", "web"))
+        elif is_root and state.get("stockHistory") == "streaming-late-human":
+            rows = [self.item("human", 1, "root-run", "assistant_message", "Unfinished response", status="running"),
+                    self.item("human", 2, "root-run", "user_message", "Human after unfinished response", "web")]
+        if thread == "pinned-worker":
+            rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
+                    {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
+        if args.get("beforePosition") is not None:
+            rows = [row for row in rows if row["position"] < args["beforePosition"]]
+        else:
+            rows = [row for row in rows if row["position"] > args.get("afterPosition", -1)]
+        page = rows[-args["limit"]:] if args.get("beforePosition") is not None else rows[:args["limit"]]
+        has_more = len(rows) > len(page)
+        if state.get("stockIncomplete") and args.get("afterPosition") is not None:
+            has_more = True
+        rows = page
+        return {"thread": summary, "items": rows, "recentRuns": [], "hasMore": has_more,
+                "nextPosition": rows[-1]["position"] + 1 if state.get("stockIncomplete") and rows else
+                    rows[-1]["position"] if rows else None,
+                "earlierPosition": None}
+
     def result_history(self, thread_id, scenario, recent, rows):
         def add(run, kind, text, source="provider", **fields):
             rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
@@ -430,6 +541,27 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
+    server.stock_thread = sys.argv[2:] == ["stock-thread"]
+    if server.stock_thread:
+        root = temp + "/project"
+        good = temp + "/worker"
+        wrong = temp + "/wrong-worker"
+        def git(*args):
+            return subprocess.check_output(["/usr/bin/git", *args], stderr=subprocess.DEVNULL, text=True).strip()
+        git("init", "-b", "main", root)
+        with open(root + "/tracked.txt","w",encoding="utf-8") as tracked:
+            tracked.write("pinned input\n")
+        git("-C",root,"add","tracked.txt")
+        commit = ["-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                  "commit", "--allow-empty", "-m"]
+        git(*commit, "original input")
+        pin = git("-C", root, "rev-parse", "HEAD")
+        git(*commit, "advanced input")
+        git("-C", root, "worktree", "add", "--detach", good, pin)
+        git("-C", root, "worktree", "add", "--detach", wrong, "HEAD")
+        server.state.update(stockRoot=root, stockTree=good, stockWrongTree=wrong, stockPin=pin,
+                            stockSource=good + "/tracked.txt", stockSourceContents="pinned input\n",
+                            stockHead=git("-C", root, "rev-parse", "HEAD"))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         if server.peer_recovery:

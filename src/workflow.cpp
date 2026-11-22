@@ -1,9 +1,12 @@
 #include "conversation_storage.hpp"
+#include "specialist_evidence.hpp"
 
 #include <set>
 
 namespace flockv0 {
 namespace {
+constexpr std::size_t maxFindingsBytes = 2000;
+
 Seconds deadlineSeconds(const Json& args, Seconds inherited = 0) {
     if (!args.contains("softDeadlineSeconds")) return inherited;
     const auto& value = args.at("softDeadlineSeconds");
@@ -24,13 +27,14 @@ bool immutableVersion(std::string_view version) {
            version.find_first_not_of("0123456789abcdef")==std::string_view::npos;
 }
 
-Json stageDefinitions(const Json& args) {
+Json stageDefinitions(const Json& args, bool pinnedInput) {
     const auto request = conversation_storage::text(args,"request",8000,true);
     const auto criteria = args.value("verificationCriteria",std::string("Verify the requested change."));
     Json stages = args.value("stages",Json::array({
         {{"stageId","implement"},{"role","implement"},{"request",request}},
         {{"stageId","verify"},{"role","verify"},{"request",criteria},{"dependsOn",{"implement"}}}}));
     if (!stages.is_array() || stages.empty() || stages.size()>32) throw Conflict("Specify 1 to 32 workflow stages");
+    if (pinnedInput && stages.size()!=2) throw Conflict("Specify two independent verification stages for peer work");
     const auto deadline = deadlineSeconds(args);
     std::set<std::string> ids;
     for (auto& stage : stages) {
@@ -48,11 +52,16 @@ Json stageDefinitions(const Json& args) {
         for (const auto& dep : deps)
             if (!dep.is_string() || !unique.insert(dep.get<std::string>()).second)
                 throw Conflict("Each dependency must name a distinct stage");
-        if (role=="verify" && deps.empty()) throw Conflict("Verification needs an artifact-producing dependency");
-        if (deps.size()==1 && !stage.contains("inputFrom")) stage["inputFrom"] = deps.front();
-        if ((role=="verify" || stage.contains("inputFrom")) &&
-            std::ranges::find(deps,Json(field(stage,"inputFrom")))==deps.end())
-            throw Conflict("Choose inputFrom among the stage dependencies");
+        if (pinnedInput) {
+            if (role!="verify" || !deps.empty() || stage.contains("inputFrom"))
+                throw Conflict("Peer verification stages must check the shared input independently");
+        } else {
+            if (role=="verify" && deps.empty()) throw Conflict("Verification needs an artifact-producing dependency");
+            if (deps.size()==1 && !stage.contains("inputFrom")) stage["inputFrom"] = deps.front();
+            if ((role=="verify" || stage.contains("inputFrom")) &&
+                std::ranges::find(deps,Json(field(stage,"inputFrom")))==deps.end())
+                throw Conflict("Choose inputFrom among the stage dependencies");
+        }
         Json spec = {{"stageId",id},{"name",stage.at("name")},{"role",role},{"request",stage.at("request")},
                      {"dependsOn",deps},{"softDeadlineSeconds",stage.at("softDeadlineSeconds")}};
         if (stage.contains("inputFrom")) spec["inputFrom"] = stage.at("inputFrom");
@@ -77,9 +86,40 @@ bool closed(std::string_view status) {
 }
 
 void Store::Impl::initializeWorkflowSchema() {
+    const auto createWorkflows = [&](const char* createTable) {
+        const auto sql = std::string(createTable) + R"SQL((
+            id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,routing TEXT NOT NULL,request TEXT NOT NULL,
+            message_id INTEGER REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0,
+            delegation_id TEXT UNIQUE,peer_request_id TEXT,start_key TEXT,input_artifact_version TEXT,
+            CHECK ((message_id IS NOT NULL AND delegation_id IS NULL AND peer_request_id IS NULL
+                    AND start_key IS NULL AND input_artifact_version IS NULL)
+                OR (message_id IS NULL AND delegation_id IS NOT NULL AND peer_request_id IS NOT NULL
+                    AND start_key IS NOT NULL AND input_artifact_version IS NOT NULL))))SQL";
+        exec(sql.c_str());
+    };
+    const auto needsOriginMigration = [&] {
+        return query("SELECT 1 FROM pragma_table_info('workflows') WHERE name='message_id' AND \"notnull\"=1").next();
+    };
+    if (needsOriginMigration()) {
+        exec("PRAGMA foreign_keys=OFF");
+        {
+            Transaction migration(db);
+            if (needsOriginMigration()) {
+                createWorkflows("CREATE TABLE workflows_with_origin");
+                exec("INSERT INTO workflows_with_origin(id,bot_id,routing,request,message_id,stop_requested)"
+                     " SELECT id,bot_id,routing,request,message_id,stop_requested FROM workflows");
+                exec("DROP TABLE workflows");
+                exec("ALTER TABLE workflows_with_origin RENAME TO workflows");
+                if (query("SELECT 1 FROM pragma_foreign_key_check('workflows')"
+                          " UNION ALL SELECT 1 FROM pragma_foreign_key_check('workflow_stages') LIMIT 1").next())
+                    throw Conflict("Could not preserve workflow references during migration");
+            }
+            migration.commit();
+        }
+        exec("PRAGMA foreign_keys=ON");
+    }
     Transaction tx(db);
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS workflows(id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,
-        routing TEXT NOT NULL,request TEXT NOT NULL,message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0))SQL");
+    createWorkflows("CREATE TABLE IF NOT EXISTS workflows");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS workflow_stages(workflow_id INTEGER NOT NULL REFERENCES workflows,
         stage_id TEXT NOT NULL,spec TEXT NOT NULL,task_id INTEGER UNIQUE REFERENCES tasks,result_id INTEGER REFERENCES journal,instruction TEXT,status TEXT NOT NULL DEFAULT 'pending',
         input TEXT NOT NULL DEFAULT '',output TEXT NOT NULL DEFAULT '',deadline INTEGER NOT NULL DEFAULT 0, alerted INTEGER NOT NULL DEFAULT 0,
@@ -113,12 +153,18 @@ void Store::Impl::initializeWorkflowSchema() {
 }
 
 Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const {
-    auto owner = query("SELECT stop_requested,request FROM workflows WHERE id=? AND bot_id=?",{id,bot});
+    auto owner = query("SELECT stop_requested,request,delegation_id,peer_request_id,input_artifact_version"
+                       " FROM workflows WHERE id=? AND bot_id=?",{id,bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
-    const auto scrub = redactor(bot);
+    const bool peer = !owner.string(2).empty();
+    const auto scrub = peer ? sharedRedactor() : redactor(bot);
     const bool stopping = owner.number(0);
     Json result = {{"ok",true},{"workflowId",id},{"request",owner.string(1)},{"stages",Json::array()},{"artifacts",Json::array()},{"verdicts",Json::array()}};
-    bool finished = true, attention = false, failed = false, stale = false;
+    if (peer) {
+        result["origin"] = {{"kind","received_peer_work"},{"delegationId",owner.string(2)},{"requestId",owner.string(3)}};
+        result["inputArtifactVersion"] = owner.string(4);
+    }
+    bool finished = true, attention = false, failed = false, stale = false, assigned = false;
     auto rows = query(R"SQL(SELECT s.spec,s.status,s.task_id,s.input,s.output,s.deadline,t.data,t.state,s.alerted,
           s.confirmed_state,s.confirmed_at,s.unreachable,old.stage_id IS NOT NULL,
           (SELECT json_group_array(d.parent_id) FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id AND d.stage_id=s.stage_id),
@@ -129,7 +175,9 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         WHERE s.workflow_id=? ORDER BY s.rowid)SQL",{id});
     while (rows.next()) {
         const auto spec = rows.json(0);
-        const auto task = rows.number(2) ? rows.json(6) : Json::object();
+        const auto taskId = rows.number(2);
+        const auto task = taskId ? rows.json(6) : Json::object();
+        assigned |= taskId!=0;
         auto status = rows.string(1);
         if (rows.string(7)=="cancelled") status = "stopped";
         else if (!closed(status) && (rows.number(11) || rows.number(14))) status = "unreachable";
@@ -140,13 +188,13 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         const bool outdated = closed(status) && rows.number(12);
         const bool needs = outdated || exceeded || status=="failed" || status=="unreachable" ||
             rows.string(7)=="waiting" || task.contains("pendingRunReport");
-        const bool childSettled = !rows.number(2) || terminal(task);
+        const bool childSettled = !taskId || terminal(task);
         finished &= closed(status) && childSettled && active.is_null() && !rows.number(14);
         attention |= needs;
         failed |= (status=="failed" && !outdated) || status=="stopped";
         stale |= outdated;
         Json stage = {{"stageId",spec.at("stageId")},{"name",spec.at("name")},{"role",scrub.text(field(spec,"role"))},
-            {"dependsOn",rows.json(13)},{"outdated",outdated},{"taskId",rows.number(2)},{"runRef",run},{"status",status},
+            {"dependsOn",rows.json(13)},{"outdated",outdated},{"taskId",taskId},{"runRef",run},{"status",status},
             {"stopRequested",stopping || rows.string(7)=="cancelling" || status=="stopped"},
             {"softDeadlineAt",rows.number(5)},{"deadlineExceeded",exceeded},{"needsAttention",needs},
             {"lastConfirmedState",rows.string(9)},{"lastConfirmedAt",rows.number(10)},
@@ -163,12 +211,20 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         Json item = {{"stageId",evidence.string(0)},{"taskId",evidence.number(1)},{"artifactVersion",evidence.string(2)},
                      {"messageId",evidence.number(4)},{"runRef",report.at("run")},{"resultRunId",report.at("resultRunId")},
                      {"itemId",report.at("itemId")}};
-        if (!evidence.string(3).empty()) item["verdict"] = evidence.string(3);
+        if (!evidence.string(3).empty()) {
+            item["verdict"] = evidence.string(3);
+            if (peer) {
+                const auto parsed = Json::parse(field(report,"report"),nullptr,false);
+                const auto findings = specialistFindings(parsed);
+                if (findings) item["findings"] = bounded(scrub.text(*findings),maxFindingsBytes);
+            }
+        }
         auto& records = result[item.contains("verdict") ? "verdicts" : "artifacts"];
         records.push_back(std::move(item));
     }
     result["status"] = stopping ? (finished ? "stopped" : "stop_requested") :
-        failed ? "failed" : stale ? "needs_verification" : finished ? "completed" : "running";
+        failed ? "failed" : stale ? "needs_verification" : finished ? "completed" :
+        peer && !assigned ? "pending" : "running";
     result["allStopped"] = stopping && finished;
     result["needsAttention"] = attention || (!stopping && failed);
     return result;
@@ -185,31 +241,66 @@ Json Store::workflows(std::string_view bot, Id before, unsigned limit) const {
     return result;
 }
 
+Id Store::Impl::startWorkflow(const WorkflowOrigin& origin, const Json& args, std::string_view bot,
+                              const Json& routing, std::string_view inputArtifactVersion) {
+    const auto environment = conversation_storage::text(routing,"environmentId",1024,true);
+    const auto project = conversation_storage::text(routing,"projectId",1024,true);
+    const auto scrub = redactor(bot);
+    scrub.requirePublic({bot,environment,project,routing.at("config")});
+    const auto safe = scrub.record(args,SecretRedactor::Fields::external);
+    const auto* peer = std::get_if<ReceivedPeerWork>(&origin);
+    const auto stages = stageDefinitions(safe,peer!=nullptr);
+    const auto& request = safe.at("request").get_ref<const std::string&>();
+    if (peer) {
+        for (const auto* field : {&peer->delegationId,&peer->requestId,&peer->startKey}) {
+            if (field->size()>1024 || !conversation_storage::hasText(*field)) throw Conflict("Invalid peer workflow origin");
+        }
+        if (!immutableVersion(inputArtifactVersion)) throw Conflict("Peer verification needs an immutable input version");
+        scrub.requirePublic({peer->delegationId,peer->requestId,peer->startKey,inputArtifactVersion});
+        auto existing = query("SELECT id,bot_id,routing,request,peer_request_id,start_key,input_artifact_version"
+                              " FROM workflows WHERE delegation_id=?",{peer->delegationId});
+        if (existing.next()) {
+            if (existing.string(1)!=bot || existing.json(2)!=routing || existing.string(3)!=request ||
+                existing.string(4)!=peer->requestId || existing.string(5)!=peer->startKey || existing.string(6)!=inputArtifactVersion)
+                throw Conflict("Peer work already has a different workflow start");
+            auto saved = query("SELECT spec FROM workflow_stages WHERE workflow_id=? ORDER BY rowid",{existing.number(0)});
+            for (auto stage : stages) {
+                stage.erase("dependsOn");
+                if (!saved.next() || saved.json(0)!=stage) throw Conflict("Peer work already has a different workflow plan");
+            }
+            if (saved.next()) throw Conflict("Peer work already has a different workflow plan");
+            return existing.number(0);
+        }
+        exec("INSERT INTO workflows(bot_id,routing,request,delegation_id,peer_request_id,start_key,input_artifact_version)"
+             " VALUES(?,?,?,?,?,?,?)",{bot,routing,request,peer->delegationId,peer->requestId,peer->startKey,inputArtifactVersion});
+    } else {
+        const auto message = std::get<ConversationWorkflowOrigin>(origin).messageId;
+        if (!inputArtifactVersion.empty()) throw Conflict("Conversation workflows get their input from earlier stages");
+        exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",{bot,routing,request,message});
+    }
+    const auto id = last();
+    for (auto stage : stages) {
+        stage.erase("dependsOn");
+        exec("INSERT INTO workflow_stages(workflow_id,stage_id,spec,input) VALUES(?,?,?,?)",
+             {id,stage.at("stageId"),stage,inputArtifactVersion});
+    }
+    for (const auto& stage : stages)
+        for (const auto& parent : stage.at("dependsOn"))
+            exec("INSERT INTO workflow_dependencies(workflow_id,stage_id,parent_id) VALUES(?,?,?)",{id,stage.at("stageId"),parent});
+    return id;
+}
+
 Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::string_view bot, Id message,
                               int step, const Json& routing) {
     if (tool=="start_workflow") {
-        const auto environment = conversation_storage::text(routing,"environmentId",1024,true);
-        const auto project = conversation_storage::text(routing,"projectId",1024,true);
-        const auto scrub = redactor(bot);
-        scrub.requirePublic({bot,environment,project,routing.at("config")});
-        const auto safe = scrub.record(args,SecretRedactor::Fields::external);
-        const auto stages = stageDefinitions(safe);
-        exec("INSERT INTO workflows(bot_id,routing,request,message_id) VALUES(?,?,?,?)",{bot,routing,safe.at("request"),message});
-        const auto id = last();
-        for (auto stage : stages) {
-            stage.erase("dependsOn");
-            exec("INSERT INTO workflow_stages(workflow_id,stage_id,spec) VALUES(?,?,?)",{id,stage.at("stageId"),stage});
-        }
-        for (const auto& stage : stages)
-            for (const auto& parent : stage.at("dependsOn"))
-                exec("INSERT INTO workflow_dependencies(workflow_id,stage_id,parent_id) VALUES(?,?,?)",{id,stage.at("stageId"),parent});
+        const auto id = startWorkflow(ConversationWorkflowOrigin{message},args,bot,routing);
         auto status = workflowStatus(id,bot,unixTime());
         status["effect"] = "started";
         return status;
     }
     const Id id = conversation_storage::identifier(args,"workflowId",true);
     if (tool=="workflow_status") return workflowStatus(id,bot,unixTime());
-    auto owner = query("SELECT stop_requested FROM workflows WHERE id=? AND bot_id=?", {id,bot});
+    auto owner = query("SELECT stop_requested,delegation_id FROM workflows WHERE id=? AND bot_id=?", {id,bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
     const bool stopping = owner.number(0);
 
@@ -236,6 +327,7 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
     }
 
     if (stopping) throw Conflict("Workflow is stopping");
+    if (!owner.string(1).empty()) throw Conflict("The received work assignment is immutable");
     const auto instruction = redactor(bot).text(conversation_storage::text(args,"instruction",8000,true));
     auto stage = query("SELECT s.task_id,s.status,EXISTS(SELECT 1 FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id"
                        " AND d.stage_id=s.stage_id) FROM workflow_stages s WHERE s.workflow_id=? AND s.stage_id=?", {id,target});
@@ -275,17 +367,24 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         exec("UPDATE workflow_stages SET alerted=1 WHERE task_id=?",{task});
         journal(task,"workflow_deadline_exceeded",{{"needsAttention",true},{"observedAt",now}});
     }
+    materializeWorkflowStages();
+    tx.commit();
+}
+
+void Store::Impl::materializeWorkflowStages(Id scopedWorkflow) {
     auto ready = query(R"SQL(WITH ready AS MATERIALIZED (
         SELECT s.workflow_id,s.spec,w.bot_id,w.routing,w.message_id,s.instruction,
                r.id,r.intent,r.done_when,
-               coalesce(r.source_message_id,w.message_id)
+               coalesce(r.source_message_id,w.message_id),s.input,d.recipient_task,d.done_when
         FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
         LEFT JOIN task_revisions r ON r.id=json_extract(s.instruction,'$.priorRevisionId')
-        WHERE w.stop_requested=0 AND s.status='pending' AND s.task_id IS NULL AND NOT EXISTS (
+        LEFT JOIN specialist_delegations d ON d.id=w.delegation_id
+        WHERE ((?1=0 AND w.message_id IS NOT NULL) OR (w.id=?1 AND d.recipient_task IS NOT NULL))
+        AND w.stop_requested=0 AND s.status='pending' AND s.task_id IS NULL AND NOT EXISTS (
           SELECT 1 FROM workflow_dependencies d JOIN workflow_stages p ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
           LEFT JOIN outdated_workflow_stages old ON old.workflow_id=p.workflow_id AND old.stage_id=p.stage_id
           WHERE d.workflow_id=s.workflow_id AND d.stage_id=s.stage_id AND (p.status<>'completed' OR old.stage_id IS NOT NULL)))
-        SELECT * FROM ready)SQL");
+        SELECT * FROM ready)SQL",{scopedWorkflow});
     while (ready.next()) {
         const Id id = ready.number(0);
         const auto spec = ready.json(1);
@@ -294,8 +393,9 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         const auto scrub = redactor(bot);
         const auto routing = ready.json(3);
         const auto request = scrub.text(field(spec,"request"));
+        const Id workflowParent = ready.number(11);
         Json sources = Json::array();
-        std::string input;
+        std::string input = workflowParent ? ready.string(10) : std::string{};
         const auto inputFrom = field(spec,"inputFrom");
         auto parents = query(R"SQL(SELECT p.stage_id,p.output,p.result_id,p.task_id,j.data
             FROM workflow_dependencies d JOIN workflow_stages p ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
@@ -317,15 +417,25 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         exec(R"SQL(UPDATE workflow_dependencies AS d SET report_id=p.result_id,artifact_version=p.output
             FROM workflow_stages p WHERE p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
             AND d.workflow_id=? AND d.stage_id=?)SQL",{id,stage});
-        const auto taskId = startConversationTask(routing,bot,request,"",ready.number(4),nullptr,false);
+        const auto taskId = workflowParent
+            ? submit({bot,request,field(routing,"environmentId"),field(routing,"projectId"),routing.at("config")},
+                     0,nullptr,RequestJournal::skip)
+            : startConversationTask(routing,bot,request,"",ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");
         task["sourceResultRefs"] = scrub.record(std::move(sources),SecretRedactor::Fields::external);
         task["inputArtifactVersion"] = input;
         const bool hasPriorRevision = ready.number(6) != 0;
+        if (workflowParent) {
+            task["workflowParentTaskId"] = workflowParent;
+            task["specialistRole"] = "workflow_stage";
+            const auto parent = load(workflowParent);
+            if (parent.contains("specialistQueueOwner")) task["specialistQueueOwner"] = parent.at("specialistQueueOwner");
+        }
         addRevision(task,hasPriorRevision ? scrub.text(ready.string(7)) : request,
-                    hasPriorRevision ? scrub.text(ready.string(8)) : request,ready.number(9));
+                    workflowParent ? scrub.text(ready.string(12)) : hasPriorRevision ? scrub.text(ready.string(8)) : request,
+                    ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
             acceptInstruction(task,next.at("messageId"),next.at("step"),
@@ -334,17 +444,22 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         exec("UPDATE workflow_stages SET task_id=?,input=?,instruction=NULL WHERE workflow_id=? AND stage_id=?",
              {taskId,input,id,spec.at("stageId")});
     }
-    tx.commit();
 }
 
 void Store::Impl::appendStageRequirements(std::string& instruction, const Json& task) const {
     auto stage = query("SELECT s.spec,s.input,w.request FROM workflow_stages s"
                        " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?", {task.at("id")});
     if (!stage.next()) throw Conflict("Missing workflow stage assignment");
-    const auto role = field(stage.json(0),"role"), pin = stage.string(1);
+    const auto spec = stage.json(0);
+    const auto role = field(spec,"role"), pin = stage.string(1);
     if (role=="verify") instruction += "\n\nRequested change: " + stage.string(2);
     if (!pin.empty()) instruction += "\n\nPinned input artifact version: " + pin;
-    if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
+    if (task.contains("workflowParentTaskId")) {
+        instruction += "\nAssigned check: " + field(spec,"name") + " (" + field(spec,"stageId") + ").";
+        instruction += "\nCheck that HEAD is the pinned commit and keep the assigned worktree unchanged.";
+        instruction += "\nVerify that exact version. Return only a JSON object with artifactVersion, verdict (pass or fail), "
+                       "and findings (a nonempty string or up to eight nonempty strings describing the check and observed result).";
+    } else if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
     else if (role=="implement") instruction += "\n\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
 }
 
@@ -373,6 +488,8 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto version = field(result,"artifactVersion");
     bool ok = field(report,"status")=="completed" && !report.value("truncated",false) &&
         field(report,"evidenceStatus") != "report_unavailable";
+    if (task.contains("workflowParentTaskId"))
+        ok = ok && !field(report,"itemId").empty() && specialistFindings(result).has_value();
     std::string output;
     if (role=="verify") {
         const auto verdict = field(result,"verdict");

@@ -302,6 +302,8 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
             throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
         bot.allowedBots.push_back(peerId);
     }
+    if (const auto role = config.find("role"); role != config.end() && role->is_string())
+        bot.role = bounded(role->get_ref<const std::string&>(), 80);
     return bot;
 }
 }
@@ -332,7 +334,7 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake("")});
+        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
 }

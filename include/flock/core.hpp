@@ -25,6 +25,7 @@ std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
+struct SpecialistAllowanceExhausted : Conflict { using Conflict::Conflict; };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -39,7 +40,7 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes { std::string soul, memory; };
-struct PeerBot { std::string name; Intake intake; };
+struct PeerBot { std::string name; Intake intake; std::string role = {}; };
 
 struct Decision {
     std::string tool;
@@ -205,6 +206,9 @@ public:
 class GitHost;
 struct GitWebhook;
 class Access;
+class ParticipationStore;
+class RootDelivery;
+class SessionHandoff;
 struct Person;
 struct ConfiguredSchedule;
 struct ScheduleImportError;
@@ -325,9 +329,21 @@ private:
     std::unique_ptr<Impl> p_;
     friend class Runtime;
     friend class Access;
+    friend class ParticipationStore;
+    friend class RootDelivery;
+    friend class SessionHandoff;
 };
 
 struct BotTools;
+struct SpecialistCheck {
+    Id channel, generation;
+    std::string delegationId, peerBotId, purpose, doneWhen, commitSha;
+};
+struct SpecialistDelegation {
+    std::string delegationId;
+    Id senderTaskId, recipientTaskId;
+    bool operator==(const SpecialistDelegation&) const = default;
+};
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
@@ -338,6 +354,8 @@ struct RuntimeOptions {
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
     std::function<void(std::string_view)> storageContention = {};
+    std::function<std::optional<Person>(std::string_view)> resolveSpecialistPerson = {};
+    std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
 };
 class Runtime {
 public:
@@ -346,6 +364,9 @@ public:
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
+    SpecialistDelegation startSpecialist(const Person&, const SpecialistCheck&);
+    Id specialistBudgetRemaining(Id channel) const;
+    void freezeSpecialistWork(const Person&, Id channel, Id generation);
     void runConversations();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.

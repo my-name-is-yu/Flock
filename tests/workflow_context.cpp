@@ -5,6 +5,7 @@
 #include <iostream>
 #include <map>
 #include <set>
+#include <sqlite3.h>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -308,6 +309,27 @@ void stageRequestKeepsEmbeddedNul() {
             "stage dispatch lost the request bytes after the marker");
 }
 
+void restoreLegacyWorkflowSchema(Fixture& f) {
+    f.runtime.reset();
+    f.store.reset();
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open((f.dir/"state.db").c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
+    require(opened==SQLITE_OK,"cannot open legacy workflow fixture");
+    const auto migrated = sqlite3_exec(db.get(),R"SQL(
+        PRAGMA foreign_keys=OFF;
+        BEGIN IMMEDIATE;
+        CREATE TABLE legacy_workflows(id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,
+            routing TEXT NOT NULL,request TEXT NOT NULL,message_id INTEGER NOT NULL REFERENCES messages,
+            stop_requested INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO legacy_workflows SELECT id,bot_id,routing,request,message_id,stop_requested FROM workflows;
+        DROP TABLE workflows;
+        ALTER TABLE legacy_workflows RENAME TO workflows;
+        COMMIT;
+    )SQL",nullptr,nullptr,nullptr);
+    require(migrated==SQLITE_OK,"could not prepare legacy workflows: "+std::string(sqlite3_errmsg(db.get())));
+}
+
 void verifyAfterRestart(bool advance) {
     Fixture f;
     const Id id = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run tests"}}).at("workflowId");
@@ -316,7 +338,10 @@ void verifyAfterRestart(bool advance) {
     f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(1);
     require(f.status().at("stages")[1]["status"]=="pending","verification dispatched prematurely");
+    const auto beforeRestart = f.status();
+    if (advance) restoreLegacyWorkflowSchema(f);
     f.restart();
+    require(f.status()==beforeRestart,"restart lost workflow IDs, dependencies or artifact evidence");
     f.ticks(3);
     auto status = f.status();
     require(f.t3.commands.size()==2 && f.t3.commands.back().tool=="delegate" &&

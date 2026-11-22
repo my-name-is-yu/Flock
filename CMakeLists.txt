@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS NO)
 include(FetchContent)
 find_package(SQLite3 3.35 REQUIRED)
 find_package(CURL 7.85 REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(PNG 1.6 REQUIRED)
 find_package(JPEG REQUIRED)
 find_package(nlohmann_json 3.12 QUIET)
@@ -39,7 +40,8 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
+                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/participation.cpp src/root_delivery.cpp
+                       src/session_handoff.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
@@ -51,7 +53,7 @@ else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp src/session_settings.cpp)
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz PRIVATE CURL::libcurl PNG::PNG JPEG::JPEG OpenSSL::Crypto)
 add_dependencies(flock_core flock_workspace_supervisor)
 target_compile_definitions(flock_core PRIVATE FLOCK_WORKSPACE_SUPERVISOR="$<TARGET_FILE:flock_workspace_supervisor>")
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -77,6 +79,10 @@ if(BUILD_TESTING)
   add_executable(flock_access_secrets tests/access_secrets.cpp)
   target_link_libraries(flock_access_secrets PRIVATE flock_core)
   add_test(NAME flock_access_secrets COMMAND flock_access_secrets)
+  add_executable(flock_participation tests/participation.cpp)
+  target_link_libraries(flock_participation PRIVATE flock_core)
+  target_compile_options(flock_participation PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_participation COMMAND flock_participation)
   add_executable(flock_session_read tests/session_read.cpp)
   target_link_libraries(flock_session_read PRIVATE flock_core)
   target_compile_options(flock_session_read PRIVATE -Wall -Wextra -Wpedantic)

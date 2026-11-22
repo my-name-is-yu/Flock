@@ -12,6 +12,7 @@ struct Bot {
     std::string id, name, environmentId, projectId;
     Json settings = Json::object();
     std::vector<std::string> allowedBots;
+    std::string role;
     Intake intake(std::string_view request) const;
 };
 
