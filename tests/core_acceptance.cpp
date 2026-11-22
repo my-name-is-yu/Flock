@@ -374,7 +374,7 @@ void budgetAndStaleWaits() {
         if (input.event["kind"] == "question") return reply();
         const auto used = input.task["additionalUsed"].get<int>();
         if (used == 3 && !input.event.contains("userAnswer") && f.logs(id,"user_answer")==0) return ask();
-        return work(used == 0 || used == 2 ? "follow_up" : "delegate",false);
+        return work(used == 1 ? "delegate" : "follow_up",false);
     };
     f.reach(id,"running");
     for (int i = 1; i <= 3; ++i) {
@@ -389,7 +389,8 @@ void budgetAndStaleWaits() {
     f.store->operate(id,question,"answer",{{"text","keep going"}});
     const auto budget = f.wait(id,"budget");
     f.rejects(id,budget,"answer",{{"text","yes"}});
-    check(f.task(id)["remaining"] == 0 && f.t3.seen.size()==4,"normal answer increased budget or fourth work sent");
+    check(f.task(id)["wait"]["attempted"] == "follow_up" && f.task(id)["remaining"] == 0 &&
+          f.t3.seen.size() == 4,"normal answer permitted an extra follow-up");
     f.store->operate(id,budget,"approve");
     f.rejects(id,budget,"approve");
     f.store->operate(id,0,"cancel");
@@ -727,32 +728,23 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     Fixture f;
     f.allowBeta();
     const auto root = f.submit("Verify and report the PR");
-    int results = 0;
-    const auto requestPeerWork = [](int number) {
-        Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR, pass " + std::to_string(number)}};
-        if (number == 1) args["doneWhen"] = Evidence;
-        return Decision{"send_bot_message",std::move(args),"Use the configured verifier"};
-    };
+    int peerReplies = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.task["id"] == root) {
-            if (input.event["kind"] == "intake") return requestPeerWork(++results);
-            if (input.event["kind"] == "bot_result") {
-                ++results;
-                if (results <= 4) return requestPeerWork(results);
-                return work("delegate",false);
-            }
-            if (input.event["kind"] == "result") return work("follow_up",false);
-            throw std::runtime_error("Unexpected sender event in peer budget test");
+        if (input.task["id"] != root) {
+            ++peerReplies;
+            return botReply("result","Verified the requested pass");
         }
-        check(input.event["kind"] == "bot_request","peer work received an unexpected event");
-        return botReply("result","Verified the requested pass");
+        if (input.event["kind"] == "bot_result" && peerReplies == 4) return work("delegate",false);
+        Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR"}};
+        if (input.event["kind"] == "intake") args["doneWhen"] = Evidence;
+        return {"send_bot_message",std::move(args),"Use the configured verifier",{{"total_tokens",37}}};
     };
 
     for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
-    check(f.task(root)["state"] == "waiting","peer work did not reach its exhausted-budget wait");
     const auto budget = f.wait(root,"budget");
-    check(f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 3 &&
-          f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
+    const auto beforeApproval = f.task(root);
+    check(beforeApproval["wait"]["attempted"] == "delegate" && beforeApproval["remaining"] == 0 &&
+          beforeApproval["additionalUsed"] == 3 && f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
           "direct T3 work bypassed the allowance exhausted by peer work");
     f.store->operate(root,budget,"approve");
     f.reach(root,"running");
@@ -760,9 +752,12 @@ void peerWorkSharesBudgetWithDirectT3Work() {
           "one approval did not admit exactly one direct T3 action");
     f.t3.finish("run-1");
     const auto secondBudget = f.wait(root,"budget");
-    check(secondBudget != budget && f.t3.launches == 1 && f.task(root)["remaining"] == 0 &&
-          f.task(root)["additionalUsed"] == 4 && f.task(root)["wait"]["attempted"] == "follow_up",
-          "the approved direct T3 action granted an additional unapproved action");
+    const auto paused = f.task(root);
+    check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 4 &&
+          f.store->tasks("beta").size() == 4,"the approved direct T3 action also granted unapproved peer work");
+    const auto& wait = paused.at("wait");
+    check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
+          wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
