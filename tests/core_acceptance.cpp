@@ -892,9 +892,6 @@ void revisionWaitsForPeerClarification() {
 void peerCompletionAfterEnvironmentMove() {
     for (const auto [kind,environment] : {std::pair{"work","cloud"},{"consult","cloud"},{"work","e"}}) {
         Fixture f;
-        executeSql(f.store->path(),"ALTER TABLE peer_exchanges DROP COLUMN sender_environment;"
-                                   "ALTER TABLE peer_exchanges DROP COLUMN sender_revision;");
-        f.restart();
         f.allowBeta();
         const Intake routing{"alpha","Release check","e","p",{{"conversationEnvironments",{{"cloud","cloud"}}}}};
         const auto sender = f.store->submit(routing);

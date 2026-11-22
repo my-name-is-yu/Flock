@@ -161,15 +161,6 @@ LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=t
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-        {
-            Transaction transaction(db);
-            if (!query("SELECT 1 FROM pragma_table_info('peer_exchanges') WHERE name='sender_environment'").next()) {
-                // Older exchanges have no recorded sender route and cannot attest to the current one.
-                exec("ALTER TABLE peer_exchanges ADD COLUMN sender_environment TEXT NOT NULL DEFAULT ''");
-                exec("ALTER TABLE peer_exchanges ADD COLUMN sender_revision INTEGER");
-            }
-            transaction.commit();
-        }
         migrateConversation();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
