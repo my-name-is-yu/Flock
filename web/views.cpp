@@ -187,7 +187,7 @@ Json eventView(const Json& event) {
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
-            copyFields(details["channel"] = Json::object(),*channel,{"channelKind","workspaceId","threadRef","externalMessageId"});
+            copyFields(details["channel"] = Json::object(),*channel,{"channelKind"});
         for (const auto* key : {"attachments","artifacts"}) {
             const auto items = data.find(key);
             if (items != data.end() && items->is_array()) details[key] = *items;

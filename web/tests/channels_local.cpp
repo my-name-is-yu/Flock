@@ -115,8 +115,13 @@ void channelEndpoints(const std::filesystem::path& database) {
     Browser::checked(bridge.Get("/api/channels/local-connections"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     const auto history = browser.get("/api/conversation?bot=release").at("events");
-    check(history.size() == 4 && history.at(0).at("data").at("channel").at("channelKind") == "slack" &&
-          history.at(1).at("data").at("channel").at("channelKind") == "imessage","HTTP conversation does not show channel intake");
+    check(history.size() == 4 && history.at(0).at("kind") == "conversation_message" &&
+          history.at(1).at("kind") == "conversation_message","HTTP conversation does not show channel intake");
+    check(history[0]["data"]["channel"] == Json{{"channelKind","slack"}} &&
+          history[1]["data"]["channel"] == Json{{"channelKind","imessage"}},
+          "HTTP channel provenance must include only the channel kind");
+    check(browser.get("/api/view?bot=release").at("events") == history,
+          "The initial timeline and conversation history must project the same channel provenance");
     const auto attachment = history[0]["data"]["attachments"][0]["id"].get<Id>();
     const auto file = browser.client.Get("/api/channels/attachments/" + std::to_string(attachment));
     check(file && file->status == 200 && file->body == image,"HTTP screenshot download missing");

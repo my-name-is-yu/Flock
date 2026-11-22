@@ -815,7 +815,13 @@ function suggestionActions(event) {
 }
 function messageSide(event) {
   if (event.kind === 'cancelled') return 'system';
+  if (event.kind === 'conversation_message' && event.data.channel?.channelKind) return 'external';
   return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
+}
+function channelLabel(kind) {
+  if (kind === 'slack') return 'via Slack';
+  if (kind === 'imessage') return 'via iMessage';
+  return 'via external channel';
 }
 function reasonText(text) {
   const reason = node('p', 'event-reason');
@@ -886,15 +892,18 @@ function eventCard(event, context, place) {
       ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
       : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const showMeta = side === 'bot' ? place.groupStart || place.taskStart : place.taskStart;
+  const showName = side === 'external' || (side === 'bot' && place.groupStart);
+  const showMeta = showName || place.taskStart;
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
-  const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
-    side === 'bot' ? bot?.name ?? 'Bot' : 'You');
+  const author = side === 'external' ? channelLabel(data.channel.channelKind) : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
+  const name = node('span', showName ? 'msg-name' : 'msg-name sr-only', author);
   meta.append(name, eventTime(event, scheduled));
   row.append(meta);
 
   const line = node('div', 'msg-line');
-  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  if (side !== 'user') {
+    line.append(side === 'bot' && place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  }
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
