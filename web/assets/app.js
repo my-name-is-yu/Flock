@@ -78,7 +78,6 @@ const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
-let pendingSource = null;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
@@ -224,16 +223,16 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
-    if (view.source || pendingSource) backToLatest();
+    if (view.source || view.pendingSource) backToLatest();
     else renderBots();
     return;
   }
-  resetConversationJump();
+  resetConversationJump(view);
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, source: null, loadingOlder: false, loadingSessions: false,
+    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
@@ -843,12 +842,12 @@ function conversationMessageRow(id) {
   // A collapsed Session report can be an anchor inside the completion row.
   return byId(`event-${id}`)?.closest('article');
 }
-function resetConversationJump() {
-  pendingSource = null;
+function resetConversationJump(context) {
+  if (context) context.pendingSource = null;
   elements['conversation-source-error'].textContent = '';
 }
 function leaveConversationSource(context) {
-  resetConversationJump();
+  resetConversationJump(context);
   if (!context.source) return false;
   context.source = null;
   readingPositions.delete(timelineKey(context.id));
@@ -888,21 +887,21 @@ function focusConversationMessage(target) {
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
-  resetConversationJump();
+  resetConversationJump(context);
   const error = elements['conversation-source-error'];
   let target = preferLoaded ? conversationMessageRow(id) : null;
   if (!target && preferLoaded && context.events.has(id)) {
     if (leaveConversationSource(context)) renderTimeline();
     target = conversationMessageRow(id);
   } else if (!target) {
-    const request = {};
-    pendingSource = request;
+    // Only the newest jump in this conversation can apply its page.
+    const request = context.pendingSource = { id };
     let page;
     try {
       page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
     } catch {}
-    if (pendingSource !== request || context !== view) return;
-    pendingSource = null;
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
     if (signal?.aborted) return;
     if (!page) {
       error.textContent = 'Could not load that message.';
@@ -2047,7 +2046,7 @@ elements['jump-to-latest'].addEventListener('click', () => {
     backToLatest();
     return;
   }
-  resetConversationJump();
+  resetConversationJump(view);
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
