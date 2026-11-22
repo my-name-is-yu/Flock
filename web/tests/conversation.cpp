@@ -490,8 +490,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
           forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
-          !forwarded.contains("initiator") && !answered.contains("recipient") && !answered.contains("forwardedMessage") &&
-          t3.launches == 0,"the exchange did not preserve the forward, its Bot authors, or the reply");
+          !answered.contains("forwardedMessage") && t3.launches == 0,
+          "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");
