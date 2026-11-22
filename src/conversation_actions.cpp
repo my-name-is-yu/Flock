@@ -288,6 +288,7 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
     }
     if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
     task["pendingInstructions"].push_back(pending);
+    if (task["question"].is_object()) task["question"].erase("suspendedDecision");
     journal(task.at("id"),"instruction_accepted",pending);
     save(task);
     return conflicting;

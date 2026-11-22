@@ -91,12 +91,14 @@ struct SimulatedT3 : T3 {
     bool loseAcknowledgement = false;
     bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
+    std::string expectedBranch = "main";
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
     std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
+    std::function<RunEvidence(const RunRef&,std::string_view)> recoverEvidence;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
     std::function<void()> beforeWorkAcknowledgement;
@@ -112,7 +114,7 @@ struct SimulatedT3 : T3 {
             if (std::exchange(failNextAnswerRead,false))
                 return {Delivery::Kind::Unknown,{},"T3 question read failed",true};
             ++replies;
-            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == "main","wrong T3 answer");
+            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == expectedBranch,"wrong T3 answer");
             runs.at(cmd.target.runId) = {};
             if (std::exchange(loseAcknowledgement,false)) return {};
             return {Delivery::Kind::Accepted,{},{}};
@@ -144,6 +146,9 @@ struct SimulatedT3 : T3 {
     Observation observe(const std::string&,const Json&,const RunRef& ref) override {
         ++polls;
         return runs.at(ref.runId);
+    }
+    RunEvidence readRunEvidence(const std::string& env,const Json& config,const RunRef& ref,std::string_view status) override {
+        return recoverEvidence ? recoverEvidence(ref,status) : T3::readRunEvidence(env,config,ref,status);
     }
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& ref) override {
         check(runs.contains(ref.runId),"interrupted unrelated Run");
@@ -340,25 +345,30 @@ void correctInvalidTaskArguments() {
     f.reach(id,"running");
 }
 
-void replayQuestionDecision() {
+void replayQuestionDecision(std::string_view outage = {}) {
     for (const bool stillOpen : {true,false}) {
         Fixture f;
         const auto id = f.store->submit({"alpha","Use main","e","p",{{"modelCallLimit",2}}});
         f.model.script = [&](const ModelInput& input) {
             if (input.event.at("kind") == "intake") return work();
             // Lose T3 visibility at the post-inference liveness check, before any reply can commit.
-            f.t3.runs.at("run-1").kind = Observation::Kind::Unavailable;
+            f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = std::string(outage)};
             return reply();
         };
         f.reach(id,"running");
         f.t3.question("run-1");
         f.reach(id,"deciding");
         f.runtime->tick();
-        check(f.model.calls == 2 && f.task(id)["state"] == "deciding" && !f.t3.replies,
+        check(f.model.calls == 2 && f.task(id)["state"] == (outage.empty() ? "deciding" : "waiting") && !f.t3.replies,
               "reply did not stop between inference and effect");
         f.restart();
+        if (outage == "settings") {
+            const auto task = f.task(id);
+            f.store->operate(localOwner,TaskTarget::from(task,task.at("wait").at("id")),"reconcile");
+        }
         if (stillOpen) f.t3.question("run-1");
         else f.t3.runs.at("run-1") = {};
+        if (outage == "settings") f.runtime->tick();
         f.reach(id,"running");
         check(f.model.calls == 2 && f.t3.replies == int(stillOpen) && !f.task(id).contains("pendingDecision"),
               "restart repeated inference or applied a stale question reply");
@@ -542,6 +552,140 @@ void waitsExpireWithReality() {
           "stale waiting operation executed");
 }
 
+void connectionRecoveryRestoresSessionQuestion() {
+    for (const auto* outage : {"auth","settings"}) {
+        for (const bool manual : {false,true}) {
+            Fixture f;
+            const auto id = f.submit();
+            f.model.script = [](const ModelInput& i) {
+                if (i.event.at("kind") == "intake") return work();
+                if (i.event.contains("userAnswer")) return reply();
+                auto question = ask();
+                question.args["choices"] = {"main","dev"};
+                return question;
+            };
+            f.reach(id,"running");
+            f.t3.question("run-1");
+            const auto old = f.wait(id,"user_question");
+            f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = outage};
+            f.runtime->tick();
+            const auto connection = f.wait(id,outage);
+            check(f.store->inbox(localOwner,"alpha").empty(),"question remained actionable during the outage");
+            f.rejects(id,old,"answer",{{"text","dev"}});
+            if (manual) f.store->operate(localOwner,TaskTarget::from(f.task(id),connection),"reconcile");
+            if (manual && std::string_view(outage) == "settings")
+                executeSql(f.store->path(),"UPDATE tasks SET data=json_remove(data,'$.question.suspendedWaitId')");
+            f.restart();
+            f.t3.question("run-1");
+            f.runtime->tick();
+            const auto restored = f.wait(id,"user_question");
+            const auto inbox = f.store->inbox(localOwner,"alpha");
+            check(restored != old && restored != connection && inbox.size() == 1 && inbox[0]["waitId"] == restored &&
+                  inbox[0]["prompt"] == "Which branch?" && inbox[0]["choices"] == Json::array({"main","dev"}) &&
+                  f.model.calls == 2,"the live question did not return with its clarification and a fresh target");
+            f.rejects(id,old,"answer",{{"text","dev"}});
+            f.rejects(id,connection,"reconcile");
+            f.store->operate(localOwner,TaskTarget::from(f.task(id),restored),"answer",{{"text","main"}});
+            f.reach(id,"running");
+            check(f.t3.replies == 1 && f.t3.seen.back().target.runId == "run-1" && f.t3.launches == 1 &&
+                  f.logs(id,"session_question") == 1 && f.logs(id,"user_answer") == 1,
+                  "recovered question did not resume the original Run exactly once");
+        }
+    }
+}
+
+void connectionRecoveryDiscardsExpiredSessionQuestion() {
+    for (const bool replaced : {false,true}) {
+        Fixture f;
+        const auto id = f.submit();
+        f.model.script = [](const ModelInput& i) {
+            if (i.event.at("kind") == "intake") return work();
+            if (i.event.at("question").at("requestId") == "replacement")
+                return Decision{"ask_user",{{"question","Which new branch?"}},"Confirm the new question"};
+            return ask();
+        };
+        f.reach(id,"running");
+        f.t3.question("run-1");
+        const auto old = f.wait(id,"user_question");
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = "auth"};
+        f.runtime->tick();
+        f.wait(id,"auth");
+        f.restart();
+        if (replaced) {
+            f.t3.question("run-1");
+            f.t3.runs.at("run-1").question.requestId = "replacement";
+            f.runtime->tick();
+            f.wait(id,"user_question");
+            const auto inbox = f.store->inbox(localOwner,"alpha");
+            check(inbox.size() == 1 && inbox[0]["prompt"] == "Which new branch?",
+                  "recovery restored an eclipsed clarification");
+        } else {
+            f.t3.runs.at("run-1") = {};
+            f.reach(id,"running");
+            check(f.store->inbox(localOwner,"alpha").empty(),"recovery restored a remotely resolved question");
+        }
+        f.rejects(id,old,"answer",{{"text","main"}});
+        check(f.t3.replies == 0 && f.logs(id,"session_question_closed") == 1,
+              "a closed question was answered or remained open");
+    }
+}
+
+void connectionRecoveryReconsidersNewDirections() {
+    Fixture f;
+    const auto id = f.submit("Check main initially");
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = "auth"};
+        return reply();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.wait(id,"auth");
+    check(f.t3.replies == 0,"the original answer escaped before recovery");
+
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "conversation_turn")
+            return converse(input,"send_to_task",id,Json::object());
+        check(input.task.at("userInstructions").dump().find("Use dev") != std::string::npos,
+              "question inference lost the new direction");
+        auto answer = reply();
+        answer.args["answers"]["branch"] = "dev";
+        return answer;
+    };
+    f.store->receive(localOwner,{"alpha","","e","p"},"new-direction-during-outage","Use dev");
+    f.runtime->runConversations();
+    f.restart();
+    f.t3.expectedBranch = "dev";
+    f.t3.question("run-1");
+    f.runtime->tick();
+    f.reach(id,"running");
+    check(f.t3.replies == 1 && f.t3.seen.back().answers.at("branch") == "dev",
+          "connection recovery applied the old Session answer");
+}
+
+void connectionRecoveryRestoresQuestionModelApproval() {
+    Fixture f;
+    const auto id = f.store->submit({"alpha","Check main","e","p",{{"modelCallLimit",1}}});
+    f.model.script = [](const ModelInput& i) { return i.event.at("kind") == "intake" ? work() : reply(); };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    const auto old = f.wait(id,"model_budget");
+    for (const auto* outage : {"auth","settings"}) {
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = outage};
+        f.runtime->tick();
+        f.wait(id,outage);
+    }
+    f.restart();
+    f.t3.question("run-1");
+    f.runtime->tick();
+    const auto restored = f.wait(id,"model_budget");
+    check(restored != old && f.model.calls == 1,"recovery bypassed the pending model approval");
+    f.rejects(id,old,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),restored),"approve");
+    f.reach(id,"running");
+    check(f.model.calls == 2 && f.t3.replies == 1,"restored approval could not resume the open question");
+}
+
 void failedPreflightIsUnsent() {
     Fixture f;
     const auto id = f.submit();
@@ -706,6 +850,207 @@ void settleWhileAnswerDeliveryIsUnknown() {
         f.reach(id,"cancelled");
         check(f.logs(id,"report") == 1 && f.t3.replies == 1 && f.t3.launches == 1,
               "settled Run duplicated its answer or report");
+    }
+}
+
+void settledReportCanRecoverAfterRestart() {
+    for (const bool available : {false,true}) {
+        Fixture f;
+        const std::string secret = "private-report-diagnostic";
+        auto access = f.store->access();
+        access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"diagnostic"}),secret);
+        const auto id = f.submit();
+        f.model.script = [&](const ModelInput& i) {
+            if (i.event.at("kind") == "intake") return work();
+            check(i.event.at("kind") == "result" && i.event.at("resultRunId") == "run-1-result" &&
+                  i.event.at("status") == "completed","report recovery lost the terminal result identity");
+            check(hasTool(i,"complete") == available,"completion did not require the settled Run's report");
+            if (available) {
+                check(i.event.at("report") == "Recovered report","recovered report did not reach the Bot");
+                return complete();
+            }
+            check(i.event.at("evidenceStatus") == "report_unavailable" && i.event.at("detail") == "[redacted]" &&
+                  i.event.at("report") == "","the missing report or redacted diagnostic was misrepresented");
+            return ask();
+        };
+        f.reach(id,"running");
+        f.t3.finish("run-1");
+        auto& observation = f.t3.runs.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.report.clear();
+        observation.itemId.clear();
+        observation.detail = secret;
+        f.runtime->tick();
+        check(f.task(id)["activeRun"].is_null() && f.task(id)["lastRun"]["runId"] == "run-1" &&
+              f.store->sessionTasks("alpha",0,1).at(0).at("runs").at(0).at("status") == "completed" &&
+              f.store->history(id).dump().find(secret) == std::string::npos,"missing evidence kept the Run active or leaked diagnostics");
+        const auto polls = f.t3.polls;
+        int attempts = 0;
+        f.t3.recoverEvidence = [&](const RunRef& source,std::string_view status) {
+            check(source.threadId == "thread-1" && source.runId == "run-1-result" && status == "completed",
+                  "recovery used an unproven evidence source");
+            ++attempts;
+            if (available) return RunEvidence{RunEvidence::Availability::Available,"Recovered report","recovered-item","",false};
+            return RunEvidence{RunEvidence::Availability::ReportUnavailable,"","",secret,false};
+        };
+        f.restart();
+        f.runtime->tick();
+        check(f.model.calls == 1 && attempts == 0,"recovery spent model allowance or retried before the scheduled time");
+        f.now += 5;
+        f.runtime->tick();
+        if (!available) {
+            f.now += 10;
+            f.runtime->tick();
+            f.wait(id,"user_question");
+        } else f.reach(id,"completed");
+        check(attempts == (available ? 1 : 2) && f.t3.polls == polls && f.logs(id,"report") == 1 &&
+              f.logs(id,"completed") == int(available),"evidence retry repeated Run observation or published an unsupported completion");
+    }
+}
+
+void lateReportCanRestoreCompletion() {
+    Fixture f;
+    const auto id = f.submit();
+    int reportReads = 0;
+    bool reportAvailable = false;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view status) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result" && status == "completed",
+              "report recovery used a different Run");
+        ++reportReads;
+        if (reportAvailable)
+            return RunEvidence{RunEvidence::Availability::Available,"Late report","late-item","",false};
+        return RunEvidence{RunEvidence::Availability::ReportUnavailable,"","","Unavailable",false};
+    };
+    Id resumedEvent = 0;
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (event.at("kind") == "intake") return work();
+        check(event.at("resultRunId") == "run-1-result","lost the settled result Run");
+        if (event.value("report","") == "Late report") {
+            check(hasTool(input,"complete") && !hasTool(input,"session_read") &&
+                  !event.contains("evidenceStatus") && event.at("itemId") == "late-item" &&
+                  event.at("id") == resumedEvent && event.at("userAnswer") == "Try again",
+                  "late recovery changed the result event or failed to restore completion");
+            return complete();
+        }
+        check(!hasTool(input,"complete") && hasTool(input,"session_read") &&
+              event.at("sessionReadViews") == Json::array({"report"}),"missing report was not recoverable in default mode");
+        if (!input.evidence.empty()) {
+            check(input.evidence.at(0).at("reportAvailable") == false &&
+                  input.task.at("remainingEvidenceReads") == 2,"failed report read did not use the event allowance");
+            return ask();
+        }
+        auto run = "run-1-result";
+        if (event.contains("userAnswer")) {
+            resumedEvent = event.at("id");
+            if (event.at("decisionFeedback").empty()) run = "run-1";
+        }
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId",run}},
+                        "Retry the terminal report"};
+    };
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    check(reportReads == 2 && f.logs(id,"report") == 1,"scheduled retries did not exhaust before recovery");
+    const auto wait = f.wait(id,"user_question");
+    check(reportReads == 3,"initial on-demand retry was not attempted exactly once");
+    const auto polls = f.t3.polls;
+    reportAvailable = true;
+    f.restart();
+    f.runtime->tick();
+    check(reportReads == 3 && f.task(id).at("wait").at("id") == wait,"waiting repeated terminal report reads");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"answer",{{"text","Try again"}});
+    f.runtime->tick();
+    check(reportReads == 3 && f.logs(id,"tool_error") == 1,"the assigned Run was accepted as the result source");
+    setSessionReadJournalFailure(f.store->path(),true);
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.store->history(id).dump().find("Late report") == std::string::npos &&
+          f.logs(id,"session_read") == 1,
+          "a failed evidence transaction left a partially recovered report");
+    setSessionReadJournalFailure(f.store->path(),false);
+    f.runtime->tick();
+    f.restart();
+    f.reach(id,"completed");
+    const auto history = f.store->history(id);
+    const auto report = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "report"; });
+    const auto completed = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "completed"; });
+    check(report != history.end() && report->at("data").at("report") == "Late report" &&
+          completed != history.end() && completed->at("data").at("source").at("itemId") == "late-item" &&
+          reportReads == 5 && f.t3.reads == 0 && f.t3.polls == polls && f.t3.launches == 1 && f.t3.follows == 0 &&
+          f.logs(id,"report") == 1,"late recovery did not persist the report and its source on the same task");
+}
+
+void lateReportCanRestorePeerResult() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit();
+    int reportReads = 0;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result","peer recovery lost the result source");
+        if (++reportReads <= 2) return RunEvidence{RunEvidence::Availability::ReportUnavailable};
+        return RunEvidence{RunEvidence::Availability::Available,"Peer report","peer-item","",false};
+    };
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (input.task.at("id") == sender) {
+            if (event.at("kind") == "intake") return botRequest("beta","work","Verify the release");
+            check(event.at("kind") == "bot_result" && event.at("references").at(0).at("itemId") == "peer-item",
+                  "the peer result referenced stale evidence");
+            return complete();
+        }
+        if (event.at("kind") == "bot_request") return work();
+        const auto& kinds = input.task.at("peer").at("replyKinds");
+        const bool hasResult = std::ranges::find(kinds,"result") != kinds.end();
+        if (event.at("report") == "Peer report") {
+            check(hasResult,"recovered evidence did not permit a peer result");
+            return botReply("result","Verified the release");
+        }
+        check(!hasResult && hasTool(input,"session_read"),"missing report did not gate the peer result");
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId","run-1-result"}},
+                        "Retry the peer's terminal report"};
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    f.reach(sender,"completed");
+    check(f.task(recipient).at("state") == "completed" && reportReads == 3 && f.t3.launches == 1 && f.t3.follows == 0,
+          "a late report did not close the original peer exchange");
+}
+
+void missingReportDoesNotBlockCancellation() {
+    for (const bool settledBeforeCancel : {false,true}) {
+        Fixture f;
+        const auto id = f.submit();
+        const auto next = f.submit("Next task");
+        f.model.script = [=](const ModelInput& i) { return i.task.at("id") == id ? work() : ask(); };
+        f.reach(id,"running");
+        f.t3.finish("run-1","interrupted");
+        auto& observation = f.t3.runs.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.report.clear();
+        if (settledBeforeCancel) f.runtime->tick();
+        f.restart();
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
+        f.reach(id,"cancelled");
+        f.wait(next,"user_question");
+        check(f.t3.interrupts == 0 && f.t3.launches == 1 && f.logs(id,"report") == 1 &&
+              f.task(id)["activeRun"].is_null(),"missing report held cancellation or the next task's project slot");
     }
 }
 
@@ -2201,12 +2546,22 @@ int main() {
     for (const auto& [name,run] : std::vector<std::pair<const char*, void(*)()>>{
             {"invalid decisions",invalidDecisions},{"correct invalid task arguments",correctInvalidTaskArguments},
             {"failed preflight",failedPreflightIsUnsent},
-            {"replay saved question decision",replayQuestionDecision},{"clarification and failure",ambiguityAndFailure},
+            {"replay saved question decision",[] { replayQuestionDecision(); }},{"clarification and failure",ambiguityAndFailure},
+            {"replay question decision after auth recovery",[] { replayQuestionDecision("auth"); }},
+            {"replay question decision after settings reconciliation",[] { replayQuestionDecision("settings"); }},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
+            {"recover live question across auth and settings waits",connectionRecoveryRestoresSessionQuestion},
+            {"discard expired question after connection recovery",connectionRecoveryDiscardsExpiredSessionQuestion},
+            {"recover the question's model approval",connectionRecoveryRestoresQuestionModelApproval},
+            {"reconsider new directions after question recovery",connectionRecoveryReconsidersNewDirections},
             {"delivery recovery",recoveredDelivery},{"retry unsent Session answer",unsentAnswerRemainsRetryable},
             {"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
+            {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
+            {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},
+            {"late report recovery for a peer result",lateReportCanRestorePeerResult},
+            {"cancellation with unavailable report",missingReportDoesNotBlockCancellation},
             {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},

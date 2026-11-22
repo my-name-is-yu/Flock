@@ -196,6 +196,36 @@ int main(int argc, char** argv) {
         checkResult("ambiguous-title-result", false);
         checkResult("reused-result", false);
 
+        using Availability = RunEvidence::Availability;
+        for (const auto* scenario : {"settled", "notification-result"}) {
+            const bool later = std::string_view(scenario) == "notification-result";
+            fixture({{"scenario",scenario},{"reportReadFailure","messages"}});
+            const auto observed = adapter->observe("env-1",launch.config,run);
+            check(observed.kind == Observation::Kind::Finished && observed.settled && observed.status == "completed" &&
+                  observed.resultRunId == (later ? "later" : "root") && observed.report.empty() &&
+                  observed.evidence == Availability::ReportUnavailable && !observed.detail.empty(),
+                  "unreadable report erased settlement or its proven source");
+            fixture({{"reportReadFailure",nullptr},{"waitFailure",true}});
+            const auto evidence = restarted->readRunEvidence("env-1",launch.config,
+                {run.threadId,observed.resultRunId,run.link},observed.status);
+            check(evidence.availability == Availability::Available &&
+                  evidence.report == (later ? "later report" : "root report"),
+                  "report recovery depended on another wait or read the wrong Run");
+            fixture({{"waitFailure",false}});
+        }
+        fixture({{"scenario","settled"},{"terminalStatus","failed"},{"reportReadFailure","activity"}});
+        observation = adapter->observe("env-1",launch.config,run);
+        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.status == "failed" &&
+              observation.resultRunId == "root" && observation.report == "root report" &&
+              observation.evidence == Availability::DiagnosticUnavailable && !observation.detail.empty(),
+              "unreadable error history erased a proven failure or its written report");
+        fixture({{"scenario","notification-result"},{"terminalStatus","completed"},
+                 {"reportReadFailure",nullptr},{"ownershipReadFailure",true}});
+        observation = adapter->observe("env-1",launch.config,run);
+        check(observation.kind == Observation::Kind::Unavailable && !observation.settled && observation.resultRunId.empty(),
+              "unreadable ownership evidence confirmed another Run's result");
+        fixture({{"ownershipReadFailure",false}});
+
         Command follow = launch;
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";

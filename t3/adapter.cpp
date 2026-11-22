@@ -501,6 +501,43 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
     }
 }
 
+RunEvidence unavailableReport(const Failure& failure) {
+    RunEvidence evidence;
+    evidence.availability = RunEvidence::Availability::ReportUnavailable;
+    evidence.detail = "Could not read the T3 Run report: " + std::string(failure.what());
+    return evidence;
+}
+
+RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::string_view status) {
+    Report report;
+    try {
+        report = readReport(client, source, "messages", "assistant_message");
+    } catch (const Failure& failure) {
+        return unavailableReport(failure);
+    }
+
+    RunEvidence evidence;
+    if (status != "completed") {
+        evidence.detail = "T3 Run ended as " + std::string(status);
+        try {
+            const auto error = readReport(client, source, "activity", "error");
+            if (!error.text.empty()) {
+                evidence.detail = bounded(error.text,2048);
+                if (report.itemId.empty()) report.itemId = error.itemId;
+                report.truncated = report.truncated || error.truncated;
+            }
+        } catch (const Failure& failure) {
+            evidence.availability = RunEvidence::Availability::DiagnosticUnavailable;
+            evidence.detail += ". Could not read T3 error history: " + std::string(failure.what());
+        }
+    }
+    if (report.text.empty()) report.text = "T3 Run " + std::string(status) + " without a written report.";
+    evidence.report = bounded(report.text, 8192);
+    evidence.truncated = report.truncated || evidence.report.size() < report.text.size();
+    evidence.itemId = std::move(report.itemId);
+    return evidence;
+}
+
 bool followUpReady(Client& client, const Command& command) {
     const auto settled = wait(client, command.target, true, 1);
     const auto effective = str(settled, "runId");
@@ -684,20 +721,12 @@ public:
                     source.runId = laterId;
                     observed.status = str(later, "status");
                 }
-                auto report = readReport(client, source, "messages", "assistant_message");
-                if (observed.status != "completed") {
-                    const auto error = readReport(client, source, "activity", "error");
-                    observed.detail = "T3 Run ended as " + observed.status;
-                    if (!error.text.empty()) {
-                        observed.detail = bounded(error.text,2048);
-                        if (report.itemId.empty()) report.itemId = error.itemId;
-                        report.truncated = report.truncated || error.truncated;
-                    }
-                }
-                if (report.text.empty()) report.text = "T3 Run " + observed.status + " without a written report.";
-                observed.report = bounded(report.text, 8192);
-                observed.truncated = report.truncated || observed.report.size() < report.text.size();
-                observed.itemId = std::move(report.itemId);
+                auto evidence = readTerminalEvidence(client,source,observed.status);
+                observed.evidence = evidence.availability;
+                observed.report = std::move(evidence.report);
+                observed.itemId = std::move(evidence.itemId);
+                observed.detail = std::move(evidence.detail);
+                observed.truncated = evidence.truncated;
                 observed.resultRunId = source.runId;
                 return observed;
             }
@@ -723,6 +752,16 @@ public:
         } catch (const Failure& failure) {
             if (failure.kind == Failure::Kind::Settings) return state(Observed::Unavailable, "settings");
             return state(Observed::Unavailable, failure.kind == Failure::Kind::Auth ? "auth" : failure.what());
+        }
+    }
+
+    RunEvidence readRunEvidence(const std::string& environmentId, const Json& config, const RunRef& source,
+                                std::string_view status) override {
+        try {
+            Client client(credential(environmentId,config));
+            return readTerminalEvidence(client,source,status);
+        } catch (const Failure& failure) {
+            return unavailableReport(failure);
         }
     }
 
