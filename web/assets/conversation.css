@@ -38,7 +38,8 @@
   padding: .125rem .25rem; border-radius: var(--radius-md);
 }
 .profile { border: 0; background: none; }
-.peer-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.peer-title:focus-visible { outline: none; }
+.peer-title:focus-visible .peer-names { outline: 2px solid var(--focus); outline-offset: 2px; }
 .peer-faces { display: flex; flex: none; }
 .peer-faces .avatar + .avatar { margin-left: calc(var(--profile-avatar-size) * -.4); }
 .profile-face { position: relative; display: block; flex: none; }
