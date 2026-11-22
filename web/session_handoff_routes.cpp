@@ -230,6 +230,7 @@ void sessionHandoffRoutes(httplib::Server& server, const WebCallbacks& callbacks
             if (!std::ranges::any_of(bots,[&](const auto& entry) {
                 return entry.is_object() && entry.value("id",Json(nullptr)) == bot;
             })) throw Conflict("Unknown Bot");
+            if (callbacks.intake(bot,"").botId != bot) throw Conflict("Session Bot is unavailable");
             const auto ticket = handoff.pair(actor,destination,bot,permission);
             reply(res,201,{{"code",ticket.code},{"expiresAt",ticket.expiresAt}});
         });

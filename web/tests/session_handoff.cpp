@@ -103,6 +103,10 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson);
     const auto handoffs = cb.sessionHandoffs;
     const auto intake = cb.intake;
+    cb.intake = [intake](std::string_view bot, std::string_view request) {
+        if (bot == "broken") throw Conflict(privateValue);
+        return intake(bot,request);
+    };
 
     const Person alice{"alice",true};
     const auto grant = [&](const Scope& scope) {
@@ -112,6 +116,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     grant(Scope::consultReply(otherTarget.environmentId,otherTarget.threadId));
     grant(Scope::sessionCoordinate(target.environmentId,target.threadId));
     grant(Scope::sessionRead(target.environmentId,target.threadId));
+    db.access().resourceGrant(alice,"broken",Scope::consultReply(target.environmentId,target.threadId),GrantChange::grant);
 
     auto server = startWeb(db,0,std::move(cb));
     Browser browser(*server);
@@ -123,6 +128,9 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     auto unknownBot = pairingInput(target);
     unknownBot["botId"] = "unconfigured-bot";
     browser.post(pairingRoute,unknownBot,403);
+    auto profileOnlyBot = pairingInput(target);
+    profileOnlyBot["botId"] = "broken";
+    browser.post(pairingRoute,profileOnlyBot,403);
     auto oldTarget = pairingInput(target);
     oldTarget.at("target")["runId"] = "human-run";
     browser.post(pairingRoute,oldTarget,400);

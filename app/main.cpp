@@ -137,10 +137,12 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
     const auto url = args.pop("T3 MCP URL");
     args.end();
 #ifdef FLOCK_WITH_T3
-    loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
+    const auto canOperate = loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
-    print({{"environmentId",environment},{"connected",true}});
+    print({{"environmentId",environment},{"connected",true},{"canOperate",canOperate}});
+    if (!canOperate)
+        std::cerr << "This T3 connection is read-only. Sign in again with T3 Operate access to launch Sessions.\n";
     return 0;
 #else
     (void)home;
