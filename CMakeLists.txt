@@ -41,7 +41,7 @@ add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)

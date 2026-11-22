@@ -23,6 +23,14 @@ void rejects(const std::function<void()>& action) {
     throw std::runtime_error("Expected rejection");
 }
 
+void attachmentEncoding() {
+    check(decodeAttachment("YQ==",1) == "a" && decodeAttachment("YWI=",2) == "ab" &&
+          decodeAttachment("YWJj",3) == "abc","Channel attachment decoding changed with padding");
+    for (auto malformed : {"", "YQ", "YQ=A", "YQ==YQ==", "YR==", "YWJ="})
+        rejects([&] { decodeAttachment(malformed,16); });
+    rejects([] { decodeAttachment("YWI=",1); });
+}
+
 struct Temp {
     std::filesystem::path path = std::filesystem::temp_directory_path() / ("flock-channels-" + std::to_string(unixTime()) +
         "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -714,6 +722,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
 
 int main() {
     try {
+        attachmentEncoding();
         Temp temp;
         const auto path = temp.path / "notes";
         std::ofstream(path) << "fixture text";
