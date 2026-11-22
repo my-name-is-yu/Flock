@@ -14,6 +14,7 @@ struct ThreadPage {
     Id cursor;
     std::string authGeneration, activeRunId;
     std::vector<ThreadEvent> events;
+    bool hasMore = false;
 };
 struct ThreadReceipt {
     std::string messageId, runId, mode;
@@ -28,6 +29,7 @@ public:
     virtual ~ThreadSession() = default;
     virtual std::optional<ThreadPage> read(const ThreadTarget&, std::optional<Id> after) = 0;
     virtual std::optional<ThreadPage> dispatchHistory(const ThreadTarget&, Id) { return {}; }
+    virtual bool runFailed(const ThreadTarget&, std::string_view) { return false; }
     virtual ThreadSend send(const ThreadTarget&, std::string_view authGeneration,
                             std::string_view requestId, std::string_view text) = 0;
     virtual std::optional<std::string> inputCommit(const ThreadTarget&) = 0;
