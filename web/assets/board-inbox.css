@@ -1,4 +1,4 @@
-.board-inbox-nav, .board-inbox-filters, .board-inbox-actions {
+.board-inbox-nav, .board-inbox-filters, .board-inbox-actions, .board-inbox-question .question-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: end;
@@ -13,7 +13,7 @@
 .board-inbox-nav button:hover { background: var(--hover); color: var(--text); }
 /* Center icons in the avatar column so labels line up with Bot names. */
 .board-inbox-nav svg { flex: none; width: 2.6rem; height: 1.2rem; }
-.board-inbox button:not(.icon-button), .board-inbox select {
+.board-inbox button:not(.icon-button, .question-confirm, .question-reply), .board-inbox select {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   padding: .38rem .65rem;
@@ -22,7 +22,7 @@
   font: inherit;
   font-size: var(--text-sm);
 }
-.board-inbox button:not(.icon-button):hover { background: var(--hover); }
+.board-inbox button:not(.icon-button, .question-confirm, .question-reply):hover { background: var(--hover); }
 .board-inbox { width: min(49rem, calc(100% - 1.5rem)); height: min(46rem, 88dvh); }
 .board-inbox-filters label, .board-inbox-form label {
   display: grid;
@@ -30,7 +30,8 @@
   color: var(--text-2);
   font-size: var(--text-sm);
 }
-.board-inbox-items, .board-inbox-card, .board-inbox-form { display: grid; gap: .65rem; }
+.board-inbox-items, .board-inbox-card, .board-inbox-form, .board-inbox-question { display: grid; gap: .65rem; }
+.board-inbox-question .question-actions { align-items: center; gap: .4rem; }
 .board-inbox-card {
   padding: .85rem 1rem;
   border: 1px solid var(--hairline);
@@ -43,6 +44,7 @@
 .board-inbox-card p, .board-inbox-card a { font-size: var(--text-sm); }
 .board-inbox-meta, #work-view-message { color: var(--text-2); }
 .board-inbox-card a { color: var(--accent); justify-self: start; }
+.board-inbox-card button.board-inbox-source { color: var(--accent); justify-self: start; }
 .board-inbox-form input, .board-inbox-form textarea {
   width: min(100%, 32rem);
   padding: .5rem;

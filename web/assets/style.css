@@ -86,6 +86,11 @@ svg { display: block; }
   height: 100dvh;
   overflow: hidden;
 }
+.workspace.keyboard-viewport {
+  position: fixed;
+  inset: var(--keyboard-viewport-top) 0 auto;
+  height: var(--keyboard-viewport-height);
+}
 .main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
 
 .avatar { display: grid; place-items: center; overflow: visible; width: 2.25rem; height: 2.25rem; flex: none; background: none; }
