@@ -975,7 +975,7 @@ function eventCard(event, context, place) {
     if (event.kind === 'conversation_message' && data.replyToMessageId)
       extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
-    if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
+    else if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
