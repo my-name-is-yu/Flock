@@ -823,7 +823,7 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.title = [event.taskId ? `#${event.taskId}` : null, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
 function sourceAction(source, label = 'Open source') {
@@ -884,13 +884,12 @@ function eventCard(event, context, place) {
       ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
       : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const showMeta = side === 'bot' ? place.groupStart || place.taskStart : place.taskStart;
+  const showMeta = side === 'bot' && place.groupStart;
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
     side === 'bot' ? bot?.name ?? 'Bot' : 'You');
   const time = eventTime(event, scheduled);
   meta.append(name);
-  if (showMeta) meta.append(time);
   row.append(meta);
 
   const line = node('div', 'msg-line');
@@ -898,7 +897,7 @@ function eventCard(event, context, place) {
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
-  if (!showMeta) actions.append(time);
+  actions.append(time);
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
@@ -1004,7 +1003,7 @@ function eventCard(event, context, place) {
     const [label, target] = replyTarget;
     actions.append(iconButton('reply', label, () => beginReply(target)));
   }
-  if (!showMeta && !actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
+  if (!actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
   line.append(bubble, actions);
   row.append(line, ...extras);
   return row;

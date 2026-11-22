@@ -73,8 +73,7 @@
 .msg-name { color: var(--text-2); font-weight: 500; }
 .msg-time { opacity: 0; transition: opacity .15s ease; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .msg:hover .msg-time, .msg:focus-within .msg-time { opacity: 1; }
-.event-message .msg-meta .msg-time, .chat-time-break .msg-time { opacity: 1; }
-.chat-time-break + .event-message:not(:hover, :focus-within) .msg-time { opacity: 0; }
+.chat-time-break .msg-time { opacity: 1; }
 .msg-line { display: flex; align-items: flex-end; gap: var(--avatar-gap); min-width: 0; max-width: 100%; }
 .msg.user .msg-line { flex-direction: row-reverse; }
 .msg-avatar, .msg-avatar-space { width: var(--avatar-size); height: var(--avatar-size); flex: none; }
@@ -162,6 +161,7 @@
 
 @media (hover: none), (pointer: coarse) {
   .msg-actions { opacity: 1; pointer-events: auto; }
+  .event-message:not(:focus-within) .msg-actions .msg-time { opacity: 0; }
 }
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
