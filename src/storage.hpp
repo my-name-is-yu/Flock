@@ -13,6 +13,15 @@
 
 namespace flockv0 {
 namespace conversation { struct Message; }
+
+class StorageError : public std::runtime_error {
+public:
+    explicit StorageError(sqlite3* db);
+    bool contended() const { return code_ == SQLITE_BUSY || code_ == SQLITE_LOCKED; }
+private:
+    int code_;
+};
+
 class Statement {
 public:
     Statement(sqlite3*, const char*, const Json& values);
@@ -84,7 +93,7 @@ struct Store::Impl {
     void queueChannelReply(Id source, Id reply, const Json&);
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
     bool channelDeliveryDue() const;
-    void deliverChannels();
+    void deliverChannels(std::stop_token = {});
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
@@ -163,6 +172,7 @@ struct Store::Impl {
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     void recoverWorkspace();
+    void persistWorkspaceResults();
     void stopWorkspace();
     std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
     void validateWorkspace(const ToolContext&, const Decision&);
@@ -171,7 +181,7 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
+    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&, std::stop_token);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -180,8 +190,10 @@ struct Store::Impl {
     void releaseModelCall(std::string_view budget, Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
-    std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
+    std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
+    void deferConversation(Id, Seconds now);
+    void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
+                 const BotTools&, GitHost*, std::stop_token);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);

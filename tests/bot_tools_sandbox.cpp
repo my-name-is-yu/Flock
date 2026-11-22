@@ -478,6 +478,39 @@ void workspaceAndLifecycle(Fixture& f) {
     check(read(root/"mutation") == "x","An unknown-state mutating command ran again");
 }
 
+void workspaceResultSurvivesARejectedTerminalWrite(Fixture& f) {
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open((f.home/"state.db").c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Fixture writer open failed");
+    const auto sql = [&](const char* statement) {
+        check(sqlite3_exec(db.get(),statement,nullptr,nullptr,nullptr) == SQLITE_OK,"Fixture write failed");
+    };
+    sql("CREATE TRIGGER reject_workspace_result BEFORE UPDATE OF exit_code ON workspace_commands "
+        "BEGIN SELECT RAISE(ABORT,'terminal write rejected'); END");
+    const auto command = f.command(Json::array({"sh","-c","printf x >> terminal-attempts; printf stdout; printf stderr >&2; exit 7"}));
+    bool rejected = false;
+    const auto deadline = std::chrono::steady_clock::now()+5s;
+    while (std::chrono::steady_clock::now() < deadline && !rejected) {
+        try { f.runtime->tickConcurrent(); }
+        catch (const std::runtime_error& error) {
+            check(std::string_view(error.what()) == "terminal write rejected","Unexpected workspace error");
+            rejected = true;
+        }
+        if (!rejected) std::this_thread::sleep_for(5ms);
+    }
+    check(rejected,"The failed terminal workspace write was swallowed");
+    sql("DROP TRIGGER reject_workspace_result");
+    const auto result = f.status(command);
+    check(result.at("state") == "exited" && result.at("stdout") == "stdout" &&
+          read(f.home/"workspaces"/"alpha"/"terminal-attempts") == "x" &&
+          result.at("stderr") == "stderr" && result.at("exitCode") == 7,
+          "Retry lost the original command result");
+    const auto next = f.command(Json::array({"printf","next"}));
+    check(f.until(next,[](const auto& row) { return row.at("state") == "exited"; }).at("stdout") == "next",
+          "The terminal retry left the Bot's command slot occupied");
+}
+
 void mountedWorkspaceDirectoryIdentity() {
 #if defined(__linux__) || defined(__APPLE__)
 #ifdef __linux__
@@ -718,6 +751,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         workspaceAndLifecycle(fixture);
+        workspaceResultSurvivesARejectedTerminalWrite(fixture);
         mountedWorkspaceDirectoryIdentity();
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);

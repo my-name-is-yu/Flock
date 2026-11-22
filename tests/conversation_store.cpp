@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <map>
 #include <thread>
@@ -30,11 +31,16 @@ struct Fixture {
     static Intake bot(std::string id = "alpha", std::string project = "project") {
         return {std::move(id),"","env",std::move(project),Json::object()};
     }
-    void sql(const std::string& statement) const {
+    auto connect() const {
         sqlite3* raw = nullptr;
         check(sqlite3_open(database().c_str(),&raw) == SQLITE_OK,"Cannot open the fixture database");
-        std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-        check(sqlite3_exec(db.get(),statement.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"The fixture SQL failed");
+        return std::unique_ptr<sqlite3,decltype(&sqlite3_close)>(raw,sqlite3_close);
+    }
+    static void sql(sqlite3* db, const std::string& statement) {
+        check(sqlite3_exec(db,statement.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"The fixture SQL failed");
+    }
+    void sql(const std::string& statement) const {
+        sql(connect().get(),statement);
     }
     long long count(const std::string& statement) const {
         sqlite3* raw = nullptr;
@@ -73,13 +79,17 @@ Decision say(std::string text, Json suggestions = nullptr) {
 }
 
 struct ScriptedModel : Model {
+    std::mutex mutex;
     std::function<Decision(const ModelInput&)> conversation;
     std::vector<ModelInput> turns;
 
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         if (input.event.value("kind","") == "conversation_turn") {
-            turns.push_back(input);
+            {
+                std::lock_guard lock(mutex);
+                turns.push_back(input);
+            }
             return conversation(input);
         }
         if (input.event.at("kind") == "intake")
@@ -92,8 +102,13 @@ struct ScriptedModel : Model {
 struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
     unsigned launches = 0;
+    std::function<void()> beforePreflight;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
+    std::optional<Delivery> preflight(const Command&) override {
+        if (beforePreflight) beforePreflight();
+        return std::nullopt;
+    }
     Delivery send(const Command& command) override {
         check(command.tool == "delegate","Unexpected work command in the Store fixture");
         const auto suffix = std::to_string(++launches);
@@ -110,10 +125,12 @@ struct RuntimeFixture {
     ScriptedModel model;
     SimulatedT3 t3;
     Runtime::SoulLoader notes = [](std::string_view) { return std::string{}; };
+    Seconds now = 100;
     Runtime runtime;
 
-    explicit RuntimeFixture(Store& store)
-        : runtime(store,model,t3,[this](std::string_view bot) { return notes(bot); }) {
+    explicit RuntimeFixture(Store& store, std::function<void(std::string_view)> contention = {})
+        : runtime(store,model,t3,[this](std::string_view bot) { return notes(bot); },
+                  RuntimeOptions{.clock = [this] { return now; },.storageContention = std::move(contention)}) {
         for (auto bot : {"alpha","beta"})
             store.access().resourceGrant({"fixture",true},bot,{"environment","env","launch"},GrantChange::grant);
     }
@@ -226,33 +243,143 @@ void sessionNoteIsNotResentAfterARestart() {
 
 void transientFailureResumesAfterTheLastFinishedStep() {
     Fixture fixture;
-    Id message = 0;
+    Id message = 0, later = 0;
     std::map<std::size_t,int> calls;
     {
         Store store(fixture.database());
         RuntimeFixture execution(store);
         execution.model.conversation = [&](const ModelInput& input) -> Decision {
             ++calls[turn(input).size()];
+            if (input.event.at("text") == "Hello beta") return say("Hello.");
             if (turn(input).empty()) return {"start_task",{{"request","Write a release note"}},"Start it"};
             throw ModelError("The connection dropped",true);
         };
         message = receive(store,"transient","Write a release note");
-        execution.runtime.runConversations();
-        check(store.tasks("alpha").size() == 1 && reply(store,message).is_null(),
-              "A transient failure lost the finished step or ended the turn");
+        later = receive(store,"later","How should we announce it?");
+        const auto other = receive(store,"beta","Hello beta",0,Fixture::bot("beta"));
+        for (int i = 0; i < 24; ++i) execution.runtime.runConversations();
+        check(store.tasks("alpha").size() == 1 && reply(store,message).is_null() &&
+              reply(store,later).is_null() && reply(store,other,"beta")["text"] == "Hello." &&
+              calls[0] == 2 && calls[1] == 1 && store.pausedConversations("alpha").empty(),
+              "A fixed-clock outage spent the budget or displaced a Bot's oldest turn");
     }
     Store restarted(fixture.database());
     RuntimeFixture execution(restarted);
-    execution.model.conversation = [&](const ModelInput& input) {
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
         ++calls[turn(input).size()];
+        if (input.event.at("text") == "How should we announce it?") {
+            check(reply(restarted,message)["text"] == "Queued.","The later turn overtook the oldest turn");
+            return say("In the changelog.");
+        }
         check(turn(input).size() == 1,"The restarted turn did not continue after its finished step");
+        if (calls[1] == 2) throw ModelError("Still offline",true);
         return say("Queued.");
     };
     execution.runtime.runConversations();
-    check(calls[0] == 1 && calls[1] == 2 && restarted.tasks("alpha").size() == 1 &&
-          reply(restarted,message)["text"] == "Queued.","Restart repeated a finished step or lost the turn");
-    check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 3,
+    check(calls[1] == 1,"Restart removed the first backoff");
+    ++execution.now;
+    execution.runtime.runConversations();
+    check(calls[1] == 2,"The first retry was not eligible after one second");
+    ++execution.now;
+    execution.runtime.runConversations();
+    check(calls[1] == 2,"Restart reset the consecutive failure count");
+    ++execution.now;
+    execution.runtime.runConversations();
+    check(calls[0] == 3 && calls[1] == 3 && restarted.tasks("alpha").size() == 1 &&
+          reply(restarted,message)["text"] == "Queued." && reply(restarted,later)["text"] == "In the changelog.",
+          "Restart repeated a finished step or lost a turn");
+    check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
           "The failed call was not counted against the message budget");
+}
+
+void concurrentWorkerRecoversFromWriterContention() {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    Store store(fixture.database());
+    auto locker = fixture.connect();
+    bool reported = false;
+    std::atomic_bool first = true;
+    std::promise<void> entered, allow;
+    const auto resume = allow.get_future().share();
+    RuntimeFixture execution(store,[&](std::string_view error) {
+        if (error.starts_with("conversation worker")) {
+            Fixture::sql(locker.get(),"ROLLBACK");
+            reported = true;
+        }
+    });
+    execution.model.conversation = [&](const ModelInput& input) {
+        if (input.event.at("text") == "Wait for SQLite" && first.exchange(false)) {
+            entered.set_value();
+            resume.wait();
+        }
+        return say("Done.");
+    };
+    const auto blocked = receive(store,"blocked","Wait for SQLite");
+    Id other = 0;
+    execution.runtime.tickConcurrent();
+    const auto ready = entered.get_future().wait_for(5s) == std::future_status::ready;
+    if (ready) Fixture::sql(locker.get(),"BEGIN IMMEDIATE");
+    allow.set_value();
+    check(ready,"The conversation worker did not start");
+    const auto deadline = std::chrono::steady_clock::now()+25s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        execution.runtime.tickConcurrent();
+        if (reported && !other) other = receive(store,"other","Different Bot",0,Fixture::bot("beta"));
+        if (other && !reply(store,blocked).is_null() && !reply(store,other,"beta").is_null()) break;
+        std::this_thread::sleep_for(5ms);
+    }
+    check(reported && reply(store,blocked)["text"] == "Done." && reply(store,other,"beta")["text"] == "Done.",
+          "A contended worker stopped the Runtime or left a Bot without a reply");
+}
+
+void shutdownLeavesAnUnsentRunReadyForRestart() {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    Store store(fixture.database());
+    Id id;
+    {
+        std::promise<void> entered, allow;
+        const auto resume = allow.get_future().share();
+        RuntimeFixture execution(store);
+        id = task(store,"Wait for T3");
+        execution.reach(store,id,"sending");
+        execution.t3.beforePreflight = [&] {
+            entered.set_value();
+            resume.wait();
+        };
+        execution.runtime.tickConcurrent();
+        const auto ready = entered.get_future().wait_for(5s) == std::future_status::ready;
+        execution.runtime.requestStop();
+        allow.set_value();
+        check(ready,"The task worker did not reach preflight");
+    }
+    check(store.task(id)["state"] == "sending" && store.task(id)["activeRun"].is_null(),
+          "A blocked worker launched a Run after shutdown");
+    RuntimeFixture execution(store);
+    execution.reach(store,id,"running");
+    check(execution.t3.launches == 1,"The unsent action could not launch once after restart");
+}
+
+void concurrentWorkerSurfacesStructuralStorageFailure() {
+    using namespace std::chrono_literals;
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    fixture.sql("CREATE TRIGGER reject_checkpoint BEFORE UPDATE OF decision ON conversation_steps "
+                "BEGIN SELECT RAISE(ABORT,'structural fixture failure'); END");
+    execution.model.conversation = [](const ModelInput&) { return say("Done."); };
+    const auto message = receive(store,"broken-checkpoint","Hello");
+    const auto deadline = std::chrono::steady_clock::now()+5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        try { execution.runtime.tickConcurrent(); }
+        catch (const std::runtime_error& error) {
+            check(std::string_view(error.what()) == "structural fixture failure" && reply(store,message).is_null(),
+                  "The Runtime surfaced the wrong failure or published an uncommitted reply");
+            return;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    throw std::runtime_error("A structural worker storage failure was swallowed");
 }
 
 void modelFailureReportsWhatWasAlreadyDone() {
@@ -455,6 +582,9 @@ int main() {
         retryAcrossConnections();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         transientFailureResumesAfterTheLastFinishedStep();
+        concurrentWorkerRecoversFromWriterContention();
+        concurrentWorkerSurfacesStructuralStorageFailure();
+        shutdownLeavesAnUnsentRunReadyForRestart();
         sessionNoteIsNotResentAfterARestart();
         modelFailureReportsWhatWasAlreadyDone();
         notesFailureEndsTheTurnWithoutWork();

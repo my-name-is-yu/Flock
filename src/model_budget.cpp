@@ -133,6 +133,8 @@ ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const Model
             exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
         throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }

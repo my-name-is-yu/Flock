@@ -11,8 +11,11 @@
 
 namespace flockv0 {
 namespace {
-[[noreturn]] void sqlError(sqlite3* db) { throw std::runtime_error(sqlite3_errmsg(db)); }
+[[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
 }
+StorageError::StorageError(sqlite3* db)
+    : std::runtime_error(sqlite3_errmsg(db)), code_(sqlite3_errcode(db) & 0xff) {}
+
 Statement::Statement(sqlite3* db, const char* sql, const Json& values) {
     if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) sqlError(db);
     try {
