@@ -293,13 +293,14 @@ WITH RECURSIVE source(env,project) AS (
   SELECT environment_id,project_id FROM tasks WHERE id=?1
 ), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
   SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
-         CASE WHEN json_extract(r.data,'$.replanning') THEN json_extract(r.data,'$.pendingEnvironmentId') END,
+         CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
+              THEN json_extract(r.data,'$.pendingEnvironmentId') END,
          COALESCE(json_extract(r.data,'$.environmentReleased'),0)
   FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
   WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
 ), dependencies(source_env,source_project,target_env,target_project) AS (
   SELECT source_env,source_project,current_env,target_project FROM work_routes
-  WHERE NOT released OR pending_env IS NULL
+  WHERE NOT released
   UNION ALL
   SELECT source_env,source_project,pending_env,target_project FROM work_routes
   WHERE pending_env IS NOT NULL

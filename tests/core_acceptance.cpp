@@ -1965,6 +1965,19 @@ void pendingPeerMovePreventsAnotherMove() {
           "the second move introduced a cycle against an already accepted move");
 }
 
+void cancelledPeerMoveFreesItsPendingDestination() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender("backup");
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("effect") == "replanning",
+          "the first move could not reserve the remote destination");
+    f.store->operate(localOwner,TaskTarget::from(f.task(f.cloudRecipient),0),"cancel");
+    check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
+          f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
+          "a cancelling recipient retained its abandoned destination");
+}
+
 void recoverLegacyPeerMoveCycle() {
     PeerMoveCycleFixture f;
     f.startRemoteSender();
@@ -2143,6 +2156,7 @@ int main() {
             {"Cyclic recipient move is rejected",cyclicPeerMoveIsRejected},
             {"Accepted peer move constrains new exchanges",pendingPeerMovePreventsNewExchange},
             {"Accepted peer move constrains other moves",pendingPeerMovePreventsAnotherMove},
+            {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
             {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
