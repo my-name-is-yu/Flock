@@ -31,7 +31,7 @@ Id positiveId(const Json& value) {
     return value.get<Id>();
 }
 
-void validate(const Decision& decision, bool conversation) {
+std::string_view validate(const Decision& decision, bool conversation) {
     const auto schema = gitToolSchema(decision.tool,conversation).at("parameters");
     const auto& args = decision.args;
     const auto& properties = schema.at("properties");
@@ -66,6 +66,8 @@ void validate(const Decision& decision, bool conversation) {
         if (field(args,key).find_first_not_of(" \r\n\t") == std::string::npos)
             throw Conflict(std::string(key) + " is required");
     };
+    const auto op = gitOperation(decision);
+    if (op.empty()) throw Conflict("Unknown Git operation");
     const auto& tool = decision.tool;
     if (tool == "git_open_pr" || args.contains("title")) requireText("title");
     if (tool == "git_comment" || (tool == "git_submit_review" && args.at("verdict") != "approve")) requireText("body");
@@ -77,18 +79,18 @@ void validate(const Decision& decision, bool conversation) {
         if ((sha.size() != 40 && sha.size() != 64) || sha.find_first_not_of("0123456789abcdefABCDEF") != sha.npos)
             throw Conflict("Expected a full commit SHA");
     }
-    if (tool != "git_manage_issue") return;
+    if (tool != "git_manage_issue") return op;
     const auto action = field(args,"action");
-    const bool writes = action == "create" || action == "update";
     const bool hasNumber = action == "read" || action == "list_comments" || action == "update";
     if (hasNumber != args.contains("issueNumber") ||
-        (!writes && (args.contains("title") || args.contains("body") || args.contains("labels") || args.contains("assignees"))) ||
+        (op == "read" && (args.contains("title") || args.contains("body") || args.contains("labels") || args.contains("assignees"))) ||
         (args.contains("state") && action != "list" && (action != "update" || args.at("state") == "all")) ||
         (args.contains("page") && action != "list" && action != "list_comments"))
         throw Conflict("Issue arguments do not match the requested action");
     if (action == "create") requireText("title");
     if (action == "update" && !args.contains("title") && !args.contains("body") && !args.contains("state") &&
         !args.contains("labels") && !args.contains("assignees")) throw Conflict("Choose an issue field to update");
+    return op;
 }
 
 std::string branch(const Json& args, const char* key) {
@@ -109,16 +111,6 @@ std::string branch(const Json& args, const char* key) {
     return ref;
 }
 
-std::string_view operation(const Decision& decision) {
-    const auto& tool = decision.tool;
-    if (tool == "git_open_pr" || tool == "git_update_pr" || tool == "git_request_review") return "pr";
-    if (tool == "git_submit_review") return "review";
-    if (tool == "git_comment") return decision.args.at("target") == "pr" ? "pr" : "issues";
-    if (tool == "git_manage_issue" && (decision.args.at("action") == "create" || decision.args.at("action") == "update"))
-        return "issues";
-    return "read";
-}
-
 }
 
 Json gitJournal(const GitContext& context, std::string_view tool, const GitRepository& repo, Json result) {
@@ -135,12 +127,11 @@ GitRepository GitRepository::parse(std::string_view host, std::string_view repo)
 
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
                           const Decision& decision, std::string_view invocation, std::optional<Id> generation) {
-    validate(decision,!generation.has_value());
+    const auto op = validate(decision,!generation.has_value());
     const auto& args = decision.args;
     const auto hostId = hostName(field(args,"host"));
     if (hostId != host.name()) throw Conflict("Git host is not connected");
     if (!taskId && args.contains("taskId")) taskId = positiveId(args.at("taskId"));
-    const auto op = operation(decision);
     if (op != "read" && !taskId) throw Conflict("Select an owned task for the Git mutation");
     GitContext context{taskId,std::string(bot),field(routing,"environmentId"),field(routing,"projectId"),{}};
     {
@@ -167,15 +158,15 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         std::vector<GitRepository> candidates;
         {
             std::lock_guard lock(mutex);
-            auto rows = query("SELECT resource FROM bot_grants WHERE bot=? AND kind='repository' AND op='read'"
-                              " AND substr(resource,1,?)=? ORDER BY resource",{bot,hostId.size()+1,hostId + "/"});
+            auto rows = query("SELECT resource FROM bot_grants WHERE bot=? AND kind='repository' AND op=?"
+                              " AND substr(resource,1,?)=? ORDER BY resource",{bot,op,hostId.size()+1,hostId + "/"});
             while (rows.next()) candidates.push_back({hostId,rows.string(0).substr(hostId.size()+1)});
         }
         Json repos = Json::array();
         const auto search = lower(field(args,"query"));
         bool truncated = false;
         for (const auto& candidate : candidates) {
-            if (candidate.repo.find(search) == candidate.repo.npos || !permits(candidate,"read")) continue;
+            if (candidate.repo.find(search) == candidate.repo.npos || !permits(candidate,op)) continue;
             if (repos.size() == 100) {
                 truncated = true;
                 break;
@@ -292,9 +283,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
             const auto owner = webhook.at("taskId").get<Id>();
             if ((call.args.contains("taskId") && call.args.at("taskId") != owner) ||
                 field(call.args,"host") != field(webhook,"host") || field(call.args,"repo") != field(webhook,"repo") ||
-                (call.tool == "git_pr_status" && call.args.at("prNumber") != webhook.at("prNumber")) ||
-                (call.tool == "git_commit_status" && field(call.args,"sha") != field(webhook,"headSha")) ||
-                (call.tool == "git_read_ci_logs" && call.args.at("jobId") != webhook.at("jobId")))
+                !gitNotificationToolAllowed(call.tool,webhook,&call.args))
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }

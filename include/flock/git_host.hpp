@@ -62,6 +62,8 @@ struct GitWebhook {
 
 const std::vector<std::string>& gitTools();
 bool isGitTool(std::string_view tool);
+std::string_view gitOperation(const Decision&);
+bool gitNotificationToolAllowed(std::string_view tool, const Json& event, const Json* args = nullptr);
 Json gitToolSchema(std::string_view tool, bool conversation);
 
 }

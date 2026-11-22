@@ -699,9 +699,8 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply"} : turnTools;
     if (gitHost && notification) {
-        tools.push_back("git_pr_status");
-        if (!field(webhook,"headSha").empty()) tools.push_back("git_commit_status");
-        if (webhook.at("jobId") != 0) tools.push_back("git_read_ci_logs");
+        for (const auto& tool : gitTools())
+            if (gitNotificationToolAllowed(tool,webhook)) tools.push_back(tool);
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
     const bool ja = japanese(message.text);
     const auto finish = [&](std::string text, std::string_view route) {

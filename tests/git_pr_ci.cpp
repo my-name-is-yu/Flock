@@ -50,7 +50,10 @@ private:
                 check(input.task.empty() && input.history.empty(),"Notification received unrelated task context");
                 if (checkOriginatingSession)
                     check(gitEvent.at("run").at("threadId") == "thread-project","Webhook lost its originating Session");
-                check(std::ranges::find(input.tools,"git_open_pr") == input.tools.end(),"Webhook supplied mutation tools");
+                std::vector<std::string> expected{"reply","git_pr_status"};
+                if (gitEvent.at("headSha") != "") expected.push_back("git_commit_status");
+                if (gitEvent.at("jobId") != 0) expected.push_back("git_read_ci_logs");
+                check(std::ranges::is_permutation(input.tools,expected),"Webhook supplied tools outside its watched targets");
                 if (gitEvent.at("jobId") == 81)
                     return {"git_read_ci_logs",{{"host",gitEvent.at("host")},{"repo",gitEvent.at("repo")},
                         {"jobId",gitEvent.at("jobId")},{"maxBytes",32}},{}};
@@ -412,6 +415,10 @@ void accessAndActions() {
     const auto deniedIssueComment = invoke(store,runtime,script,"read-is-not-issues","git_comment",
         {{"host",hostName},{"repo",repoName},{"taskId",task},{"target","issue"},{"number",2},{"body","Comment"}});
     check(deniedIssueComment.at("ok") == false && host->hostCalls == 0,"repository read or write allowed an issue comment");
+    const auto deniedIssueUpdate = invoke(store,runtime,script,"read-is-not-issue-update","git_manage_issue",
+        {{"host",hostName},{"repo",repoName},{"taskId",task},{"action","update"},{"issueNumber",2},{"state","closed"}});
+    check(deniedIssueUpdate.at("error") == "Repository access denied" && host->hostCalls == 0,
+          "repository read or write allowed an issue update");
     for (const auto* operation : {"pr","review","issues"}) grant(store,"owner","repository",repoGrant,operation);
     auto argsFor = [task](Json args, std::string repo) {
         args.update({{"host",hostName},{"repo",std::move(repo)},{"taskId",task}});
@@ -429,6 +436,13 @@ void accessAndActions() {
     host->upstreamPermitted = true;
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
     check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
+    const auto tasklessIssueWrite = invoke(store,runtime,script,"taskless-issue-write","git_manage_issue",
+        {{"host",hostName},{"repo",repoName},{"action","create"},{"title","Change"}});
+    check(tasklessIssueWrite.at("error") == "Select an owned task for the Git mutation" && host->hostCalls == 0,
+          "issue mutation did not require an owned task");
+    const auto tasklessIssueRead = invoke(store,runtime,script,"taskless-issue-read","git_manage_issue",
+        {{"host",hostName},{"repo",repoName},{"action","list"}});
+    check(tasklessIssueRead.at("ok") == true && host->hostCalls == 1,"issue listing unexpectedly required a task");
     auto foreign = argsFor(openArgs("foreign"),repoName);
     foreign["taskId"] = other;
     check(invoke(store,runtime,script,"foreign-task","git_open_pr",foreign).at("ok") == false &&
