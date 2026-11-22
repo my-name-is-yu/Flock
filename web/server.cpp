@@ -249,7 +249,8 @@ public:
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
-                if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
+                const auto actor = web::person(callbacks_,req);
+                if (!store_.access().permitsPerson(actor,id,Role::view)) return error(res,403,"access_denied");
                 const auto known = bots();
                 const auto* bot = botById(known,id);
                 if (!bot) return error(res,404,"bot_not_found");
@@ -275,6 +276,7 @@ public:
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
                         auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr));
                         view["bot"]["id"] = id;
+                        view["composerPerson"] = callbacks_.authenticate ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
                         view["changedMessageIds"] = Json::array();
                         if (const auto changed = changes.messages.find(id); changed != changes.messages.end())

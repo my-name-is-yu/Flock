@@ -48,6 +48,8 @@ if(BUILD_TESTING)
   target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_web_composer_drafts
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
     if(TARGET flock_app_support)
