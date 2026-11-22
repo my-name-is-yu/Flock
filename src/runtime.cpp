@@ -170,6 +170,7 @@ ORDER BY id)SQL");
     Id lastScheduled = 0;
 
     std::vector<Id> nextProjects(std::size_t slots) {
+        if (slots == 0) return {};
         auto ids = eligible();
         std::erase_if(ids,[&](Id id) { return workers.contains(id); });
         if (ids.size() > slots) {

@@ -68,6 +68,7 @@ INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,eve
  DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
 )SQL",{repo.host,repo.repo,pr.number,eventCursor,pr.headSha});
     }
+    gitWebhooksDrainedAt.reset();
     return true;
 }
 

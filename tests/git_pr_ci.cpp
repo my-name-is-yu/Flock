@@ -239,6 +239,38 @@ void webhookHeadPeriods() {
           "A SHA-only delivery was routed again when another watch moved to the same head");
 }
 
+void webhookDeliveryResumesAfterAnIdlePoll() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    Store store(path), receiver(path);
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    script.openAfterSession = true;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"pr");
+    grant(store,"owner","repository",repoGrant,"read");
+    const auto task = store.submit(intake());
+    host->inspect = [&](const GitContext&,const GitOpenPr&) {
+        check(store.receiveGitWebhook({hostName,"early-ci",repoName,"ci","completed",{},sha,"Early head",0}),
+              "Could not receive a webhook while the PR was opening");
+        runtime.runConversations();
+        check(historyCount(store,task,"git_webhook") == 0,"An unwatched event was delivered");
+    };
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(historyCount(store,task,"git_webhook") == 1,"A new watch did not receive the previously unmatched event");
+    runtime.runConversations();
+
+    constexpr unsigned queued = 101;
+    for (unsigned i = 0; i < queued; ++i)
+        check(receiver.receiveGitWebhook({hostName,"queued-" + std::to_string(i),repoName,"ci","completed",{1},
+                                        sha,"Queued job",0}),"Could not receive a webhook on another connection");
+    for (int i = 0; i < 3; ++i) runtime.runConversations();
+    check(historyCount(store,task,"git_webhook") == queued + 1,
+          "Delivery lost or repeated events across connections or batches");
+}
+
 void reconciliationAfterTaskRevision() {
     Directory directory;
     const auto path = directory.path/"state.db";
@@ -618,6 +650,7 @@ int main() {
         schemas();
         runner();
         webhookHeadPeriods();
+        webhookDeliveryResumesAfterAnIdlePoll();
         reconciliationAfterTaskRevision();
         recovery(FakeHost::State::open,false);
         recovery(FakeHost::State::closed,false);

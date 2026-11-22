@@ -175,19 +175,6 @@ WITH queue AS (
 SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
              json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
 FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
-CREATE VIEW IF NOT EXISTS project_task_order AS
-SELECT task.id, task.environment_id, task.project_id, task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM tasks task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
-  AND sender.project_id=task.project_id AND sender.state NOT IN ('completed','cancelled')
-WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         initializeAccessSchema();
@@ -401,10 +388,14 @@ Store::Store(std::filesystem::path db, MemorySeed seed)
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
+Id Store::Impl::dataVersion() const {
+    auto version = query("PRAGMA data_version");
+    return version.next() ? version.number(0) : 0;
+}
+
 std::pair<std::int64_t,std::int64_t> Store::changeStamp() const {
     std::lock_guard lock(p_->mutex);
-    auto version = p_->query("PRAGMA data_version");
-    return {sqlite3_total_changes64(p_->db),version.next() ? version.number(0) : 0};
+    return {sqlite3_total_changes64(p_->db),p_->dataVersion()};
 }
 
 Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
@@ -756,8 +747,41 @@ ORDER BY j.id DESC LIMIT 1
 
 Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
                          std::string_view viewer) const {
+    if (before == std::numeric_limits<Id>::min()) return Json::array();
+    const auto through = before ? before-1 : std::numeric_limits<Id>::max();
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
+WITH visible AS NOT MATERIALIZED (
+  SELECT id,task_id,conversation_bot_id FROM journal
+  WHERE id<=?2
+    AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
+         OR (kind='waiting' AND json_extract(data,'$.reason')='user_question'))
+    AND ((conversation_bot_id IS NOT NULL AND kind<>'git_webhook')
+      OR (conversation_bot_id IS NULL
+        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
+        AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
+        AND (kind!='user_answer' OR json_extract(data,'$.conversation') IS NOT 1)
+        AND (kind!='bot_message' OR (json_extract(data,'$.initiator') IS NOT 'user'
+          AND json_extract(data,'$.recipient') IS NOT 'user'))))
+), bot_page AS (
+  SELECT id FROM visible WHERE conversation_bot_id=?1 ORDER BY id DESC LIMIT ?4
+), page_ids AS MATERIALIZED (
+  -- A row past the page limit within one task cannot reach the combined page.
+  SELECT candidate.value AS id FROM tasks t
+  CROSS JOIN json_each((SELECT json_group_array(id) FROM (
+    SELECT id FROM visible WHERE task_id=t.id AND conversation_bot_id IS NULL
+    ORDER BY id DESC LIMIT ?4
+  ))) candidate
+  WHERE t.bot_id=?1
+  UNION ALL SELECT id FROM bot_page
+  ORDER BY id DESC LIMIT ?4
+), page AS (
+  SELECT j.id,j.task_id,j.time,j.kind,
+    CASE WHEN j.kind='cancelled' AND t.id IS NOT NULL
+         THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data
+  FROM page_ids ids JOIN journal j ON j.id=ids.id
+  LEFT JOIN tasks t ON j.kind='cancelled' AND j.conversation_bot_id IS NULL AND t.id=j.task_id
+)
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
@@ -790,26 +814,11 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'
             ) THEN 'true' ELSE 'false' END))) END
-FROM (
-  SELECT j.id,j.task_id,j.time,j.kind,
-    CASE WHEN j.kind='cancelled' THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data,
-    j.conversation_bot_id
-  FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
-    AND j.conversation_bot_id IS NULL
-    AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
-    AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
-    AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
-    AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
-      AND json_extract(j.data,'$.recipient') IS NOT 'user'))
-  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=? AND kind<>'git_webhook'
-) AS page LEFT JOIN messages m ON m.id=page.id
+FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
-WHERE (?=0 OR page.id<?)
-  AND (?=0 OR page.kind IN ('conversation_reply','report','completed','pr_review_requested')
-       OR (page.kind='waiting' AND json_extract(page.data,'$.reason')='user_question'))
-ORDER BY page.id DESC LIMIT ?)SQL",
-        {bot,bot,before,before,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
+ORDER BY page.id DESC)SQL",
+        {bot,through,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
