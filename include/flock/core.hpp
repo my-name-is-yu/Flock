@@ -150,6 +150,8 @@ public:
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json activeTasks(std::string_view botId) const;
+    // Distinct active state and replanning combinations, grouped by Bot ID.
+    Json activeTaskStatesByBot() const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
     // Journal position and tasks with a newly recorded Run since that position.
     // On the initial read only the position is needed, before loading the first page.

@@ -640,6 +640,17 @@ ORDER BY task.id DESC)SQL", {bot});
     return result;
 }
 
+Json Store::activeTaskStatesByBot() const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT DISTINCT bot_id,state,coalesce(json_extract(data,'$.replanning'),0)
+FROM tasks WHERE state NOT IN ('completed','cancelled'))SQL");
+    auto result = Json::object();
+    while (rows.next())
+        result[rows.string(0)].push_back({{"state",rows.string(1)},{"replanning",rows.number(2) != 0}});
+    return result;
+}
+
 Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query("SELECT id FROM tasks WHERE bot_id=? AND (?=0 OR id<?)"
