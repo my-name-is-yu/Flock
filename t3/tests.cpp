@@ -203,7 +203,9 @@ int main(int argc, char** argv) {
               "Report reads older pages for the assigned Run and joins text continuations");
         fixture({{"changeReportDuringRead", true}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Unavailable,"Report rejects changes during text continuation");
+        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.report.empty() &&
+              observation.evidence == RunEvidence::Availability::ReportUnavailable,
+              "Report rejects changes during text continuation without erasing settlement");
         fixture({{"changeReportDuringRead", false}});
         using Availability = RunEvidence::Availability;
         for (const auto* scenario : {"settled", "notification-result"}) {
