@@ -16,14 +16,24 @@ function fixtures() {
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'First message' } },
     { id: 2, kind: 'conversation_reply', time: time + 60, data: { text: 'Second message' } },
-    { id: 3, kind: 'report', time: time + 1000, data: { report: 'Report', run: { link: `${location.origin}/run` } } },
+    { id: 3, kind: 'report', time: time + 1000, taskId: 17, data: {
+      report: 'Report', status: 'completed', truncated: false, revisionId: 1, resultRunId: 'final',
+      run: { link: `${location.origin}/run`, environmentId: 'local', threadId: 'thread', runId: 'launch' },
+    } },
   ];
+  window.completeReport = () => {
+    events.push({ id: 4, kind: 'completed', time: time + 1001, taskId: 17, data: {
+      text: 'Report', revisionId: 1, run: { ...events[2].data.run, runId: 'final' },
+    } });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.fetch = async (path) => Response.json(path === '/api/bots' ? [bot] : {
     bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [],
+    canDecide: true, composerPerson: null,
   });
 }
 
-function exercise() {
+async function exercise() {
   const check = (value, message) => { if (!value) throw new Error(message); };
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
@@ -90,9 +100,23 @@ function exercise() {
   tap(first);
   check(rows.every(row => row.querySelectorAll('time').length === 1 && !row.querySelector('time').closest('[aria-hidden="true"]')),
     'The timestamp was duplicated or removed from accessibility');
+  tap(report);
+  window.completeReport();
+  for (let attempt = 0; attempt < 20 && !document.getElementById('event-4'); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  const merged = document.getElementById('event-4');
+  check(merged && document.getElementById('event-3')?.closest('article') === merged,
+    'Collapsing the report and completion dropped the original event anchor');
+  check(shown().length === 1 && shown()[0].parentElement === merged && merged.querySelectorAll('time').length === 1,
+    'The revealed timestamp did not follow the collapsed row');
+  check(merged.querySelectorAll('[aria-label="Reply to this result"]').length === 1 && !shown()[0].title.includes('#17'),
+    'The collapsed row lost its single reply or leaked an internal Task number');
+  tap(merged.querySelector('.event-text'));
+  check(!shown().length && window.scrollY === 0, 'Tapping the collapsed row did not close its timestamp in the conversation');
+  tap(document.querySelector('#event-1 .event-text'));
   window.noHoverFixture.matches = false;
   window.noHoverFixture.dispatchEvent(new Event('change'));
-  tap(first);
+  tap(document.querySelector('#event-1 .event-text'));
   check(!shown().length, 'The tap timestamp remained enabled with hover support');
 }
 
@@ -105,7 +129,7 @@ const index = (await read('/index.html')).toString().replace('<script type="modu
     try {
       for (let attempt = 0; attempt < 20 && document.querySelectorAll('.event-message').length < 3; attempt++)
         await new Promise(resolve => setTimeout(resolve, 10));
-      (${exercise})();
+      await (${exercise})();
       document.documentElement.dataset.flockResult = 'pass';
     } catch (error) {
       document.documentElement.dataset.flockResult = error.message;
