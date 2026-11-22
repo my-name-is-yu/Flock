@@ -3,7 +3,7 @@ import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
-import { messagePlacement, messageSide } from '/chat-grouping.mjs';
+import { messagePlacement, messageSide, peerMessagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
@@ -902,6 +902,13 @@ function eventTime(event, extra) {
   return time;
 }
 
+function chatTimeBreak(event) {
+  const separator = node('p', 'day chat-time-break');
+  separator.setAttribute('aria-hidden', 'true');
+  separator.append(eventTime(event));
+  return separator;
+}
+
 function messageBubble(target) {
   if (!(target instanceof Element)) return null;
   const bubble = target.closest('.event-message .bubble');
@@ -911,11 +918,12 @@ function messageBubble(target) {
 }
 
 function closeMessageTime() {
-  if (!view?.revealedTimeRow) return;
-  const row = byId(view.revealedTimeRow)?.closest('.event-message');
+  const context = timelineContext();
+  if (!context?.revealedTimeRow) return;
+  const row = byId(context.revealedTimeRow)?.closest('.event-message');
   const time = row?.querySelector(':scope > .msg-time');
   if (time) row.querySelector('.msg-actions').prepend(time);
-  view.revealedTimeRow = null;
+  context.revealedTimeRow = null;
 }
 
 let messageTap = null;
@@ -943,16 +951,17 @@ for (const type of ['pointercancel', 'contextmenu']) {
 elements.timeline.addEventListener('click', (event) => {
   const tap = messageTap;
   messageTap = null;
-  if (!view || !noHover.matches || !tap?.released || !event.detail || hasTextSelection()
+  const context = timelineContext();
+  if (!context || !noHover.matches || !tap?.released || !event.detail || hasTextSelection()
     || messageBubble(event.target) !== tap.bubble) return;
   const row = tap.bubble.closest('.event-message');
   const wasRevealed = !!row.querySelector(':scope > .msg-time');
   closeMessageTime();
   if (wasRevealed) return;
   const line = tap.bubble.parentElement;
-  const time = line.querySelector('.msg-time');
+  const time = line.querySelector(':scope > .msg-actions > .msg-time');
   line.after(time);
-  view.revealedTimeRow = row.id;
+  context.revealedTimeRow = row.id;
   time.scrollIntoView({ block: 'nearest' });
 });
 noHover.addEventListener('change', () => {
@@ -1318,26 +1327,33 @@ function peerThread(events, dm, keep) {
   }
   const rows = [];
   let day = '';
-  for (const event of events) {
+  events.forEach((event, index) => {
     const nextDay = dayLabel(event.time);
     if (nextDay !== day) {
       rows.push(keep(`day-${event.id}`, nextDay, () => node('p', 'day', nextDay)));
       day = nextDay;
     }
+    const place = peerMessagePlacement(events[index - 1], event, events[index + 1]);
+    if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const from = participant(event.data.fromBotId);
     const anchored = event.id === dm.anchorId;
-    rows.push(keep(`event-${event.id}`, [event, from.name, from.avatar, anchored], () => peerMessage(event, from, anchored)));
-  }
+    const row = keep(`event-${event.id}`, [event, from.name, from.avatar, anchored], () => peerMessage(event, from, dm, anchored));
+    row.classList.toggle('group-start', place.groupStart);
+    row.classList.toggle('group-continues', !place.groupEnd);
+    row.querySelector('.msg-meta').classList.toggle('sr-only', !place.groupStart);
+    syncTimelineAvatar(row, place.groupEnd, from);
+    rows.push(row);
+  });
   return rows;
 }
-function peerMessage(event, from, anchored) {
+function peerMessage(event, from, dm, anchored) {
   const { text, forwardedMessage } = event.data;
-  const row = node('article', 'msg group-start peer-dm-message');
+  const row = node('article', 'msg event-message peer-dm-message');
   row.id = `event-${event.id}`;
-  row.tabIndex = -1;
+  row.tabIndex = 0;
   row.toggleAttribute('data-anchored', anchored);
   const metadata = node('div', 'msg-meta');
-  metadata.append(node('span', 'msg-name', from.name), eventTime(event));
+  metadata.append(node('span', 'msg-name', from.name));
   const line = node('div', 'msg-line');
   const bubble = node('div', 'bubble');
   if (forwardedMessage) {
@@ -1347,8 +1363,12 @@ function peerMessage(event, from, anchored) {
     bubble.append(quote);
   }
   if (text || !forwardedMessage) bubble.append(node('p', 'event-text', text));
-  line.append(avatar(from, 'msg-avatar'), bubble);
+  const time = eventTime(event);
+  const actions = node('div', 'msg-actions');
+  actions.append(time);
+  line.append(node('span', 'msg-avatar-space'), bubble, actions);
   row.append(metadata, line);
+  if (noHover.matches && dm.revealedTimeRow === row.id) line.after(time);
   return row;
 }
 
@@ -1512,14 +1532,7 @@ function conversationRows(data, events, keep, source) {
     }
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
     const place = messagePlacement(previous, event, shown[index + 1]?.event);
-    if (place.timeBreak) {
-      rows.push(keep(`gap-${event.id}`, event.time, () => {
-        const separator = node('p', 'day chat-time-break');
-        separator.setAttribute('aria-hidden', 'true');
-        separator.append(eventTime(event));
-        return separator;
-      }));
-    }
+    if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
     const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;

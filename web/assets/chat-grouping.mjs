@@ -12,11 +12,19 @@ function sameDay(first, second) {
   return new Date(first.time * 1000).toDateString() === new Date(second.time * 1000).toDateString();
 }
 
-function joinsGroup(first, second, side) {
-  if (!first || !second || side === 'system' || side === 'peer') return false;
+function nearby(first, second) {
+  if (!first || !second) return false;
   const gap = second.time - first.time;
-  return gap >= 0 && gap < groupGapSeconds && first.taskId === second.taskId &&
-    messageSide(first) === side && messageSide(second) === side && sameDay(first, second);
+  return gap >= 0 && gap < groupGapSeconds && sameDay(first, second);
+}
+
+function timeBreak(previous, event) {
+  return !!previous && event.time - previous.time >= groupGapSeconds && sameDay(previous, event);
+}
+
+function joinsGroup(first, second, side) {
+  return side !== 'system' && side !== 'peer' && nearby(first, second) && first.taskId === second.taskId &&
+    messageSide(first) === side && messageSide(second) === side;
 }
 
 export function messagePlacement(previous, event, next) {
@@ -25,8 +33,20 @@ export function messagePlacement(previous, event, next) {
     side,
     groupStart: !joinsGroup(previous, event, side),
     groupEnd: !joinsGroup(event, next, side),
-    timeBreak: !!previous && side !== 'system' && event.time - previous.time >= groupGapSeconds && sameDay(previous, event),
+    timeBreak: side !== 'system' && timeBreak(previous, event),
     taskStart: previous?.taskId !== event.taskId,
     afterQuestion: previous?.kind === 'waiting' && previous.data.id === event.data.waitId,
+  };
+}
+
+function joinsPeerGroup(first, second) {
+  return nearby(first, second) && first.data.fromBotId === second.data.fromBotId;
+}
+
+export function peerMessagePlacement(previous, event, next) {
+  return {
+    groupStart: !joinsPeerGroup(previous, event),
+    groupEnd: !joinsPeerGroup(event, next),
+    timeBreak: timeBreak(previous, event),
   };
 }
