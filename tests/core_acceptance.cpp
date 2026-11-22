@@ -2127,6 +2127,8 @@ void specialistAdmission(SpecialistMode mode) {
               f.t3.seen.at(0).actionId!=f.t3.seen.at(1).actionId,"workflow did not transfer the project slot to its siblings");
         for (const auto& command : f.t3.seen)
             check(command.config.at("session").at("workspaceStrategy").at("expectedCommit")==pin &&
+                  command.config.at("session").at("interactionMode")=="default" &&
+                  command.config.at("session").at("runtimeMode")=="approval-required" &&
                   command.instruction.find("findings (briefly name the check")!=std::string::npos,
                   "a stage launch lost the immutable input or the findings contract");
         check(f.t3.seen.at(0).instruction.find("verify-1")!=std::string::npos &&
@@ -2217,7 +2219,7 @@ void specialistAdmission(SpecialistMode mode) {
     const auto& launched = f.t3.seen.front();
     check(f.t3.launches==1 && launched.target.runId.empty() && launched.ownerBotId=="beta" &&
           launched.config.at("session").at("runtimeMode")=="approval-required" &&
-          launched.config.at("session").at("interactionMode")=="plan" &&
+          launched.config.at("session").at("interactionMode")=="default" &&
           launched.instruction.find(pin)!=std::string::npos,"specialist launched outside its own pinned worktree");
     check(f.t3.seen.size()==2 && f.t3.reconciles==2 && f.t3.seen.at(1).actionId==launched.actionId &&
           f.t3.seen.at(1).instruction==launched.instruction && f.t3.seen.at(1).authGeneration==launched.authGeneration,

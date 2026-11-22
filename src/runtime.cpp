@@ -246,7 +246,7 @@ WHERE d.recipient_task=?1 OR d.id=(
                 !access.permits(command.ownerBotId,{"environment",command.environmentId,"launch"},true)) return false;
             const auto session = command.config.at("session");
             if (session.at("workspaceStrategy") != specialistWorkspace(origin.commit) ||
-                field(session,"runtimeMode") != "approval-required" || field(session,"interactionMode") != "plan") return false;
+                field(session,"runtimeMode") != "approval-required") return false;
         } catch (const std::exception&) { return false; }
         return true;
     }
@@ -1333,7 +1333,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         auto& session = peer.intake.config["session"];
         session["workspaceStrategy"] = specialistWorkspace(check.commitSha);
         session["runtimeMode"] = "approval-required";
-        session["interactionMode"] = "plan";
+        session["interactionMode"] = "default";
         if (!reserveSpecialistBudget(check.channel)) throw Conflict("The coordination work allowance is exhausted");
         const Id senderId = db.submit({std::string(requester),check.purpose,peer.intake.environmentId,peer.intake.projectId},
                                       0,nullptr,RequestJournal::skip);
