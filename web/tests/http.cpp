@@ -1,4 +1,5 @@
 #include "http_fixture.hpp"
+#include "flock/memory_automation.hpp"
 
 #include <sqlite3.h>
 
@@ -531,7 +532,8 @@ void exercise(const std::filesystem::path& path) {
           triagePage["bot"]["soul"] == "報告された問題を整理する。" && triagePage["bot"]["cron"].empty(),
           "selected Bots showed incorrect settings");
     const auto& schedule = releasePage.at("bot").at("cron").at(0);
-    check(schedule == Json{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},{"request","前日の変更を確認する"}},
+    check(schedule == Json{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
+          {"request","前日の変更を確認する"},{"active",false}},
           "Release's scheduled request was incorrect");
     check(releasePage["sessionTasks"][0]["sessions"][0]["link"] == "https://app.t3.codes/threads/local-env/thread-release" &&
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
@@ -728,6 +730,53 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
         return std::chrono::steady_clock::now() < deadline;
     });
     check(!result && ready && finished,"stream missed an invalidation");
+}
+
+void recurringRequestStatus(const std::filesystem::path& path) {
+    constexpr Seconds now = 2'000'000'000;
+    const Person owner{"fixture",true};
+    auto web = callbacks();
+    auto cards = web.bots();
+    auto& cron = cards.at(0).at("cron");
+    cron.push_back({{"id","invalid"},{"schedule","0 9 * * Mon"},{"timezone","Asia/Tokyo"},{"request","Invalid weekday"}});
+    cron.push_back({{"id","edited"},{"schedule","0 7 * * *"},{"timezone","Etc/UTC"},{"request","Check staging"}});
+    web.bots = [cards] { return cards; };
+    Store store(path);
+    const auto errors = store.syncSchedules("release",{
+        {"daily","0 9 * * *","Asia/Tokyo",web.intake("release","前日の変更を確認する")},
+        {"invalid","0 9 * * Mon","Asia/Tokyo",web.intake("release","Invalid weekday")},
+        {"edited","0 8 * * *","Etc/UTC",web.intake("release","Check staging")},
+    },now);
+    check(errors.size() == 1 && errors.front().id == "invalid","fixture accepted an unsupported weekday");
+    const auto rows = store.automations(owner,"release").at("automations");
+    const auto daily = std::ranges::find_if(rows,[](const Json& row) { return row.at("configId") == "daily"; });
+    check(daily != rows.end(),"fixture did not activate the configured schedule");
+    for (int i = 0; i < 20; ++i) {
+        store.createAutomation(owner,web.intake("release","Check staging"),{
+            {"kind","reminder"},{"timezone","Etc/UTC"},{"fireAt",now + 60},{"request","Check staging"},
+        },now);
+    }
+
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    const auto requests = [&] { return browser.get("/api/view?bot=release").at("bot").at("cron"); };
+    const auto configured = requests();
+    check(configured.at(0).at("active") == true,"newer automations hid an active configured schedule");
+    check(configured.at(1).at("active") == false && configured.at(1).at("schedule") == "0 9 * * Mon" &&
+          configured.at(1).at("timezone") == "Asia/Tokyo","invalid cron lost the original configuration or appeared active");
+    check(configured.at(2).at("active") == false,"an unapplied edit appeared active");
+
+    Browser stream(*server);
+    unsigned updates = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        check(change.at("bot") == "release","schedule update invalidated a different Bot");
+        if (updates++ == 0) {
+            Store(path).cancelAutomation(owner,"release",daily->at("id").get<Id>());
+            return true;
+        }
+        check(requests().at(0).at("active") == false,"canceled schedule still appeared active");
+        return false;
+    });
 }
 
 void eventStream(const std::filesystem::path& path) {
@@ -1222,6 +1271,7 @@ int main() {
         exercise(directory.path / "state.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
+        recurringRequestStatus(directory.path / "recurring-requests.db");
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
