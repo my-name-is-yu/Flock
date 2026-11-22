@@ -30,7 +30,7 @@ constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "cancel_task","message_session","interrupt_session","read_result",
-                                         "find_tasks","reply","list_grants","request_access","list_secrets",
+                                         "find_tasks","flock_session_search","flock_session_events","reply","list_grants","request_access","list_secrets",
                                          "request_secret_input","list_connections",
                                          "check_environment_readiness","update_bot_settings","request_bot_change"};
 
@@ -712,7 +712,9 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         }
 
         Json result;
-        if (decision->tool == "check_environment_readiness") {
+        if (decision->tool == "flock_session_search" || decision->tool == "flock_session_events") {
+            result = sessionReadTool(message->bot,message->routing.at("config"),*decision,t3);
+        } else if (decision->tool == "check_environment_readiness") {
             try {
                 result = readiness(message->bot,message->routing,decision->args,t3);
                 result["ok"] = true;

@@ -60,6 +60,8 @@ struct Store::Impl {
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     void migrateAccess();
+    void migrateSessionRead();
+    Json sessionReadTool(std::string_view bot, const Json& config, const Decision&, T3&);
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);

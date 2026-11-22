@@ -50,31 +50,6 @@ bool active(std::string_view status) {
 
 bool hasRun(const RunRef& run) { return !run.threadId.empty() && !run.runId.empty(); }
 
-const Json& member(const Json& object, const char* key) {
-    const auto field = object.find(key);
-    if (field == object.end()) invalidResponse();
-    return *field;
-}
-
-const Json& array(const Json& object, const char* key) {
-    const auto& field = member(object, key);
-    if (!field.is_array()) invalidResponse();
-    return field;
-}
-
-bool boolean(const Json& object, const char* key) {
-    const auto& field = member(object, key);
-    if (!field.is_boolean()) invalidResponse();
-    return field.get<bool>();
-}
-
-Position position(const Json& value) {
-    if (!value.is_number_integer()) invalidResponse();
-    const auto number = value.get<Position>();
-    if (number < 0 || number > 9007199254740991) invalidResponse();
-    return number;
-}
-
 std::optional<Position> cursor(const Json& response, const char* key) {
     const auto& value = member(response, key);
     return value.is_null() ? std::nullopt : std::optional(position(value));
@@ -102,12 +77,8 @@ Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
     return page;
 }
 
-bool local(const Json& item, const std::string& threadId) {
-    return str(item, "sourceThreadId") == threadId && str(item, "visibility") == "local";
-}
-
 bool fromRun(const Json& item, const RunRef& run) {
-    return local(item, run.threadId) && str(item, "runId") == run.runId;
+    return localItem(item, run.threadId) && str(item, "runId") == run.runId;
 }
 
 template<typename Visit>
@@ -231,7 +202,7 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     std::set<std::string> ordinaryInputs;
     Scan scan;
     walkThreadHistoryForward(client, scan, requested.threadId, "activity", 700, -1, [&](const Json& item) {
-        if (!local(item, requested.threadId)) return true;
+        if (!localItem(item, requested.threadId)) return true;
         const auto run = str(item, "runId");
         const auto type = str(item, "type");
         if (type == "subagent") {
@@ -547,7 +518,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
-            if (str(item, "type") != "user_message" || !local(item, threadId)) return true;
+            if (str(item, "type") != "user_message" || !localItem(item, threadId)) return true;
             const auto text = itemText(item);
             const bool possible = text.more ? expected.starts_with(text.text) : expected == text.text;
             if (possible && str(item, "createdBy") == "agent" && str(item, "creationSource") == "mcp" &&
@@ -880,19 +851,28 @@ public:
         return excerpt;
     }
 
+    std::optional<SessionMetadata> findSession(const SessionTarget& target, std::string_view query) override {
+        return t3detail::findSession(directory_,target,query);
+    }
+    std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
+        return t3detail::sessionEvents(directory_,target,filter);
+    }
+    std::optional<SessionEvent> sessionEvent(const SessionTarget& target, std::string_view id) override {
+        return t3detail::sessionEvent(directory_,target,id);
+    }
+    std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
+        return t3detail::sessionCounts(directory_,target);
+    }
+    std::optional<SessionAttachment> sessionAttachment(const SessionTarget& target, std::string_view item,
+                                                       std::string_view attachment) override {
+        return t3detail::sessionAttachment(directory_,target,item,attachment);
+    }
+
 private:
     std::filesystem::path directory_;
 
     Credential credential(const std::string& environment, const Json& config) const {
-        auto connection = loadCredential(directory_, environment);
-        if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
-            throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-        if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
-            const auto hint = str(config["t3"], "mcpUrl");
-            if (checkedUrl(hint).full != connection.mcpUrl)
-                throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
-        }
-        return connection;
+        return readCredential(directory_, environment, config);
     }
 
     static void requireOperate(const Credential& connection) {
