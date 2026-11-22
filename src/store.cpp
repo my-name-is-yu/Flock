@@ -205,7 +205,6 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         initializeBoardInboxSchema();
         exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
              " WHERE kind IN ('run_started','report')");
-        exec("DROP INDEX IF EXISTS journal_run_starts");
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
