@@ -40,6 +40,9 @@ if(BUILD_TESTING)
     add_test(NAME flock_web_composer_screenshot_dimensions COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-dimensions.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_composer_screenshot_dimensions PROPERTIES TIMEOUT 30)
+    add_test(NAME flock_web_message_time_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-time.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_message_time_dom PROPERTIES TIMEOUT 30)
     add_test(NAME flock_web_question_choices_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/question-choices.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_board_inbox_dom flock_web_question_choices_dom PROPERTIES TIMEOUT 30)
@@ -53,6 +56,8 @@ if(BUILD_TESTING)
   target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_web_chat_grouping
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chat-grouping.mjs")
     add_test(NAME flock_web_composer_drafts
       COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
