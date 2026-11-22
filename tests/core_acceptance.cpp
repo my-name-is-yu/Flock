@@ -968,8 +968,13 @@ void lateReportCanRestoreCompletion() {
     f.runtime->tick();
     check(reportReads == 3 && f.logs(id,"tool_error") == 1,"the assigned Run was accepted as the result source");
     setSessionReadJournalFailure(f.store->path(),true);
-    f.runtime->tick();
-    check(f.store->history(id).dump().find("Late report") == std::string::npos && f.logs(id,"session_read") == 1,
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.store->history(id).dump().find("Late report") == std::string::npos &&
+          f.logs(id,"session_read") == 1,
           "a failed evidence transaction left a partially recovered report");
     setSessionReadJournalFailure(f.store->path(),false);
     f.runtime->tick();
