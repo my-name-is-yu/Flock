@@ -574,6 +574,16 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         else {
             const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
+            if (action.at("phase") == "ready" && action.at("tool") == "answer_session_question") {
+                const auto differs = [&](std::string_view key, const std::string& saved) {
+                    const auto hint = field(data,key);
+                    return !hint.empty() && hint != saved;
+                };
+                if (differs("threadId",field(action.at("target"),"threadId")) ||
+                    differs("runId",field(action.at("target"),"runId")) ||
+                    differs("questionId",field(action,"questionId")))
+                    throw Conflict("The supplied T3 question is outside the saved answer destination");
+            }
             auto updated = action;
             updated.erase("phase"); updated.erase("authGeneration");
             updated["candidate"] = {{"threadId",field(data,"threadId")},{"runId",field(data,"runId")}};

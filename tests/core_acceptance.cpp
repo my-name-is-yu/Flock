@@ -626,7 +626,10 @@ void unsentAnswerRemainsRetryable() {
           "the user was not told the Session answer was unsent");
 
     f.restart();
-    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+    f.rejects(id,wait,"reconcile",{{"questionId","another-question"}});
+    check(f.task(id).at("wait").at("id") == wait && f.t3.replies == 0,
+          "a mismatched reconciliation hint allowed an unsent answer to proceed");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile",{{"questionId",answer.questionId}});
     f.reach(id,"running");
     const auto retry = f.t3.seen.back();
     check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 0 && f.task(id)["activeRun"] == run &&
