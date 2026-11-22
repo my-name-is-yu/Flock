@@ -675,14 +675,13 @@ Person Store::Impl::turnActor(const Message& message) {
         case PrincipalSource::trusted: return admitted;
         case PrincipalSource::channel: return {admitted.id,false};
         case PrincipalSource::legacy:
-            // A legacy shared Web receipt cannot be distinguished from a trusted intake by ID alone.
             return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
         case PrincipalSource::web: {
             if (!resolveWebIdentity) return {};
             try {
                 if (const auto root = resolveWebIdentity(admitted.id)) return {admitted.id,*root};
             } catch (const std::exception&) {
-                // An unavailable identity provider cannot authorize a queued turn.
+                return {};
             }
             return {};
         }

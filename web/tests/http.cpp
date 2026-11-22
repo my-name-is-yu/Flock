@@ -805,6 +805,16 @@ void conversationPermissions(const std::filesystem::path& path) {
         if (credential == "Bearer decider") return Person{"decider"};
         return Person{};
     };
+    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
+    {
+        const auto server = startWeb(store,0,web);
+        Browser decider(*server);
+        decider.client.set_default_headers({{"Authorization","Bearer decider"}});
+        check(decider.get("/api/view?bot=release").at("canDecide") == true,
+              "custom authentication without a resolver prevented reads");
+        decider.post("/api/messages",message,503);
+        check(store.conversation("release").empty(),"a listener without a resolver queued a message");
+    }
     bool deciderAvailable = true;
     web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
         if (person == "reader" || (person == "decider" && deciderAvailable)) return false;
@@ -843,7 +853,6 @@ void conversationPermissions(const std::filesystem::path& path) {
     const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
         {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
         {"targetGeneration",wait.at("generation")}};
-    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
     reader.post("/api/messages",message,403);
     reader.post("/api/operations",answer,403);
     unsigned updates = 0;

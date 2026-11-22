@@ -591,6 +591,8 @@ private:
                 if (message) {
                     const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
                     if (previous) return json(res,201,*previous);
+                    if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                        return error(res,503,"message_identity_unavailable");
                 }
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }

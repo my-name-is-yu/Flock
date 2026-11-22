@@ -32,7 +32,6 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
                 (!credential.starts_with("Basic ") && !credential.starts_with("Bearer ")) ||
                 credential.find_first_of("\r\n")!=credential.npos || !people.emplace(credential,principal).second)
                 throw Conflict("Invalid Web identity");
-            // A durable person ID can only carry root authority common to their current credentials.
             const auto identity = identities.try_emplace(principal.id,true).first;
             identity->second = identity->second && principal.adminRoot;
             if (principal.adminRoot) roots.push_back(std::move(principal.id));

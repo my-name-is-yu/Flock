@@ -288,6 +288,11 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
         if (credential == "Bearer reader") return Person{"reader",false};
         return Person{};
     };
+    config.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
+        if (person == "owner") return true;
+        if (person == "reader") return false;
+        return std::nullopt;
+    };
     store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
     const auto server = startWeb(store,0,std::move(config));
     Browser browser(*server);
@@ -1000,7 +1005,6 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
         runtime.runConversations();
         const auto page = browser.get(view);
-        // The pause is itself a reply. Check the latest reply for each resumed message.
         const auto latestRoute = [&page](Id messageId) {
             for (const auto& event : page.at("events") | std::views::reverse)
                 if (event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == messageId)
@@ -1035,7 +1039,6 @@ void queuedWebAuthority(const std::filesystem::path& path) {
 }
 
 void legacyWebAuthority(const std::filesystem::path& path) {
-    // Seed a shared Web message using the schema before principal provenance was recorded.
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(path.c_str(),&raw);
     const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
