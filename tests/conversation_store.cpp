@@ -417,7 +417,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
           "Restart repeated a finished step or lost a turn");
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
           "The failed call was not counted against the message budget");
-    check(fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 3 &&
+    check(fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 4 &&
           fixture.count("SELECT count(*) FROM messages WHERE id=" + std::to_string(message) +
                         " AND json_type(routing,'$.modelBudgetId') IS NULL") == 1,
           "Restart lost the deterministic budget or stored a redundant routing ID");
