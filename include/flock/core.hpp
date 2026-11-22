@@ -261,7 +261,7 @@ public:
                       ConversationEvents events = ConversationEvents::all, std::string_view viewer = {}) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50,
-                          Id from = 0) const;
+                          Id from = 0, std::string_view viewer = {}) const;
     Id peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const;
     std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;
     bool hasPeerExchange(std::string_view bot, std::string_view peer) const;

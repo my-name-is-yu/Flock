@@ -252,12 +252,6 @@
 .peer-dm-message .msg-time { opacity: 1; }
 .peer-dm-message .msg-line { align-items: flex-start; }
 .peer-dm-message[data-anchored] .bubble { outline: 1px solid var(--focus); outline-offset: 2px; }
-.peer-forward-meta {
-  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
-  color: var(--text-2); font-size: var(--text-xs);
-}
-.peer-forward-meta .glyph svg { width: .85rem; height: .85rem; }
-.peer-forward-meta .msg-time { color: var(--text-3); }
 .peer-forwarded-message {
   margin: 0; padding: .4rem .6rem; border-inline-start: 2px solid var(--hairline);
   border-radius: var(--radius-sm); background: var(--canvas);
