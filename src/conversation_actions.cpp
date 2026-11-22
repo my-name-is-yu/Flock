@@ -277,9 +277,9 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         task["replanning"] = true;
         exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{task.value("eventId",Id{0})});
         if (task.at("state") == "waiting" && waitIsActionable(task)) {
-            auto pendingWait = query("SELECT data FROM waits WHERE id=? AND resolution IS NULL",{task.at("wait").at("id")});
-            if (!pendingWait.next()) throw DecisionUnavailable{};
-            auto data = pendingWait.json(0);
+            auto data = task.at("wait");
+            if (!data.is_object()) throw DecisionUnavailable{};
+            for (const auto* key : {"id","messageId","target"}) data.erase(key);
             const auto reason = field(data,"reason");
             clearWait(task,"request_changed");
             wait(task,reason,std::move(data));

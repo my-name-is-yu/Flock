@@ -28,11 +28,6 @@ std::string taskTitle(const Json& task) {
     return title(intent.empty() ? field(task,"request") : intent);
 }
 
-Id storedId(const Json& data, const char* name) {
-    const auto value = data.find(name);
-    return value != data.end() && value->is_number_integer() ? value->get<Id>() : 0;
-}
-
 Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     if (message <= 0) return 0;
     auto row = store.query("SELECT id FROM journal WHERE id=? AND conversation_bot_id=?"
@@ -40,35 +35,8 @@ Id messageAnchor(const auto& store, std::string_view bot, Id message) {
     return row.next() ? row.number(0) : 0;
 }
 
-Id waitAnchor(const auto& store, Id task, Id wait, const Json& data) {
-    if (const auto message = storedId(data,"messageId"); message > 0) {
-        auto row = store.query(R"SQL(
-SELECT id FROM journal WHERE id=? AND task_id=? AND conversation_bot_id IS NULL
-AND kind='waiting' AND json_extract(data,'$.id')=?
-)SQL",{message,task,wait});
-        if (row.next()) return row.number(0);
-    }
-    // Older tasks may keep only the wait ID. Limit the lookup to recent entries for this task.
-    auto row = store.query(R"SQL(
-SELECT id FROM (
-    SELECT id,kind,data,conversation_bot_id FROM journal WHERE task_id=? ORDER BY id DESC LIMIT 128
-)
-WHERE conversation_bot_id IS NULL AND kind='waiting' AND json_extract(data,'$.id')=?
-ORDER BY id DESC LIMIT 1
-)SQL",{task,wait});
-    return row.next() ? row.number(0) : 0;
-}
-
 void addAnchor(Json& view, Id anchor) {
     if (anchor > 0) view["conversationEventId"] = anchor;
-}
-
-Json publicWait(const Json& wait) {
-    if (!wait.is_object()) return nullptr;
-    const auto reason = field(wait,"reason");
-    Json view{{"id",wait.at("id")},{"reason",reason},{"text",field(wait,"text")}};
-    if (reason == "user_question") view["choices"] = wait.value("choices",Json::array());
-    return view;
 }
 
 bool validDecision(InboxKind kind, std::string_view decision) {
@@ -198,16 +166,14 @@ ORDER BY w.id DESC
 )SQL",{id});
         while (waits.next()) {
             const auto task = waits.json(2);
-            auto wait = waits.json(4);
+            const auto wait = waits.json(4);
             const auto kind = inboxWaitKind(field(wait,"reason"));
             if (!kind || !p_->waitIsActionable(task)) continue;
             const auto waitId = waits.number(3);
-            wait["id"] = waitId;
-            const auto view = publicWait(wait);
             add({id,*kind,waitId,waitId,waits.number(0),task.value("currentRevision",Id{0}),waits.number(1)},
-                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",view.at("text")},
-                 {"choices",view.value("choices",Json::array())}},
-                waitAnchor(*p_,waits.number(0),waitId,task.value("wait",Json(nullptr))));
+                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",field(wait,"text")},
+                 {"choices",*kind == user_question ? wait.value("choices",Json::array()) : Json::array()}},
+                p_->waitAnchor(waits.number(0),waitId));
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
