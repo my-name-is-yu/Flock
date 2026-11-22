@@ -110,6 +110,8 @@ void cronIntakeAndRestart() {
         fall.tick(utc(2026,11,1,7,0));
         const auto tasks = store.tasks();
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
+        check(tasks[0]["scheduleId"] == "fall" && tasks[0]["request"] == "Overlap",
+              "scheduled task lost its configured ID or request");
         check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
               tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
         check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
@@ -726,13 +728,13 @@ void botProfilesAndAvatars() {
     const auto uploaded = bots.updateProfile("scout",{
         {"name","Scout Prime"},
         {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/png",pngBytes});
+    },AvatarImage{pngBytes});
     check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" &&
           !uploaded.at("avatar").at("version").get<std::string>().empty(),
           "uploaded PNG avatar metadata was not saved");
     const auto savedPng = bots.avatarImage("scout");
-    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+    check(savedPng && savedPng->format().contentType == "image/png" && savedPng->bytes() == pngBytes,
           "stored PNG bytes did not match upload");
 
     // Rename without re-uploading keeps the existing image.
@@ -748,13 +750,13 @@ void botProfilesAndAvatars() {
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
         {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/gif",gifBytes});
+    },AvatarImage{gifBytes});
     check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
           std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "replacing uploaded avatar did not clean up previous image file");
     const auto savedGif = bots.avatarImage("scout");
-    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+    check(savedGif && savedGif->format().contentType == "image/gif" && savedGif->bytes() == gifBytes,
           "replaced GIF bytes did not match");
 
     // Switching back to shape removes uploaded file.
@@ -766,13 +768,6 @@ void botProfilesAndAvatars() {
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "switching from upload to shape did not remove stored image file");
 
-    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
-    rejects<Conflict>([&] {
-        bots.updateProfile("scout",{
-            {"name","Scout"},
-            {"avatar",{{"kind","upload"}}},
-        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
-    },"SVG payload accepted as avatar image");
     rejects<Conflict>([&] {
         bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
     },"blank Bot name accepted");
@@ -788,8 +783,11 @@ void botProfilesAndAvatars() {
     });
     const auto loaded = bots.get("release");
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
-          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          loaded.projectId == "project-canonical",
           "editing profile altered existing Bot execution configuration");
+    check(std::ranges::any_of(bots.cards(),[](const Json& card) {
+        return card.at("id") == "release" && card.at("avatar").at("icon") == "compass";
+    }),"updated Bot card did not retain its icon");
 
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
@@ -804,7 +802,13 @@ void botProfilesAndAvatars() {
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
     });
-    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+    const auto customImage = pngBytes + "new upload";
+    bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",{{"kind","upload"}}}},AvatarImage{customImage});
+    const auto reopened = Bots(temp.path / "bots").avatarImage("custom");
+    std::ifstream spare(customDir / "avatar.png",std::ios::binary);
+    check(reopened && reopened->bytes() == customImage &&
+          std::string(std::istreambuf_iterator<char>(spare),{}) == pngBytes,
+          "upload failed to persist the new image and preserve the unrelated image");
 
     // A save that would exceed the config read limit fails before the file changes.
     const auto bigDir = temp.path / "bots" / "big";

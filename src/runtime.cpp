@@ -63,38 +63,6 @@ void includeInstructions(std::string& instruction, const Json& pending) {
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
     for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
 }
-
-void validateAnswers(const Json& fields, const Json& answers) {
-    if (!fields.is_array() || fields.empty() || !answers.is_object())
-        throw Conflict("Answers are required per question field");
-    std::set<std::string> ids;
-    for (const auto& f : fields) {
-        const auto id = field(f,"id");
-        if (id.empty() || !ids.insert(id).second) throw Conflict("Unsupported question fields");
-        const bool required = f.value("required",true);
-        if (!answers.contains(id)) {
-            if (required) throw Conflict("A required question field was not answered");
-            continue;
-        }
-        const auto& a = answers[id];
-        const auto values = a.is_string() ? Json::array({a}) : a;
-        if (!values.is_array() || (required && values.empty()) ||
-            (values.size() > 1 && !f.value("multiple",false)))
-            throw Conflict("Question field answer has the wrong cardinality");
-        const auto options = f.value("options",Json::array());
-        const bool freeform = f.value("freeform",options.empty());
-        std::set<std::string> seen;
-        for (const auto& v : values) {
-            if (!v.is_string() || !present(v.get<std::string>()) || !seen.insert(v.get<std::string>()).second)
-                throw Conflict("Invalid or repeated answer");
-            if (!freeform && std::none_of(options.begin(),options.end(),[&](const Json& option) {
-                return option == v || field(option,"value") == v.get<std::string>();
-            })) throw Conflict("Answer does not match a question option");
-        }
-    }
-    for (auto i = answers.begin(); i != answers.end(); ++i)
-        if (!ids.contains(i.key())) throw Conflict("Answer references an unknown question field");
-}
 }
 
 struct Runtime::Impl {
@@ -396,10 +364,9 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (target.empty()) target = old;
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
-            const bool workingRecipient = peer && peer->recipient == id && peer->kind == "work" && peer->phase == "working";
-            if (peer && !workingRecipient) return false;
+            if (peer && !peer->allowsReplan(id)) return false;
             const auto event = db.currentEvent(current);
-            const bool preservePeerAnswer = workingRecipient && !event.is_null() && event["consumed"] != true &&
+            const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
             if (target != old && !current.value("environmentReleased",false)) {
                 current["environmentReleased"] = true;
@@ -408,7 +375,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (target != old || current.value("environmentReleased",false) || current["state"] == "queued") {
                 const auto blocker = db.queueBlocker(id);
                 if (!blocker.is_null()) {
-                    const bool waitingSender = workingRecipient && blocker["id"] == peer->sender &&
+                    const bool waitingSender = peer && blocker["id"] == peer->sender &&
                         blocker["state"] == "peer_waiting";
                     if (!waitingSender) return false;
                 }
@@ -816,7 +783,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         const bool moved = task.value("newSessionRequired",false);
         if (moved || task["lastRun"].is_null() || task["lastRun"].at("revisionId") != revision(task)) {
             const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
-            instruction += "\n\nTask intent:\n" + field(task,"intent") +
+            instruction += "\n\nTask intent:\n" + taskIntent(task) +
                 "\n\nCompletion criteria:\n" + criteria;
             overhead += std::max<std::size_t>(criteria.size(),8000) - criteria.size();
         }
@@ -835,7 +802,6 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             instruction += "\n\nUser request:\n" + request;
         }
         if (const auto restart = task.find("restartContext"); restart != task.end() && task["lastRun"].is_null()) {
-            instruction += "\n\nOriginal task being resumed:\n" + field(*restart,"intent");
             const auto& delivered = restart->at("deliveredInstructions");
             if (!delivered.empty()) instruction += "\n\nEarlier user instructions delivered before cancellation (reference only):";
             for (const auto& item : delivered) instruction += "\n\n" + field(item,"text");
@@ -896,7 +862,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
     void establishCriteria(Json& task, const Json& args) {
         if (task.contains("currentRevision")) return;
         const auto source = task.value("criteriaSourceMessageId",task.value("sourceMessageId",Id{0}));
-        db.addRevision(task,field(task,"intent"),task.value("requestedDoneWhen",field(args,"doneWhen")),source);
+        db.addRevision(task,taskIntent(task),task.value("requestedDoneWhen",field(args,"doneWhen")),source);
         task.erase("requestedDoneWhen");
         task.erase("criteriaSourceMessageId");
     }
@@ -1029,7 +995,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         peer.intake.scheduleId.clear();
         peer.intake.scheduledAt = 0;
-        const auto id = db.submit(peer.intake,0,nullptr,true);
+        const auto id = db.submit(peer.intake,0,nullptr,RequestJournal::skip);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
         auto message = peerMessage(exchange,sender,recipient,"request",note,action);
@@ -1244,7 +1210,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (tool == "answer_session_question") {
             if (field(args,"requestId") != field(snapshot["question"],"requestId"))
                 throw Conflict("The Session question no longer matches");
-            validateAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
+            sessionQuestionAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
         }
         change(snapshot,[&](Json& current) {
             if (tool == "follow_up" && current.value("newSessionRequired",false))
@@ -1291,7 +1257,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (prefill == PrefillResult::Persisted) return std::nullopt;
         if (prefill == PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
         const auto bot = notes(field(task,"botId"));
-        Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",field(task,"intent")},
+        Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",taskIntent(task)},
             {"doneWhen",task["doneWhen"]},
             {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
         if (task.contains("sourceMessageId")) summary["sourceMessageId"] = task.at("sourceMessageId");
@@ -1439,12 +1405,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     }
 
     bool shouldStop(const Json& task) {
-        const bool cancel = task["state"] == "cancelling";
-        if (!cancel && !task.value("replanning",false)) return false;
+        if (db.replanReady(task)) return true;
+        if (task["state"] != "cancelling") return false;
         std::lock_guard lock(db.mutex);
         const auto peer = db.peerExchange(task["id"]);
-        if (!peer) return true;
-        return peer->recipient == task["id"] && (cancel || (peer->kind == "work" && peer->phase == "working"));
+        return !peer || peer->recipient == task["id"];
     }
 
     void step(Id id) {

@@ -41,8 +41,8 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
             delivered.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",text}});
         }
         std::reverse(delivered.begin(),delivered.end());
-        task["restartContext"] = {{"intent",prior.at("intent")},{"taskId",priorId},
-                                  {"deliveredInstructions",std::move(delivered)}};
+        task["intent"] = taskIntent(prior);
+        task["restartContext"] = {{"taskId",priorId},{"deliveredInstructions",std::move(delivered)}};
         for (const auto& item : pending) {
             Json entry = {{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",item.at("text")},
                           {"revisionId",nullptr},{"conflicting",false}};
