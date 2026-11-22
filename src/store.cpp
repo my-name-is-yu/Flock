@@ -556,6 +556,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     const auto reason = field(wait,"reason");
     std::string next = "deciding";
     if (operation == "answer" && reason == "user_question") {
+        if (replanReady(task)) throw Conflict("The task is replanning; this question is no longer answerable");
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
             throw Conflict("A nonempty answer (up to 8,000 bytes) is required");

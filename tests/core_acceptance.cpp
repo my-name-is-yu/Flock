@@ -884,7 +884,7 @@ void peerClarificationAfterRun() {
     for (const auto mode : {"on_demand","prefill","off"}) checkPeerClarificationAfterRun(mode);
 }
 
-void revisionWaitsForPeerClarification() {
+void revisionWaitsForPeerClarification(bool direct = false) {
     Fixture f;
     f.allowBeta();
     const Intake routing{"alpha","Release check","e","p",
@@ -922,8 +922,11 @@ void revisionWaitsForPeerClarification() {
     f.runtime->runConversations();
     check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
           "The requested destination change did not reach the task");
-    f.store->receive(routing,"branch-answer","Use main",question);
-    f.runtime->runConversations();
+    if (direct) f.store->operate(root,f.task(root).at("wait").at("id"),"answer",{{"text","Use main"}});
+    else {
+        f.store->receive(routing,"branch-answer","Use main",question);
+        f.runtime->runConversations();
+    }
     check(f.logs(root,"user_answer") == 1,"The conversation rejected the answer the peer is waiting for");
     f.reach(root,"running");
     const auto messages = f.botMessages("alpha");
@@ -1718,7 +1721,8 @@ int main() {
             {"history reading restart",evidenceResume},{"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
-            {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
+            {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
+            {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
             {"recipient revision continues its work exchange",recipientRevisionContinuesTheOpenWorkExchange},
             {"recipient revision during peer question preserves answer",recipientRevisionDuringPeerQuestionPreservesTheAnswer},
             {"recipient move during peer question starts a fresh Session",recipientMoveDuringPeerQuestionStartsAFreshSession},

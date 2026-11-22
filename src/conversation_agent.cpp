@@ -208,9 +208,9 @@ Json Store::Impl::turnInput(const Message& message, int step) const {
     std::set<Id> listed;
     const auto latestResult = [&](Id taskId) -> Json {
         auto row = query(R"SQL(
-SELECT id,kind,data FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled') AND id<?
+SELECT id,kind,data FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled')
 ORDER BY id DESC LIMIT 1
-)SQL",{taskId,message.id});
+)SQL",{taskId});
         if (!row.next()) return nullptr;
         const auto kind = row.string(1);
         const auto data = row.json(2);
@@ -290,11 +290,13 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
         auto rows = query(R"SQL(
 SELECT j.id,j.task_id,j.kind,j.data,m.text FROM journal j
 LEFT JOIN tasks t ON t.id=j.task_id LEFT JOIN messages m ON m.id=j.id
-WHERE j.id<? AND (
-  (j.conversation_bot_id=? AND j.kind IN ('conversation_message','conversation_reply')) OR
-  (j.conversation_bot_id IS NULL AND t.bot_id=? AND j.kind IN ('waiting','report','completed','cancelled')))
+WHERE (j.conversation_bot_id=? AND (
+  (j.kind='conversation_message' AND j.id<?) OR
+  (j.kind='conversation_reply' AND json_extract(j.data,'$.replyToMessageId')<?))) OR
+  (j.conversation_bot_id IS NULL AND t.bot_id=? AND j.kind IN ('waiting','user_answer','report','completed','cancelled')
+   AND (j.kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1))
 ORDER BY j.id DESC LIMIT ?
-)SQL",{message.id,message.bot,message.bot,historyLimit});
+)SQL",{message.bot,message.id,message.id,message.bot,historyLimit});
         std::size_t remaining = historyBytes;
         while (rows.next() && remaining > 0) {
             const auto kind = rows.string(2);
@@ -302,7 +304,11 @@ ORDER BY j.id DESC LIMIT ?
             Json entry = {{"messageId",rows.number(0)},{"kind",kind}};
             if (rows.number(1)) entry["taskId"] = rows.number(1);
             std::string body;
-            if (kind == "conversation_message") {
+            if (kind == "user_answer") {
+                entry["role"] = "user";
+                entry["waitId"] = integer(data,"waitId");
+                body = field(data,"text");
+            } else if (kind == "conversation_message") {
                 entry["role"] = "user";
                 body = rows.string(4);
             } else if (kind == "conversation_reply") {
@@ -481,7 +487,7 @@ AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?
                          {"environmentId",field(task,"environmentId")}};
             view.update(taskState(task,message));
             auto result = query("SELECT id,kind FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled')"
-                                " AND id<? ORDER BY id DESC LIMIT 1",{last,message.id});
+                                " ORDER BY id DESC LIMIT 1",{last});
             if (result.next()) view["latestResult"] = {{"messageId",result.number(0)},{"kind",result.string(1)}};
             found.push_back(std::move(view));
         }

@@ -373,6 +373,11 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.script("Use account Quartz-717",{answer(id)});
     f.receive("account",explanation.at("suggestions").at(0).get<std::string>(),explanation.at("messageId"));
     check(f.event(id,"user_answer")["text"] == "Use account Quartz-717","the answer did not reach the question");
+    const auto& continuation = f.model.turnInputs.back();
+    check(std::ranges::none_of(continuation.history,[&](const Json& entry) {
+        return entry.value("taskId",Id{0}) == id && entry.value("kind",std::string{}) == "user_answer" &&
+               entry.value("text",std::string{}) == "Use account Quartz-717";
+    }),"the written answer was duplicated as a task answer in history");
     f.restart();
     f.reach(id,"running");
     check(answered && f.t3.sent.size() == 2 && f.t3.sent.back().target.threadId == "session-1" &&
@@ -449,6 +454,11 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     f.receive("change-then-answer","青。完了条件も色見本を付けることに");
     check(f.lastTurn()[0]["result"]["ok"] == true && f.lastTurn()[1]["result"]["ok"] == false &&
           f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
+    bool rejected = false;
+    try { f.store->operate(color,wait.at("id"),"answer",{{"text","青"}}); }
+    catch (const Conflict&) { rejected = true; }
+    check(rejected && f.task(color).at("wait") == wait && f.event(color,"user_answer").is_null(),
+          "a direct answer was accepted for a question that replanning will discard");
     f.advanceUntil([&] {
         const auto current = f.task(color).at("wait");
         return current.is_object() && current.at("id") != wait.at("id");
@@ -480,6 +490,37 @@ void offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion() {
           f.event(id,"user_answer")["text"] == "Cancel this task" &&
           f.event(id,"cancel_requested").is_null(),
           "an offered cancellation-sounding answer was treated as a task cancel");
+}
+
+void directAnswersRemainInConversationHistory() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Choose a name"));
+    f.model.questions.emplace(id,Json{{"question","Which name?"},{"choices",{"Maple","Juniper"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    f.store->operate(id,wait.at("id"),"answer",{{"text","Maple"}});
+    f.script("Which name did I choose?",{say("Maple")});
+    f.receive("remember-name","Which name did I choose?");
+    const auto& history = f.model.turnInputs.back().history;
+    check(std::ranges::any_of(history,[&](const Json& entry) {
+        return entry.value("kind",std::string{}) == "user_answer" && entry.at("role") == "user" &&
+               entry.at("taskId") == id && entry.at("waitId") == wait.at("id") && entry.at("text") == "Maple";
+    }),"the conversation lost the selected answer or its question reference");
+}
+
+void queuedTurnsSeeEarlierReplies() {
+    Fixture f;
+    f.script("Recommend a plan",{say("Use plan Maple")});
+    f.script("Explain your recommendation",{say("Maple needs fewer resources")});
+    const auto first = f.enqueue("recommend","Recommend a plan");
+    const auto second = f.enqueue("explain-recommendation","Explain your recommendation");
+    f.runtime->runConversations();
+    check(f.response(first).at("messageId") > second.at("messageId"),"the replies were not queued");
+    f.runtime->runConversations();
+    const auto& history = f.model.turnInputs.back().history;
+    check(std::ranges::any_of(history,[](const Json& entry) {
+        return entry.at("role") == "bot" && entry.at("text") == "Use plan Maple";
+    }),"the queued follow-up lost the reply to the earlier request");
 }
 
 void destinationClarificationContinuesFromConversationHistory() {
@@ -539,27 +580,56 @@ void pausedTurnDoesNotHoldCompletion() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
-    f.t3.finish("run-1","Timing evidence");
-    f.reach(id,"deciding");
     auto limited = f.routing();
     limited.config["modelCallLimit"] = 1;
     std::string seen;
+    Json latestResult;
+    bool reportInHistory = false;
+    bool foundResult = false, readResult = false;
     f.script("Check what is running, then change the criteria",{
         [](const ModelInput&) { return Decision{"find_tasks",Json::object(),"Look first"}; },
         [&](const ModelInput& input) {
             for (const auto& task : input.task.at("tasks"))
-                if (task.at("taskId") == id) seen = task.at("state");
+                if (task.at("taskId") == id) {
+                    seen = task.at("state");
+                    if (task.contains("latestResult")) latestResult = task.at("latestResult");
+                }
+            reportInHistory = std::ranges::any_of(input.history,[&](const Json& entry) {
+                return entry.value("taskId",Id{0}) == id && entry.value("kind",std::string{}) == "report" &&
+                       entry.value("text",std::string{}) == "Timing evidence";
+            });
+            return Decision{"find_tasks",Json::object(),"Find the current result"};
+        },
+        [&](const ModelInput& input) {
+            const auto& found = input.event.at("turn").back().at("result").at("tasks");
+            for (const auto& task : found)
+                if (task.at("taskId") == id)
+                    foundResult = task.at("latestResult").at("messageId") == latestResult.at("messageId");
+            return Decision{"read_result",{{"messageId",latestResult.at("messageId")}},"Read the final report"};
+        },
+        [&](const ModelInput& input) {
+            readResult = input.event.at("turn").back().at("result").at("text") == "Timing evidence";
             return Decision{"reply",{{"text","It already finished."}},"Report the current state"};
         }});
-    f.store->receive(limited,"paused","Check what is running, then change the criteria");
+    const auto message = f.store->receive(limited,"paused","Check what is running, then change the criteria");
     f.tick();
     f.tick();
-    check(f.store->pausedConversations("alpha").size() == 1 && !f.event(id,"completed").is_null(),
-          "a turn waiting for a model call approval held the task's completion");
-    f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
-    f.tick();
-    check(f.store->pausedConversations("alpha").empty() && seen == "completed",
-          "the approved turn did not see the task as it is now");
+    check(f.store->pausedConversations("alpha").size() == 1,
+          "the conversation did not pause for model approval");
+    f.t3.finish("run-1","Timing evidence");
+    f.reach(id,"completed");
+    Id reportId = 0;
+    for (const auto& row : f.store->history(id))
+        if (row.at("kind") == "completed") reportId = row.at("id").get<Id>();
+    check(reportId > message.at("messageId").get<Id>(),"the fixture report did not arrive after the conversation message");
+    for (int call = 0; call < 3; ++call) {
+        f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
+        f.tick();
+    }
+    check(f.store->pausedConversations("alpha").empty() && seen == "completed" &&
+          latestResult.value("messageId",Id{0}) == reportId && latestResult.value("kind",std::string{}) == "completed" &&
+          latestResult.value("excerpt",std::string{}) == "Timing evidence" && reportInHistory && foundResult && readResult,
+          "the approved turn did not see the task's latest report");
 }
 
 void cancelledReportCanBeReferencedWithoutRestarting() {
@@ -1490,6 +1560,8 @@ int main() {
         answersNeedTheirOwnReplyTargetAndAStableTask();
         offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion();
         destinationClarificationContinuesFromConversationHistory();
+        directAnswersRemainInConversationHistory();
+        queuedTurnsSeeEarlierReplies();
         pausedTurnDoesNotHoldCompletion();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
