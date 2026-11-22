@@ -103,6 +103,7 @@ public:
         const auto scanDeadline = Clock::now()+searchTimeLimit;
         std::size_t scanned = 0;
         bool timedOut = false;
+        bool skippedSlowCandidate = false;
         for (;;) {
             while (matches.size() <= limit && scanned < scanLimit) {
                 if (Clock::now() >= scanDeadline) {
@@ -116,7 +117,7 @@ public:
                 } catch (const SessionReadTimeout&) {
                     timedOut = true;
                     if (scanned == 0) {
-                        incomplete.push_back(target);
+                        skippedSlowCandidate = true;
                         ++scanned;
                     }
                     break;
@@ -146,8 +147,8 @@ public:
             if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
             const auto latestScrub = store_.sharedRedactor();
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
-            bool truncated = unsearched != incomplete.end();
-            if (truncated) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
+            bool truncated = skippedSlowCandidate || unsearched != incomplete.end();
+            if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
                     result["nextCursor"] = issue(RefKind::search,matches[limit-1].target,scopedKey);

@@ -134,7 +134,10 @@ void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const 
 
     auto resume = query;
     resume["cursor"] = partial.at("nextCursor");
+    const auto deferredStart = std::chrono::steady_clock::now();
     const auto deferred = conversation.search(resume);
+    check(std::chrono::steady_clock::now()-deferredStart < std::chrono::milliseconds(3100),
+          "a candidate that supplied no evidence was read again before the next model call");
     check(deferred.at("ok") == true && deferred.at("truncated") == true && deferred.at("sessions").empty() &&
           deferred.at("nextCursor").is_string(),"a repeatedly slow candidate did not return an incomplete continuation");
     auto pastSlow = query;
