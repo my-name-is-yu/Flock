@@ -9,7 +9,11 @@ import { setTimeout } from "node:timers/promises";
 const executable = process.argv[2];
 const home = mkdtempSync(join(tmpdir(), "flock-headless-access-"));
 const cliArgs = ["--home", home];
-const options = { encoding: "utf8", timeout: 5000 };
+// Keep the fixture independent of the developer's Flock configuration.
+const env = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => !name.startsWith("FLOCK_")),
+);
+const options = { encoding: "utf8", timeout: 5000, env };
 const cli = (...args) => JSON.parse(execFileSync(executable, [...cliArgs, ...args], options));
 const launch = ["release", "environment", "demo-env", "launch"];
 
@@ -44,7 +48,7 @@ try {
   const { resourceKind, resourceId, operation, approvedBy } = grants[0];
   assert.deepEqual([resourceKind, resourceId, operation, approvedBy], ["environment", "demo-env", "launch", "local-cli"]);
 
-  const daemon = spawn(executable, [...cliArgs, "run", "--fixed", "--no-web"], { stdio: ["ignore", "ignore", "inherit"] });
+  const daemon = spawn(executable, [...cliArgs, "run", "--fixed", "--no-web"], { env, stdio: ["ignore", "ignore", "inherit"] });
   const stopped = once(daemon, "close");
   try {
     const submitted = cli("submit", "release", "Check the upcoming release");

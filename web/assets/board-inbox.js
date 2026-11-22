@@ -250,7 +250,9 @@ function decisionCard(item, submit, source, question, saving) {
   return article;
 }
 
-export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCompose, focusComposer, canDismiss = () => true }) {
+export function mountBoardInbox({
+  api, sourceAction, onChange, onAccepted, onRefreshError, canCompose, focusComposer, canDismiss = () => true,
+}) {
   const byId = (id) => document.getElementById(id);
   const main = byId('main');
   const trigger = byId('needs-you');
@@ -661,14 +663,17 @@ export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCo
 
   async function refresh() {
     const stamp = ++epoch;
+    let latest;
     try {
-      const { items: latest } = await api('inbox');
-      if (stamp !== epoch || !Array.isArray(latest)) return;
-      if (JSON.stringify(items) !== JSON.stringify(latest)) apply(latest);
+      ({ items: latest } = await api('inbox'));
     } catch (error) {
       if (stamp !== epoch) return;
       if (error.status === 401 || error.status === 403) apply([]);
+      else onRefreshError();
+      return;
     }
+    if (stamp !== epoch || !Array.isArray(latest)) return;
+    if (JSON.stringify(items) !== JSON.stringify(latest)) apply(latest);
   }
 
   function setContext(botId, viewerId) {

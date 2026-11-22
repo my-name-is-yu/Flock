@@ -247,6 +247,8 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
                 if (!repositoryAccess(access,host,context,repo,"read",&source)) continue;
             }
             authorized.insert(id);
+        } catch (const StorageError&) {
+            throw;
         } catch (const std::exception&) {
             continue;
         }
@@ -366,6 +368,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
                 const auto data = host.call(context,repo,decision);
                 result = {{"ok",true},{"data",sharedRedactor().payload(data,false,gitResultTextLimit)}};
             }
+        } catch (const StorageError&) {
+            throw;
         } catch (const std::exception& error) {
             result = {{"ok",false},{"error",bounded(sharedRedactor().text(error.what()),gitResultTextLimit)}};
         }
@@ -453,6 +457,8 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
         }
         return gitTool(*host,message.bot,0,message.routing,call,
                        "turn/" + std::to_string(message.id) + "/" + std::to_string(step));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception& error) {
         return {{"ok",false},{"error",sharedRedactor().text(error.what())}};
     }
