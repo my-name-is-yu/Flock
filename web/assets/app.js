@@ -17,7 +17,7 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-heading', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
@@ -221,6 +221,7 @@ function selectBot(botId, peerId = null, updateHistory = true) {
     else renderBots();
     return;
   }
+  resetConversationJump(view);
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
@@ -936,35 +937,16 @@ noHover.addEventListener('change', () => {
   if (!noHover.matches) closeMessageTime();
 });
 
-function sourceAction(source, label = 'Open source') {
-  const control = button(label, 'text-button', async () => {
-    const match = byId(`event-${source.messageId}`);
-    const target = match?.closest('article') ?? match;
-    if (target) {
-      closeDetail();
-      target.focus();
-      target.scrollIntoView({ block: 'center' });
-      return;
-    }
-    const context = view;
-    const selection = { kind: 'source' };
-    openDetail(selection);
-    try {
-      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
-      if (detail !== selection) return;
-      selection.event = page.events.find((event) => event.id === source.messageId);
-      selection.failed = !selection.event;
-    } catch {
-      if (detail !== selection) return;
-      selection.failed = true;
-    }
-    renderDetail();
-  });
-  control.dataset.timelineAction = `source:${source.messageId}`;
-  return control;
+function conversationMessageRow(id) {
+  // A collapsed Session report can be an anchor inside the completion row.
+  return byId(`event-${id}`)?.closest('article');
+}
+function resetConversationJump(context) {
+  if (context) context.pendingSource = null;
+  elements['conversation-source-error'].textContent = '';
 }
 function leaveConversationSource(context) {
-  context.pendingSource = null;
+  resetConversationJump(context);
   if (!context.source) return false;
   context.source = null;
   readingPositions.delete(timelineKey(context.id));
@@ -1004,10 +986,14 @@ function focusConversationMessage(target) {
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
-  if (preferLoaded && context.events.has(id)) {
+  resetConversationJump(context);
+  const error = elements['conversation-source-error'];
+  let target = preferLoaded ? conversationMessageRow(id) : null;
+  if (!target && preferLoaded && context.events.has(id)) {
     if (leaveConversationSource(context)) renderTimeline();
-  } else {
-    // Find and the inbox share one pending jump per conversation.
+    target = conversationMessageRow(id);
+  } else if (!target) {
+    // Only the newest jump in this conversation can apply its page.
     const request = context.pendingSource = { id };
     let page;
     try {
@@ -1016,20 +1002,27 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
     if (signal?.aborted) return;
-    if (!page?.events.some((event) => event.id === id)) {
-      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+    if (!page) {
+      error.textContent = 'Could not load that message.';
+      return;
+    }
+    const event = page.events.find((item) => item.id === id);
+    if (!event || event.kind === 'wait_closed' || event.kind === 'bot_message') {
+      error.textContent = 'That message is no longer in this conversation.';
       return;
     }
     if (!context.source) rememberReadingPosition(true);
     context.source = { id, bot: bot ?? context.data.bot, events: page.events };
     renderTimeline();
+    target = conversationMessageRow(id);
   }
-  const target = byId(`event-${id}`)?.closest('article');
-  if (target) {
-    elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
-    target.classList.add('conversation-source-target');
-    focusConversationMessage(target);
+  if (!target) {
+    error.textContent = 'That message is no longer in this conversation.';
+    return;
   }
+  elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  target.classList.add('conversation-source-target');
+  focusConversationMessage(target);
   updateJumpToLatest();
 }
 function cardSourceAction(bot, id, close) {
@@ -1176,8 +1169,13 @@ function eventCard(event, context, place, report) {
         row.insertBefore(quote, meta.nextSibling);
       }
     }
-    if (event.kind === 'conversation_message' && data.replyToMessageId)
-      extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (event.kind === 'conversation_message' && data.replyToMessageId) {
+      const original = button('Open original message', 'text-button open-original-message', () => {
+        void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
+      });
+      original.dataset.timelineAction = 'open-original';
+      extras.push(original);
+    }
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
@@ -2043,24 +2041,6 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'source') {
-    if (changed('detail', detail)) {
-      elements['detail-title'].textContent = 'Original message';
-      const source = detail.event;
-      const text = source?.kind === 'waiting' ? waitText(source.data) :
-        source?.data.report ?? source?.data.text ??
-        (detail.failed ? 'The original message is no longer available in this conversation.' : 'Loading…');
-      const body = node('p', 'prose', text);
-      elements['detail-body'].replaceChildren(body);
-      const link = linkToRun(source?.data.run);
-      if (link) {
-        const actions = node('div', 'event-actions');
-        actions.append(link);
-        elements['detail-body'].append(actions);
-      }
-    }
-    return;
-  }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
     if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
@@ -2384,7 +2364,7 @@ elements['jump-to-latest'].addEventListener('click', () => {
     backToLatest();
     return;
   }
-  if (view) view.pendingSource = null;
+  resetConversationJump(view);
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
