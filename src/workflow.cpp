@@ -138,7 +138,8 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         const auto run = active.is_object() ? active : task.value("lastRun",Json(nullptr));
         const bool exceeded = !closed(status) && rows.number(5)>0 && (now>=rows.number(5) || rows.number(8));
         const bool outdated = closed(status) && rows.number(12);
-        const bool needs = outdated || exceeded || status=="failed" || status=="unreachable" || rows.string(7)=="waiting";
+        const bool needs = outdated || exceeded || status=="failed" || status=="unreachable" ||
+            rows.string(7)=="waiting" || task.contains("pendingRunReport");
         const bool childSettled = !rows.number(2) || terminal(task);
         finished &= closed(status) && childSettled && active.is_null() && !rows.number(14);
         attention |= needs;
@@ -370,7 +371,8 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto report = row.json(2);
     const auto result = Json::parse(field(report,"report"),nullptr,false);
     const auto version = field(result,"artifactVersion");
-    bool ok = field(report,"status")=="completed" && !report.value("truncated",false);
+    bool ok = field(report,"status")=="completed" && !report.value("truncated",false) &&
+        field(report,"evidenceStatus") != "report_unavailable";
     std::string output;
     if (role=="verify") {
         const auto verdict = field(result,"verdict");
@@ -393,7 +395,8 @@ bool Store::Impl::settleStageReport(Json& task) {
          {ok ? "completed" : "failed",output,reportId,id,stage});
     consumeEvent(task);
     task["state"] = "completed";
-    journal(task.at("id"),"completed",{{"text",ok ? field(report,"report") : "Workflow stage failed: "+field(report,"report")},
+    const auto text = field(report,"evidenceStatus") == "report_unavailable" ? field(report,"detail") : field(report,"report");
+    journal(task.at("id"),"completed",{{"text",ok ? text : "Workflow stage failed: "+text},
         {"revisionId",task.at("currentRevision")},{"source",report.at("run")}});
     return true;
 }

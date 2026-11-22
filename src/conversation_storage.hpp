@@ -6,11 +6,14 @@
 #include <limits>
 
 namespace flockv0::conversation {
+enum class PrincipalSource { legacy = 0, trusted = 1, web = 2, channel = 3 };
+
 struct Message {
     Id id = 0, replyTo = 0;
     std::string bot, text, channelScope;
     Json routing;
-    Person actor;
+    Person admittedActor;
+    PrincipalSource principalSource = PrincipalSource::legacy;
     Id questionMessageId = 0, questionTaskId = 0;
 };
 }
@@ -19,6 +22,10 @@ namespace flockv0::conversation_storage {
 inline constexpr auto messageSize = 16000;
 inline constexpr std::size_t expandedContextBytes = 8192;
 std::size_t boundExpandedContext(Json& turn);
+void projectToolHistory(Json& turn, const Json& redactionRevision);
+inline bool canRereadToolResult(std::string_view tool) {
+    return !tool.empty() && tool != "read_tool_result" && tool != "expand_context";
+}
 
 inline bool hasText(std::string_view value) {
     return value.find_first_not_of(" \r\n\t") != std::string_view::npos;

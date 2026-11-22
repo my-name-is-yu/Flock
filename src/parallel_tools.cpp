@@ -41,7 +41,7 @@ bool allowedAfterWebEvidence(const Decision& call) {
         "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
         "list_grants","list_secrets","list_connections","check_environment_readiness","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
-        "skill_list","skill_read","inspect_attachment","workflow_status","expand_context",
+        "skill_list","skill_read","inspect_attachment","workflow_status","expand_context","read_tool_result",
         "read_memory","memory_history","list_schedules","git_find_repos","git_repo_info",
         "git_pr_status","git_commit_status","git_read_ci_logs"
     };
@@ -58,11 +58,13 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
          {results,message,step});
 }
 
-bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls) {
+bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<ModelCall>& calls,
+                             std::stop_token shutdown) {
     std::vector<std::size_t> reserved;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(loadTurnMessage(ctx.messageId))) { transaction.commit(); return false; }
         auto previous = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
                               {ctx.messageId,step});
@@ -79,6 +81,10 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                           {"error","Flock restarted during this tool call. Its outcome is unknown."}};
             }
             if (!result.is_null()) continue;
+            if (!calls[i].rejection.empty()) {
+                result = toolFailure(calls[i].rejection);
+                continue;
+            }
             if (ctx.hasWebEvidence && !allowedAfterWebEvidence(calls[i])) {
                 result = webEvidenceActionDenied();
                 continue;
@@ -90,6 +96,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             } catch (const Conflict& error) {
                 result = toolFailure(scrub.text(error.what()));
                 continue;
+            } catch (const StorageError&) {
+                throw;
             } catch (const std::exception&) {
                 result = toolFailure("Bot tool target is unavailable");
                 continue;
@@ -125,6 +133,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                     result = {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
                 } catch (const Conflict& error) {
                     result = toolFailure(error.what());
+                } catch (const StorageError&) {
+                    throw;
                 } catch (const std::exception&) {
                     result = toolFailure("Bot tool execution failed");
                 }

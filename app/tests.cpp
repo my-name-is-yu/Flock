@@ -53,7 +53,7 @@ public:
         }
         return result;
     }
-    void interrupt(const std::string&,const Json&,const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 void notesAndRoutingOnRestart() {
@@ -97,7 +97,7 @@ void notesAndRoutingOnRestart() {
         check(t3.commands[0].config["session"]["model"] == "child-model" &&
               t3.commands[0].config["session"]["providerInstanceId"] == "child-provider" &&
               t3.commands[0].config["session"]["runtimeMode"] == "auto" &&
-              t3.commands[0].config["session"]["workspaceStrategy"]["branch"] == "main" &&
+              t3.commands[0].config["session"]["workspaceStrategy"]["baseRef"] == "origin/main" &&
               t3.commands[0].config["runTimeoutSeconds"] == 999,"child settings and timeout must survive intake");
     }
 
@@ -536,6 +536,18 @@ void responseContract() {
     rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
 }
 
+void oversizedRequestStopsBeforeOpeningBridge() {
+    Sandbox temp;
+    const auto credentials = temp.path / "credentials";
+    ChatGPTModel model(credentials);
+    const ModelInput input{
+        Json::object(),{{"kind","conversation_turn"},{"text",std::string(1'250'000,'\x01')}},
+        Json::array(),{},{"reply"}, {}, Json::array(),botConfig()
+    };
+    rejects<ModelError>([&] { model.decide(input); },"Oversized escaped request reached the transport");
+    check(!std::filesystem::exists(credentials),"The bridge was opened for a request over its byte limit");
+}
+
 class AcceptanceModel final : public Model {
 public:
     std::vector<Json> requests;
@@ -836,6 +848,7 @@ int main() {
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
         responseContract();
+        oversizedRequestStopsBeforeOpeningBridge();
         {
             Sandbox temp;
             Store store(temp.path/"state.db");

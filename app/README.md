@@ -45,6 +45,16 @@ Example `bots/release/config.json`
 Use the exact environment and project IDs from T3. The optional `session`
 object accepts `model`, `providerInstanceId`, `runtimeMode`, and
 `workspaceStrategy`. Omitted Session settings use the T3 project's defaults.
+Set `model` and `providerInstanceId` together. Runtime modes are
+`approval-required`, `auto-accept-edits`, `auto`, and `full-access`.
+For the project checkout, use `{"type":"root"}`. For a new worktree, use
+`{"type":"worktree","baseRef":"origin/main","startFromOrigin":true}` and
+optionally set `branch`. To use an existing worktree, set `type` to
+`existing_worktree` and specify `worktreePath`.
+
+If a task is waiting for a Session settings correction, update its Bot's
+`config.json` and reconcile the task to retry the unsent action.
+
 Add the IDs of Bots that this Bot may contact to `allowedBots`. It defaults
 to an empty list. For the example above, set up `bots/verifier/` with its own
 configuration and role. Release may send Verifier a question or request work,

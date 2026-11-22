@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS git_pr_heads(
 CREATE TABLE IF NOT EXISTS git_mutations(
  invocation TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), dedupe TEXT, result TEXT,
  PRIMARY KEY(task_id,invocation), UNIQUE(task_id,dedupe));
+CREATE TABLE IF NOT EXISTS git_task_reads(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
+ invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
+ UNIQUE(task_id,invocation));
+CREATE INDEX IF NOT EXISTS git_task_reads_by_task ON git_task_reads(task_id,id);
 CREATE TABLE IF NOT EXISTS git_webhook_events(
  id INTEGER PRIMARY KEY, host TEXT NOT NULL, event_id TEXT NOT NULL, repo TEXT NOT NULL,
  data TEXT NOT NULL, payload_digest TEXT, UNIQUE(host,event_id), UNIQUE(host,payload_digest));
@@ -68,6 +73,7 @@ INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,eve
  DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
 )SQL",{repo.host,repo.repo,pr.number,eventCursor,pr.headSha});
     }
+    gitWebhooksDrainedAt.reset();
     return true;
 }
 
