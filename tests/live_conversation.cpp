@@ -423,14 +423,23 @@ bool explainsCanary(const std::string& reply) {
 
 enum class NoteTiming { Immediate, SafeBoundary };
 
+const std::string databaseDirective =
+    R"((?:use|using|(?:switch|move|point|set|change)(?:\s+(?!(?:to|but|then)\b)\w+){0,4}\s+to)"
+    R"(|target(?:ing)?|connect(?:ing)?\s+to)"
+    R"(|benchmark(?:ing)?\s+(?:against|on|with)|run(?:ning)?\s+(?:against|on)))";
+const std::string databaseExclusion =
+    R"((?:\b(?:not|never|no|avoid|skip|without|instead\s+of|rather\s+than)|n(?:'|’)t)\s+)"
+    "(?:" + databaseDirective + R"(\s+)?(?:the\s+)?)";
+const std::string passiveDatabaseExclusion = R"(\s+(?:should|must)\s+(?:not|never)\s+be\s+used\b)";
+
 bool selectsOtherDatabase(const std::string& text) {
-    // Capture each exclusion with its own production mention so a later directive is scored separately.
+    // Capture each exclusion with its own database mention so a later directive is scored separately.
     static const std::regex otherDatabase(
-        R"(((?:\b(?:not|never|no|avoid|skip|without|instead\s+of|rather\s+than)|n['’]t)\s+)"
-        R"((?:(?:use|using|switch\s+to|target|connect\s+to|benchmark\s+against|run\s+against)\s+)?(?:the\s+)?`?)?)"
-        R"(\b(?:production|prod)\b|\b(?:development|dev)\s+(?:database|db)\b)");
+        "(" + databaseExclusion + ")?" +
+        R"(\b(?:(?:production|prod)(?:\s+(?:database|db))?|(?:development|dev)[\s-]+(?:database|db))\b)" +
+        "(" + passiveDatabaseExclusion + ")?");
     for (auto it = std::sregex_iterator(text.begin(),text.end(),otherDatabase); it != std::sregex_iterator(); ++it)
-        if (!(*it)[1].matched) return true;
+        if (!(*it)[1].matched && !(*it)[2].matched) return true;
     return false;
 }
 
@@ -445,12 +454,13 @@ void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing
           "expected one new " + std::string(kind) + " event for this message");
     const auto& note = notes.front();
     const auto& instruction = note.at("text").get_ref<const std::string&>();
+    static const std::string stagingDatabase = R"(\bstaging(?:\s+(?:database|db))?\b)";
     static const std::regex staging(
-        R"(\b(?:use|switch to|target|connect to|benchmark against|run against)\s+(?:the\s+)?staging\s+(?:database|db)\b)");
+        R"(\b)" + databaseDirective + R"(\s+(?:the\s+)?)" + stagingDatabase + "|" +
+        stagingDatabase + R"(\s+(?:(?:should|must)\s+be\s+used|only|from\s+now\s+on|going\s+forward)\b)");
     static const std::regex rejectsStaging(
-        R"((?:(?:\b(?:not|never)|n['’]t)\s+(?:use|switch to|target|connect to|benchmark against|run against))"
-        R"(|\b(?:no|avoid|skip|without|instead of|rather than))\s+(?:the\s+)?staging\b)");
-    const auto text = lower(instruction);
+        databaseExclusion + stagingDatabase + "|" + stagingDatabase + passiveDatabaseExclusion);
+    const auto text = stripMarkdownFormatting(lower(instruction));
     check(std::regex_search(text,staging) && !std::regex_search(text,rejectsStaging) &&
           !selectsOtherDatabase(text),
           "the new instruction did not direct the benchmark to use the staging database");
@@ -743,7 +753,14 @@ void selfTest() {
     for (auto text : {"Use the staging database, not the production database",
                       "Use the staging database instead of production",
                       "Use the staging database rather than prod",
-                      "Avoid production and use the staging database"}) {
+                      "Avoid production and use the staging database",
+                      "Switch the benchmark database to staging.",
+                      "Use staging for all subsequent benchmark queries.",
+                      "Switch the benchmark database to staging, not production.",
+                      "Do not switch the benchmark database to production; use staging.",
+                      "Use **staging** instead of `production`.",
+                      "Do not point the benchmark to the dev db. Staging should be used.",
+                      "Production must not be used. Run the benchmark using staging."}) {
         test("a note for running work reaches",{steer(text),done});
         test("a note for running work waits",{queue(text),done});
     }
@@ -751,7 +768,18 @@ void selfTest() {
                       "Use staging and production database",
                       "Use the staging database and production database",
                       "Use the staging database, then switch to production",
-                      "Use the staging database, not the production database. Then run against prod."}) {
+                      "Use the staging database, not the production database. Then run against prod.",
+                      "Do not switch the benchmark database to staging.",
+                      "Switch the benchmark database to production.",
+                      "Mention staging without changing the database.",
+                      "Use staging now, then production later.",
+                      "Use staging now, then connect to prod.",
+                      "Use staging for now, then switch the benchmark database to the dev db.",
+                      "Use staging for now. Do not switch from staging but switch to production later.",
+                      "Use staging for now. Don't switch the benchmark database to staging later.",
+                      "Use staging for now. Don’t use staging for the final run.",
+                      "Use staging for now. Staging should not be used going forward.",
+                      "Use staging for now. Run on the existing database instead of staging."}) {
         test("a note for running work reaches",{steer(text),done},"did not direct");
         test("a note for running work waits",{queue(text),done},"did not direct");
     }
