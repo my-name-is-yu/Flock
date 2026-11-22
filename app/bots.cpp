@@ -353,7 +353,6 @@ Bot Bots::get(std::string_view id) const {
             stored["workspaceStrategy"] = session["workspaceStrategy"];
         }
     }
-    if (config.contains("avatar")) bot.avatar = config["avatar"];
     const auto allowedBots = config.value("allowedBots",Json::array());
     if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
     std::set<std::string> allowedIds;
@@ -431,9 +430,9 @@ Json Bots::cardLocked(std::string_view id) const {
     Json item = {{"id",id},{"name",name},{"soul",readText(botDir / "SOUL.md",8192,true)},{"cron",schedules}};
     if (config.contains("role") && config["role"].is_string() && validBotRole(config["role"].get_ref<const std::string&>()))
         item["role"] = config["role"];
-    if (config.contains("avatar") && (config["avatar"].is_string() || config["avatar"].is_object())) {
-        auto avatar = config["avatar"];
-        if (avatar.is_object() && avatar.value("kind","") == "upload") {
+    if (const auto stored = config.find("avatar"); stored != config.end() && stored->is_object()) {
+        auto avatar = *stored;
+        if (avatar.value("kind","") == "upload") {
             const auto file = avatar.value("file",std::string{});
             const auto target = botDir / file;
             if (!AvatarImage::isStoredFilename(file) || !isAvatarFile(target)) {

@@ -24,7 +24,7 @@ struct Schedule {
 
 struct Bot {
     std::string id, name, environmentId, projectId;
-    Json settings = Json::object(), avatar;
+    Json settings = Json::object();
     std::vector<Schedule> schedules;
     std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;

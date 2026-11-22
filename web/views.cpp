@@ -72,7 +72,6 @@ Json runView(const Json& run, std::string_view environment) {
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
-    if (source.is_string()) return source;
     Json view = Json::object();
     copyFields(view,source,{"kind","example","icon","color","eyeColor","filename","version"});
     if (field(source,"kind") == "upload") {
@@ -98,8 +97,8 @@ Json botSummary(const Json& bot) {
     const auto name = field(bot,"name");
     Json summary = {{"id",id},{"name",name.empty() ? id : name}};
     copyFields(summary,bot,{"role"});
-    if (bot.contains("avatar") && (bot["avatar"].is_string() || bot["avatar"].is_object()))
-        summary["avatar"] = avatarView(bot["avatar"],id);
+    if (const auto avatar = bot.find("avatar"); avatar != bot.end() && avatar->is_object())
+        summary["avatar"] = avatarView(*avatar,id);
     return summary;
 }
 
