@@ -18,10 +18,12 @@ struct SessionService : T3 {
     std::set<std::string> interrupts;
     std::map<std::string,Observation> observations;
     std::map<std::string,RunRef> runs;
-    bool loseReceipt = false;
+    bool loseReceipt = false, receiptVisible = true;
+    std::function<void()> onObserve;
 
     std::string authGeneration(const std::string&,const Json&) override { return "test"; }
     Delivery send(const Command& command) override {
+        if (command.tool=="answer_session_question") return {Delivery::Kind::NotAccepted,{},"Answer definitely unsent",true};
         commands.push_back(command);
         auto suffix = std::to_string(commands.size());
         RunRef run{command.tool=="delegate" ? "thread-"+suffix : command.target.threadId,"run-"+suffix,"link-"+suffix};
@@ -29,8 +31,14 @@ struct SessionService : T3 {
         if (std::exchange(loseReceipt,false)) return {Delivery::Kind::Unknown,{},{}};
         return {Delivery::Kind::Accepted,run,{}};
     }
-    Delivery reconcile(const Command& command) override { return {Delivery::Kind::Accepted,runs.at(command.actionId),{}}; }
-    Observation observe(const std::string&,const Json&,const RunRef& run) override { return observations[run.runId]; }
+    Delivery reconcile(const Command& command) override {
+        if (!receiptVisible) return {};
+        return {Delivery::Kind::Accepted,runs.at(command.actionId),{}};
+    }
+    Observation observe(const std::string&,const Json&,const RunRef& run) override {
+        if (auto callback = std::exchange(onObserve,{})) callback();
+        return observations[run.runId];
+    }
     void interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); }
     void finish(std::string run, Json report, std::string status = "completed") {
         auto& observation = observations[run];
@@ -44,10 +52,16 @@ struct SessionService : T3 {
 struct Bot : Model {
     Decision action;
     Json history, result;
+    std::function<Decision(const ModelInput&)> conversation;
     Decision decide(const ModelInput& input) override {
+        if (input.event.at("kind")=="question")
+            return {"answer_session_question",{{"requestId","q"},{"answers",{{"choice","yes"}}}},"Answer the Session"};
         if (input.event.at("kind")!="conversation_turn")
             throw std::runtime_error("Unexpected task decision: "+input.event.dump());
         history = input.history;
+        if (conversation) return conversation(input);
+        if (!action.tool.empty())
+            require(std::ranges::find(input.tools,action.tool)!=input.tools.end(),"tool missing from conversation runtime");
         if (input.event.at("turn").empty() && !action.tool.empty()) return action;
         if (!input.event.at("turn").empty()) result = input.event.at("turn").back().at("result");
         return {"reply",{{"text","Received"}},"Acknowledge the turn"};
@@ -94,7 +108,7 @@ struct Fixture {
         return bot.result;
     }
     Json status() { return store->workflows("bot").at(0); }
-    void ticks(int count) { while (count-->0) runtime->tick(); }
+    void ticks(int count) { for (int i = 0; i < count; ++i) runtime->tick(); }
 };
 
 const std::string shaA(40,'a'), shaB(40,'b');
@@ -104,7 +118,7 @@ void verifyAfterRestart(bool advance) {
     const Id id = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run tests"}}).at("workflowId");
     f.ticks(2);
     require(f.t3.commands.size()==1,"expected single implementation Session");
-    f.t3.finish("run-1",{{"commitSha",shaA}});
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(1);
     require(f.status().at("stages")[1]["status"]=="pending","verification dispatched prematurely");
     f.restart();
@@ -112,6 +126,7 @@ void verifyAfterRestart(bool advance) {
     auto status = f.status();
     require(f.t3.commands.size()==2 && f.t3.commands.back().tool=="delegate" &&
         f.t3.commands.back().instruction.find(shaA)!=std::string::npos &&
+        f.t3.commands.back().instruction.find("Implement feature")!=std::string::npos &&
         status["stages"][1]["inputArtifactVersion"]==shaA,"lost pin or reran implementation");
     if (advance) {
         f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","implement"},{"instruction","Revise implementation"}});
@@ -203,6 +218,202 @@ void uncertainLaunchAndStageStop() {
     require(f.status()["stages"][0]["status"]=="stopped" && f.t3.commands.size()==1,"dependent of stopped stage ran");
 }
 
+void stopDuringUnconfirmedStart() {
+    Fixture f;
+    f.t3.loseReceipt = true;
+    f.t3.receiptVisible = false;
+    const auto id = f.call("start_workflow",{{"request","Confirm before stopping"}}).at("workflowId");
+    f.ticks(2);
+    auto status = f.call("stop_workflow",{{"workflowId",id}});
+    require(status["stages"][0]["status"]=="unreachable" && status["stages"][0]["stopRequested"]==true &&
+            status["stages"][0]["lastConfirmedAt"]==0 && status["allStopped"]==false,"stop obscured the lost launch receipt");
+    f.restart();
+    f.ticks(3);
+    status.erase("effect");
+    require(f.status()==status && f.t3.commands.size()==1,"restart retried or confirmed the uncertain launch");
+    f.now += 5;
+    f.t3.receiptVisible = true;
+    f.ticks(2);
+    require(f.t3.interrupts.contains("run-1") && !f.status()["allStopped"].get<bool>(),"recovered Run was not stopped");
+    f.t3.finish("run-1",Json::object(),"interrupted");
+    f.t3.observations["run-1"].settled = false;
+    f.ticks(1);
+    require(f.status()["stages"][0]["lastConfirmedState"]=="settling" && f.status()["allStopped"]==false,
+            "unsettled delegated work was reported stopped");
+    f.t3.observations["run-1"].settled = true;
+    f.ticks(2);
+    require(f.status()["allStopped"]==true && f.t3.commands.size()==1,"reconciled stop admitted a downstream stage");
+}
+
+void reopenedStageWaitsForProject() {
+    Fixture f;
+    const Json one = {{"request","Independent work"},{"stages",Json::array({{{"stageId","only"},{"role","collect"}}})}};
+    const auto first = f.call("start_workflow",one).at("workflowId");
+    f.ticks(2);
+    f.t3.finish("run-1","Initial findings");
+    f.ticks(1);
+    f.call("start_workflow",one);
+    f.ticks(2);
+    const auto revised = f.call("instruct_workflow_stage",{{"workflowId",first},{"stageId","only"},{"instruction","Check again"}});
+    const Id task = revised["stages"][0]["taskId"];
+    require(f.store->task(task)["blockedBy"]["id"]==f.status()["stages"][0]["taskId"],"reopened task bypassed the queue");
+    f.ticks(4);
+    require(f.t3.commands.size()==2,"older stage took another workflow's active slot");
+    f.t3.finish("run-2","Second workflow done");
+    f.ticks(4);
+    require(f.t3.commands.size()==3 && f.t3.commands.back().tool=="follow_up" &&
+            f.t3.commands.back().target.threadId=="thread-1","reopened task lost its Session");
+}
+
+void invalidateDependencyChain() {
+    Fixture f;
+    const auto id = f.call("start_workflow",{{"request","Release tested changes"},{"stages",Json::array({
+        {{"stageId","build"},{"role","implement"}},{{"stageId","notes"},{"role","collect"}},
+        {{"stageId","test"},{"role","verify"},{"dependsOn",{"build"}}},
+        {{"stageId","release"},{"role","publish"},{"dependsOn",{"test","notes"}},{"inputFrom","test"}}})}}).at("workflowId");
+    f.ticks(2);
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
+    f.t3.finish("run-2","Include the operator notes");
+    f.ticks(3);
+    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
+    f.ticks(3);
+    const auto instruction = f.t3.commands.back().instruction;
+    require(instruction.find("Include the operator notes")!=std::string::npos && instruction.find("run-2")!=std::string::npos &&
+            instruction.find(shaA)!=std::string::npos && instruction.find("run-3")!=std::string::npos,
+            "join did not receive both attributed reports");
+    f.t3.finish("run-4","Released A");
+    f.ticks(1);
+    require(f.status()["status"]=="completed","first release did not finish");
+    const auto revise = [&](std::string stage) {
+        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId",stage},{"instruction","Repeat for B"}});
+        f.ticks(3);
+    };
+    revise("build");
+    f.t3.finish("run-5",{{"artifactVersion",shaB}});
+    f.ticks(1);
+    require(f.status()["stages"][3]["outdated"]==true,"transitively stale release counted as current");
+    revise("test");
+    f.t3.finish("run-6",{{"artifactVersion",shaB},{"verdict","pass"}});
+    f.ticks(1);
+    f.restart();
+    require(f.status()["stages"][2]["verified"]==true && f.status()["stages"][3]["outdated"]==true &&
+            f.status()["status"]=="needs_verification","B reused the release for A");
+    revise("release");
+    require(f.t3.commands.size()==7 && f.t3.commands.back().instruction.find(shaB)!=std::string::npos,
+            "reopened release did not bind the new dependency");
+    f.t3.finish("run-7","Released B");
+    f.ticks(1);
+    require(f.status()["status"]=="completed","updated release remained stale");
+}
+
+void settledWhileReadingInstruction() {
+    Fixture f;
+    f.call("start_workflow",{{"request","Preserve duplicate input rows"}});
+    f.ticks(2);
+    const Id task = f.status()["stages"][0]["taskId"];
+    f.t3.finish("run-1",{{"artifactVersion",shaA},{"finding","Keep the original row count"}});
+    f.t3.onObserve = [&] {
+        f.store->receive({"bot","","env","project",Json::object(),{},0},"fresh","Continue in a fresh Session");
+        f.bot.action = {"continue_fresh_session",{{"taskId",task}},"Continue the same task"};
+    };
+    f.ticks(1);
+    require(f.store->task(task)["state"]!="completed" && f.status()["stages"][1]["taskId"]==0,
+            "stage closed before the pending message was read");
+    f.restart();
+    f.ticks(6);
+    const auto& next = f.t3.commands.back();
+    require(f.t3.commands.size()==2 && next.tool=="delegate" && f.store->task(task)["runs"].size()==2 &&
+            next.instruction.find("Keep the original row count")!=std::string::npos &&
+            next.instruction.find("run-1")!=std::string::npos && f.status()["artifacts"][0]["artifactVersion"]==shaA &&
+            f.status()["stages"][1]["taskId"]==0,"fresh Session lost its settled report or started a verifier");
+    f.t3.finish("run-2",{{"artifactVersion",shaB}});
+    f.ticks(3);
+    require(f.status()["stages"][1]["inputArtifactVersion"]==shaB &&
+            f.t3.commands.back().instruction.find("Preserve duplicate input rows")!=std::string::npos,
+            "default verifier lost the requested behavior or pin");
+    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
+    f.ticks(1);
+    require(f.status()["verdicts"].empty() && f.status()["stages"][1]["verified"]==false,
+            "verifier's mismatched report was recorded against its assigned version");
+}
+
+void observeAfterUnsentAnswer() {
+    Fixture f;
+    f.call("start_workflow",{{"request","Ask for the output format"}});
+    f.ticks(2);
+    auto& run = f.t3.observations["run-1"];
+    run.kind = Observation::Kind::Question;
+    run.question = {"q",Json::array({{{"id","choice"},{"freeform",true}}})};
+    f.ticks(3);
+    const Id task = f.status()["stages"][0]["taskId"];
+    require(f.store->task(task)["wait"]["reason"]=="unknown_delivery" && f.store->task(task)["pendingAction"]["phase"]=="ready",
+            "unsent answer fixture did not reach its safe retry point");
+    f.restart();
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
+    f.ticks(3);
+    require(f.t3.commands.size()==2 && f.status()["stages"][1]["inputArtifactVersion"]==shaA,
+            "unsent answer prevented observation of a completed Run");
+}
+
+void stopBeforeFirstSend() {
+    for (int prepared : {0,1}) {
+        Fixture f;
+        const auto id = f.call("start_workflow",{{"request","Pending launch"}}).at("workflowId");
+        f.ticks(prepared);
+        f.call("stop_workflow",{{"workflowId",id}});
+        f.restart();
+        f.ticks(3);
+        require(f.t3.commands.empty() && f.status()["allStopped"]==true,"stop admitted pending or prepared work");
+    }
+}
+
+void scopedCompactionPages() {
+    Fixture f;
+    std::string original;
+    for (int i=0; i<1000; ++i) original += "根拠\n\t\x01";
+    const Id first = f.turn(original);
+    const Id end = f.turn("Boundary");
+    const auto summary = f.call("compact_conversation",{{"endMessageId",end},{"summary","Keep the original evidence"}});
+    require(summary["compaction"]["originalCount"]==3,"summary counted messages outside its boundary");
+    f.bot.action = {"expand_context",{{"compactionId",summary["compaction"]["compactionId"]}},"Look up original evidence"};
+    f.store->receive({"other","","env","project",Json::object(),{},0},"read","Read first Bot's evidence");
+    f.runtime->runConversations();
+    require(f.bot.result.at("ok")==false && f.bot.history.empty(),"compaction crossed Bot histories");
+    f.turn("Bad offset","expand_context",{{"startMessageId",first},{"offset",1}});
+    require(f.bot.result.at("ok")==false,"cursor split a UTF-8 character");
+    std::string replay;
+    std::size_t offset = 0;
+    do {
+        const auto page = f.call("expand_context",{{"startMessageId",first},{"endMessageId",first},{"offset",offset},{"limit",1}});
+        require(page.dump().size()<=8192 && page.at("messages").size()==1 && page["messages"][0]["messageId"]==first,
+                "escaped evidence exceeded its byte or item cap");
+        replay += page["messages"][0]["text"].get<std::string>();
+        if (!page.contains("nextOffset")) break;
+        offset = page.at("nextOffset");
+        require(offset==replay.size() && page.at("nextMessageId")==first,"non-advancing evidence cursor");
+    } while (replay.size()<original.size());
+    require(replay==original,"UTF-8 cursor skipped or duplicated original bytes");
+
+    int calls = 0;
+    bool reviewed = false;
+    f.bot.conversation = [&](const ModelInput& input) -> Decision {
+        const auto& steps = input.event.at("turn");
+        std::size_t expanded = 0;
+        for (const auto& step : steps) {
+            const auto& result = step.at("result");
+            if (result.contains("messages")) expanded += result.dump().size();
+        }
+        require(expanded<=8192 && expanded+input.history.dump().size()<=24000,"expansions accumulated beyond model context budget");
+        if (++calls <= 5) return {"expand_context",{{"startMessageId",first},{"endMessageId",first}},"Read original evidence"};
+        require(steps.front()["result"].value("evidenceOmitted",false) && steps.back()["result"].contains("messages"),
+                "bounded context lost the latest requested evidence");
+        reviewed = true;
+        return {"reply",{{"text","Reviewed"}},"Finish"};
+    };
+    f.turn("Read several pages");
+    require(calls==6 && reviewed,"multi-step expansion did not respect the evidence budget");
+}
+
 void compactAndContinue() {
     Fixture f;
     const std::string original = "Keep original instruction and artifact "+shaA;
@@ -227,7 +438,7 @@ void compactAndContinue() {
 
     f.call("start_workflow",{{"request","Implement feature"}});
     f.ticks(2);
-    f.t3.finish("run-1",{{"commitSha",shaA}});
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
     f.ticks(3);
     const Id task = f.status()["stages"][1]["taskId"];
     auto before = f.store->task(task);
@@ -252,6 +463,13 @@ int main() {
         rejectInvalidGraphAndArtifact();
         stopAndDeadline();
         uncertainLaunchAndStageStop();
+        stopDuringUnconfirmedStart();
+        reopenedStageWaitsForProject();
+        invalidateDependencyChain();
+        settledWhileReadingInstruction();
+        observeAfterUnsentAnswer();
+        stopBeforeFirstSend();
+        scopedCompactionPages();
         compactAndContinue();
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n';

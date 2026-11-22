@@ -168,12 +168,7 @@ struct Runtime::Impl {
     std::vector<Id> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
-SELECT id FROM project_execution_queue WHERE position=1
-UNION
-SELECT sibling.task_id FROM project_execution_queue q JOIN workflow_stages head ON head.task_id=q.id
-JOIN workflow_stages sibling USING(workflow_id) JOIN tasks t ON t.id=sibling.task_id
-WHERE q.position=1 AND t.environment_id=q.environment_id AND t.project_id=q.project_id
-AND t.state NOT IN ('completed','cancelled')
+SELECT id FROM project_slots WHERE blocker_id IS NULL
 UNION
 SELECT id FROM tasks WHERE state NOT IN ('completed','cancelled') AND (
   COALESCE(json_extract(data,'$.environmentReleased'),0)=1 OR
@@ -199,10 +194,16 @@ ORDER BY id)SQL");
 
     void activate(const Json& task) {
         change(task,[&](Json& current) {
-            auto turn = db.query("SELECT 1 FROM project_execution_queue WHERE id=? AND position=1"
+            auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL"
                                  " UNION ALL SELECT 1 FROM peer_exchanges WHERE recipient_task=? AND kind='consult'",
                                  {current["id"],current["id"]});
             if (!turn.next()) return false;
+            if (current.contains("workflowId") && current["lastRun"].is_null()) {
+                const auto pending = pendingBatch(current);
+                supersedeInstructions(current,pending.superseded);
+                queueAction(current,actionId(),"delegate",field(current,"doneWhen"),Json::object(),pending.instructions);
+                return true;
+            }
             if (current["eventId"] == 0) db.event(current,"intake",{{"kind","intake"}});
             current["state"] = "deciding";
             return true;
@@ -241,7 +242,12 @@ ORDER BY id)SQL");
         });
     }
     bool ingest(const Json& snapshot, const Observation& observed) {
-        return change(snapshot,[&](Json& task) {
+        std::lock_guard lock(db.mutex);
+        Transaction tx(db.db);
+        auto task = db.load(snapshot.at("id"));
+        if (task.at("generation")!=snapshot.at("generation")) return false;
+        if (task.contains("workflowId")) db.stageObservation(task,observed,options.clock());
+        const bool changed = [&] {
             const auto run = runRef(task["activeRun"]);
             const auto state = field(task,"state");
             const auto reason = field(task["wait"],"reason");
@@ -281,7 +287,11 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                         task.erase("feedback");
                         db.event(task,"result/" + field(task,"environmentId") + "/" + run.threadId + "/" + run.runId,data);
                     }
-                    db.journal(task["id"],"report",data);
+                    const auto reportId = db.journal(task["id"],"report",data);
+                    if (task.contains("workflowId")) {
+                        task["pendingStageReport"] = reportId;
+                        db.settleStageReport(task);
+                    }
                 }
                 if (const auto stop = field(task,"stopActionId"); !stop.empty()) {
                     db.exec("UPDATE outbox SET phase='accepted' WHERE id=?", {stop});
@@ -290,9 +300,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     task.erase("replanInterruptAt");
                 }
                 if (state == "cancelling") cancelDone(task);
-                else if (task.contains("workflowId") && !replanning && !hasPending(task))
-                    db.finishStage(task,data);
-                else task["state"] = "deciding";
+                else if (!terminal(task)) task["state"] = "deciding";
                 return true;
             }
             if (state == "cancelling" || replanning) return false;
@@ -346,18 +354,20 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 return true;
             }
             return false;
-        });
+        }();
+        if (changed) db.save(task);
+        tx.commit();
+        return changed;
     }
 
     Observation observe(const Json& task) {
-        Observation observation;
         try {
-            observation = t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
+            return t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
         } catch (const std::exception&) {
+            Observation observation;
             observation.kind = Observation::Kind::Unavailable;
+            return observation;
         }
-        if (task.contains("workflowId")) db.stageObservation(task,observation,options.clock());
-        return observation;
     }
 
     void cancel(const Json& task) {
@@ -481,7 +491,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     if (!waitingSender) return false;
                 }
             }
-            if (current.erase("freshRequested")) current["newSessionRequired"] = true;
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;
@@ -495,7 +504,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (current["lastRun"].is_null())
                     db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
             }
-            current["state"] = "deciding";
+            current["state"] = current.contains("workflowId") && current["lastRun"].is_null() ? "queued" : "deciding";
             for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","environmentReleased","replanReconcileAt","feedback"})
                 current.erase(key);
             return true;
@@ -613,9 +622,13 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 else {
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
-                    if (task.contains("workflowId"))
-                        db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0 WHERE task_id=?",
-                                {options.clock(),id});
+                    if (task.contains("workflowId")) {
+                        const auto now = options.clock();
+                        db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0,"
+                                "status=CASE WHEN status='pending' THEN 'running' ELSE status END,"
+                                "deadline=CASE WHEN deadline=0 AND json_extract(spec,'$.softDeadlineSeconds')>0 "
+                                "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE deadline END WHERE task_id=?", {now,now,id});
+                    }
                     task["activeRun"] = runJson(outcome.run);
                     task["activeRun"]["environmentId"] = task["environmentId"];
                     task["activeRun"]["revisionId"] = action.value("revisionId",Json(nullptr));
@@ -623,7 +636,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                         {"revisionId",task["activeRun"]["revisionId"]},
                         {"sourceResultRefs",action.value("sourceResultRefs",Json::array())}});
                     instructionDelivery(task,action);
-                    if (action["tool"] == "delegate") task.erase("newSessionRequired");
+                    if (action["tool"] == "delegate" && !task.value("replanning",false)) task.erase("newSessionRequired");
                 }
                 if (reply) db.journal(id,"session_answered",{{"requestId", action["questionId"]},{"actionId",action["id"]}});
                 task["actionId"] = "";
@@ -684,10 +697,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
                 if (!change(task,[&](Json& current) {
                     db.exec("UPDATE outbox SET phase='started',auth_generation=? WHERE id=?", {cmd.authGeneration,action["id"]});
-                    if (current.contains("workflowId") && cmd.tool != "answer_session_question")
-                        db.exec("UPDATE workflow_stages SET status='running',deadline=CASE WHEN json_extract(spec,'$.softDeadlineSeconds')>0 "
-                                "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE 0 END WHERE task_id=? AND status='pending'",
-                                {options.clock(),id});
                     if (cmd.tool != "answer_session_question" && current["deadline"] == 0)
                         current["deadline"] = options.clock() + current["config"].value("runTimeoutSeconds",1800);
                     db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
@@ -851,18 +860,28 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 resultReferences.push_back(std::move(reference));
                 instruction += "\n\nReferenced result " + std::to_string(id) + " from task " +
                     std::to_string(source.at("taskId").get<Id>()) +
-                    (source.value("option",0) ? ", option " + std::to_string(source.at("option").get<int>()) : "") +
-                    " (reference only):";
+                    (source.value("option",0) ? ", option " + std::to_string(source.at("option").get<int>()) : "");
+                if (source.contains("stageId")) instruction += "\nStage: " + field(source,"stageId");
+                if (source.contains("run")) instruction += "\nSource Run: " + source.at("run").dump();
+                if (source.contains("resultRunId")) instruction += "\nReport Run: " + field(source,"resultRunId");
+                instruction += " (reference only):";
                 const auto excerpt = bounded(field(source,"text"),excerptBudget);
                 if (!excerpt.empty()) instruction += "\n" + excerpt;
                 excerptBudget -= excerpt.size();
             };
             for (const auto& item : pending)
                 if (item.contains("source")) quoteSource(item.at("source"));
-            if (task.value("newSessionRequired",false) || task["lastRun"].is_null()) {
-                for (const auto& source : task.value("sourceResultRefs",Json::array()))
-                    if (task.value("newSessionRequired",false) || source["taskId"] == task.value("sourceTaskId",Id{0}))
-                        quoteSource(source);
+            if (tool == "delegate") {
+                for (const auto& source : task.value("sourceResultRefs",Json::array())) quoteSource(source);
+                if (task.value("newSessionRequired",false)) {
+                    auto reports = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 3",
+                                            {task.at("id")});
+                    while (reports.next()) {
+                        const auto report = reports.json(1);
+                        quoteSource({{"taskId",task.at("id")},{"messageId",reports.number(0)},{"run",report.at("run")},
+                                     {"resultRunId",report.at("resultRunId")},{"text",bounded(field(report,"report"),2000)}});
+                    }
+                }
             }
             instruction += "\n\n[Flock action ID: " + action + "]";
             task["deadline"] = 0;
@@ -1461,15 +1480,11 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
-        if (state == "cancelling") cancel(task);
+        if (task.contains("pendingStageReport")) {
+            change(task,[&](Json& current) { return db.settleStageReport(current); });
+        } else if (state == "cancelling") cancel(task);
         else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
-        else if (state == "queued" && task.contains("workflowId")) {
-            change(task,[&](Json& current) {
-                queueAction(current,actionId(),"delegate",field(current,"stageAssignment"),Json::object(),
-                            pendingBatch(current).instructions);
-                return true;
-            });
-        } else if (state == "queued") activate(task);
+        else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;
             if (task["activeRun"].is_null() && !task["lastRun"].is_null() && hasPending(task)) {
@@ -1481,25 +1496,22 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (canContinue) continueTask(task);
             else decide(task);
         }
-        else if (state == "sending") {
+        else {
+            if (!task["activeRun"].is_null() && (state=="waiting" || state=="running") && ingest(task,observe(task))) return;
+            const bool uncertain = state=="waiting" && task.contains("workflowId") && !field(task,"actionId").empty();
+            if (state!="sending" && !uncertain) return;
             Json action;
             {
                 std::lock_guard lock(db.mutex);
                 action = db.outbox(task);
             }
-            if (!action.is_null()) deliver(task,action);
-        } else if (task.contains("workflowId") && state == "waiting" && field(task["wait"],"reason")=="unknown_delivery") {
-            Json action;
-            {
-                std::lock_guard lock(db.mutex);
-                action = db.outbox(task);
+            if (uncertain) {
+                const auto now = options.clock();
+                if (action.at("phase")!="started" || now<task.value("workflowReconcileAt",Seconds{})) return;
+                if (!change(task,[&](Json& current) { current["workflowReconcileAt"] = now+5; return true; })) return;
             }
-            const auto now = options.clock();
-            if (action.is_object() && action.at("phase")=="started" && now>=task.value("workflowReconcileAt",Seconds{}) &&
-                change(task,[&](Json& current) { current["workflowReconcileAt"] = now+5; return true; }))
-                deliver(task,action);
-        } else if (!task["activeRun"].is_null() && (state == "running" || state == "waiting"))
-            ingest(task,observe(task));
+            deliver(task,action);
+        }
     }
 };
 

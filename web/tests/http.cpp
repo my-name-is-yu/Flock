@@ -170,8 +170,18 @@ void inspectors(const std::filesystem::path& path) {
           "workflow stages missing from the Bot view");
     check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
           "inspectors mixed Bot histories");
-    check(browser.get("/api/conversation?bot=release").dump().find("Original release instructions")!=std::string::npos,
+    const auto audit = browser.get("/api/conversation?bot=release");
+    check(audit.dump().find("Original release instructions")!=std::string::npos,
           "summary removed the original message from the HTTP audit history");
+    bool linked = false;
+    for (const auto& event : audit.at("events")) {
+        const auto& data = event.at("data");
+        if (!data.contains("actions")) continue;
+        for (const auto& action : data.at("actions"))
+            if (action.at("tool")=="start_workflow" && action.at("workflowId")==workflows[0]["workflowId"])
+                linked = data.at("status")=="working";
+    }
+    check(linked,"workflow start was missing from the conversation reply");
 }
 
 void boundary(Browser& browser) {

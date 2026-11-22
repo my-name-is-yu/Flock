@@ -41,9 +41,9 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
     return id;
 }
 
-bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,
+bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
                                     const Json& source, const Json& routing, const TaskChange* change) {
-    auto task = load(taskId);
+    Id revision = task.value("currentRevision",Id{});
     bool conflicting = change != nullptr;
     std::string environment;
     if (change) {
@@ -83,7 +83,7 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
     }
     if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
     task["pendingInstructions"].push_back(pending);
-    journal(taskId,"instruction_accepted",pending);
+    journal(task.at("id"),"instruction_accepted",pending);
     save(task);
     return conflicting;
 }

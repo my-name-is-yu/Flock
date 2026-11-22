@@ -139,6 +139,11 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN candidates sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
   AND sender.project_id=task.project_id AND peer.phase<>'closed'
 WHERE COALESCE(peer.kind,'')<>'consult';
+CREATE VIEW IF NOT EXISTS project_slots AS
+SELECT q.id,CASE WHEN q.id<>head.id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
+             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN head.id END AS blocker_id
+FROM project_execution_queue q JOIN project_execution_queue head USING(environment_id,project_id)
+JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=head.id WHERE head.position=1;
 CREATE VIEW IF NOT EXISTS project_task_order AS
 SELECT task.id, task.environment_id, task.project_id, task.state,
        ROW_NUMBER() OVER (
@@ -179,10 +184,8 @@ void Store::Impl::save(Json& task) {
          {task["state"], task["generation"], task, task["environmentId"], task["id"]});
 }
 Json Store::Impl::queueBlocker(Id id) const {
-    auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
-                     " FROM project_execution_queue head JOIN project_execution_queue task"
-                     " USING(environment_id,project_id) JOIN tasks owner ON owner.id=head.id"
-                     " WHERE task.id=? AND head.position=1 AND head.id<>task.id", {id});
+    auto row = query("SELECT t.id,t.bot_id,json_extract(t.data,'$.request'),t.state FROM project_slots slot"
+                     " JOIN tasks t ON t.id=slot.blocker_id WHERE slot.id=?", {id});
     if (!row.next()) return nullptr;
     return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
 }
@@ -441,15 +444,7 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
     result["pendingAction"] = pending;
-    if (includeBlocker && result["state"] == "queued") {
-        auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
-                             " FROM project_execution_queue head JOIN project_execution_queue task"
-                             " USING(environment_id,project_id) JOIN tasks owner ON owner.id=head.id"
-                             " WHERE task.id=? AND head.position=1 AND head.id<>task.id",
-                             {id});
-        if (row.next()) result["blockedBy"] = {{"id",row.number(0)},{"botId",row.string(1)},
-                                              {"request",row.string(2)},{"state",row.string(3)}};
-    }
+    if (includeBlocker && result["state"] == "queued") result["blockedBy"] = queueBlocker(id);
     auto revisions = query("SELECT id,number,intent,done_when,source_message_id FROM task_revisions"
                            " WHERE task_id=? ORDER BY number", {id});
     result["revisions"] = Json::array();
@@ -480,14 +475,10 @@ Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
 Json Store::activeTasks(std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-WITH queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-)
 SELECT task.id,task.state,task.data,owner.id,owner.bot_id,owner.state,json_extract(owner.data,'$.request')
 FROM tasks task
-LEFT JOIN queue target ON task.state='queued' AND target.id=task.id
-LEFT JOIN tasks owner ON owner.id=target.head_id AND owner.id<>task.id
+LEFT JOIN project_slots slot ON task.state='queued' AND slot.id=task.id
+LEFT JOIN tasks owner ON owner.id=slot.blocker_id
 WHERE task.bot_id=? AND task.state NOT IN ('completed','cancelled')
 ORDER BY task.id DESC)SQL", {bot});
     Json result = Json::array();

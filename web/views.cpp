@@ -181,7 +181,7 @@ Json eventView(const Json& event) {
             details["actions"] = Json::array();
             for (const auto& action : *actions) {
                 Json item = Json::object();
-                copyFields(item,action,{"tool","taskId","effect"});
+                copyFields(item,action,{"tool","taskId","workflowId","stageId","effect"});
                 details["actions"].push_back(std::move(item));
             }
         }

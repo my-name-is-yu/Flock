@@ -521,6 +521,41 @@ function sessionRow(task, session, status, live) {
   }
   return row;
 }
+function workflowInspectors(data, open) {
+  const sections = [];
+  const section = (key, title) => {
+    const item = node('details');
+    item.dataset.inspector = key;
+    item.open = open.has(key);
+    item.append(node('summary', null, title));
+    sections.push(item);
+    return item;
+  };
+  for (const workflow of data?.workflows ?? []) {
+    const item = section(`workflow-${workflow.workflowId}`, `${workflow.request} · ${workflow.status.replaceAll('_', ' ')}`);
+    for (const stage of workflow.stages) {
+      const status = [stage.status.replaceAll('_', ' ')];
+      if (stage.outdated) status.push('Outdated input');
+      if (stage.stopRequested && stage.status === 'unreachable') status.push('Stop requested');
+      if (stage.lastConfirmedState) status.push(`Last confirmed ${stage.lastConfirmedState}`);
+      if (stage.deadlineExceeded) status.push('Soft deadline exceeded');
+      const row = node('p', null, [stage.name, ...status].join(' · '));
+      const link = linkToRun(stage.runRef);
+      if (link) row.append(' · ', link);
+      item.append(row);
+      if (stage.inputArtifactVersion) item.append(node('p', null, `Pinned input · ${stage.inputArtifactVersion}`));
+      if (stage.outputArtifactVersion) item.append(node('p', null, `Output · ${stage.outputArtifactVersion}`));
+    }
+    for (const check of workflow.verdicts) {
+      item.append(node('p', null, `${check.stageId} · ${check.verdict} · ${check.artifactVersion}`));
+    }
+  }
+  for (const summary of data?.compactions ?? []) {
+    const item = section(`summary-${summary.compactionId}`, `Conversation summary · ${summary.originalCount} messages`);
+    item.append(node('p', null, `Messages ${summary.startMessageId}–${summary.endMessageId}`), node('p', null, summary.summary));
+  }
+  return sections;
+}
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
@@ -588,25 +623,9 @@ function renderActivity() {
     heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
     rows.push(heading, ...items);
   }
-  for (const workflow of data?.workflows ?? []) {
-    const section = node('details');
-    section.append(node('summary', null, `Workflow · ${workflow.status.replaceAll('_', ' ')}`));
-    for (const stage of workflow.stages) {
-      const attention = stage.needsAttention ? ' · Needs attention' : '';
-      section.append(node('p', null, `${stage.name} · ${stage.status.replaceAll('_', ' ')}${attention}`));
-    }
-    for (const check of workflow.verdicts) {
-      section.append(node('p', null, `${check.stageId} · ${check.verdict} · ${check.artifactVersion}`));
-    }
-    rows.push(section);
-  }
-  for (const summary of data?.compactions ?? []) {
-    const section = node('details');
-    section.append(node('summary', null, `Conversation summary · ${summary.originalCount} messages`),
-      node('p', null, summary.summary));
-    rows.push(section);
-  }
   const list = elements['session-list'];
+  const open = new Set(Array.from(list.querySelectorAll('details[open]'), (item) => item.dataset.inspector));
+  rows.push(...workflowInspectors(data, open));
   list.setAttribute('aria-busy', loading);
   list.replaceChildren(...rows);
   if (loading) list.append(...skeletonRows(2));

@@ -264,7 +264,8 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
         integer("compactionId","Optional summary identifier.");
         integer("startMessageId","Inclusive first message or nextMessageId cursor.");
         integer("endMessageId","Inclusive last message.");
-        integer("offset","Byte cursor from nextOffset.");
+        integer("offset","Byte cursor from nextOffset, paired with startMessageId.");
+        fields["offset"]["minimum"] = 0;
         integer("limit","Maximum messages, capped at eight.");
         text("query","Optional literal search text.",false);
     } else if (name == "continue_fresh_session") {

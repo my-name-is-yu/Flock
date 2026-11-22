@@ -7,6 +7,9 @@
 namespace flockv0 {
 using conversation_storage::hasText;
 using conversation_storage::integer;
+using conversation_storage::identifier;
+using conversation_storage::text;
+using conversation_storage::ToolError;
 using conversation_storage::messageSize;
 using conversation_storage::verifiedEnvironment;
 
@@ -21,10 +24,8 @@ using conversation::Message;
 
 constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
-constexpr int historyLimit = 24;
 constexpr int findLimit = 10;
 constexpr int maxSteps = 24;
-constexpr std::size_t historyBytes = 24000;
 constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
 
@@ -38,40 +39,6 @@ bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
         return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
     });
-}
-
-struct ToolError : std::runtime_error {
-    Json details;
-    explicit ToolError(const std::string& message, Json extra = Json::object())
-        : std::runtime_error(message), details(std::move(extra)) {}
-};
-
-std::string text(const Json& args, std::string_view key, std::size_t limit, bool required) {
-    const auto value = args.find(key);
-    if (value == args.end() || value->is_null()) {
-        if (required) throw ToolError(std::string(key) + " is required");
-        return {};
-    }
-    if (!value->is_string()) throw ToolError(std::string(key) + " must be a string");
-    auto result = value->get<std::string>();
-    if (!hasText(result)) {
-        if (required) throw ToolError(std::string(key) + " must not be empty");
-        return {};
-    }
-    if (result.size() > limit)
-        throw ToolError(std::string(key) + " exceeds " + std::to_string(limit) + " bytes");
-    return result;
-}
-
-Id identifier(const Json& args, std::string_view key, bool required, long double minimum = 1) {
-    const auto value = args.find(key);
-    if (value == args.end() || value->is_null()) {
-        if (required) throw ToolError(std::string(key) + " is required");
-        return 0;
-    }
-    if (!value->is_number_integer() || value->get<long double>() < minimum)
-        throw ToolError(std::string(key) + (minimum > 0 ? " must be a positive integer" : " must be a non-negative integer"));
-    return value->get<Id>();
 }
 
 Json waitView(const Json& wait, Id messageId) {
@@ -172,6 +139,8 @@ Json sourceRef(const Json& result) {
 Json Store::Impl::turnInput(const Message& message, int step) const {
     Json tasks = Json::array();
     std::set<Id> listed;
+    const auto summaries = compactions(message.bot,0,1,message.id);
+    const Id boundary = summaries.empty() ? 0 : summaries.front().at("endMessageId").get<Id>();
     const auto latestResult = [&](Id taskId) -> Json {
         auto row = query(R"SQL(
 SELECT id,kind,data FROM journal WHERE task_id=? AND kind IN ('report','completed','cancelled') AND id<?
@@ -180,8 +149,9 @@ ORDER BY id DESC LIMIT 1
         if (!row.next()) return nullptr;
         const auto kind = row.string(1);
         const auto data = row.json(2);
-        return {{"messageId",row.number(0)},{"kind",kind},{"revisionId",integer(data,"revisionId")},
-                {"excerpt",bounded(field(data,kind == "report" ? "report" : "text"),600)}};
+        Json result = {{"messageId",row.number(0)},{"kind",kind},{"revisionId",integer(data,"revisionId")}};
+        if (row.number(0)>boundary) result["excerpt"] = bounded(field(data,kind == "report" ? "report" : "text"),600);
+        return result;
     };
     const auto addTask = [&](Id taskId) {
         if (!listed.insert(taskId).second) return;
@@ -250,56 +220,6 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
         } else replyTo = {{"messageId",message.replyTo},{"kind","unavailable"}};
     }
 
-    Json history = Json::array();
-    const auto summaries = compactions(message.bot,0,1);
-    const bool compacted = !summaries.empty() && summaries.front().at("endMessageId") < message.id;
-    const Id boundary = compacted ? summaries.front().at("endMessageId").get<Id>() : 0;
-    {
-        auto rows = query(R"SQL(
-SELECT j.id,j.task_id,j.kind,j.data,m.text FROM journal j
-LEFT JOIN tasks t ON t.id=j.task_id LEFT JOIN messages m ON m.id=j.id
-WHERE j.id<? AND j.id>? AND (
-  (j.conversation_bot_id=? AND j.kind IN ('conversation_message','conversation_reply')) OR
-  (j.conversation_bot_id IS NULL AND t.bot_id=? AND j.kind IN ('waiting','report','completed','cancelled')))
-ORDER BY j.id DESC LIMIT ?
-)SQL",{message.id,boundary,message.bot,message.bot,historyLimit});
-        std::size_t remaining = historyBytes - (compacted ? summaries.front().dump().size() : 0);
-        while (rows.next() && remaining > 0) {
-            const auto kind = rows.string(2);
-            const auto data = rows.json(3);
-            Json entry = {{"messageId",rows.number(0)},{"kind",kind}};
-            if (rows.number(1)) entry["taskId"] = rows.number(1);
-            std::string body;
-            if (kind == "conversation_message") {
-                entry["role"] = "user";
-                body = rows.string(4);
-            } else if (kind == "conversation_reply") {
-                entry["role"] = "bot";
-                body = field(data,"text");
-                if (data.contains("actions")) entry["actions"] = data.at("actions");
-                if (data.contains("suggestions")) entry["suggestions"] = data.at("suggestions");
-            } else {
-                entry["role"] = "task";
-                body = field(data,kind == "report" ? "report" : "text");
-                if (kind == "waiting") {
-                    if (field(data,"reason") != "user_question") continue;
-                    entry["waitId"] = integer(data,"id");
-                }
-            }
-            const std::size_t limit = entry["role"] == "user" ? 4000 : entry["role"] == "bot" ? 1500 : 700;
-            body = bounded(body,std::min(limit,remaining));
-            remaining -= body.size();
-            entry["text"] = std::move(body);
-            history.push_back(std::move(entry));
-        }
-        if (compacted) {
-            auto summary = summaries.front();
-            summary["kind"] = "conversation_compaction";
-            history.push_back(std::move(summary));
-        }
-        std::reverse(history.begin(),history.end());
-    }
-
     Json environments = Json::array();
     if (const auto initial = field(message.routing,"environmentId"); !initial.empty())
         environments.push_back({{"name",initial},{"environmentId",initial},{"default",true}});
@@ -312,15 +232,27 @@ ORDER BY j.id DESC LIMIT ?
     }
 
     Json turn = Json::array();
+    std::size_t expandedBytes = 0;
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
-                       " AND result IS NOT NULL ORDER BY step",{message.id,step});
+                       " AND result IS NOT NULL ORDER BY step DESC",{message.id,step});
     while (steps.next()) {
         const auto decision = steps.json(0);
-        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
+        auto result = steps.json(1);
+        if (decision.at("tool")=="expand_context" && result.contains("messages")) {
+            const auto bytes = result.dump().size();
+            if (expandedBytes+bytes > conversation_storage::expandedContextBytes) {
+                result.erase("messages");
+                result["evidenceOmitted"] = true;
+            }
+            else expandedBytes += bytes;
+        }
+        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",std::move(result)}});
     }
+    std::reverse(turn.begin(),turn.end());
+    auto history = conversationHistory(message.bot,message.id,summaries,expandedBytes);
     Json workflows = Json::array();
-    auto recent = query("SELECT w.id,CASE WHEN m.id>? THEN m.text ELSE '' END FROM workflows w JOIN messages m ON m.id=w.message_id "
-                        "WHERE w.bot_id=? AND m.id<=? ORDER BY w.id DESC LIMIT 12",{boundary,message.bot,message.id});
+    auto recent = query("SELECT id,CASE WHEN message_id>? THEN request ELSE '' END FROM workflows "
+                        "WHERE bot_id=? AND message_id<=? ORDER BY id DESC LIMIT 12",{boundary,message.bot,message.id});
     while (recent.next())
         workflows.push_back({{"workflowId",recent.number(0)},{"request",bounded(recent.string(1),300)}});
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
@@ -385,7 +317,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect","started"},{"taskId",id}};
     }
     if (tool == "send_to_task" || tool == "change_task") {
-        const auto task = ownTask(identifier(args,"taskId",true),bot);
+        auto task = ownTask(identifier(args,"taskId",true),bot);
         expectGeneration(task);
         active(task);
         const auto instruction = text(args,"instruction",messageSize,true);
@@ -403,7 +335,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             if (!change->environment.empty() && verifiedEnvironment(task,routing,change->environment).empty())
                 throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
         }
-        const bool conflicting = acceptInstruction(task.at("id"),task.value("currentRevision",Id{0}),message.id,step,
+        const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),routing,change ? &*change : nullptr);
         return {{"ok",true},{"effect",conflicting ? "replanning" : "accepted"},{"taskId",task.at("id")}};
     }
@@ -559,15 +491,26 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     while (steps.next()) {
         const auto result = steps.json(1);
         if (!result.value("ok",false) || !result.contains("effect")) continue;
-        actions.push_back({{"tool",steps.json(0).at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
-        touched.insert(result.at("taskId").get<Id>());
+        Json action = {{"tool",steps.json(0).at("tool")},{"effect",result.at("effect")}};
+        if (result.contains("taskId")) {
+            action["taskId"] = result.at("taskId");
+            touched.insert(result.at("taskId").get<Id>());
+        }
+        for (const auto* key : {"workflowId","stageId"})
+            if (result.contains(key)) action[key] = result.at(key);
+        actions.push_back(std::move(action));
     }
     if (route == "error" && !actions.empty()) {
         const bool ja = japanese(message.text);
         text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
         for (const auto& action : actions) {
-            const auto task = load(action.at("taskId"));
-            text += "\n- " + field(action,"effect") + ": " + requestName(task);
+            text += "\n- " + field(action,"effect") + ": ";
+            if (action.contains("taskId")) text += requestName(load(action.at("taskId")));
+            else {
+                auto workflow = query("SELECT request FROM workflows WHERE id=?", {action.at("workflowId")});
+                workflow.next();
+                text += bounded(workflow.string(0),160);
+            }
         }
     }
     const auto status = effectStatus(actions);
