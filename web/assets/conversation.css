@@ -377,6 +377,15 @@
 .empty-state h2 { font-size: var(--text-lg); font-weight: 600; }
 .empty-state p { font-size: var(--text-sm); color: var(--text-2); }
 
+.bubble[data-fold="folded"] .foldable-text {
+  max-height: calc(1lh * 12); overflow: hidden;
+  mask-image: linear-gradient(#000 calc(100% - 2lh), transparent);
+}
+.fold-toggle {
+  display: block; margin-top: .3rem; padding: 0; border: 0; background: none;
+  color: inherit; font-size: var(--text-sm); font-weight: 600; opacity: .85;
+}
+.fold-toggle:hover { opacity: 1; text-decoration: underline; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
