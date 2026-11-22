@@ -285,6 +285,34 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
 
+bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
+    // A sender cannot move until its exchange closes. Reserve a recipient's pending destination
+    // while retaining the current dependency until the recipient releases that queue.
+    return query(R"SQL(
+WITH RECURSIVE source(env,project) AS (
+  SELECT environment_id,project_id FROM tasks WHERE id=?1
+), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
+  SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
+         CASE WHEN json_extract(r.data,'$.replanning') THEN json_extract(r.data,'$.pendingEnvironmentId') END,
+         COALESCE(json_extract(r.data,'$.environmentReleased'),0)
+  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
+  WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
+), dependencies(source_env,source_project,target_env,target_project) AS (
+  SELECT source_env,source_project,current_env,target_project FROM work_routes
+  WHERE NOT released OR pending_env IS NULL
+  UNION ALL
+  SELECT source_env,source_project,pending_env,target_project FROM work_routes
+  WHERE pending_env IS NOT NULL
+), reachable(env,project) AS (
+  SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
+  UNION
+  SELECT target_env,target_project FROM dependencies JOIN reachable
+    ON source_env=env AND source_project=project
+)
+SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
+)SQL",{sender,environment,project}).next();
+}
+
 bool Store::Impl::replanReady(const Json& task) const {
     if (!task.value("replanning",false)) return false;
     std::lock_guard lock(mutex);

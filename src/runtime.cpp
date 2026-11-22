@@ -208,7 +208,7 @@ ORDER BY id)SQL");
         }
     }
 
-    void cancelDone(Json& task) {
+    void cancelDone(Json& task, std::string_view detail = {}) {
         closeQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
             const auto action = db.outbox(task);
@@ -225,9 +225,10 @@ ORDER BY id)SQL");
         task.erase("pendingInstructions");
         task["activeRun"] = nullptr;
         task["state"] = "cancelled";
-        db.journal(task["id"],"cancelled",Json::object());
+        db.journal(task["id"],"cancelled",detail.empty() ? Json::object() : Json{{"detail",detail}});
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
-            finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
+            finishPeer(*peer,task,db.load(peer->sender),"cancelled",
+                       detail.empty() ? "The receiving Bot's task was cancelled." : detail,actionId());
     }
 
     void stopNote(const Json& snapshot, const std::string& detail) {
@@ -412,14 +413,23 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
+            const bool released = current.value("environmentReleased",false);
+            if (peer && (target != old || released) &&
+                db.peerWorkRouteWouldCycle(peer->sender,target,field(current,"projectId"))) {
+                // A legacy move can reach here after releasing its previous slot. Its Run is
+                // settled, and cancellation closes the exchange without sending work to either queue.
+                cancelDone(current,"The receiving Bot's task was cancelled because its saved destination "
+                                   "would make project queues wait for one another.");
+                return true;
+            }
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
-            if (target != old && !current.value("environmentReleased",false)) {
+            if (target != old && !released) {
                 current["environmentReleased"] = true;
                 return true;
             }
-            if (target != old || current.value("environmentReleased",false) || current["state"] == "queued") {
+            if (target != old || released || current["state"] == "queued") {
                 const auto blocker = db.queueBlocker(id);
                 if (!blocker.is_null()) {
                     const bool waitingSender = peer && blocker["id"] == peer->sender &&
@@ -1011,24 +1021,6 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
         return *peer;
     }
 
-    void ensureNoRouteCycle(const Json& sender, const Intake& target) const {
-        if (sender["environmentId"] == target.environmentId && sender["projectId"] == target.projectId) return;
-        auto cycle = db.query(R"SQL(
-WITH RECURSIVE dependencies(source_env,source_project,target_env,target_project) AS (
-  SELECT s.environment_id,s.project_id,t.environment_id,t.project_id
-  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks t ON t.id=p.recipient_task
-  WHERE p.kind='work' AND p.phase<>'closed'
-), reachable(env,project) AS (
-  VALUES(?,?)
-  UNION
-  SELECT target_env,target_project FROM dependencies JOIN reachable
-  ON source_env=env AND source_project=project
-)
-SELECT 1 FROM reachable WHERE env=? AND project=?
-)SQL",{target.environmentId,target.projectId,sender["environmentId"],sender["projectId"]});
-        if (cycle.next()) throw Conflict("This work request would make two project queues wait for one another");
-    }
-
     Json peerMessage(const PeerExchange& peer, const Json& from, const Json& to, std::string_view type,
                      std::string_view body, std::string_view messageId) {
         Json message = {{"exchangeId",peer.id},{"messageId",messageId},{"fromBotId",from["botId"]},
@@ -1101,7 +1093,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
                 throw Conflict("Let the assigned Run settle before requesting another Bot's work");
             if (!admitWork(sender,decision,charge)) return;
             establishCriteria(sender,args);
-            ensureNoRouteCycle(sender,peer.intake);
+            if (db.peerWorkRouteWouldCycle(sender.at("id"),peer.intake.environmentId,peer.intake.projectId))
+                throw Conflict("This work request would make two project queues wait for one another");
         }
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         const auto id = db.submit(peer.intake,0,nullptr,RequestJournal::skip);
