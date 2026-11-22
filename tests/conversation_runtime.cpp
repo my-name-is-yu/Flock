@@ -528,6 +528,42 @@ void exactOfferedAnswersPreserveTheStoredChoice() {
     }
 }
 
+void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Publish the draft only with approval"));
+    f.model.questions.emplace(id,Json{{"question","Publish the draft?"},{"choices",{"Yes","No"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    f.script("Can I see a preview first?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Show a preview?"},{"suggestions",{"Yes","No"}}},"Offer a preview"};
+    }});
+    const auto preview = f.response(f.receive("request-preview","Can I see a preview first?",wait.at("messageId")));
+    f.script("Yes",{say("Here is a preview.")});
+    const auto reply = f.response(f.receive("accept-preview","Yes",preview.at("messageId")));
+    check(reply.at("text") == "Here is a preview." && f.task(id).at("wait") == wait &&
+          f.event(id,"user_answer").is_null(),"a newer suggestion answered an older question");
+}
+
+void attachedChoiceRemainsAuthoritative() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Check the error"));
+    f.model.questions.emplace(id,Json{{"question","Is the error present?"},{"choices",{"Yes","No"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    bool sawAttachment = false;
+    f.script("Yes",{[&](const ModelInput& input) {
+        sawAttachment = input.event.at("attachments").size() == 1;
+        auto call = answer(id)(input);
+        call.args["text"] = "No";
+        return call;
+    }});
+    f.store->receive(localOwner,f.routing(),"attached-choice","Yes",wait.at("messageId"),
+        Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64","iVBORw0KGgo="}}}));
+    f.runtime->runConversations();
+    check(sawAttachment && f.event(id,"user_answer").at("text") == "Yes",
+          "the conversation lost the attachment or changed the selected choice");
+}
+
 void directAnswersRemainInConversationHistory() {
     Fixture f;
     const auto id = f.store->submit(f.routing("Choose a name"));
@@ -1825,6 +1861,8 @@ int main() {
         answersStayOnTheirQuestion();
         answersNeedTheirOwnReplyTargetAndAStableTask();
         exactOfferedAnswersPreserveTheStoredChoice();
+        latestSuggestionsTakePrecedenceOverAnInheritedQuestion();
+        attachedChoiceRemainsAuthoritative();
         destinationClarificationContinuesFromConversationHistory();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();

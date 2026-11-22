@@ -111,7 +111,12 @@ SELECT j.id,j.task_id,j.data FROM targets JOIN journal j ON j.id=targets.id JOIN
         const auto choices = wait.find("choices");
         const bool matchesChoice = field(wait,"reason") == "user_question" && choices != wait.end() &&
             choices->is_array() && std::ranges::find(*choices,Json(message.text)) != choices->end();
-        message.question = conversation::QuestionAnchor{anchor.number(0),anchor.number(1),integer(wait,"id"),matchesChoice};
+        const bool newerSuggestion = matchesChoice && query(R"SQL(
+SELECT 1 FROM journal j, json_each(j.data,'$.suggestions') s
+WHERE j.id=? AND j.conversation_bot_id=? AND j.kind='conversation_reply' AND s.value=?
+)SQL",{message.replyTo,message.bot,message.text}).next();
+        if (!newerSuggestion)
+            message.question = conversation::QuestionAnchor{anchor.number(0),anchor.number(1),integer(wait,"id"),matchesChoice};
     }
     return message;
 }
@@ -466,7 +471,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (tool == "answer_task_question") {
         const auto task = ownTask(identifier(args,"taskId",true),message);
         const auto waitId = identifier(args,"waitId",true);
-        const auto answer = text(args,"text",8000,true);
+        const auto answer = message.question && message.question->matchesChoice ? message.text : text(args,"text",8000,true);
         if (integer(task.at("wait"),"id") != waitId)
             throw ToolError("That question is no longer open",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
         if (const auto error = questionAnswerError(task,message))
@@ -740,7 +745,9 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         if (!turnPending(id)) return true;
         message = loadTurnMessage(id);
         exec("INSERT OR IGNORE INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
-        if (message.question && message.question->matchesChoice) {
+        if (message.question && message.question->matchesChoice &&
+            !query("SELECT 1 FROM message_attachments WHERE message_id=? "
+                   "UNION ALL SELECT 1 FROM channel_attachments WHERE message_id=? LIMIT 1",{id,id}).next()) {
             if (authorizeTurn(message)) resolveOfferedAnswer(message);
             transaction.commit();
             return true;
