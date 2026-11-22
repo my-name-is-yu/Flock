@@ -134,13 +134,16 @@ async function exercise(mountBoardInbox) {
   check(document.activeElement === answer() && answer().value === draft && !answer().disabled,
     'The changed request lost the draft or editor focus');
   const reuse = [...answer().form.querySelectorAll('button')].find(({ textContent }) => textContent === 'Use draft for this question');
-  reuse.click();
-  check(!send.disabled && document.activeElement === answer(), 'Reviewing the draft did not restore the answer controls');
+  check(reuse && send.disabled, 'An unchanged old draft must still be reviewed');
+  const choice = [...answer().form.querySelectorAll('button')].find(({ textContent }) => textContent === 'release');
+  choice.click();
+  check(!send.disabled && !reuse.isConnected && answer().value === 'release',
+    'Choosing a current answer was blocked by the old draft');
   send.click();
   await settled();
   const accepted = calls.filter(([route]) => route === 'inbox/decide').at(-1)[1];
-  check(Object.keys(target).every((field) => accepted[field] === revised[field]) && accepted.data.text === draft,
-    'The reviewed draft did not use the updated decision target');
+  check(Object.keys(target).every((field) => accepted[field] === revised[field]) && accepted.data.text === 'release',
+    'The selected answer did not use the updated decision target');
   check(!cards.children.length && message.textContent.includes('Decision saved'), 'Decided question stayed in the Inbox');
   byId('work-view-history').click();
   await settled();

@@ -115,7 +115,18 @@ function decisionCard(item, submit, drafts, remember, saving) {
     inputs.text.required = true;
     inputs.text.value = draft?.text ?? '';
     const saveAnswer = () => remember(key, { target: draftTarget, text: inputs.text.value, stale });
-    inputs.text.addEventListener('input', saveAnswer);
+    const useCurrentQuestion = () => {
+      draftTarget = target;
+      stale = false;
+      saveAnswer();
+      review?.remove();
+      review = undefined;
+      setBusy(false);
+    };
+    inputs.text.addEventListener('input', () => {
+      if (draftTarget !== target && inputs.text.value !== draft?.text) useCurrentQuestion();
+      else saveAnswer();
+    });
     if (changed || stale) {
       review = element('div');
       review.append(element('p', changed
@@ -125,12 +136,7 @@ function decisionCard(item, submit, drafts, remember, saving) {
         const useDraft = element('button', 'Use draft for this question');
         useDraft.type = 'button';
         useDraft.addEventListener('click', () => {
-          draftTarget = target;
-          stale = false;
-          saveAnswer();
-          review.remove();
-          review = undefined;
-          setBusy(false);
+          useCurrentQuestion();
           inputs.text.focus();
         });
         review.append(useDraft);
@@ -145,7 +151,8 @@ function decisionCard(item, submit, drafts, remember, saving) {
         button.type = 'button';
         button.addEventListener('click', () => {
           inputs.text.value = choice;
-          saveAnswer();
+          if (draftTarget !== target) useCurrentQuestion();
+          else saveAnswer();
         });
         choices.append(button);
       }
