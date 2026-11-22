@@ -362,6 +362,9 @@
 .msg-quote span:last-child { overflow: hidden; text-overflow: ellipsis; }
 .msg-quote .glyph svg { width: .8rem; height: .8rem; }
 
+.msg.working {
+  animation: working-enter .24s cubic-bezier(.22, 1.2, .36, 1) both;
+}
 .msg.working .msg-line { align-items: center; }
 .typing { display: inline-flex; gap: .2rem; padding-inline: .2rem .1rem; flex: none; }
 .typing span { width: .36rem; height: .36rem; border-radius: var(--radius-full); background: var(--text-3); animation: typing 1.3s ease-in-out infinite; }
@@ -370,6 +373,7 @@
 .working-label {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-md); color: var(--text-2);
 }
+@keyframes working-enter { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes typing { 0%, 70%, 100% { opacity: .3; transform: scale(.8); } 35% { opacity: 1; transform: none; } }
 
 .empty-state { min-height: min(24rem, 50vh); display: grid; place-content: center; justify-items: center; gap: .4rem; text-align: center; }
@@ -384,6 +388,7 @@
 .fold-toggle {
   display: block; margin-top: .3rem; padding: 0; border: 0; background: none;
   color: inherit; font-size: var(--text-sm); font-weight: 600; opacity: .85;
+  cursor: pointer; transition: opacity .15s ease;
 }
 .fold-toggle:hover { opacity: 1; text-decoration: underline; }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
@@ -423,8 +428,9 @@
   .conversation-header { --profile-header-padding: .125rem; }
 }
 @media (prefers-reduced-motion: reduce) {
+  .msg.working { animation: none; }
   .typing span { animation: none; opacity: .55; }
-  .msg-time, .msg-actions { transition: none; }
+  .msg-time, .msg-actions, .fold-toggle, .peer-back, .profile-face-button, .profile-caption, .peer-breadcrumb { transition: none; }
 }
 
 @media (hover: none), (pointer: coarse) {

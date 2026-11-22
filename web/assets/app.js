@@ -27,11 +27,38 @@ const elements = Object.fromEntries([
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const motionAnimations = new WeakMap();
+const motionEaseOut = 'cubic-bezier(0.23, 1, 0.32, 1)';
+const motionSpring = 'cubic-bezier(0.22, 1.2, 0.36, 1)';
+function cancelMotion(el) {
+  const prev = el && motionAnimations.get(el);
+  if (!prev) return;
+  motionAnimations.delete(el);
+  prev.cancel();
+}
+function runMotion(el, keyframes, options) {
+  if (!el?.animate || reducedMotion.matches) return null;
+  cancelMotion(el);
+  const animation = el.animate(keyframes, options);
+  motionAnimations.set(el, animation);
+  const clear = () => {
+    if (motionAnimations.get(el) === animation) motionAnimations.delete(el);
+  };
+  animation.addEventListener('finish', clear, { once: true });
+  animation.addEventListener('cancel', clear, { once: true });
+  return animation;
+}
 function animateLiveReply(id) {
-  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
-    { opacity: .76, transform: 'translateY(4px)' },
+  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
+    { opacity: .5, transform: 'translateY(8px) scale(.975)' },
     { opacity: 1, transform: 'none' },
-  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+  ], { duration: 200, easing: motionSpring });
+}
+function animateSentMessage(id) {
+  runMotion(byId(`event-${id}`)?.querySelector('.bubble'), [
+    { opacity: 0, transform: 'translateY(10px) scale(.96)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 210, easing: motionSpring });
 }
 const workspace = document.querySelector('.workspace');
 const conversationActions = byId('conversation-actions');
@@ -229,41 +256,74 @@ function conversationUrl(botId, peerId, anchor) {
   else url.searchParams.delete('anchor');
   return url;
 }
-function animateViewTransition(kind) {
+function animateTimelineContent(kind) {
   if (reducedMotion.matches) return;
   const inner = elements.conversation.querySelector('.conversation-inner');
-  const ease = 'cubic-bezier(.2, .9, .25, 1)';
+  cancelMotion(inner);
+  cancelMotion(elements.timeline);
   if (kind === 'dm-enter') {
-    inner?.animate?.([
-      { opacity: 0, transform: 'scale(.985) translateY(8px)' },
+    runMotion(inner, [
+      { opacity: 0, transform: 'translateX(18px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 210, easing: ease });
-    elements['peer-heading']?.animate?.([
-      { opacity: 0, transform: 'scale(.94)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 185, easing: ease });
-    elements['peer-back']?.animate?.([
-      { opacity: 0, transform: 'translateX(-6px)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 185, easing: ease });
+    ], { duration: 220, easing: motionEaseOut });
   } else if (kind === 'dm-exit') {
-    inner?.animate?.([
-      { opacity: 0, transform: 'scale(1.015)' },
+    runMotion(inner, [
+      { opacity: 0, transform: 'translateX(-18px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 190, easing: ease });
-    byId('profile-heading')?.animate?.([
-      { opacity: 0, transform: 'scale(.96)' },
-      { opacity: 1, transform: 'none' },
-    ], { duration: 170, easing: ease });
+    ], { duration: 220, easing: motionEaseOut });
   } else if (kind === 'bot-switch') {
-    elements.timeline?.animate?.([
-      { opacity: .2, transform: 'translateY(6px)' },
+    runMotion(elements.timeline, [
+      { opacity: .15, transform: 'translateY(8px)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 175, easing: ease });
-    elements['profile-avatar-button']?.animate?.([
-      { opacity: .65, transform: 'scale(.92)' },
+    ], { duration: 210, easing: motionEaseOut });
+  }
+}
+function animateViewTransition(kind) {
+  const inner = elements.conversation.querySelector('.conversation-inner');
+  const profileHeading = byId('profile-heading');
+  for (const target of [inner, elements.timeline, elements['peer-faces'], elements['peer-heading'],
+      elements['peer-back'], elements['profile-avatar-button'], profileHeading]) {
+    cancelMotion(target);
+  }
+  if (reducedMotion.matches) return;
+  const context = timelineContext();
+  if (elements.timeline?.childElementCount > 0) {
+    animateTimelineContent(kind);
+    if (context) context.pendingViewMotion = null;
+  } else if (context) {
+    context.pendingViewMotion = kind;
+  }
+  if (kind === 'dm-enter') {
+    runMotion(elements['peer-faces'], [
+      { opacity: 0, transform: 'translateX(12px) scale(.92)' },
       { opacity: 1, transform: 'none' },
-    ], { duration: 180, easing: ease });
+    ], { duration: 220, easing: motionSpring });
+    runMotion(elements['peer-heading'], [
+      { opacity: 0, transform: 'translateX(14px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionEaseOut });
+    runMotion(elements['peer-back'], [
+      { opacity: 0, transform: 'translateX(-10px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 200, easing: motionEaseOut });
+  } else if (kind === 'dm-exit') {
+    runMotion(elements['profile-avatar-button'], [
+      { opacity: 0, transform: 'translateX(-10px) scale(.92)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionSpring });
+    runMotion(profileHeading, [
+      { opacity: 0, transform: 'translateX(-12px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionEaseOut });
+  } else if (kind === 'bot-switch') {
+    runMotion(elements['profile-avatar-button'], [
+      { opacity: .6, transform: 'scale(.88) translateY(3px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 230, easing: motionSpring });
+    runMotion(profileHeading, [
+      { opacity: .5, transform: 'translateY(4px) scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 220, easing: motionSpring });
   }
 }
 function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fromPeerLink = false } = {}) {
@@ -1598,6 +1658,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     scroller.setAttribute('aria-label', 'Bot DM history');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
+    if (dm.pendingViewMotion && elements.timeline.childElementCount > 0) {
+      const pending = dm.pendingViewMotion;
+      dm.pendingViewMotion = null;
+      animateTimelineContent(pending);
+    }
     return;
   }
   if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
@@ -1606,12 +1671,28 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
     foldLongMessages();
     moveScroll();
+    if (context?.pendingViewMotion && elements.timeline.childElementCount > 0) {
+      const pending = context.pendingViewMotion;
+      context.pendingViewMotion = null;
+      animateTimelineContent(pending);
+    }
   }
-  const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
-    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  const motionAllowed = !source && !document.hidden && !reducedMotion.matches && !document.querySelector('dialog[open]');
+  const canAnimate = motionAllowed && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom;
   if (canAnimate) {
     const id = replyArrivalId(events, liveAfterId);
     if (id != null) animateLiveReply(id);
+  }
+  const sentAfterId = context?.pendingSentAfterId;
+  const messageAfterId = canAnimate ? liveAfterId : (sentAfterId != null ? sentAfterId : null);
+  if (messageAfterId != null) {
+    const addedMessages = events.filter((event) => event.id > messageAfterId && event.kind === 'conversation_message');
+    if (addedMessages.length > 0) {
+      if (motionAllowed && addedMessages.length <= 2) {
+        for (const event of addedMessages) animateSentMessage(event.id);
+      }
+      if (sentAfterId != null) context.pendingSentAfterId = null;
+    }
   }
 }
 
@@ -1625,20 +1706,41 @@ function foldLongMessages() {
     if (!(text.scrollHeight > lineHeight * (foldLines + 2))) continue;
     const bubble = text.closest('.bubble');
     const id = text.closest('.event-message')?.id;
-    const toggle = button(null, 'fold-toggle', () => {
-      const folded = bubble.dataset.fold === 'folded';
-      setFold(!folded);
-      if (folded) unfoldedMessages.add(id);
-      else {
-        unfoldedMessages.delete(id);
-        bubble.scrollIntoView({ block: 'nearest' });
-      }
-    });
     const setFold = (folded) => {
       bubble.dataset.fold = folded ? 'folded' : 'unfolded';
       toggle.textContent = folded ? 'Show more' : 'Show less';
       toggle.setAttribute('aria-expanded', String(!folded));
     };
+    const toggle = button(null, 'fold-toggle', () => {
+      const nextFolded = bubble.dataset.fold !== 'folded';
+      const startHeight = text.getBoundingClientRect().height;
+      cancelMotion(text);
+      setFold(nextFolded);
+      if (nextFolded) unfoldedMessages.delete(id);
+      else unfoldedMessages.add(id);
+      const endHeight = nextFolded ? text.getBoundingClientRect().height : text.scrollHeight;
+      if (!reducedMotion.matches && text.animate && Math.abs(endHeight - startHeight) > 1) {
+        text.style.overflow = 'hidden';
+        const duration = Math.min(340, Math.max(200, Math.round(180 + Math.abs(endHeight - startHeight) * 0.18)));
+        const anim = runMotion(text, [
+          { maxHeight: `${startHeight}px` },
+          { maxHeight: `${endHeight}px` },
+        ], { duration, easing: motionEaseOut });
+        if (anim) {
+          const cleanup = () => {
+            if (!motionAnimations.has(text)) text.style.overflow = '';
+          };
+          anim.addEventListener('finish', () => {
+            cleanup();
+            if (nextFolded) bubble.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          }, { once: true });
+          anim.addEventListener('cancel', cleanup, { once: true });
+          return;
+        }
+        text.style.overflow = '';
+      }
+      if (nextFolded) bubble.scrollIntoView({ block: 'nearest' });
+    });
     text.after(toggle);
     setFold(!unfoldedMessages.has(id));
   }
@@ -2549,6 +2651,7 @@ async function submit(event) {
       payload = prepared.payload;
       screenshots.pending = prepared.pending;
     } else payload = composer.prepareSend(reply);
+    context.pendingSentAfterId = context.newestEvent ?? 0;
     await api('messages', payload);
     if (attachments.length) {
       composer.settleScreenshotSend(payload);
@@ -2561,6 +2664,7 @@ async function submit(event) {
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
+    context.pendingSentAfterId = null;
     if (payload && error.status >= 400 && error.status < 500) {
       if (attachments.length) delete screenshots.pending;
       else composer.settleSend(payload, false);
