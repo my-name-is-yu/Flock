@@ -893,6 +893,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
             return complete();
         }
         if (kind == "bot_request") return work();
+        if (input.task.contains("userInstructions") && kind == "result") return work("follow_up",false);
         check(kind == "result" && input.task["doneWhen"] == revisedCriteria &&
               event["run"]["runId"] == "run-2",
               "the old Run result was exposed as the receiving Bot's revised evidence");
@@ -983,7 +984,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
         check(kind == "bot_answer" && event["text"] == "Use main" &&
               event["sessionResult"]["run"]["runId"] == "run-1" &&
               input.task["doneWhen"] == revisedCriteria &&
-              input.task.value("userInstructions",std::string{}).find(revisedCriteria) != std::string::npos,
+              input.task.at("userInstructions").front().at("text").get<std::string>().find(revisedCriteria) != std::string::npos,
               "the sender answer or revised instructions did not reach the recipient model");
         offeredFollowUp = hasTool(input,"follow_up");
         if (!attemptedInvalidDecision) {
@@ -1075,6 +1076,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
         }
         if (input.task["id"] == unrelated) return kind == "intake" ? work() : complete();
         if (kind == "bot_request") return work();
+        if (kind == "result" && input.task.contains("userInstructions")) return work("delegate",false);
         check(kind == "result" && input.event["environmentId"] == "e","the recipient judged the earlier Run");
         return botReply("result","Verification complete");
     };
@@ -1143,7 +1145,7 @@ void consultationRepliesAfterUserInstructions() {
             }
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && event["text"] == "Use main" && !hasTool(input,"delegate") &&
-                  input.task.value("userInstructions",std::string{})
+                  input.task.at("userInstructions").front().at("text").get<std::string>()
                           .find(revise ? instruction : "exclude deprecated branches") != std::string::npos,
                   "the consultation lost the peer answer or the user instruction");
             return botReply("result","Rollback policy confirmed");
@@ -1204,6 +1206,26 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
+}
+
+void requestedCriteriaApplyToFirstPeerWork() {
+    Fixture f;
+    f.allowBeta();
+    const auto receipt = f.store->receive({"alpha","","e","p"},"work-with-criteria","Check the release");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "conversation_turn")
+            return converse(input,"start_task",0,{{"doneWhen","Confirm the signature"}});
+        check(!input.needsDoneWhen && input.task.at("requestedDoneWhen") == "Confirm the signature",
+              "peer work required the model to repeat the user's criterion");
+        return {"send_bot_message",{{"kind","work"},{"text","Verify the release"},{"botId","beta"}},"Ask the verifier"};
+    };
+    f.runtime->runConversations();
+    const Id sender = f.store->tasks("alpha").at(0).at("id");
+    f.reach(sender,"peer_waiting");
+    const auto task = f.task(sender);
+    check(task.at("doneWhen") == "Confirm the signature" && task.at("remaining") == 3 &&
+          task.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId"),
+          "first peer work did not adopt the saved criterion and its source");
 }
 
 void modelBudgetFollowsBotConsultation() {
@@ -1429,20 +1451,21 @@ void consultationRestoresOwnEvidence() {
     }
 }
 
-void freshResultStillRequiresPrefill() {
+void freshResultSurvivesUnavailableHistory() {
     Fixture f;
     f.read = "prefill";
     f.restart();
     f.t3.beforeRead = [] { throw std::runtime_error("Fixture T3 history unavailable"); };
     const auto task = f.submit("Verify fresh evidence");
     f.model.script = [&](const ModelInput& input) {
-        check(input.event["kind"] == "intake","fresh result reached the model without required prefill");
-        return work();
+        if (input.event["kind"] == "intake") return work();
+        check(input.event.at("historyUnavailable") == true && input.evidence.empty(),"missing history was not visible");
+        return complete();
     };
     f.reach(task,"running");
     f.t3.finish("run-1");
-    f.wait(task,"model_failure");
-    check(f.model.calls == 1 && f.logs(task,"completed") == 0,"failed prefill completed or judged a fresh result");
+    f.reach(task,"completed");
+    check(f.model.calls == 2 && f.logs(task,"completed") == 1,"settled report was lost after prefill failed");
 }
 
 void prefillPersistenceFailureDoesNotProceed() {
@@ -1660,13 +1683,14 @@ int main() {
             {"work recipient move waits for an unrelated owner",workRecipientMoveWaitsForUnrelatedOwner},
             {"consultation replies after user instructions",consultationRepliesAfterUserInstructions},
             {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Requested criteria for first peer work",requestedCriteriaApplyToFirstPeerWork},
             {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
             {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
             {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
             {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
-            {"Fresh result prefill failure",freshResultStillRequiresPrefill},
+            {"Fresh result prefill failure",freshResultSurvivesUnavailableHistory},
             {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},

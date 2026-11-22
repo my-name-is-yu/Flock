@@ -49,6 +49,7 @@ struct ModelInput {
     std::string feedback;
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
+    bool needsDoneWhen = false, canForwardUserMessage = false;
 
 };
 struct ModelError : std::runtime_error {

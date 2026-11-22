@@ -101,12 +101,17 @@ struct Script : Model {
             if (question != questions.end() && !input.event.contains("userAnswer"))
                 return {"ask_user",question->second,"The fixture needs a user answer"};
             Json args = {{"instruction","Measure and report the fixture"}};
-            if (input.task["doneWhen"] == "") args["doneWhen"] = "Report baseline latency";
+            if (input.needsDoneWhen) args["doneWhen"] = "Report baseline latency";
             return {"delegate",args,"Collect the fixture evidence"};
         }
         check(input.event["kind"] == "result","unexpected model event");
         if (beforeComplete) beforeComplete(input);
         if (onResult) return onResult(input);
+        if (input.task.contains("userInstructions")) {
+            const auto canFollow = std::ranges::find(input.tools,"follow_up") != input.tools.end();
+            return {canFollow ? "follow_up" : "delegate",{{"instruction","Apply the pending instructions"}},
+                    "The report predates the user instructions"};
+        }
         return {"complete",{{"report",input.event["report"]}},"The fixture report includes the requested evidence"};
     }
 };
@@ -354,6 +359,7 @@ void followUpCarriesTheReferencedReport() {
           f.task(id)["sourceResultRefs"] == Json::array({pending["source"]}),
           "the active task did not save the referenced result with the pending instruction");
     f.restart();
+    f.model.onResult = {};
     f.t3.finish("run-2","Separate baseline checked");
     f.reach(id,"deciding");
     f.reach(id,"running");
@@ -607,6 +613,30 @@ void appendWaitsForSafeBoundary() {
     check(f.event(id,"completed")["text"] == "Latest CSV evidence","an old report was published as completion");
     f.reach(next,"running");
     check(f.t3.sent.size() == 3,"the queued task did not inherit the released project slot");
+}
+
+void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Confirm the existing criteria",{change(id,{{"doneWhen","Report baseline latency"}})});
+    const auto receipt = f.receive("same-criteria","Confirm the existing criteria");
+    check(!f.task(id).value("replanning",false) && f.task(id)["revisions"].size() == 1,
+          "repeating a criterion triggered replanning");
+    f.t3.finish("run-1","Baseline latency is 10 ms");
+    int decisions = 0;
+    f.model.onResult = [&](const ModelInput& input) {
+        const auto& item = input.task.at("userInstructions").at(0);
+        check(item.at("messageId") == receipt.at("messageId") && input.event.at("report") == "Baseline latency is 10 ms",
+              "settled decision missed the instruction identity or evidence");
+        Json args = {{"report","Baseline latency is 10 ms"}};
+        if (++decisions > 1)
+            args["acknowledgedInstructions"] = Json::array({{{"messageId",item.at("messageId")},{"step",item.at("step")}}});
+        return Decision{"complete",args,"The existing report satisfies the repeated criterion"};
+    };
+    f.reach(id,"completed");
+    check(decisions == 2 && f.t3.sent.size() == 1 && f.event(id,"decision").at("args").contains("acknowledgedInstructions"),
+          "completion ignored pending instructions or forced another Run");
 }
 
 void twoInstructionsFromOneMessageAreTrackedSeparately() {
@@ -977,7 +1007,15 @@ void cloudDestinationWaitsForItsProject() {
     f.tick(2);
     check(f.task(desktopFollowing)["state"] == "queued" && f.task(desktopFollowing)["blockedBy"]["id"] == moving,
           "the desktop slot was released before the old Run settled");
-    f.t3.finish("run-2","Old location stopped");
+    f.t3.finish("run-2","Old location stopped " + std::string(6000,'x'));
+    bool sawHistoricalEnvironment = false;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] != moving) return;
+        for (const auto& row : input.history) {
+            if (row.at("kind") == "report" && row.value("truncated",false))
+                sawHistoricalEnvironment = row.at("source").at("environmentId") == "desktop";
+        }
+    };
     f.restart();
     f.reach(desktopFollowing,"running");
     check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 3 &&
@@ -987,7 +1025,7 @@ void cloudDestinationWaitsForItsProject() {
     f.reach(occupied,"completed");
     f.reach(moving,"running");
     const auto task = f.task(moving);
-    check(f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
+    check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
           f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&
           task["runs"][1]["environmentId"] == "cloud" && task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
@@ -1036,8 +1074,7 @@ void latestTargetPrecedesABatchedBacklog() {
     f.receive("new-location","計測はローカルMacで");
     f.t3.finish("run-1","Settled before the next destination");
     f.advanceUntil([&] { return f.t3.sent.size() > 1; },"the backlog did not reach T3");
-    check(f.t3.sent[1].instruction.find("ローカルMacで") != std::string::npos,
-          "the first continuation did not take the latest destination into account");
+    check(f.t3.sent[1].environmentId == "desktop","the structured destination did not use the latest patch");
     for (std::size_t run = 2; run <= f.t3.sent.size(); ++run) {
         check(run <= 4,"the backlog exceeded the additional work allowance");
         f.t3.finish("run-" + std::to_string(run),"Continuation settled");
@@ -1046,11 +1083,14 @@ void latestTargetPrecedesABatchedBacklog() {
     }
     std::string sentInstructions;
     for (auto command = std::next(f.t3.sent.begin()); command != f.t3.sent.end(); ++command) {
-        check(command->environmentId == "desktop" && command->instruction.find("クラウドMacで") == std::string::npos,
+        check(command->environmentId == "desktop",
               "a continuation was sent with a superseded destination");
         sentInstructions += command->instruction;
         sentInstructions += '\n';
     }
+    check(sentInstructions.find("クラウドMacで") < sentInstructions.find(notes.front()) &&
+          sentInstructions.find("ローカルMacで") > sentInstructions.find(notes.back()),
+          "environment corrections dropped or reordered accepted directions");
     for (const auto& note : notes) {
         const auto first = sentInstructions.find(note);
         check(first != std::string::npos && sentInstructions.find(note,first + note.size()) == std::string::npos,
@@ -1211,6 +1251,7 @@ int main() {
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
         appendWaitsForSafeBoundary();
+        settledInstructionsCanBeAcknowledgedWithoutAnotherRun();
         twoInstructionsFromOneMessageAreTrackedSeparately();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();

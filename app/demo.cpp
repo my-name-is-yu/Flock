@@ -35,6 +35,11 @@ class DemoModel final : public Model {
             }
             return {"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."};
         }
+        if (event == "result" && in.task.contains("userInstructions")) {
+            const bool follow = std::ranges::find(in.tools,"follow_up") != in.tools.end();
+            return {follow ? "follow_up" : "delegate",{{"instruction","Apply the pending user instructions."}},
+                "The demo report predates the accepted instructions."};
+        }
         if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
             return {"complete",{{"report",in.event.value("report","")}},
                 "The demo Session reported that it completed the requested work."};
@@ -50,7 +55,7 @@ class DemoModel final : public Model {
                 return {"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."};
             }
             Json args = {{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
-            if (in.task.value("doneWhen","").empty()) args["doneWhen"] = "The demo Session returns a completion report.";
+            if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
             return {"delegate",std::move(args),"A demo Session can handle this request."};
         }
         throw ModelError("No fixed demo decision for this event",false);
