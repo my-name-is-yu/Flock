@@ -1326,8 +1326,10 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
-            const auto budget = db.taskModelBudget(current);
-            attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+            auto reserved = db.query("SELECT reserved_attempt FROM events WHERE id=?",{event["id"]});
+            if (reserved.next()) attempt = reserved.number(0);
+            if (attempt) db.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event["id"]});
+            else attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
                     "The model call limit is exhausted. Approve one more model call to continue."}});

@@ -153,7 +153,7 @@ struct Scene {
         auto before = snapshot();
         const auto steerCount = t3.notes.size();
         const auto interruptCount = t3.interrupted.size();
-        const auto receipt = store.receive(intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
+        const auto receipt = store.receive(localOwner,intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
                                            text,replyTo);
         runtime.runConversations();
         for (const auto& row : store.conversation("release",0,200)) {
@@ -600,12 +600,10 @@ struct Script : Model {
         const auto task = std::ranges::find_if(tasks,[&](const Json& item) { return item.at("request") == request; });
         check(task != tasks.end(),"scripted task was missing: " + request.dump());
         decision.args["taskId"] = task->at("taskId");
-        if (decision.tool == "answer_task_question") {
-            decision.args["waitId"] = task->at("wait").at("waitId");
-        } else {
-            decision.args["generation"] = task->at("generation");
-            if (decision.tool == "change_task") decision.args["revisionId"] = task->at("revisionId");
-        }
+        decision.args["generation"] = task->at("generation");
+        if (decision.tool == "answer_task_question") decision.args["waitId"] = task->at("wait").at("waitId");
+        if (decision.tool == "change_task" || decision.tool == "answer_task_question")
+            decision.args["revisionId"] = task->at("revisionId");
         return decision;
     }
 };

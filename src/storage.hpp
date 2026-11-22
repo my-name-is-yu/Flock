@@ -1,4 +1,5 @@
 #pragma once
+#include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include <map>
 #include <mutex>
@@ -73,7 +74,7 @@ struct Store::Impl {
     std::mutex deliveryMutex;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
-    std::optional<Json> messageReceipt(std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo) const;
+    std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
     bool channelMessageAuthorized(Id, std::string_view bot) const;
     Json channelContext(Id, std::string_view bot, std::vector<std::string>* images = nullptr) const;
@@ -90,11 +91,17 @@ struct Store::Impl {
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
     void initializeAccessSchema();
+    void initializeBoardInboxSchema();
+    std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
+    void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
+    void approveMessageModelCall(Id message, Id pause);
+    void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
+    void withdrawTaskQuestion(Json&, Id waitId);
+    SecretRedactor redactor(std::string_view bot) const;
+    Json accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
-    SecretRedactor redactor(std::string_view bot) const;
     SecretRedactor sessionRedactor() const;
-    Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path);
@@ -112,7 +119,7 @@ struct Store::Impl {
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    void grantModelCall(std::string_view budget);
+    Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
@@ -136,7 +143,9 @@ struct Store::Impl {
     void save(Json&);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
               RequestJournal requestJournal = RequestJournal::record);
-    void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
+    void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
+                 Id sourceMessage = 0, std::optional<InboxKind> = {});
+    bool waitIsActionable(const Json& task) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
@@ -150,6 +159,8 @@ struct Store::Impl {
     Json outbox(const Json&) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
+
+std::optional<InboxKind> inboxWaitKind(std::string_view reason);
 
 class Transaction {
 public:

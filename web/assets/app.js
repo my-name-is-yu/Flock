@@ -2,6 +2,7 @@ import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
+import { mountBoardInbox } from '/board-inbox.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -39,13 +40,16 @@ const waitLabels = {
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question',
+  session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
   intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
+  request_changed: 'The request changed. Review its current details before acting again.',
+  already_closed: 'This request was already decided or closed.',
+  access_denied: 'You do not have permission to make this decision.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -757,8 +761,10 @@ function pausedActions(turn) {
   const actions = node('div', 'event-actions');
   const waitMessageId = turn.messageId;
   const key = `message/${waitMessageId}`;
-  const approve = button('Approve one more model call', 'button',
-    () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+  const approve = button('Approve one more model call', 'button', () => void submitOperation(view, key, {
+    itemKind: 'conversation_model_budget', itemId: turn.replyToMessageId, waitId: waitMessageId,
+    taskId: 0, targetRevision: 0, targetGeneration: waitMessageId, decision: 'approve',
+  }));
   approve.disabled = pendingWaits.has(key);
   actions.append(approve);
   return actions;
@@ -1742,19 +1748,20 @@ async function loadSessions() {
 
 async function operate(context, task, operation, fields = {}) {
   const waitId = task.wait.id;
-  await submitOperation(context, waitId, { taskId: task.id, waitId, operation, ...fields });
+  await submitOperation(context, waitId, { taskId: task.id, waitId, operation,
+    targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
 }
 async function submitOperation(context, key, payload) {
   if (!context || pendingWaits.has(key)) return;
-  const isOpen = () => view === context && (payload.waitMessageId
-    ? detail?.kind === 'paused' && detail.messageId === payload.waitMessageId
+  const isOpen = () => view === context && (payload.itemKind
+    ? detail?.kind === 'paused' && detail.messageId === payload.waitId
     : detail?.waitId === payload.waitId);
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
   let failed = false;
   try {
-    await api('operations', { botId: context.id, ...payload });
+    await api(payload.itemKind ? 'inbox/decide' : 'operations', { botId: context.id, ...payload });
     setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
     if (isOpen()) closeDetail();
   } catch (error) {
@@ -1931,3 +1938,5 @@ document.addEventListener('visibilitychange', resumeUpdates);
 window.addEventListener('pagehide', () => liveUpdates.use(null));
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
+
+mountBoardInbox(api);

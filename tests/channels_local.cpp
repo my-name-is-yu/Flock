@@ -118,6 +118,11 @@ Decision reply(std::string text) {
     return {"reply",{{"text",text},{"suggestions",{"Start here","Show me more"}}},{}};
 }
 
+Decision answerQuestion(const Json& task, std::string_view text) {
+    return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},
+        {"revisionId",task.at("currentRevision")},{"generation",task.at("generation")},{"text",text}},{}};
+}
+
 Observation finished() {
     Observation result;
     result.kind = Observation::Kind::Finished;
@@ -343,7 +348,6 @@ void taskUpdates(const std::filesystem::path& database) {
         return reply("Unexpected turn");
     };
     for (int i = 0; i < 4; ++i) runtime.tick();
-    const auto wait = store.task(taskId).at("wait");
     check(transport->effects.size() == 4 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
           transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
           "Task question was not delivered to the originating thread");
@@ -363,13 +367,14 @@ void taskUpdates(const std::filesystem::path& database) {
         if (input.event.at("kind") == "result")
             return {"complete",{{"report","Private release completed."}},"The Session confirmed the release"};
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"answer_task_question",{{"taskId",taskId},{"waitId",wait.at("id")},{"text","Preview"}},{}};
+        if (steps.empty()) return answerQuestion(store.task(taskId),"Preview");
         check(steps.at(0).at("result").at("ok") == true,"Originating thread could not answer its question");
         return reply("Answer received.");
     };
     const auto answer = event("private-origin","answer","Preview");
     store.receiveChannel(channel,"fixture-auth",answer,intake);
     runtime.runConversations();
+    check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id,"Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
     check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 7 &&
@@ -484,12 +489,9 @@ void taskQuestionChoices(const std::filesystem::path& database) {
         check(anchor.at("taskId") == first.at("id") && anchor.at("messageId") == first.at("wait").at("messageId") &&
               anchor.at("waitId") == first.at("wait").at("id"),"Posted choice lost its exact journal target");
         const auto& turn = input.event.at("turn");
-        const auto apply = [&](const Json& task) -> Decision {
-            return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},{"text","Yes"}},{}};
-        };
-        if (turn.empty()) return apply(second);
+        if (turn.empty()) return answerQuestion(second,"Yes");
         check(turn.at(0).at("result").at("ok") == false,"Selection was applied to the other open question");
-        if (turn.size() == 1) return apply(first);
+        if (turn.size() == 1) return answerQuestion(first,"Yes");
         answered = turn.at(1).at("result").at("ok") == true;
         return reply("Answer received.");
     };
@@ -515,8 +517,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
               anchor.at("inReplyTo").at("replyToMessageId") == second.at("wait").at("messageId"),
               "Clarification reply lost the channel question it followed");
         const auto& turn = input.event.at("turn");
-        if (turn.empty())
-            return {"answer_task_question",{{"taskId",second.at("id")},{"waitId",second.at("wait").at("id")},{"text","Yes"}},{}};
+        if (turn.empty()) return answerQuestion(second,"Yes");
         followed = turn.at(0).at("result").at("ok") == true;
         return reply("Answer received.");
     };
@@ -569,7 +570,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
             observed = true;
             return reply("Chat is available");
         };
-        store.receive(intake(bot,""),std::to_string(++count),"Local connection");
+        store.receive(localOwner,intake(bot,""),std::to_string(++count),"Local connection");
         runtime.runConversations();
         check(observed,"Local tool result was not delivered");
     };
@@ -617,7 +618,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId","env"}}});
         return reply("Chat is available");
     };
-    store.receive(intake("release",""),std::to_string(++count),"List reusable environments");
+    store.receive(localOwner,intake("release",""),std::to_string(++count),"List reusable environments");
     runtime.runConversations();
     check(unchanged,"Local connections added a reusable environment");
     check(store.conversation("release").back()["data"]["text"] == "Chat is available","Chat disabled after local decline");

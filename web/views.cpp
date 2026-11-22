@@ -226,7 +226,7 @@ std::string displayState(const Json& task) {
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","generation","sourceTaskId","createdAt"});
     return result;
 }
 
@@ -360,7 +360,7 @@ Json sessions(Store& store, std::string_view bot, Id before) {
 
 Json taskDetail(const Json& task, const Json& latestResult) {
     auto result = taskSummary(task);
-    copyFields(result,task,{"doneWhen","intent"});
+    copyFields(result,task,{"doneWhen","intent","blockerReason"});
     result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
     auto& revisions = result["revisions"] = Json::array();
     if (task.contains("revisions") && task["revisions"].is_array()) {
@@ -407,7 +407,7 @@ Json botView(Store& store, const Json& bot, const Json* changedSessionTasks) {
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();
-        copyFields(view,turn,{"messageId","text","route"});
+        copyFields(view,turn,{"messageId","replyToMessageId","text","route"});
         paused.push_back(std::move(view));
     }
     if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))

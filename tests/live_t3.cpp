@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 #include "flock/t3_mcp.hpp"
 
 #include <algorithm>
@@ -230,7 +230,7 @@ int main(int argc, char** argv) {
             std::cout << Json{{"task",store.task(id)},{"history",store.history(id,0,200)}}.dump(2) << '\n';
         } else if (operation == "operate" && (argc == 6 || argc == 7)) {
             Store store(argv[2]);
-            store.operate(std::stoll(argv[3]),std::stoll(argv[4]),argv[5],argc == 7 ? Json::parse(argv[6]) : Json::object());
+            store.operate(localOwner,TaskTarget::from(store.task(std::stoll(argv[3])),std::stoll(argv[4])),argv[5],argc == 7 ? Json::parse(argv[6]) : Json::object());
         } else if (operation == "inspect" && argc == 5) {
             Store store(argv[2]);
             auto t3 = makeT3Mcp(argv[3]);

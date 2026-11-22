@@ -66,17 +66,20 @@ CREATE TABLE IF NOT EXISTS bot_grants(bot TEXT,kind TEXT,resource TEXT,op TEXT,a
 CREATE TABLE IF NOT EXISTS person_resource_grants(person TEXT,kind TEXT,resource TEXT,op TEXT,
  PRIMARY KEY(person,kind,resource,op));
 CREATE TABLE IF NOT EXISTS grant_requests(id INTEGER PRIMARY KEY,bot TEXT,kind TEXT,resource TEXT,op TEXT,
- requestedBy TEXT,requestedAt INTEGER,status TEXT DEFAULT 'pending',decidedBy TEXT,decidedAt INTEGER);
+ requestedBy TEXT,requestedAt INTEGER,status TEXT DEFAULT 'pending',decidedBy TEXT,decidedAt INTEGER,
+ source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS grant_audit_log(id INTEGER PRIMARY KEY,bot TEXT,time INTEGER,actor TEXT,action TEXT,scope TEXT);
 CREATE INDEX IF NOT EXISTS audit_by_bot ON grant_audit_log(bot,action);
 CREATE TRIGGER IF NOT EXISTS access_requested AFTER INSERT ON grant_requests BEGIN
  INSERT INTO grant_audit_log(bot,time,actor,action,scope) VALUES(NEW.bot,NEW.requestedAt,NEW.requestedBy,'request',
  json_object('requestId',NEW.id,'resourceKind',NEW.kind,'resourceId',NEW.resource,'operation',NEW.op));
 END;
-CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,status TEXT DEFAULT 'pending');
+CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
+ status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE UNIQUE INDEX IF NOT EXISTS pending_secret ON protected_inputs(bot,name) WHERE status='pending';
 CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
-CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending');
+CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
+ request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
@@ -206,28 +209,34 @@ void Access::resourceGrant(const Person& actor, std::string_view bot, const Scop
     tx.commit();
 }
 
-Id Access::request(std::string_view bot, const Scope& s) {
+Id Access::request(std::string_view bot, const Scope& s, Id sourceMessage) {
     if (!validBotId(bot) || !s.valid()) throw Conflict("Invalid resource scope");
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({bot,s.resource});
-    db_.exec("INSERT INTO grant_requests(bot,kind,resource,op,requestedBy,requestedAt) VALUES(?,?,?,?,?,?)",
-             {bot,s.kind,s.resource,s.operation,bot,unixTime()});
+    db_.exec("INSERT INTO grant_requests(bot,kind,resource,op,requestedBy,requestedAt,source_message_id) VALUES(?,?,?,?,?,?,?)",
+             {bot,s.kind,s.resource,s.operation,bot,unixTime(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     return db_.last();
 }
 
 void Access::decide(const Person& actor, std::string_view bot, Id id, bool approve) {
     std::lock_guard lock(db_.mutex);
     Transaction tx(db_.db);
+    decideGrant(actor,bot,id,approve);
+    tx.commit();
+}
+
+void Access::decideGrant(const Person& actor, std::string_view bot, Id id, bool approve) {
+    if (!permitsPerson(actor,bot,Role::admin)) throw DecisionDenied{};
     db_.redactor(bot).requirePublic({actor.id,bot});
     auto row = db_.query("SELECT kind,resource,op FROM grant_requests WHERE id=? AND bot=? AND status='pending'",{id,bot});
-    if (!row.next() || !permitsPerson(actor,bot,Role::admin)) throw Conflict("Pending request and admin access required");
+    if (!row.next()) throw DecisionUnavailable{};
     Scope scope{row.string(0),row.string(1),row.string(2)};
-    if (approve && !holds(actor,scope)) throw Conflict("Scope exceeds grant authority");
+    if (approve && !holds(actor,scope)) throw DecisionDenied{};
     if (approve) addGrant(actor,bot,scope);
     db_.exec("UPDATE grant_requests SET status=?,decidedBy=?,decidedAt=? WHERE id=?",{approve?"approved":"denied",actor.id,unixTime(),id});
     audit(actor,bot,approve?"approve":"deny",
           {{"requestId",id},{"resourceKind",scope.kind},{"resourceId",scope.resource},{"operation",scope.operation}});
-    tx.commit();
+    db_.recordInboxDecision(actor,{std::string(bot),InboxKind::grant_request,id,0,0,0,0},approve?"approve":"deny");
 }
 
 Json Access::grants(std::string_view bot) const {
@@ -261,47 +270,47 @@ Json Access::administration(const Person& actor, std::string_view bot) const {
 }
 
 Id Access::requestBotChange(std::string_view bot, std::string_view operation, std::string_view target,
-                            std::string_view name) {
+                            std::string_view name, Id sourceMessage) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !validBotId(target) ||
         !permits(bot,{"bot_admin",std::string(target),std::string(operation)},true))
         throw Conflict("Bot administration grant required");
     db_.redactor(bot).requirePublic({name,target});
-    db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key) VALUES(?,?,?,?,?)",
-             {bot,operation,target,botName(name),actionId()});
+    db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
+             {bot,operation,target,botName(name),actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     return db_.last();
 }
 
-void Access::reviewBotChange(const Person& actor, std::string_view bot, Id request, bool approve,
-                             const ApplyBotChange& apply) {
-    std::lock_guard lock(db_.mutex);
-    auto authorizedChange = [&] {
-        auto row = db_.query("SELECT operation,target,name,request_key,status FROM bot_changes WHERE bot=? AND id=?",
-                             {bot,request});
-        if (!row.next() || !permitsPerson(actor,bot,Role::admin)) throw Conflict("Bot change unavailable");
-        BotChange change{row.string(0),row.string(1),row.string(2),row.string(3)};
-        if (approve && (!apply || !permits(bot,{"bot_admin",change.target,change.operation},true) ||
-            (change.operation=="create_bot" ? !actor.adminRoot : !permitsPerson(actor,change.target,Role::admin))))
-            throw Conflict("Bot change approval denied");
-        return std::pair{change,row.string(4)};
-    };
-    {
-        Transaction tx(db_.db);
-        const auto [change,status] = authorizedChange();
-        if (status == "pending") {
-            if (approve && change.operation=="rename_bot")
-                db_.exec("UPDATE bot_changes SET status='superseded' WHERE target=? AND operation='rename_bot' AND status='approved'",
-                         {change.target});
-            db_.redactor(bot).requirePublic(actor.id);
-            db_.exec("UPDATE bot_changes SET status=? WHERE id=?",{approve?"approved":"denied",request});
-            audit(actor,bot,approve?"approve_bot_change":"deny_bot_change",
-                  {{"requestId",request},{"target",change.target},{"operation",change.operation},{"name",change.name}});
-        } else if (status != "approved" || !approve) throw Conflict("Bot change already decided");
-        tx.commit();
-    }
-    if (!approve) return;
+std::pair<BotChange,std::string> Access::authorizedBotChange(
+    const Person& actor, std::string_view bot, Id request, bool approve, const ApplyBotChange& apply) {
+    if (!permitsPerson(actor,bot,Role::admin)) throw DecisionDenied{};
+    auto row = db_.query("SELECT operation,target,name,request_key,status FROM bot_changes WHERE bot=? AND id=?",
+                         {bot,request});
+    if (!row.next()) throw DecisionUnavailable{};
+    BotChange change{row.string(0),row.string(1),row.string(2),row.string(3)};
+    if (approve && !apply) throw Conflict("Applying Bot changes is unavailable");
+    if (approve && (!permits(bot,{"bot_admin",change.target,change.operation},true) ||
+        (change.operation=="create_bot" ? !actor.adminRoot : !permitsPerson(actor,change.target,Role::admin))))
+        throw DecisionDenied{};
+    return {change,row.string(4)};
+}
+
+void Access::decideBotChange(const Person& actor, std::string_view bot, Id request, bool approve,
+                             const BotChange& change) {
+    if (approve && change.operation=="rename_bot")
+        db_.exec("UPDATE bot_changes SET status='superseded' WHERE target=? AND operation='rename_bot' AND status='approved'",
+                 {change.target});
+    db_.redactor(bot).requirePublic(actor.id);
+    db_.exec("UPDATE bot_changes SET status=? WHERE id=?",{approve?"approved":"denied",request});
+    audit(actor,bot,approve?"approve_bot_change":"deny_bot_change",
+          {{"requestId",request},{"target",change.target},{"operation",change.operation},{"name",change.name}});
+    db_.recordInboxDecision(actor,{std::string(bot),InboxKind::bot_change,request,0,0,0,0},approve?"approve":"deny");
+}
+
+void Access::applyApprovedBotChange(const Person& actor, std::string_view bot, Id request,
+                                    const ApplyBotChange& apply) {
     Transaction tx(db_.db);
-    const auto [change,status] = authorizedChange();
+    const auto [change,status] = authorizedBotChange(actor,bot,request,true,apply);
     if (status == "approved") {
         try { apply(change); } catch (const std::exception&) { throw BotChangePending{}; }
         db_.exec("UPDATE bot_changes SET status='applied' WHERE id=?",{request});
@@ -309,16 +318,30 @@ void Access::reviewBotChange(const Person& actor, std::string_view bot, Id reque
     tx.commit();
 }
 
-Id Access::requestSecret(std::string_view bot, const SecretRef& ref) {
+void Access::reviewBotChange(const Person& actor, std::string_view bot, Id request, bool approve,
+                             const ApplyBotChange& apply) {
+    std::lock_guard lock(db_.mutex);
+    {
+        Transaction tx(db_.db);
+        const auto [change,status] = authorizedBotChange(actor,bot,request,approve,apply);
+        if (status == "pending") decideBotChange(actor,bot,request,approve,change);
+        else if (status != "approved" || !approve) throw DecisionUnavailable{};
+        tx.commit();
+    }
+    if (approve) applyApprovedBotChange(actor,bot,request,apply);
+}
+
+Id Access::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMessage) {
     if (!validBotId(bot) || !ref.valid()) throw Conflict("Invalid Bot or secret reference");
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({bot,ref.name});
     auto row = db_.query(R"SQL(
-INSERT INTO protected_inputs(bot,name,file)
- SELECT ?1,?2,?3 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE bot=?1 AND name=?2 AND status='fulfilled')
- ON CONFLICT(bot,name) WHERE status='pending' DO UPDATE SET status=excluded.status
+INSERT INTO protected_inputs(bot,name,file,source_message_id)
+ SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE bot=?1 AND name=?2 AND status='fulfilled')
+ ON CONFLICT(bot,name) WHERE status='pending' DO UPDATE
+ SET source_message_id=coalesce(protected_inputs.source_message_id,excluded.source_message_id)
  RETURNING id
-)SQL",{bot,ref.name,actionId()});
+)SQL",{bot,ref.name,actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     if (!row.next()) throw Conflict("Protected input unavailable");
     const auto id = row.number(0);
     row.next();
@@ -328,20 +351,25 @@ INSERT INTO protected_inputs(bot,name,file)
 void Access::submitSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
     std::lock_guard lock(db_.mutex);
     Transaction tx(db_.db);
-    if (!permitsPerson(actor,bot,Role::admin)) throw Conflict("Admin required");
+    fulfillSecret(actor,bot,request,value);
+    tx.commit();
+}
+
+void Access::fulfillSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
+    if (!permitsPerson(actor,bot,Role::admin)) throw DecisionDenied{};
     auto row = db_.query(R"SQL(
 SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending'
  AND NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=p.name AND status='fulfilled')
 )SQL",{bot,request});
-    if (!row.next()) throw Conflict("Protected input unavailable");
+    if (!row.next()) throw DecisionUnavailable{};
     const auto name = row.string(1);
-    if (!holds(actor,{"secret",name,"use"})) throw Conflict("Protected input unavailable");
+    if (!holds(actor,{"secret",name,"use"})) throw DecisionDenied{};
     if (value.empty() || name.find(value)!=name.npos || bot.find(value)!=bot.npos) throw Conflict("Invalid protected value");
     db_.redactor(bot).requirePublic(actor.id);
-    db_.secrets.insert({row.string(0)},value);
     audit(actor,bot,"supply_secret",{{"requestId",request},{"resourceKind","secret"},{"resourceId",name}});
+    db_.recordInboxDecision(actor,{std::string(bot),InboxKind::protected_input,request,0,0,0,0},"supply");
     db_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?",{request});
-    tx.commit();
+    db_.secrets.insert({row.string(0)},value);
 }
 
 void Access::useSecret(Id task, const SecretRef& ref, bool upstream, const std::function<void(std::string_view)>& adapter) const {

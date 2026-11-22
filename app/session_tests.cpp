@@ -73,7 +73,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
     } model(store,shared);
     store.access().resourceGrant({"root",true},"release",shared,GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
-    store.receive({"release","Read staging","env-canonical","project-canonical",config,{},0},
+    store.receive(localOwner,{"release","Read staging","env-canonical","project-canonical",config,{},0},
                   "read-staging","How much work went into the staging investigation?");
     runtime.runConversations();
     check(model.paged && model.revoked && t3.sends == 0,"model schemas did not dispatch pagination and revocation");

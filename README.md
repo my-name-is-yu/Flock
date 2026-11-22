@@ -73,7 +73,7 @@ build/app/flock --help
 build/app/flock tasks
 build/app/flock status <task-id>
 build/app/flock history <task-id>
-build/app/flock answer <task-id> <wait-id> 'main'
+build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 ```
 
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.

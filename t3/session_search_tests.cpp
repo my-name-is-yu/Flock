@@ -32,7 +32,7 @@ void deletedSessionSearch(T3& t3, const std::filesystem::path& database, const s
     const auto call = [&](std::string tool, Json args) {
         model.result = nullptr;
         model.next = {std::move(tool),std::move(args),"Inspect the requested investigation"};
-        store.receive(intake,std::to_string(++sequence),"Check the investigation.");
+        store.receive(localOwner,intake,std::to_string(++sequence),"Check the investigation.");
         runtime.runConversations();
         return model.result;
     };

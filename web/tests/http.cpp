@@ -15,78 +15,6 @@ using namespace flockv0;
 using namespace flockv0::http_test;
 namespace {
 
-struct TestDirectory {
-    std::filesystem::path path;
-    TestDirectory() {
-        char name[] = "/tmp/flock-web-XXXXXX";
-        const auto directory = mkdtemp(name);
-        check(directory != nullptr,"could not create fixture directory");
-        path = directory;
-    }
-    ~TestDirectory() { std::error_code error; std::filesystem::remove_all(path,error); }
-};
-
-struct FixedModel : Model {
-    Decision decide(const ModelInput& input) override {
-        if (input.event["kind"] == "intake")
-            return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
-        if (input.event["kind"] == "question") {
-            if (input.event.contains("userAnswer")) {
-                return {"answer_session_question",{{"requestId","scope-question"},
-                    {"answers",{{"scope",input.event["userAnswer"]}}}},"The user selected the scope"};
-            }
-            return {"ask_user",{{"question","利用者向けの変更だけを載せますか？"},{"choices",{"利用者向けのみ","すべて"}}},"掲載範囲の指定が必要"};
-        }
-        return {"complete",{{"report","Draft complete"}},"The Session report matches the criterion"};
-    }
-};
-
-struct FixedT3 : T3 {
-    std::map<std::string,Observation,std::less<>> observations;
-    std::vector<Command> replies;
-    std::map<std::string,unsigned,std::less<>> launches;
-
-    std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
-    Delivery send(const Command& command) override {
-        if (command.tool == "delegate") {
-            if (command.projectId == "settings" &&
-                command.config.value("session",Json::object()).value("runtimeMode","") != "approval-required")
-                return {Delivery::Kind::Settings,{},privateValue,true};
-            const auto& project = command.projectId;
-            const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
-            return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + project + "-" + std::to_string(++launches[project]),link},{}};
-        }
-        check(command.tool == "answer_session_question","unexpected command in fixture");
-        replies.push_back(command);
-        observations.erase(command.target.threadId);
-        return {Delivery::Kind::Accepted,{},{}};
-    }
-    Delivery reconcile(const Command&) override { return {}; }
-    Observation observe(const std::string&, const Json&, const RunRef& run) override { return observations[run.threadId]; }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
-};
-
-WebCallbacks callbacks() {
-    return {
-        [] {
-            return Json::array({
-                {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
-                    {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
-                    {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()}},
-                {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
-                {{"id","broken"},{"name","Broken"}},
-            });
-        },
-        [](std::string_view bot, std::string_view request) -> Intake {
-            if (bot == "broken") throw std::runtime_error(privateValue);
-            return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
-                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
-        }
-    };
-}
-
 void pageAssets(Browser& browser, const std::string& html) {
     const std::regex tags(R"(<(script|link)\b[^>]*>)");
     const std::regex source(R"(\ssrc\s*=\s*["']([^"']+)["'])");
@@ -153,8 +81,6 @@ void checkPresence(Browser& browser, const Json& list, const std::string& bot, s
     const auto view = browser.get("/api/view?bot=" + bot);
     check(view.at("presence") == expected,"unexpected Bot view presence for " + bot);
 }
-
-void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
 
 bool hasEvent(const Json& events, std::string_view kind, std::string_view field, std::string_view text) {
     for (const auto& event : events) {
@@ -523,10 +449,12 @@ void exercise(const std::filesystem::path& path) {
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
-    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
+    const auto& visibleWait = afterSubmit.at("waits").at(0);
+    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
+                  {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
     browser.post("/api/operations",reply,404);
     reply["botId"] = "release";
-    cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
+    cli.operate(localOwner,TaskTarget::from(cli.task(release),waitId),"answer",{{"text","利用者向けのみ"}});
     const auto answered = browser.get("/api/view?bot=release");
     check(std::any_of(answered["events"].begin(),answered["events"].end(),[&](const Json& row) {
         return row["kind"] == "user_answer" && row["taskId"] == release &&
@@ -560,8 +488,10 @@ void exercise(const std::filesystem::path& path) {
     };
     server = startWeb(store,port,std::move(updatedBots));
     Browser reopened(*server);
+    const auto& settingsWait = settingsPage.at("waits").at(0);
     reopened.post("/api/operations",{{"botId","settings"},{"taskId",settings},
-        {"waitId",settingsPage["waits"][0]["wait"]["id"]},{"operation","reconcile"},
+        {"waitId",settingsWait.at("wait").at("id")},{"operation","reconcile"},
+        {"targetRevision",settingsWait.at("currentRevision")},{"targetGeneration",settingsWait.at("generation")},
         {"session",{{"runtimeMode","invalid-client-setting"}}}});
     tick(*runtime,2);
     check(cli.task(settings)["state"] == "running" && t3.launches["settings"] == 1,
@@ -577,15 +507,18 @@ void exercise(const std::filesystem::path& path) {
     t3.observations["thread-triage"] = {};
     tick(*runtime,1);
     check(reopened.get("/api/view?bot=triage")["waits"].empty(),"resolved T3 wait stayed visible");
-    reopened.post("/api/operations",{{"botId","triage"},{"taskId",triage},{"waitId",externalId},{"operation","cancel"}},409);
+    reopened.post("/api/operations",{{"botId","triage"},{"taskId",triage},{"waitId",externalId},{"operation","cancel"},
+        {"targetRevision",external.at("currentRevision")},{"targetGeneration",external.at("generation")}},409);
     check(cli.task(triage)["state"] == "running","stale cancellation affected a resumed Run");
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
     triageQuestion.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     tick(*runtime,2);
-    const auto questionId = reopened.get("/api/view?bot=triage")["waits"][0]["wait"]["id"];
-    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","すべて"}};
+    const auto question = reopened.get("/api/view?bot=triage").at("waits").at(0);
+    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",question.at("wait").at("id")},
+        {"operation","answer"},{"text","すべて"},{"targetRevision",question.at("currentRevision")},
+        {"targetGeneration",question.at("generation")}};
     reopened.post("/api/operations",answer);
     reopened.post("/api/operations",answer,409);
     tick(*runtime,2);
@@ -929,6 +862,7 @@ int main() {
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
         accessEndpoints(directory.path / "access.db");
+        boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }

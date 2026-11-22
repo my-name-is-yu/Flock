@@ -197,8 +197,8 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db);
         Runtime runtime(store,model,t3,notes);
-        store.operate(firstId,waitId,"answer",{{"text","main"}});
-        rejects<Conflict>([&] { store.operate(firstId,waitId,"answer",{{"text","old answer"}}); },"duplicate answer accepted");
+        store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","main"}});
+        rejects<Conflict>([&] { store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","old answer"}}); },"duplicate answer accepted");
         runtime.tick();
         runtime.tick();
         check(store.task(firstId)["state"] == "running" && store.task(firstId)["doneWhen"] == "Evidence required before edit",
@@ -318,7 +318,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
         const auto start = model.requests.size();
-        store.receive(bot,"new-work","Collect the validation evidence");
+        store.receive(localOwner,bot,"new-work","Collect the validation evidence");
         runtime.runConversations();
         const auto tasks = store.tasks(bot.botId);
         check(tasks.size() == 1,"the request should create one Task for this Bot");
@@ -337,7 +337,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
         const Id result = store.latestTaskResult(task).at("id");
-        return store.receive(bot,key,"Why does that evidence support the result?",result).at("messageId");
+        return store.receive(localOwner,bot,key,"Why does that evidence support the result?",result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
                                        const BotNotes& notes, std::string_view expectedReply) {
@@ -377,7 +377,7 @@ void notesAcrossConversationAndWork() {
     const auto beforeFailure = model.requests.size();
     const auto originalRequest = "Collect the missing release evidence";
     noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
-    store.receive(firstIntake,"unreadable-notes",originalRequest);
+    store.receive(localOwner,firstIntake,"unreadable-notes",originalRequest);
     runtime.runConversations();
     const auto failure = store.conversation(firstIntake.botId).back().at("data");
     check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
@@ -386,7 +386,7 @@ void notesAcrossConversationAndWork() {
           "an unreadable note must prompt repair without calling the model or creating work");
 
     noteReadError.reset();
-    store.receive(firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
+    store.receive(localOwner,firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
     runtime.runConversations();
     const auto tasks = store.tasks(firstIntake.botId);
     check(model.requests.size() == beforeFailure + 2 &&
@@ -455,6 +455,7 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
+                   "record_task_blocker","withdraw_task_question",
                    "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
@@ -466,7 +467,7 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 20 &&
+    check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
@@ -477,6 +478,10 @@ void responseContract() {
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
+    check(turnTool("record_task_blocker")["required"] == Json::array({"reason","taskId","generation","blockerReason"}) &&
+          turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
+          turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
+          "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
@@ -673,7 +678,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "change_task";
         changes.args = {{"taskId",task},{"doneWhen","Confirm the output"}};
-        store.receive(intake,"criteria","Completion criteria: Confirm the output");
+        store.receive(localOwner,intake,"criteria","Completion criteria: Confirm the output");
         routing.runConversations();
     }
     check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
@@ -689,7 +694,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "send_to_task";
         changes.args = {{"taskId",task}};
-        store.receive(intake,"follow-up","Include the exact sample count");
+        store.receive(localOwner,intake,"follow-up","Include the exact sample count");
         routing.runConversations();
     }
     {
@@ -726,10 +731,10 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
         return Json(nullptr);
     };
-    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
+    const auto question = store.receive(localOwner,intake,"explain","What did it find?",result).at("messageId").get<Id>();
     runtime.runConversations();
     const auto explanation = replyTo(question);
-    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
+    const auto again = store.receive(localOwner,intake,"again","Explain again",explanation.at("messageId").get<Id>())
         .at("messageId").get<Id>();
     runtime.runConversations();
     check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
@@ -748,7 +753,7 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
     const auto question = store.task(task).at("wait").at("messageId").get<Id>();
 
-    store.receive(intake,"dataset-answer","Use the release dataset",question);
+    store.receive(localOwner,intake,"dataset-answer","Use the release dataset",question);
     runtime.runConversations();
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
     const auto history = store.history(task);
