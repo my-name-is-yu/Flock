@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
@@ -83,9 +83,50 @@ function checkLogin(executable) {
   }
 }
 
+function transportResponse(mode) {
+  if (mode === "malformed") return new Response("data: {invalid}\n\n", { headers: { "content-type": "text/event-stream" } });
+  if (mode === "corrupt") return new Response(Uint8Array.of(255), { headers: { "content-type": "text/event-stream" } });
+  if (mode === "disconnect") throw new TypeError("connection reset");
+  if (mode === "short-stream") return new Response("data: {}\n", { headers: { "content-type": "text/event-stream" } });
+  const [status, code] = mode.split("/");
+  return Response.json({ error: { code } }, { status: Number(status) });
+}
+
+function checkTransport(executable) {
+  const root = mkdtempSync(join(tmpdir(), "flock-transport-"));
+  const lock = openSync(join(root, "lock"), "wx", 0o600);
+  try {
+    writeFileSync(join(root, "profile.json"), JSON.stringify({
+      accessToken: "fixture", refreshToken: "fixture", granted: ["chatgpt.tokens.use.direct"],
+      expiresAt: Date.now() + 3600_000,
+    }), { mode: 0o600 });
+    for (const [mode, transient, message] of [
+      ["malformed", false, /Invalid JSON/], ["corrupt", false, /Invalid UTF-8/], ["disconnect", true, /Unable to reach/],
+      ["short-stream", true, /ended before/], ["400/feature_unavailable", false, /feature_unavailable/],
+      ["503/test", true, /503/], ["429/subscription_sharing_usage_limit_exceeded", false, /usage_limit/],
+    ]) {
+      const response = childProcess.spawnSync(process.execPath, ["--import", scriptPath,
+        join(dirname(executable), "chatgpt.mjs"), "infer", root, "3"], {
+        input: "{}", encoding: "utf8", stdio: ["pipe", "pipe", "pipe", lock],
+        env: { ...process.env, FLOCK_TEST_TRANSPORT_MODE: mode },
+      });
+      assert.equal(response.status, 0, response.stderr);
+      const error = JSON.parse(response.stdout);
+      assert.match(error.error, message);
+      assert.equal(error.transient, transient, mode);
+    }
+  } finally {
+    closeSync(lock);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 if (realpathSync(process.argv[1]) === scriptPath) {
   if (Number(process.versions.node.split(".")[0]) < 22) process.exit(77);
   checkLogin(process.argv[2]);
+  checkTransport(process.argv[2]);
+} else if (process.env.FLOCK_TEST_TRANSPORT_MODE) {
+  globalThis.fetch = async () => transportResponse(process.env.FLOCK_TEST_TRANSPORT_MODE);
 } else {
   simulateAuthorization(process.env.FLOCK_TEST_LOGIN_MODE);
 }

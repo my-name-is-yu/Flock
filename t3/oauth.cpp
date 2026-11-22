@@ -158,13 +158,89 @@ std::string sameOrigin(const Url& resource, const std::string& value) {
     return url.full;
 }
 
-Json oauthJson(const std::string& url, const Headers& headers = {}, const std::string& body = {}) {
+Failure oauthFailure(std::string_view stage, const HttpResponse& response) {
+    const auto payload = Json::parse(response.body, nullptr, false);
+    const auto code = str(payload, "error");
+    auto message = "T3 OAuth " + std::string(stage) + " failed (HTTP " + std::to_string(response.status) + ")";
+    if (!code.empty()) message += ": " + code;
+    return Failure(Failure::Kind::Auth, message);
+}
+
+Json oauthJson(std::string_view stage, const std::string& url, const Headers& headers = {}, const std::string& body = {}) {
     const auto response = http(url, body.empty() ? "GET" : "POST", headers, body);
-    if (response.status < 200 || response.status >= 300)
-        throw Failure(Failure::Kind::Auth, "T3 rejected OAuth discovery, registration, or token exchange");
-    auto payload = parse(response.body);
-    if (!payload.is_object()) invalidResponse();
+    if (response.status < 200 || response.status >= 300) throw oauthFailure(stage, response);
+    auto payload = Json::parse(response.body, nullptr, false);
+    if (!payload.is_object() || payload.contains("error")) throw oauthFailure(stage, response);
     return payload;
+}
+
+// RFC 9110 challenges and auth-params both use commas. A token followed by
+// '=' continues the current challenge. Quoted commas and quoted-pairs are data.
+std::optional<std::string> bearerMetadata(std::string_view header) {
+    constexpr std::string_view tokens = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~";
+    auto space = [&] { header.remove_prefix(std::min(header.find_first_not_of(" \t"), header.size())); };
+    auto token = [&] {
+        const auto length = std::min(header.find_first_not_of(tokens), header.size());
+        const auto value = header.substr(0, length);
+        header.remove_prefix(length);
+        return value;
+    };
+    auto lower = [](std::string_view value) {
+        std::string result(value);
+        for (char& c : result) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        return result;
+    };
+    bool bearer = false;
+    std::optional<std::string> metadata;
+    while (!header.empty()) {
+        space();
+        if (header.empty()) break;
+        if (header.front() == ',') { header.remove_prefix(1); continue; }
+        auto key = token();
+        if (key.empty()) invalidResponse();
+        space();
+        if (!header.starts_with('=')) {
+            bearer = lower(key) == "bearer";
+            if (header.empty() || header.starts_with(',')) continue;
+            // Other schemes may carry token68 credentials instead of params.
+            auto credentials = header.substr(0, header.find(','));
+            auto padding = credentials.find('=');
+            auto bare = trim(credentials.substr(0, padding));
+            if (!bare.empty() && bare.find_first_not_of(
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~+/") == std::string::npos &&
+                (padding == std::string_view::npos || trim(credentials.substr(padding)).find_first_not_of('=') == std::string::npos)) {
+                header.remove_prefix(credentials.size());
+                continue;
+            }
+            key = token();
+            space();
+        }
+        if (key.empty() || !header.starts_with('=')) invalidResponse();
+        header.remove_prefix(1);
+        space();
+        std::string value;
+        if (header.starts_with('"')) {
+            header.remove_prefix(1);
+            while (!header.empty() && !header.starts_with('"')) {
+                if (header.starts_with('\\')) header.remove_prefix(1);
+                if (header.empty()) invalidResponse();
+                value += header.front();
+                header.remove_prefix(1);
+            }
+            if (header.empty()) invalidResponse();
+            header.remove_prefix(1);
+        } else {
+            value = token();
+            if (value.empty()) invalidResponse();
+        }
+        if (bearer && lower(key) == "resource_metadata") {
+            if (metadata && *metadata != value) invalidResponse();
+            metadata = std::move(value);
+        }
+        space();
+        if (!header.empty() && !header.starts_with(',')) invalidResponse();
+    }
+    return metadata;
 }
 
 bool supports(const Json& metadata, const char* key, std::string_view value) {
@@ -177,28 +253,19 @@ struct OAuthEndpoints { std::string issuer, authorization, token, registration; 
 OAuthEndpoints discover(const Url& resource) {
     const auto probe = http(resource.full, "POST", {{"Accept", "application/json, text/event-stream"},
                             {"Content-Type", "application/json"}},
-        R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Flock","version":"0.1.0"}}})");
-    if (probe.status != 401)
-        throw Failure(Failure::Kind::Settings, "T3 did not advertise OAuth at this MCP URL");
+        Json{{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", initializeParams()}}.dump());
+    if (probe.status != 401) throw oauthFailure("discovery", probe);
     auto metadataUrl = resource.origin + "/.well-known/oauth-protected-resource" + resource.path;
-    const auto auth = probe.headers.find("www-authenticate");
-    constexpr std::string_view marker = "resource_metadata=\"";
-    if (auth != probe.headers.end()) {
-        const auto offset = auth->second.find(marker);
-        if (offset != std::string::npos) {
-            const auto begin = offset + marker.size();
-            const auto end = auth->second.find('"', begin);
-            if (end == std::string::npos) invalidResponse();
-            metadataUrl = sameOrigin(resource, auth->second.substr(begin, end - begin));
-        }
+    if (const auto auth = probe.headers.find("www-authenticate"); auth != probe.headers.end()) {
+        if (auto advertised = bearerMetadata(auth->second)) metadataUrl = sameOrigin(resource, *advertised);
     }
-    const auto metadata = oauthJson(metadataUrl);
+    const auto metadata = oauthJson("discovery", metadataUrl);
     if (checkedUrl(str(metadata, "resource")).full != resource.full) invalidResponse();
     const auto authorities = metadata.value("authorization_servers", Json::array());
     if (!authorities.is_array() || authorities.size() != 1 || !authorities.front().is_string()) invalidResponse();
     const auto issuer = checkedUrl(authorities.front().get<std::string>());
     if (issuer.origin != resource.origin || issuer.path != "/") invalidResponse();
-    const auto oauth = oauthJson(issuer.origin + "/.well-known/oauth-authorization-server");
+    const auto oauth = oauthJson("discovery", issuer.origin + "/.well-known/oauth-authorization-server");
     if (checkedUrl(str(oauth, "issuer")).full != issuer.full ||
         !supports(oauth, "code_challenge_methods_supported", "S256") ||
         !supports(oauth, "token_endpoint_auth_methods_supported", "none") ||
@@ -338,7 +405,7 @@ void loginT3(const std::filesystem::path& credentialDirectory, const std::string
     socklen_t size = sizeof(addr);
     if (getsockname(listener.get(), reinterpret_cast<sockaddr*>(&addr), &size) != 0) callbackFailure();
     const auto redirect = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + std::string(CallbackPath);
-    const auto registration = oauthJson(oauth.registration, {{"Content-Type", "application/json"}},
+    const auto registration = oauthJson("registration", oauth.registration, {{"Content-Type", "application/json"}},
         Json{{"client_name", "Flock"}, {"redirect_uris", Json::array({redirect})},
              {"token_endpoint_auth_method", "none"}, {"grant_types", Json::array({"authorization_code"})},
              {"response_types", Json::array({"code"})}}.dump());
@@ -351,7 +418,7 @@ void loginT3(const std::filesystem::path& credentialDirectory, const std::string
         {"redirect_uri", redirect}, {"scope", scope}, {"resource", resource.full}, {"state", state},
         {"code_challenge", digest(verifier)}, {"code_challenge_method", "S256"}}));
     const auto code = receiveCode(listener.get(), state, oauth.issuer);
-    const auto tokenResult = oauthJson(oauth.token, {{"Content-Type", "application/x-www-form-urlencoded"}},
+    const auto tokenResult = oauthJson("token", oauth.token, {{"Content-Type", "application/x-www-form-urlencoded"}},
         form({{"grant_type", "authorization_code"}, {"code", code}, {"redirect_uri", redirect},
               {"client_id", clientId}, {"code_verifier", verifier}, {"resource", resource.full}}));
     const auto token = str(tokenResult, "access_token");

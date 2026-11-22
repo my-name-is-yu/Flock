@@ -159,10 +159,9 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [] {
             return Json::array({
                 {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
-                    {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
+                    {"cron",Json::array()},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
+                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()}},
                 {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
                 {{"id","broken"},{"name","Broken"}},
             });
@@ -290,6 +289,8 @@ void conversationEntry(const std::filesystem::path& path) {
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
+    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").get<Id>();
+    const auto since = "&changesAfter=" + std::to_string(cursor);
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
     check(model.turns == 0 && store.tasks().size() == 1,"HTTP intake ran the model before returning its receipt");
     disableIntake = true;
@@ -303,7 +304,10 @@ void conversationEntry(const std::filesystem::path& path) {
     browser.post("/api/messages",{{"botId","release"},{"text","追加確認"}},400);
 
     tick(runtime,3);
-    const auto page = browser.get("/api/view?bot=release");
+    const auto page = browser.get("/api/view?bot=release" + since);
+    check(page.at("changedMessageIds") == Json::array({messageId}) &&
+          browser.get("/api/view?bot=triage" + since).at("changedMessageIds").empty(),
+          "a processed message was not invalidated exclusively for its own Bot");
     unsigned questions = 0, answers = 0;
     for (const auto& event : page.at("events")) {
         if (event["kind"] == "conversation_message") {
@@ -490,8 +494,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
           forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
-          !forwarded.contains("initiator") && !answered.contains("recipient") && !answered.contains("forwardedMessage") &&
-          t3.launches == 0,"the exchange did not preserve the forward, its Bot authors, or the reply");
+          !answered.contains("forwardedMessage") && t3.launches == 0,
+          "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");

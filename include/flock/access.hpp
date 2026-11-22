@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/core.hpp"
+#include <compare>
 
 namespace flockv0 {
 bool validBotId(std::string_view);
@@ -11,6 +12,7 @@ enum class Role { view = 1, decide, admin };
 struct Person {
     std::string id;
     bool adminRoot = false; // Assigned by the trusted host, never deserialized from a request.
+    auto operator<=>(const Person&) const = default;
 };
 struct Scope {
     std::string kind, resource, operation;
