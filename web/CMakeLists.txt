@@ -17,7 +17,7 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp access_routes.cpp memory_automation_routes.cpp identity.cpp views.cpp "${flock_web_asset_header}")
+add_library(flock_web server.cpp access_routes.cpp memory_automation_routes.cpp identity.cpp views.cpp change_feed.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
 target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads)
@@ -32,9 +32,11 @@ if(BUILD_TESTING)
   target_include_directories(flock_web_conversation_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
-  if(TARGET flock_app_support)
-    find_program(FLOCK_NODE_EXECUTABLE node)
-    if(FLOCK_NODE_EXECUTABLE)
+  find_program(FLOCK_NODE_EXECUTABLE node)
+  if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_web_event_history
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
+    if(TARGET flock_app_support)
       target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
       target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
       target_compile_definitions(flock_web_conversation_tests PRIVATE FLOCK_TEST_CHATGPT=1)

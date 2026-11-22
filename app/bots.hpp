@@ -1,7 +1,8 @@
 #pragma once
+#include "flock/access.hpp"
 
+#include "flock/bot_profile.hpp"
 #include "flock/memory_automation.hpp"
-#include "flock/web.hpp"
 
 #include <mutex>
 #include <optional>
@@ -9,7 +10,7 @@
 namespace flockv0::app {
 struct Bot {
     std::string id, name, environmentId, projectId;
-    Json settings = Json::object(), avatar;
+    Json settings = Json::object();
     std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;
 };
@@ -33,8 +34,6 @@ private:
     mutable std::mutex mutex_;
     std::filesystem::path path(std::string_view id) const;
     Json cardLocked(std::string_view id) const;
-    Json readConfig(std::string_view id) const;
-    static Bot configuredBot(std::string_view id, const Json&);
 };
 
 }

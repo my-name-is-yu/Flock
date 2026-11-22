@@ -55,7 +55,7 @@ Json revisionView(const Statement& row) {
 }
 }
 
-void Store::Impl::migrateMemory() {
+void Store::Impl::initializeMemorySchema() {
     Transaction tx(db);
     if (sqlite3_exec(db,R"SQL(
 CREATE TABLE IF NOT EXISTS memory_documents(

@@ -57,7 +57,7 @@ bool Scope::valid() const {
 
 Access Store::access() { return Access(*p_); }
 
-void Store::Impl::migrateAccess() {
+void Store::Impl::initializeAccessSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS person_bot_grants(bot TEXT,person TEXT,role INTEGER,PRIMARY KEY(bot,person));
@@ -79,7 +79,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHE
 CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending');
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Access migration failed");
+    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
 }
 
 bool Access::permits(std::string_view bot, const Scope& s, bool upstream) const {

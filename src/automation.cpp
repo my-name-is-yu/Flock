@@ -101,7 +101,7 @@ bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& s
 }
 }
 
-void Store::Impl::migrateAutomation() {
+void Store::Impl::initializeAutomationSchema() {
     Transaction tx(db);
     if (sqlite3_exec(db,R"SQL(
 CREATE TABLE IF NOT EXISTS automations(
@@ -160,14 +160,24 @@ FROM automations WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
 )SQL",{bot,before,before});
     Json items = Json::array();
     Id next = 0;
+    const auto scrub = redactor(bot);
+    std::optional<SecretRedactor> shared;
     while (rows.next()) {
         if (items.size() == 20) {
             next = items.back().at("id");
             break;
         }
-        items.push_back(automationView(rows));
+        auto item = automationView(rows);
+        if (item.at("kind") == "trigger") {
+            if (!shared) shared = sharedRedactor();
+            auto filter = shared->payload(item.at("eventFilter"));
+            item.erase("eventFilter");
+            item = shared->record(std::move(item));
+            item["eventFilter"] = std::move(filter);
+        } else item = scrub.record(std::move(item));
+        items.push_back(std::move(item));
     }
-    return redactor(bot).record({{"automations",items},{"before",next}});
+    return {{"automations",std::move(items)},{"before",next}};
 }
 
 Json Store::cancelAutomation(const Person& actor, std::string_view bot, Id id) {
@@ -323,7 +333,7 @@ void Store::Impl::fireAutomation(Id id, const Statement& row, Seconds now) {
             if (def.contains("label")) trigger["label"] = def.at("label");
             auto scrub = redactor(bot);
             trigger = scrub.record(std::move(trigger));
-            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),{},0,nullptr,trigger);
+            const auto task = submit(intake(bot,field(def,"request"),row.json(2)),0,nullptr,RequestJournal::record,trigger);
             const auto receipts = Json::array({{{"taskId",task},{"botId",bot},{"triggerId",id}}});
             exec("INSERT INTO automation_firings VALUES(?,?,?,?)",{key,bot,now,receipts});
         }
@@ -360,11 +370,16 @@ AND json_extract(definition,'$.source')=? ORDER BY id
         auto& receipts = received.try_emplace(bot,Json::array()).first->second;
         const auto def = rows.json(2);
         if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
+        const auto routing = rows.json(3);
+        const Json destination = {bot,routing};
+        if (scrub.record(destination,SecretRedactor::Fields::external) != destination) continue;
+        const auto request = bounded(scrub.text(field(def,"request")),maxRequestBytes);
+        if (request.find_first_not_of(" \r\n\t") == request.npos) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",def.at("source")},
+        const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",scrub.text(std::string(source))},
                               {"event",*payload},{"firedAt",now}};
-        const auto task = p_->submit(intake(bot,field(def,"request"),rows.json(3)),{},0,nullptr,trigger);
+        const auto task = p_->submit(intake(bot,request,routing),0,nullptr,RequestJournal::record,trigger);
         receipts.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
     }
     if (delivered.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");

@@ -421,6 +421,54 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
           "Webhook provenance retained a protected event value");
 }
 
+void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
+    Store store(db);
+    const auto now = utc(2026,1,1);
+    const std::string source = "fixture-webhook-source", token = "fixture-request-token";
+    const auto id = store.createAutomation(owner,alpha,{{"kind","trigger"},{"source",source},
+        {"request","Check " + token},{"eventFilter",{{token,"ready"}}}},now).at("id");
+    const auto publicId = store.createAutomation(owner,alpha,{{"kind","trigger"},{"source",source},
+        {"request","Check " + token}},now).at("id");
+    auto access = store.access();
+    access.submitSecret(owner,beta.botId,access.requestSecret(beta.botId,{"source-token"}),source);
+    access.submitSecret(owner,beta.botId,access.requestSecret(beta.botId,{"request-token"}),token);
+
+    const auto list = store.automations(owner,alpha.botId).at("automations");
+    check(list.at(1).at("id") == id && list.at(1).at("source") == "[redacted]" &&
+          list.at(1).at("request") == "Check [redacted]" && list.at(1).at("eventFilter").contains("[redacted]"),
+          "Trigger listing exposed saved webhook metadata that became protected");
+
+    const auto delivery = store.receiveWebhook(owner,source,"evt-1",{{token,"ready"}},now);
+    const auto receipts = delivery.at("tasks");
+    check(receipts.size() == 1 && receipts.at(0).at("triggerId") == publicId,
+          "A newly protected filter matched or a redacted trigger failed to deliver");
+    const auto taskId = receipts.at(0).at("taskId").get<Id>();
+    const auto task = store.task(taskId);
+    check(task.at("request") == "Check [redacted]" && task.at("intent") == task.at("request") &&
+          task.at("trigger").at("source") == "[redacted]","Task retained protected webhook metadata");
+    const auto containsMetadata = [&](const Json& data) {
+        const auto dump = data.dump();
+        return dump.find(source) != dump.npos || dump.find(token) != dump.npos;
+    };
+    check(!containsMetadata(store.history(taskId)) && !containsMetadata(store.conversation(alpha.botId)),
+          "Webhook request or provenance leaked into a journal");
+
+    Adapter adapter;
+    Script model;
+    RuntimeOptions options;
+    options.clock = [&] { return now; };
+    Runtime runtime(store,model,adapter,[](auto) { return std::string{}; },options);
+    runtime.tick();
+    runtime.tick();
+    check(model.inputs.size() == 1 && model.inputs.front().task.at("trigger") == task.at("trigger") &&
+          !containsMetadata(model.inputs.front().task) && !containsMetadata(model.inputs.front().event),
+          "The task model lost webhook provenance or received protected metadata");
+
+    const auto replay = store.receiveWebhook(owner,source,"evt-1",Json::object(),now);
+    check(replay.at("duplicate") == true && replay.at("tasks") == receipts,
+          "Redacted webhook metadata changed delivery deduplication");
+}
+
 void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026,1,1);
@@ -464,6 +512,7 @@ int main() {
         automationConversation(temp.path / "webhook.sqlite3");
         webhookGrants(temp.path / "webhook-grants.sqlite3");
         webhookMatchesRawPublicFields(temp.path / "webhook-filters.sqlite3");
+        webhookRechecksSavedMetadata(temp.path / "webhook-saved.sqlite3");
         webhookEventIdsStayPrivate(temp.path / "webhook-metadata.sqlite3");
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
