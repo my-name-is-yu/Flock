@@ -4,7 +4,7 @@
 #include <unistd.h>
 
 namespace flockv0 {
-std::function<Person(std::string_view)> webIdentities(const std::filesystem::path& path) {
+void configureWebIdentities(Store& store, const std::filesystem::path& path, WebCallbacks& callbacks) {
     const int fd = open(path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
     struct Close {int fd; ~Close() {if (fd>=0) close(fd);} } closeFile{fd};
     struct stat info{};
@@ -22,6 +22,7 @@ std::function<Person(std::string_view)> webIdentities(const std::filesystem::pat
     const auto entries=Json::parse(data,nullptr,false);
     if (!entries.is_array()) throw Conflict("Invalid Web identities");
     std::map<std::string,Person,std::less<>> people;
+    std::vector<std::string> roots;
     for (auto& item:entries) {
         try {
             const auto credential=item.at("authorization").get<std::string>();
@@ -30,9 +31,11 @@ std::function<Person(std::string_view)> webIdentities(const std::filesystem::pat
                 (!credential.starts_with("Basic ") && !credential.starts_with("Bearer ")) ||
                 credential.find_first_of("\r\n")!=credential.npos || !people.emplace(credential,principal).second)
                 throw Conflict("Invalid Web identity");
+            if (principal.adminRoot) roots.push_back(std::move(principal.id));
         } catch (const Json::exception&) { throw Conflict("Invalid Web identity"); }
     }
-    return [people=std::move(people)](std::string_view authorization) -> Person {
+    store.setRootPeople(std::move(roots));
+    callbacks.authenticate = [people=std::move(people)](std::string_view authorization) -> Person {
         auto found=people.find(authorization);
         return found==people.end() ? Person{} : found->second;
     };
