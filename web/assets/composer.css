@@ -86,6 +86,7 @@
   grid-area: reply; display: flex; align-items: center; gap: .5rem;
   margin: .35rem .35rem 0; padding-inline-start: .65rem;
   border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--text-2);
+  animation: notice-in 180ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .reply-mark { width: 1rem; height: 1rem; flex: none; color: var(--accent); }
 .reply-target { flex: 1; min-width: 0; font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -96,8 +97,10 @@
   width: var(--composer-control-size); height: var(--composer-control-size); padding: 0;
   border: .3rem solid transparent; border-radius: var(--radius-full);
   background: transparent; background-clip: padding-box; color: var(--text-2);
+  transition: background-color .15s ease, color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
 .reply-cancel:hover:not(:disabled) { background-color: var(--accent-soft-hover); color: var(--text); }
+.reply-cancel:active:not(:disabled) { transform: scale(.92); }
 .reply-cancel svg { width: .95rem; height: .95rem; }
 
 .composer textarea {
@@ -122,28 +125,41 @@
 .screenshot-preview {
   position: relative; flex: 0 0 7rem; width: 7rem; height: 4.75rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-lg); background: var(--canvas);
+  animation: notice-in 180ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .screenshot-preview img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
 .screenshot-preview .remove-screenshot {
   position: absolute; top: .2rem; right: .2rem; width: 1.65rem; height: 1.65rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-full); background: var(--raised); font-size: 1rem;
+  transition: background-color .15s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
 }
 .screenshot-preview .remove-screenshot:hover:not(:disabled) { background: var(--hover); }
+.screenshot-preview .remove-screenshot:active:not(:disabled) { transform: scale(.92); }
 
 .composer-toolbar .attach-screenshots {
   grid-area: attach; width: var(--composer-control-size); height: var(--composer-control-size);
   margin: .15rem; border: .3rem solid transparent; border-radius: var(--radius-full);
   background: var(--selected); background-clip: padding-box;
+  transition: background-color .16s ease, color .16s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1), opacity .15s ease;
+}
+.composer-toolbar .attach-screenshots svg {
+  transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 .composer-toolbar .attach-screenshots:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--hover); }
+.composer-toolbar .attach-screenshots:active:not(:disabled):not([aria-disabled="true"]) { transform: scale(.94); }
 .composer-toolbar .attach-screenshots[aria-disabled="true"] { opacity: .5; cursor: wait; }
 .composer-toolbar { display: contents; }
 .composer-toolbar > .notice { grid-area: feedback; }
 .composer-toolbar > .notice:not(:empty) { padding: 0 .95rem .65rem; }
 .composer:has(> .decision-reply-context:not([hidden])) .composer-toolbar > .notice:not(:empty) { padding: 0 .4rem; }
 .notice { min-width: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; transition: opacity .4s ease; }
+.notice:not(:empty):not(.fading) { animation: notice-in 180ms ease-out; }
 .notice.error { color: var(--danger); }
 .notice.fading { opacity: 0; }
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
 
 :is(.reply-cancel, .attach-screenshots, .send):focus-visible { outline-offset: -2px; }
 .send {
@@ -151,12 +167,29 @@
   width: var(--composer-control-size); height: var(--composer-control-size); margin: .15rem; padding: 0;
   border: .3rem solid transparent; border-radius: var(--radius-full);
   background: var(--accent-fill); background-clip: padding-box; color: var(--on-accent);
-  transition: background-color .15s ease, color .15s ease;
+  transition: background-color .16s ease, color .16s ease, transform .16s cubic-bezier(0.23, 1, 0.32, 1), filter .14s ease;
+}
+.composer.can-send .send {
+  animation: send-ready 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes send-ready {
+  0% { transform: scale(.88); }
+  65% { transform: scale(1.06); }
+  100% { transform: scale(1); }
 }
 .send:hover:not(:disabled) { background-color: var(--accent-fill-hover); }
-.send:active:not(:disabled) { filter: brightness(.9); }
+.send:active:not(:disabled) { filter: brightness(.9); transform: scale(.93); }
 .send:disabled { opacity: 1; background-color: var(--selected); color: var(--text-3); }
-.send svg { width: 1.05rem; height: 1.05rem; }
+.send svg {
+  width: 1.05rem; height: 1.05rem;
+  transition: transform .18s cubic-bezier(0.23, 1, 0.32, 1), opacity .15s ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .send:hover:not(:disabled) svg { transform: translateY(-1.5px); }
+  .composer-toolbar .attach-screenshots:hover:not(:disabled):not([aria-disabled="true"]) svg {
+    transform: rotate(90deg) scale(1.06);
+  }
+}
 .composer[aria-busy="true"] .send svg { opacity: 0; }
 .composer[aria-busy="true"] .send::after {
   content: ""; position: absolute; inset: .55rem; border-radius: 50%;
@@ -195,6 +228,25 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer-container, .composer, .composer-box, .notice, .send { transition: none; }
+  .composer-container,
+  .composer,
+  .composer-box,
+  .notice,
+  .send,
+  .send svg,
+  .composer-toolbar .attach-screenshots,
+  .composer-toolbar .attach-screenshots svg,
+  .reply-cancel,
+  .screenshot-preview .remove-screenshot { transition: none; }
+  .composer.can-send .send,
+  .notice:not(:empty):not(.fading),
+  .reply-context,
+  .screenshot-preview { animation: none; }
+  .send:hover:not(:disabled) svg,
+  .send:active:not(:disabled),
+  .composer-toolbar .attach-screenshots:hover:not(:disabled):not([aria-disabled="true"]) svg,
+  .composer-toolbar .attach-screenshots:active:not(:disabled):not([aria-disabled="true"]),
+  .reply-cancel:active:not(:disabled),
+  .screenshot-preview .remove-screenshot:active:not(:disabled) { transform: none; }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }
