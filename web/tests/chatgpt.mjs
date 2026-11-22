@@ -98,7 +98,7 @@ function mockResponses() {
       assert.equal(request.stream, true);
       const namespace = request.tools[0];
       assert.equal(namespace.name, "flock");
-      const context = JSON.parse(request.input[0].content);
+      const context = JSON.parse(request.input[0].content[0].text);
       const result = output(context);
       const tool = namespace.tools.find(tool => tool.name === result.name);
       assert.ok(tool, `Response tool ${result.name} was missing from the production request`);

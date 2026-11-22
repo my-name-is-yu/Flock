@@ -30,7 +30,8 @@ void channelEndpoints(const std::filesystem::path& database) {
     };
     struct ChannelModel final : Model {
         Json local, review;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             if (input.event["kind"] == "intake")
                 return {"delegate",{{"instruction","Prepare"},{"doneWhen","Prepared"}},"The work needs a Session"};
             const auto& turn = input.event.at("turn");

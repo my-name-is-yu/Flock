@@ -13,12 +13,9 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-void Store::Impl::migrateConversation() {
+void Store::Impl::initializeConversationSchema() {
     Transaction transaction(db);
     if (sqlite3_exec(db,R"SQL(
-DROP TABLE IF EXISTS route_candidates;
-DROP TABLE IF EXISTS route_decisions;
-DROP TABLE IF EXISTS conversation_migrations;
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,id)
 WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
@@ -44,7 +41,8 @@ CREATE TABLE IF NOT EXISTS conversation_turns(
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
-  attempt_id INTEGER, decision TEXT, effect TEXT, result TEXT,
+  attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
+  result TEXT CHECK(json_type(result)='array'),
   PRIMARY KEY(message_id,step));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -82,27 +80,32 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
 }
 
 std::optional<Json> Store::Impl::messageReceipt(const Person& actor, std::string_view bot, std::string_view clientId,
-                                               std::string_view text, Id replyTo) const {
+                                               std::string_view text, Id replyTo, const Json& attachments) const {
     auto row = query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?",
                          {bot,actor.id,clientId});
     if (!row.next()) return std::nullopt;
+    auto stored = query("SELECT payload FROM message_attachments WHERE message_id=? ORDER BY attachment_id",{row.number(0)});
+    auto media = Json::array();
+    while (stored.next()) media.push_back(stored.json(0));
+    if (media != attachments) throw Conflict("This client message ID already has different attachments");
     return receiptRow(row,redactor(bot).text(std::string(text)),replyTo);
 }
 
 std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId,
-                                   std::string_view text, Id replyTo) const {
+                                   std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
     if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
     if (!Access(*p_).permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
-    return p_->messageReceipt(actor,bot,clientId,text,replyTo);
+    return p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
 }
 
-Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
-    return receive(actor,routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; });
+Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                    const Json& attachments) {
+    return receive(actor,routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; },attachments);
 }
 
 Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route) {
+                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route, const Json& attachments) {
     if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0)
@@ -112,7 +115,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
         if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
-        const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo);
+        const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {
             const auto routing = route();
@@ -130,6 +133,7 @@ INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
         actor.id,actor.adminRoot ? 1 : 0,routing.botId});
+            p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }
         if (channel) p_->saveChannelMessage(receipt.at("messageId"),bot,*channel,existing.has_value());

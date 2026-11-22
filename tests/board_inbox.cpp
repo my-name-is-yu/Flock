@@ -65,7 +65,8 @@ struct Database {
 struct Script : Model {
     Id managed = 0;
     bool failConversation = false;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();

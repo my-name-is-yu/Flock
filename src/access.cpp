@@ -15,7 +15,7 @@ const Json& resourceOperations() {
         {"service",{"read","use","manage"}},{"repository",{"read","write","pr","review","issues"}},
         {"secret",{"use"}},{"session",{"read"}},{"mcp_server",{"discover","invoke","read_resource"}},
         {"environment",{"inspect","configure","launch"}},{"shared_memory",{"read","write"}},
-        {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"bot_admin",{"create_bot","rename_bot"}}};
+        {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"skill",{"list","read"}},{"attachment",{"inspect"}},{"bot_admin",{"create_bot","rename_bot"}}};
     return catalog;
 }
 

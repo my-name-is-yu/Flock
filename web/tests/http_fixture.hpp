@@ -27,7 +27,8 @@ struct TestDirectory {
 };
 
 struct FixedModel : Model {
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event["kind"] == "intake")
             return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
         if (input.event["kind"] == "question") {

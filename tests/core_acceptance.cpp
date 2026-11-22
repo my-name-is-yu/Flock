@@ -81,7 +81,8 @@ bool hasTool(const ModelInput& input, std::string_view tool) {
 struct Script : Model {
     std::function<Decision(const ModelInput&)> script;
     int calls = 0;
-    Decision decide(const ModelInput& input) override { ++calls; return script(input); }
+    Json usage = Json::object();
+    ModelTurn decide(const ModelInput& input) override { ++calls; return {{script(input)},usage}; }
 };
 
 struct SimulatedT3 : T3 {
@@ -898,6 +899,7 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     Fixture f;
     f.allowBeta();
     const auto root = f.submit("Verify and report the PR");
+    f.model.usage = {{"total_tokens",37}};
     int peerReplies = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
         if (input.task["id"] != root) {
@@ -907,7 +909,7 @@ void peerWorkSharesBudgetWithDirectT3Work() {
         if (input.event["kind"] == "bot_result" && peerReplies == 4) return work("delegate",false);
         Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR"}};
         if (input.event["kind"] == "intake") args["doneWhen"] = Evidence;
-        return {"send_bot_message",std::move(args),"Use the configured verifier",{{"total_tokens",37}}};
+        return {"send_bot_message",std::move(args),"Use the configured verifier"};
     };
 
     for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();

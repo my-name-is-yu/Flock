@@ -38,6 +38,14 @@ saved name to the exact target ID. Creation requires a root identity. Rename
 requires admin access to the requesting and target Bots. If the profile write
 fails after approval, use **Apply approved change** to retry.
 
+`POST /api/messages` optionally accepts an `attachments` array with up to four
+objects containing `name`, `mimeType` and `dataBase64`. Supported types are
+`image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
+to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
+`attachment/<botId>/inspect` to let the Bot inspect media in its conversation.
+An image-capable ChatGPT model receives authorized image contents. Audio
+inspection returns file properties and WAV format and duration.
+
 ## Memory and automation
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared

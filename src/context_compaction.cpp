@@ -113,6 +113,10 @@ ORDER BY entry.id DESC LIMIT 24
         const char* role = user ? "user" : reply ? "bot" : "task";
         Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role},{"text",""}};
         if (rows.number(1)) entry["taskId"] = rows.number(1);
+        if (kind=="conversation_message" && message.channelScope.empty()) {
+            auto media = attachmentViews(rows.number(0));
+            if (!media.empty()) entry["attachments"] = std::move(media);
+        }
         if (kind=="conversation_reply") {
             const auto data = rows.json(3);
             for (const auto* key : {"actions","suggestions"})

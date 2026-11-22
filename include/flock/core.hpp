@@ -21,6 +21,7 @@ using Seconds = std::int64_t;
 
 Seconds unixTime();
 std::string bounded(std::string_view text, std::size_t bytes);
+std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
 
@@ -43,7 +44,14 @@ struct Decision {
     std::string tool;
     Json args = Json::object();
     std::string reason;
-    Json usage = Json::object(); // Optional numeric measurements from the adapter.
+};
+struct ModelTurn {
+    std::vector<Decision> calls;
+    Json usage = Json::object();
+};
+struct ModelImage {
+    Id messageId;
+    std::string attachmentId, mimeType, dataBase64;
 };
 struct ModelInput {
     Json task, event, history;
@@ -53,7 +61,7 @@ struct ModelInput {
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
     bool needsDoneWhen = false, canForwardUserMessage = false;
-    std::vector<std::string> images{};
+    std::vector<ModelImage> images{};
 };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object())
@@ -64,8 +72,7 @@ struct ModelError : std::runtime_error {
 class Model {
 public:
     virtual ~Model() = default;
-    // Return exactly one tool call. Throw ModelError for transport/format failures.
-    virtual Decision decide(const ModelInput&) = 0;
+    virtual ModelTurn decide(const ModelInput&) = 0;
 };
 
 struct RunRef {
@@ -221,9 +228,9 @@ public:
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0);
+                 Id replyToMessageId = 0, const Json& attachments = Json::array());
     std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0) const;
+                                std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
     Json pausedConversations(std::string_view botId) const;
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
@@ -277,13 +284,15 @@ public:
 
 private:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&);
+                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&,
+                 const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;
     friend class Access;
 };
 
+struct BotTools;
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
@@ -291,6 +300,7 @@ struct RuntimeOptions {
     // Resolve the peers this sender can use, with each peer's own execution settings.
     std::function<std::vector<PeerBot>(std::string_view)> peers = {};
     std::function<void(std::string_view)> automationError = {};
+    std::shared_ptr<const BotTools> botTools = {};
 };
 class Runtime {
 public:

@@ -294,7 +294,7 @@ bool Store::Impl::channelMessageAuthorized(Id id, std::string_view bot) const {
     return !row.next() || permitsChannel(bot,originFrom(row.json(0)),row.string(1),row.string(2),"use");
 }
 
-Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<std::string>* images) const {
+Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<ModelImage>* images) const {
     auto row = query("SELECT c.origin,c.sender_id,c.person_id,c.scope_key FROM channel_messages c JOIN messages m ON m.id=c.message_id"
                      " WHERE c.message_id=? AND m.bot_id=?",{id,bot});
     if (!row.next()) return Json::object();
@@ -321,7 +321,7 @@ ORDER BY a.message_id DESC,a.position LIMIT 24
                  {"messageId",files.number(4)}});
             if (current && images && type.starts_with("image/")) {
                 const auto bytes = files.string(5);
-                if (matchesMime(type,bytes)) images->push_back("data:" + type + ";base64," + encodeAttachment(bytes));
+                if (matchesMime(type,bytes)) images->push_back({id,{},type,encodeAttachment(bytes)});
             }
         }
     }
@@ -510,7 +510,7 @@ AND d.state IN ('pending','unknown') AND json_extract(d.payload,'$.externalMessa
     return result;
 }
 
-Json Store::Impl::channelToolStatus(Id source, std::string_view bot, Json result, std::vector<std::string>* images) const {
+Json Store::Impl::channelToolStatus(Id source, std::string_view bot, Json result, std::vector<ModelImage>* images) const {
     if (result.contains("readAttachmentId")) {
         const auto file = channelAttachment(source,result.at("readAttachmentId"),bot);
         const auto kind = field(result,"channelKind") == "slack" ? ChannelKind::slack : ChannelKind::imessage;
@@ -519,11 +519,13 @@ Json Store::Impl::channelToolStatus(Id source, std::string_view bot, Json result
         if (file->mimeType == "text/plain")
             return {{"ok",true},{"name",file->name},{"text",bounded(file->bytes,16000)},{"truncated",file->bytes.size() > 16000}};
         if (images) {
-            auto image = "data:" + file->mimeType + ";base64," + encodeAttachment(file->bytes);
-            if (std::ranges::find(*images,image) == images->end()) {
+            ModelImage image{source,{},file->mimeType,encodeAttachment(file->bytes)};
+            if (std::ranges::none_of(*images,[&](const auto& existing) {
+                return existing.mimeType == image.mimeType && existing.dataBase64 == image.dataBase64;
+            })) {
                 std::size_t used = 0;
-                for (const auto& existing : *images) used += existing.size();
-                if (used + image.size() > (attachmentLimit + 2) / 3 * 4 + attachmentCount * 32)
+                for (const auto& existing : *images) used += existing.dataBase64.size() + existing.mimeType.size() + 13;
+                if (used + image.dataBase64.size() + image.mimeType.size() + 13 > (attachmentLimit + 2) / 3 * 4 + attachmentCount * 32)
                     return {{"ok",false},{"error","The total image limit for this turn is reached"}};
                 images->push_back(std::move(image));
             }

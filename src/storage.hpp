@@ -1,4 +1,7 @@
 #pragma once
+#include "flock/access.hpp"
+#include "flock/secrets.hpp"
+#include "workspace_internal.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
 #include "flock/memory_automation.hpp"
@@ -50,18 +53,6 @@ private:
     int stateDirectory_;
 };
 
-class SecretRedactor {
-public:
-    explicit SecretRedactor(std::vector<std::string> values);
-    std::string text(std::string_view source, bool truncated = false) const;
-    Json payload(const Json&) const;
-    enum class Fields { protocol, external };
-    Json record(Json, Fields = Fields::protocol) const;
-    void requirePublic(const Json&) const;
-private:
-    std::vector<std::string> values_;
-};
-
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 
 struct Store::Impl {
@@ -78,10 +69,11 @@ struct Store::Impl {
     std::mutex deliveryMutex;
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
-    std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo) const;
+    std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
+                                       const Json& attachments) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
     bool channelMessageAuthorized(Id, std::string_view bot) const;
-    Json channelContext(Id, std::string_view bot, std::vector<std::string>* images = nullptr) const;
+    Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr) const;
     std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
@@ -91,7 +83,7 @@ struct Store::Impl {
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
     bool channelDeliveryDue() const;
     void deliverChannels();
-    Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<std::string>* images = nullptr) const;
+    Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
     void initializeAccessSchema();
@@ -143,22 +135,43 @@ struct Store::Impl {
     void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
-    void migrateConversation();
-    void migrateModelBudget();
+    void initializeConversationSchema();
+    void initializeModelBudgetSchema();
+    void initializeWorkspaceSchema();
+    void initializeAttachmentsSchema();
+    void saveAttachments(Id, const Json&);
+    Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
+    Json attachmentViews(Id) const;
+    Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
+    void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
+    std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
+    void recoverWorkspace();
+    void stopWorkspace();
+    std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
+    void validateWorkspace(const ToolContext&, const Decision&);
+    Json workspaceTool(const ToolContext&, const Decision&);
+    std::optional<Scope> authorizedBotToolScope(std::string_view bot, const Decision&);
+    void validateBotTool(const ToolContext&, const Decision&);
+    Json executeBotTool(const ToolContext&, const Decision&);
+    void saveTurnResults(Id, int step, const Json& results);
+    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    Id takeReservedConversationCall(Id messageId);
+    void releaseModelCall(std::string_view budget, Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
+    ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
+    bool authorizeTurn(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;
-    Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<std::string>& images);
+    Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<ModelImage>& images);
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);

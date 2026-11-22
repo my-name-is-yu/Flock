@@ -5,7 +5,7 @@
 namespace flockv0::app {
 namespace {
 class DemoModel final : public Model {
-    Decision decide(const ModelInput& in) override {
+    ModelTurn decide(const ModelInput& in) override {
         const auto event = in.event.value("kind","");
         if (event == "conversation_turn") {
             const auto& turn = in.event.at("turn");
@@ -18,31 +18,31 @@ class DemoModel final : public Model {
                     : tool == "read_result" ? "The demo result records successful completion of simulated work. "
                                               "It contains no implementation details."
                     : "I queued your request.";
-                return {"reply",{{"text",text}},"The fixed demo reports what it did."};
+                return {{{"reply",{{"text",text}},"The fixed demo reports what it did."}}};
             }
             const auto& reply = in.event.at("replyTo");
             if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
-                return {"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
+                return {{{"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
                     {"revisionId",reply["revisionId"]},{"generation",reply["generation"]},
-                    {"text",in.event.value("text","")}},"The user replied to the demo question."};
+                    {"text",in.event.value("text","")}},"The user replied to the demo question."}}};
             }
             if (reply.is_object() && reply.value("kind","") == "result")
-                return {"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."};
+                return {{{"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."}}};
             if (reply.is_object() && reply.value("kind","") == "bot_message") {
                 const auto source = reply.value("inReplyTo",Json::object()).value("replyToMessageId",Json(nullptr));
                 if (!source.is_null())
-                    return {"read_result",{{"messageId",source}},"The user followed up on an explained demo result."};
+                    return {{{"read_result",{{"messageId",source}},"The user followed up on an explained demo result."}}};
             }
-            return {"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."};
+            return {{{"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."}}};
         }
         if (event == "result" && in.task.contains("userInstructions")) {
             const bool follow = std::ranges::find(in.tools,"follow_up") != in.tools.end();
-            return {follow ? "follow_up" : "delegate",{{"instruction","Apply the pending user instructions."}},
-                "The demo report predates the accepted instructions."};
+            return {{{follow ? "follow_up" : "delegate",{{"instruction","Apply the pending user instructions."}},
+                "The demo report predates the accepted instructions."}}};
         }
         if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
-            return {"complete",{{"report",in.event.value("report","")}},
-                "The demo Session reported that it completed the requested work."};
+            return {{{"complete",{{"report",in.event.value("report","")}},
+                "The demo Session reported that it completed the requested work."}}};
         }
         if (std::ranges::find(in.tools,"delegate") != in.tools.end()) {
             std::string answer;
@@ -52,11 +52,11 @@ class DemoModel final : public Model {
             if (answer.empty() && request.starts_with("ask:")) {
                 auto question = request.substr(4);
                 if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo Session focus on?";
-                return {"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."};
+                return {{{"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."}}};
             }
             Json args = {{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
             if (in.needsDoneWhen) args["doneWhen"] = "The demo Session returns a completion report.";
-            return {"delegate",std::move(args),"A demo Session can handle this request."};
+            return {{{"delegate",std::move(args),"A demo Session can handle this request."}}};
         }
         throw ModelError("No fixed demo decision for this event",false);
     }

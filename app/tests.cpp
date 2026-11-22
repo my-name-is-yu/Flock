@@ -21,7 +21,8 @@ namespace {
 class NotesModel final : public Model {
 public:
     std::vector<ModelInput> inputs;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         inputs.push_back(input);
         if (input.event["kind"] == "result")
             return {"complete",{{"report","Original evidence confirmed"}},"The report meets the original acceptance criterion."};
@@ -32,7 +33,7 @@ public:
     }
 };
 
-class NotesT3 final : public T3 {
+class NotesT3 : public T3 {
 public:
     std::vector<Command> commands;
     bool finished = false;
@@ -124,7 +125,7 @@ void notesAndRoutingOnRestart() {
 }
 
 Json requestContext(const Json& request) {
-    return Json::parse(request.at("input").at(0).at("content").get<std::string>());
+    return Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
 }
 
 void notesAcrossConversationAndWork() {
@@ -133,7 +134,8 @@ void notesAcrossConversationAndWork() {
     static constexpr auto explanation = "The Session supplied the evidence required for completion.";
     struct ModelFixture final : Model {
         std::vector<Json> requests;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             requests.push_back(responseRequest(input));
             const auto context = requestContext(requests.back());
             const auto& event = context.at("event");
@@ -430,8 +432,8 @@ void responseContract() {
                           {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
     const Json eventArgs{{"reason","Read the test log"},{"sessionRef","opaque-session"},{"operation","get_attachment"},
                          {"attachmentRef","opaque-attachment"}};
-    check(responseDecision(modelCall("flock_session_search",searchArgs),turn).args.at("project") == "Release" &&
-          responseDecision(modelCall("flock_session_events",eventArgs),turn).args.at("attachmentRef") == "opaque-attachment",
+    check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
+          responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
     auto spoofed = eventArgs;
     spoofed["botId"] = "someone-else";
@@ -454,7 +456,7 @@ void responseContract() {
     };
     input.tools.clear();
     for (const auto& [name,args] : requiredChannelArgs) input.tools.push_back(name);
-    input.images = {"data:image/png;base64,YQ=="};
+    input.images = {{1,{},"image/png","YQ=="}};
     const auto channelRequest = responseRequest(input);
     for (const auto& function : channelRequest.at("tools").at(0).at("tools")) {
         const auto name = function.at("name").get<std::string>();
@@ -466,7 +468,7 @@ void responseContract() {
     }
     const auto content = channelRequest.at("input").at(0).at("content");
     check(content.at(0).at("type") == "input_text" && content.at(1).at("type") == "input_image" &&
-          content.at(1).at("image_url") == input.images.at(0),"Screenshot did not enter the Responses image input");
+          content.at(1).at("image_url") == "data:image/png;base64,YQ==","Screenshot did not enter the Responses image input");
     input.images.clear();
     input.event = {{"kind","intake"}};
 
@@ -476,7 +478,7 @@ void responseContract() {
     input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
-    const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
+    const auto peerContext = requestContext(peerRequest);
     const auto& destinations = peerContext.at("task").at("peers");
     check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
         destinations.at(0).at("name") == "Verifier",
@@ -519,7 +521,7 @@ void responseContract() {
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
     input.tools = {"complete"};
     const auto completeRequest = responseRequest(input);
-    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest);
+    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest).calls.at(0);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
     for (const auto* key : {"namespace","status"}) {
@@ -537,7 +539,8 @@ void responseContract() {
 class AcceptanceModel final : public Model {
 public:
     std::vector<Json> requests;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
             return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
@@ -571,7 +574,8 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     struct ChangeModel final : Model {
         std::string tool;
         Json args;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             if (!input.event.at("turn").empty()) return {"reply",{{"text","Saved."}},"Confirm"};
             auto call = args;
             for (const auto& task : input.task.at("tasks")) {

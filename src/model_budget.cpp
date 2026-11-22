@@ -12,7 +12,7 @@ Id modelCallLimit(const Json& config) {
     return limit->get<Id>();
 }
 
-void Store::Impl::migrateModelBudget() {
+void Store::Impl::initializeModelBudgetSchema() {
     Transaction transaction(db);
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS model_budgets(
@@ -69,6 +69,20 @@ Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpo
     return last();
 }
 
+Id Store::Impl::takeReservedConversationCall(Id message) {
+    auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
+                          " AND reserved_attempt IS NOT NULL",{message});
+    if (!reserved.next()) return 0;
+    const auto id = reserved.number(0);
+    exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?",{message});
+    return id;
+}
+
+void Store::Impl::releaseModelCall(std::string_view budget, Id attempt) {
+    exec("DELETE FROM model_attempts WHERE id=? AND budget_id=?",{attempt,budget});
+    if (sqlite3_changes(db)) exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
+}
+
 Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,
                                      Id messageId, Id taskId, Id eventId) {
     exec("UPDATE model_budgets SET call_limit=call_limit+1 WHERE id=? AND call_limit<?",
@@ -79,9 +93,9 @@ Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view 
     return attempt;
 }
 
-Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
     const auto scrub = redactor(bot);
-    Decision decision;
+    ModelTurn turn;
     try {
         auto safe = input;
         safe.task = scrub.record(input.task);
@@ -91,19 +105,22 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
         safe.config = scrub.record(input.config,SecretRedactor::Fields::external);
         safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
-        decision = model.decide(safe);
-        for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
-        decision.reason = scrub.text(decision.reason);
-        if (decision.args.contains("docId")) {
-            const auto shared = sharedRedactor();
-            const auto document = decision.args.at("docId");
-            decision.args = shared.record(std::move(decision.args),SecretRedactor::Fields::external);
-            if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
-            decision.reason = shared.text(decision.reason);
+        turn = model.decide(safe);
+        for (auto& decision : turn.calls) {
+            for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
+            decision.reason = scrub.text(decision.reason);
+
+            if (decision.args.contains("docId")) {
+                const auto shared = sharedRedactor();
+                const auto document = decision.args.at("docId");
+                decision.args = shared.record(std::move(decision.args),SecretRedactor::Fields::external);
+                if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
+                decision.reason = shared.text(decision.reason);
+            }
+            if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
+                decision.tool = scrub.text(decision.tool);
         }
-        if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
-            decision.tool = scrub.text(decision.tool);
-        decision.usage = scrub.payload(decision.usage);
+        turn.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         auto usage = scrub.payload(error.usage);
         if (!usage.empty()) {
@@ -114,10 +131,10 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }
-    if (!decision.usage.empty()) {
+    if (!turn.usage.empty()) {
         std::lock_guard lock(mutex);
-        exec("UPDATE model_attempts SET usage=? WHERE id=?",{decision.usage,attemptId});
+        exec("UPDATE model_attempts SET usage=? WHERE id=?",{turn.usage,attemptId});
     }
-    return decision;
+    return turn;
 }
 }

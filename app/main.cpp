@@ -1,3 +1,4 @@
+#include "bot_tools.hpp"
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
@@ -182,6 +183,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
 #endif
+    options.botTools = loadBotTools(home);
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);

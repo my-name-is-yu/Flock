@@ -163,3 +163,44 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 [signin]: https://developers.openai.com/siwc/token-sharing-open-source/sign-in
 [models]: https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference
 [limits]: https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations
+
+## Bot tools
+
+Conversation turns can use the Bot's workspace under `<home>/workspaces/<botId>`.
+Grant `workspace/<botId>/read` for files and search, `write` for edits, and
+`exec` plus `read` to run a command. Commands receive write access when the Bot
+also has the `write` grant. macOS uses the system sandbox. Linux requires
+`/usr/bin/bwrap` with unprivileged namespaces and FD-based bind support.
+Commands have a 10-second wall limit and share an 8 KiB stdout and stderr
+limit. On macOS, run one executable at a time. Shell built-ins and `exec`
+work within this limit. Regular project builds and tests run in T3 Sessions.
+A running command whose outcome is unknown after a restart is recorded as
+`unknown_after_restart`.
+
+Web fetch requires `web/<hostname>/fetch` and accepts public HTTPS text
+responses. Web search requires `web/public/search` and the host environment
+variable `FLOCK_WEB_SEARCH_KEY` for Brave Search. After reading web evidence,
+the Bot can keep reading and reply. Actions require a new user message.
+
+Set optional skill and MCP targets in `<home>/bot-tools.json`.
+Relative paths are resolved against the Flock home.
+
+```json
+{
+  "skills": {"writing": "/path/to/skills/writing"},
+  "mcpServers": {
+    "knowledge": {"url": "https://example.com/mcp", "tokenEnv": "KNOWLEDGE_MCP_TOKEN"}
+  }
+}
+```
+
+Grant `skill/catalog/list` for discovery and `skill/<skill>/read` per skill.
+MCP uses Streamable HTTP. Grant `mcp_server/<name>/discover`, `invoke` and
+`read_resource` independently. `tokenEnv` is optional and points to a
+host-managed bearer token. Discovery lists one collection per call and returns
+`nextCursor` when another page is available.
+
+Each authorized Bot tool action counts against the request's shared
+`modelCallLimit`. Calls in a parallel batch reserve available action slots
+in provider order. An approval resumes the next pending action when a batch
+pauses. The Bot receives results in provider order when the batch finishes.

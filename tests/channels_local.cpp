@@ -58,7 +58,8 @@ struct SessionAdapter final : T3 {
 class Script final : public Model {
 public:
     std::function<Decision(const ModelInput&)> decideNext;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.at("kind") == "intake")
             return {"delegate",{{"instruction","Prepare work"},{"doneWhen","Work is prepared"}},"The work needs a Session"};
         return decideNext(input);
@@ -151,7 +152,7 @@ void channels(const std::filesystem::path& database) {
             const auto& file = input.event.at("attachments").at(0);
             check(file.at("name") == "screenshot.png" && file.at("size") == image.size(),"Missing screenshot metadata");
             attachment = file.at("id");
-            check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)},"Model cannot read screenshot");
+            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" && input.images[0].dataBase64 == encodeAttachment(image),"Model cannot read screenshot");
         } else {
             check(input.history.empty() && !input.event.contains("earlierAttachments"),"Slack content leaked into iMessage");
         }
@@ -276,7 +277,7 @@ void channels(const std::filesystem::path& database) {
             check(input.images.empty(),"Earlier screenshot was injected without selecting it");
             return {"read_channel_attachment",{{"attachmentId",attachment}},{}};
         default:
-            check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)} &&
+            check(input.images.size() == 1 && input.images[0].mimeType == "image/png" && input.images[0].dataBase64 == encodeAttachment(image) &&
                   results.at(2).at("result").at("imageIncluded") == true,"Earlier screenshot did not reach the model");
             return reply("I can still see the screenshot.");
         }

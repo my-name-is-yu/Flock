@@ -190,10 +190,12 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         initializeAccessSchema();
-        migrateConversation();
+        initializeConversationSchema();
         initializeChannelSchema();
         initializeLocalMachineSchema();
-        migrateModelBudget();
+        initializeModelBudgetSchema();
+        initializeWorkspaceSchema();
+        initializeAttachmentsSchema();
         initializeCompactionSchema();
         initializeWorkflowSchema();
         initializeMemorySchema();

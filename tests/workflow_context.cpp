@@ -56,7 +56,8 @@ struct Bot : Model {
     Decision action;
     Json history, result;
     std::function<Decision(const ModelInput&)> conversation, work;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.at("kind")=="question")
             return {"answer_session_question",{{"requestId","q"},{"answers",{{"choice","yes"}}}},"Answer the Session"};
         if (input.event.at("kind")!="conversation_turn" && work) return work(input);

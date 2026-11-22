@@ -57,7 +57,8 @@ struct FixedModel : Model {
     Id comparisonResult = 0;
     std::size_t summarySourceSize = 0;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event["kind"] == "conversation_turn") return converse(input);
         if (input.event["kind"] == "intake")
             return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
@@ -225,7 +226,8 @@ void inspectors(const std::filesystem::path& path) {
     struct InspectorModel : Model {
         const std::string credential = "credential-protected-after-inspector-write";
         Id boundary = 0;
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
             if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
                 return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes "+credential}},"Summarize earlier work"};
             if (input.event.at("turn").empty() && input.event.at("text")=="Release")
@@ -465,7 +467,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     Json original;
     struct ForwardingModel final : Model {
         std::function<Decision(const ModelInput&)> script;
-        Decision decide(const ModelInput& input) override { return script(input); }
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
     model.script = [&](const ModelInput& input) -> Decision {
         const auto kind = input.event.at("kind");

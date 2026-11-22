@@ -87,7 +87,8 @@ struct Script : Model {
     std::map<Id,Json> questions;
     std::function<Decision(const ModelInput&)> onResult;
     std::vector<ModelInput> turnInputs;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.value("kind","") == "conversation_turn") {
             turnInputs.push_back(input);
             if (beforeTurn) beforeTurn(input);

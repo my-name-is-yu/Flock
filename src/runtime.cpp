@@ -59,6 +59,10 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
     return batch;
 }
 
+struct TaskDecision : Decision {
+    Json usage = Json::object();
+};
+
 bool needsDoneWhen(const Json& task) {
     return !task.contains("currentRevision") && field(task,"requestedDoneWhen").empty();
 }
@@ -94,17 +98,21 @@ struct Runtime::Impl {
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : db(*store.p_), access(store.access()), model(m), t3(adapter),
           soul(std::move(loader)), options(std::move(opts)) {
+        if (!options.botTools) options.botTools = std::make_shared<BotTools>();
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
             if (lockFd >= 0) close(lockFd);
             throw Conflict("Cannot acquire the exclusive Runtime lock for this database");
         }
+        try { db.recoverWorkspace(); }
+        catch (...) { close(lockFd); throw; }
     }
     ~Impl() {
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
+        db.stopWorkspace();
         close(lockFd);
     }
 
@@ -740,7 +748,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
 
     static constexpr int maxToolErrors = 6;
 
-    void rejectDecision(const Json& task, const Json& event, const Decision& decision, std::string_view message) {
+    void rejectDecision(const Json& task, const Json& event, const TaskDecision& decision, std::string_view message) {
         change(task,[&](Json& current) {
             const auto why = bounded(message,2048);
             Json entry = {{"tool",bounded(decision.tool,128)},{"result",{{"ok",false},{"error",why}}},
@@ -948,7 +956,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         task["state"] = "sending";
     }
 
-    bool admitWork(Json& task, const Decision& decision, bool& charge) {
+    bool admitWork(Json& task, const TaskDecision& decision, bool& charge) {
         charge = !task["lastRun"].is_null() || db.query(
             "SELECT 1 FROM peer_exchanges WHERE sender_task=? AND kind='work' LIMIT 1",{task["id"]}).next();
         if (!charge) return true;
@@ -1058,7 +1066,7 @@ SELECT 1 FROM reachable WHERE env=? AND project=?
         saveTask(task);
     }
 
-    void recordDecision(const Json& task, const Json& event, const Decision& decision, std::string_view action) {
+    void recordDecision(const Json& task, const Json& event, const TaskDecision& decision, std::string_view action) {
         db.journal(task["id"],"decision",{{"actionId",action},{"tool",decision.tool},{"args",decision.args},
             {"reason",decision.reason},{"eventId",event["id"]},{"evidence",event["evidence"]},{"usage",decision.usage},
             {"revisionId",revision(task)}});
@@ -1076,7 +1084,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         return {{"text",row.string(0)},{"time",row.number(1)}};
     }
 
-    void sendPeer(Json& sender, const Json& event, const Decision& decision, PeerBot peer, const std::string& action) {
+    void sendPeer(Json& sender, const Json& event, const TaskDecision& decision, PeerBot peer, const std::string& action) {
         if (db.peerExchange(sender["id"])) throw Conflict("Finish the current Bot exchange first");
         const auto& args = decision.args;
         const auto note = field(args,"text");
@@ -1152,7 +1160,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         return kinds;
     }
 
-    bool replyPeer(Json& task, const Json& event, const Decision& decision, const std::string& action) {
+    bool replyPeer(Json& task, const Json& event, const TaskDecision& decision, const std::string& action) {
         const auto peer = db.peerExchange(task["id"]);
         if (!peer) throw Conflict("The Bot exchange has closed");
         const auto type = field(decision.args,"kind");
@@ -1180,7 +1188,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         return true;
     }
 
-    void readPeerEvidence(const Json& task, const Json& event, const Decision& decision) {
+    void readPeerEvidence(const Json& task, const Json& event, const TaskDecision& decision) {
         const auto& args = decision.args;
         const auto messageId = field(args,"messageId");
         if (event["kind"] != "bot_result" || messageId.empty() || event["messageId"] != messageId)
@@ -1211,7 +1219,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         persistExcerpt(task,event,std::move(entry),"read_bot_evidence",decision.usage);
     }
 
-    void acceptReplyOrCompletion(const Json& snapshot, const Json& event, const Decision& decision) {
+    void acceptReplyOrCompletion(const Json& snapshot, const Json& event, const TaskDecision& decision) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         const auto id = snapshot["id"].get<Id>();
@@ -1227,7 +1235,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         transaction.commit();
     }
 
-    void complete(Json& current, const Json& event, const Decision& decision) {
+    void complete(Json& current, const Json& event, const TaskDecision& decision) {
         const auto pending = current.value("pendingInstructions",Json::array());
         auto ids = Json::array();
         for (const auto& item : pending) ids.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")}});
@@ -1250,7 +1258,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         saveTask(current);
     }
 
-    void accept(const Json& snapshot, const Json& event, const Decision& decision) {
+    void accept(const Json& snapshot, const Json& event, const TaskDecision& decision) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
         static const std::map<std::string_view,std::set<std::string_view>> arguments{
@@ -1344,15 +1352,15 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             target["requestId"] == observed.question.requestId;
     }
 
-    std::optional<Decision> savedDecision(const Json& task, const Json& event) {
+    std::optional<TaskDecision> savedDecision(const Json& task, const Json& event) {
         auto saved = task.find("pendingDecision");
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return Decision{saved->at("tool"),saved->at("args"),saved->at("reason"),saved->at("usage")};
+        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage")};
     }
 
-    std::optional<Decision> inferDecision(const Json& task, Json event, const Json& history,
+    std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
             const std::vector<std::string>& tools, const Json& pending, Json choices,
             const std::optional<PeerExchange>& peer) {
         const auto prefill = prefillHistory(task,event);
@@ -1405,9 +1413,11 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             transaction.commit();
         }
         if (!attempt) return std::nullopt;
-        const auto decision = db.callModel(field(task,"botId"),model,
+        auto turn = db.callModel(field(task,"botId"),model,
             {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
              needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
+        if (turn.calls.size() != 1) throw Conflict("Return one task action");
+        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage)};
         // Bookkeeping must not advance the generation observed by conversation turns.
         const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
             {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
@@ -1426,7 +1436,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
         Json event, history = Json::array();
         std::optional<PeerExchange> peer;
-        std::optional<Decision> decision;
+        std::optional<TaskDecision> decision;
         {
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
@@ -1516,7 +1526,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 (event.at("kind") != "result" || event.contains("userAnswer"))) return false;
             if (event.is_null()) event = Json::object();
             const auto tool = current.value("newSessionRequired",false) ? "delegate" : "follow_up";
-            const Decision decision{tool,Json::object(),"Apply accepted user instructions after the assigned Run settled"};
+            const TaskDecision decision{{tool,Json::object(),"Apply accepted user instructions after the assigned Run settled"}};
             bool charge = false;
             if (!admitWork(current,decision,charge)) return true;
             const auto action = actionId();
@@ -1565,14 +1575,14 @@ void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools)) break;
     }
     p_->db.deliverChannels();
 }
 void Runtime::tick() {
     p_->fireDueAutomations();
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit))
-        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
+        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools);
     p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
     p_->db.deliverChannels();
@@ -1601,7 +1611,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools);
                 }));
             }
         }

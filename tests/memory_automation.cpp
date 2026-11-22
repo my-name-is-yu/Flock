@@ -49,7 +49,8 @@ struct Adapter : T3 {
 struct Script : Model {
     std::vector<Decision> choices;
     std::vector<ModelInput> inputs;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         inputs.push_back(input);
         if (!choices.empty()) {
             check(input.tools.end() != std::find(input.tools.begin(),input.tools.end(),choices.front().tool),

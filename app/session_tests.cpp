@@ -40,7 +40,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
         bool paged = false, revoked = false;
         Json sessionRef;
         HistoryModel(Store& store, const Scope& shared) : store(store), shared(shared) {}
-        Decision decide(const ModelInput& input) override {
+        ModelTurn decide(const ModelInput& input) override {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
             std::string tool = "flock_session_search";

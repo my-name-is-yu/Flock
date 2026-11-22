@@ -44,22 +44,23 @@ struct Mixed : Model {
     std::map<Id,Json> questions;
     Json trace = Json::array();
     explicit Mixed(Model& model) : live(model) {}
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override {
         const auto kind = input.event.value("kind","");
         if (kind == "conversation_turn") {
             trace = input.event.at("turn");
-            auto decision = live.decide(input);
-            trace.push_back({{"tool",decision.tool},{"args",decision.args}});
-            return decision;
+            auto turn = live.decide(input);
+            for (const auto& decision : turn.calls)
+                trace.push_back({{"tool",decision.tool},{"args",decision.args}});
+            return turn;
         }
         if (const auto question = questions.find(input.task.at("id").get<Id>());
             kind == "intake" && question != questions.end() && !input.event.contains("userAnswer"))
-            return {"ask_user",question->second,"The fixture needs a decision"};
+            return {{{"ask_user",question->second,"The fixture needs a decision"}}};
         if (kind == "result")
-            return {"complete",{{"report",input.event.value("report","")}},"The fixture report is the result"};
+            return {{{"complete",{{"report",input.event.value("report","")}},"The fixture report is the result"}}};
         Json args = {{"instruction",input.task.value("request","")}};
         if (input.task.value("doneWhen","").empty()) args["doneWhen"] = "Report the result with evidence";
-        return {"delegate",args,"Run the fixture work"};
+        return {{{"delegate",args,"Run the fixture work"}}};
     }
 };
 
@@ -591,7 +592,8 @@ struct Script : Model {
     std::size_t next = 0;
 
     explicit Script(std::vector<Decision> decisions) : steps(std::move(decisions)) {}
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         auto decision = steps.at(next++);
         if (!decision.args.contains("fixtureRequest")) return decision;
         const auto request = decision.args.at("fixtureRequest");

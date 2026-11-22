@@ -196,7 +196,8 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
 }
 
 struct PeerModel final : Model {
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event["kind"] == "intake")
             return {"send_bot_message",{{"botId","triage"},{"kind","consult"},{"text","判定基準を教えて"}},
                 "Triage owns the criteria"};
