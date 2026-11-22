@@ -975,7 +975,8 @@ function eventCard(event, context, place) {
     if (event.kind === 'conversation_message' && data.replyToMessageId)
       extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
-    else if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
+    else if (event.id === context.latestWebMessageId && data.status === 'received')
+      extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
@@ -1144,6 +1145,9 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    // Source lookups do not establish the latest message in the live conversation.
+    latestWebMessageId: data ? events.findLast((event) =>
+      event.kind === 'conversation_message' && !event.data.channel?.channelKind)?.id : undefined,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
