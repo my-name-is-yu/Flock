@@ -2,6 +2,7 @@
 #include "conversation_storage.hpp"
 
 #include <algorithm>
+#include <set>
 
 namespace flockv0 {
 using conversation_storage::verifiedEnvironment;
@@ -22,18 +23,26 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
         const auto prior = load(priorId);
         const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen"));
         if (!criteria.empty()) task["requestedDoneWhen"] = criteria;
-        // Acceptance journal entries cover both dispatched and still-pending instructions, exactly once.
+        const auto pending = prior.value("cancelledInstructions",Json::array());
+        std::set<std::pair<Id,int>> pendingIds;
+        for (const auto& item : pending)
+            pendingIds.emplace(item.at("messageId").get<Id>(),item.at("step").get<int>());
+
+        // Excerpt only earlier deliveries. Pending directions follow them in acceptance order.
         auto rows = query("SELECT data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
-                          " ORDER BY id DESC LIMIT 20",{priorId});
+                          " ORDER BY id DESC",{priorId});
         Json instructions = Json::array();
         std::size_t remaining = 8000;
-        while (remaining && rows.next()) {
+        while (remaining && instructions.size() < 20 && rows.next()) {
             const auto item = rows.json(0);
+            if (pendingIds.contains({item.at("messageId").get<Id>(),item.at("step").get<int>()})) continue;
             const auto text = bounded(field(item,"text"),remaining);
             remaining -= text.size();
             instructions.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",text}});
         }
         std::reverse(instructions.begin(),instructions.end());
+        for (const auto& item : pending)
+            instructions.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",item.at("text")}});
         task["restartContext"] = {{"intent",prior.at("intent")},{"taskId",priorId},
                                   {"pendingInstructions",std::move(instructions)}};
     }

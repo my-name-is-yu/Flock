@@ -553,8 +553,13 @@ void resumeRestoresCancelledTaskDirections() {
     f.script("Use a pinned regression fixture",{send(old)});
     f.receive("past-direction","Use a pinned regression fixture");
     f.reach(old,"running");
-    f.script("Keep the raw timing file",{send(old)});
-    f.receive("pending-direction","Keep the raw timing file");
+    const std::string prefix = "Record all timing samples: ";
+    const std::string constraint = "Keep the raw timing file.";
+    const auto pending = prefix + std::string(9000 - prefix.size() - constraint.size(),'x') + constraint;
+    f.script("Add timing requirements",{send(old,{{"instruction",pending}})});
+    f.receive("pending-direction","Add timing requirements");
+    check(f.task(old).at("pendingInstructions").back().at("text") == pending,
+          "the full instruction was not pending at cancellation");
     f.store->operate(old,0,"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
@@ -576,12 +581,16 @@ void resumeRestoresCancelledTaskDirections() {
     const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(next,"running");
     const auto& instruction = f.t3.sent.back().instruction;
+    const auto position = instruction.find(pending);
+    check(position != instruction.npos && instruction.find(prefix) == position &&
+          instruction.find(prefix,position + 1) == instruction.npos,
+          "the resumed Session did not receive the full pending instruction exactly once");
     check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
           f.task(next)["environmentId"] == "cloud" &&
           instruction.find("Measure the reference dataset") != std::string::npos &&
           instruction.find("Report baseline latency") != std::string::npos &&
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
-          instruction.find("Keep the raw timing file") != std::string::npos && f.t3.sent.back().tool == "delegate",
+          f.t3.sent.back().tool == "delegate",
           "resume omitted the original intent, criteria, or accepted directions");
 }
 
