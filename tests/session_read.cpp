@@ -35,7 +35,7 @@ struct Backend : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-    void interrupt(const std::string&,const Json&,const RunRef&) override { ++stops; }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { ++stops; return InterruptOutcome::Requested; }
 
     bool allowed(const SessionTarget& target) {
         ++reads;

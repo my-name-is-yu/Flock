@@ -126,6 +126,10 @@ class Fixture(BaseHTTPRequestHandler):
                 self.reply(envelope)
                 return
             content = self.tool(tool["name"], tool["arguments"])
+            if (tool["name"] == "t3_pending_request" and tool["arguments"]["action"] == "respond"
+                    and state.get("dropAnswerReply")):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -208,7 +212,8 @@ class Fixture(BaseHTTPRequestHandler):
             return reply
         if name == "t3_thread_interrupt":
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
-            return {"threadId": "thread", "runId": "root", "status": "interrupt_requested"}
+            status = state.get("interruptReply") or "interrupt_requested"
+            return {"threadId": "thread", "runId": None if status == "no_active_run" else "root", "status": status}
         if name == "t3_pending_request":
             assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
@@ -216,6 +221,11 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
+                if state.get("failAnswerRecheck"):
+                    reads = state.get("answerReads", 0) + 1
+                    state["answerReads"] = reads
+                    if reads == 2:
+                        return {"_tag": "OrchestratorMcpFailure", "code": "internal_error"}
                 return {"requestId": "request", "questions": questions}
             assert action == "respond" and scenario != "ambiguous"
             state["scenario"] = "running"

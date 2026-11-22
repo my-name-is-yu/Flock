@@ -397,11 +397,17 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         Json requested;
         if (!change(task,[&](Json& current) {
             current["runStop"]["retryAt"] = now + 5;
-            db.journal(current["id"],"interrupt_requested",stop);
             return true;
         },&requested)) return;
-        try { t3.interrupt(field(task,"environmentId"),task["config"],runRef(stop.at("run"))); }
-        catch (const std::exception&) { stopNote(requested,"T3 did not confirm the interrupt request"); }
+        InterruptOutcome outcome;
+        try { outcome = t3.interrupt(field(task,"environmentId"),task["config"],runRef(stop.at("run"))); }
+        catch (const std::exception&) { return stopNote(requested,"T3 did not confirm the interrupt request"); }
+        if (outcome != InterruptOutcome::Requested)
+            return stopNote(requested,"Waiting for T3 to confirm the assigned Run has settled");
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        db.journal(task["id"],"interrupt_requested",stop);
+        transaction.commit();
     }
 
     void finishReplan(const Json& task) {
@@ -615,8 +621,10 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             const auto reason = outcome.kind == Delivery::Kind::Auth ? "auth" :
                                 outcome.kind == Delivery::Kind::Settings ? "settings" : "unknown_delivery";
-            const auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" :
-                                                         bounded(outcome.detail,2048);
+            auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" :
+                                                   bounded(outcome.detail,2048);
+            if (reply && delivery == DeliveryOutcome::DefinitelyUnsent)
+                detail = bounded("The Session answer was not sent. " + detail,2048);
             if (delivery == DeliveryOutcome::DefinitelyUnsent) {
                 db.exec("UPDATE outbox SET phase=? WHERE id=?", {cancelling ? "closed" : "ready",action["id"]});
                 if (!reply) task["deadline"] = 0;

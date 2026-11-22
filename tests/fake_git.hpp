@@ -44,7 +44,7 @@ public:
         result.settled = true;
         return result;
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 class FakeHost final : public GitHost {

@@ -549,7 +549,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     return result(Outcome::Accepted, {}, std::move(received));
 }
 
-Delivery answer(Client& client, const Command& command) {
+Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
     const auto watching = wait(client, command.target, false, 1);
@@ -568,6 +568,7 @@ Delivery answer(Client& client, const Command& command) {
     try {
         if (readQuestion(client, thread, command.questionId) != attribution.raw)
             return result(Outcome::NotAccepted, "The T3 question changed before the saved answer could be sent");
+        invoked = true;
         const auto responded = client.call(PendingRequest, {{"action", "respond"}, {"threadId", thread},
             {"requestId", command.questionId}, {"answers", answers}});
         position(member(responded, "sequence"));
@@ -614,7 +615,7 @@ public:
             requireOperate(connection);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            if (command.tool == "answer_session_question") return answer(client, command);
+            if (command.tool == "answer_session_question") return answer(client, command, invoked);
             if (command.tool == "steer") return steer(client, command, invoked);
             const bool launch = command.tool == "delegate";
             Json reply;
@@ -638,9 +639,9 @@ public:
             if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
             return result(Outcome::Accepted, {}, std::move(run));
         } catch (const Failure& failure) {
-            if (invoked) return workReply(failure);
+            if (invoked && command.tool != "answer_session_question") return workReply(failure);
             auto refused = failureDelivery(failure);
-            if (command.tool != "answer_session_question") refused.definitelyUnsent = true;
+            refused.definitelyUnsent = !invoked;
             return refused;
         }
     }
@@ -729,7 +730,7 @@ public:
         }
     }
 
-    void interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
+    InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
         if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
         auto connection = credential(environmentId, config);
         requireOperate(connection);
@@ -737,13 +738,16 @@ public:
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
         const auto current = wait(client, run, false, 1);
         const auto effective = str(current, "runId");
-        if (terminal(str(current, "status"))) return;
+        if (terminal(str(current, "status"))) return InterruptOutcome::AlreadyTerminal;
         if (!active(str(current, "status"))) invalidResponse();
         const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
         const auto status = str(reply, "status");
-        if (str(reply, "threadId") != run.threadId ||
-            (status != "no_active_run" && (str(reply, "runId") != effective || (status != "interrupt_requested" && !terminal(status)))))
-            invalidResponse();
+        if (str(reply, "threadId") != run.threadId) invalidResponse();
+        if (status == "no_active_run") return InterruptOutcome::NoActiveRun;
+        if (str(reply, "runId") != effective) invalidResponse();
+        if (status == "interrupt_requested") return InterruptOutcome::Requested;
+        if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
+        invalidResponse();
     }
 
     Excerpt read(const ReadRequest& request) override {

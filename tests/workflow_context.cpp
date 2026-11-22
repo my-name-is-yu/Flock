@@ -42,7 +42,7 @@ struct SessionService : T3 {
         if (auto callback = std::exchange(onObserve,{})) callback();
         return observations[run.runId];
     }
-    void interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); return InterruptOutcome::Requested; }
     void finish(std::string run, Json report, std::string status = "completed") {
         auto& observation = observations[run];
         observation.kind = Observation::Kind::Finished;

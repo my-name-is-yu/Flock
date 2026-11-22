@@ -64,7 +64,7 @@ struct FixedT3 : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return observations[run.threadId]; }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 inline WebCallbacks callbacks() {

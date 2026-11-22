@@ -18,7 +18,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
         Delivery send(const Command&) override { ++sends; return {}; }
         Delivery reconcile(const Command&) override { throw std::runtime_error("Unexpected reconcile"); }
         Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-        void interrupt(const std::string&,const Json&,const RunRef&) override {}
+        InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
             check(target.environmentId == "env-canonical" && target.threadId == "manual-staging",
                   "search lost the authorized target");

@@ -53,7 +53,7 @@ public:
         }
         return result;
     }
-    void interrupt(const std::string&,const Json&,const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 void notesAndRoutingOnRestart() {
