@@ -202,24 +202,13 @@ void exercise(const std::filesystem::path& path) {
     runtime.runConversations();
 
     const auto before = db.exec("PRAGMA data_version");
-    const auto board = store.board(alice);
     const auto inbox = store.inbox(alice);
-    check(store.board(alice) == board && store.inbox(alice) == inbox && db.exec("PRAGMA data_version") == before,
-          "refreshing board/inbox mutated SQLite");
-    const auto questionRow = row(board,"taskId",question);
-    check(questionRow.at("botId") == "report" && questionRow.at("botName") == "report" &&
-          questionRow.at("requestTitle") == "Report the work" && questionRow.at("description") == "Report the work\nInclude the source" &&
-          questionRow.at("doneWhen") == originalCriteria && questionRow.at("status") == "waiting" &&
-          questionRow.at("wait").at("text") == "Which report?" && questionRow.at("prRefs").at(0).at("url") == prUrl,
-          "board dropped assignment, criteria, wait, or PR reference");
-    check(row(board,"taskId",deadlineTask).at("deadlineAt") == due &&
-          store.board(alice,"review").size() == 5 && store.board(alice,"private").empty() &&
-          store.board(alice,{},"terminal").at(0).at("taskId") == terminal &&
-          store.board(alice,{},"active").size() == board.size()-1 && board.size() == 7,
-          "board filters did not enforce Bot visibility or task state");
-    check(store.board(alice,{},"waiting").size() == 6 &&
-          store.inbox(alice,"private").empty() && store.inbox(reader,"review").empty(),
-          "waiting filter or inbox grants were ignored");
+    check(store.inbox(alice) == inbox && db.exec("PRAGMA data_version") == before,"refreshing the inbox mutated SQLite");
+    const auto questionRow = row(inbox,"itemKind","user_question");
+    check(questionRow.at("botId") == "report" && questionRow.at("botName") == "report" && questionRow.at("taskId") == question &&
+          questionRow.at("requestTitle") == "Report the work" && questionRow.at("request") == "Report the work\nInclude the source" &&
+          questionRow.at("prompt") == "Which report?","inbox dropped the question's request or prompt");
+    check(store.inbox(alice,"private").empty() && store.inbox(reader,"review").empty(),"inbox grants were ignored");
     check(row(inbox,"itemKind","user_question").at("choices") == Json::array({"Draft","Final"}) &&
           row(inbox,"itemKind","conversation_model_budget").at("itemId") == conversation.at("messageId") &&
           row(inbox,"itemKind","conversation_model_budget").at("request") == "Pause this conversation" &&
@@ -251,7 +240,7 @@ void exercise(const std::filesystem::path& path) {
         check(change.target == "review" && change.name == "Reviewer","wrong Bot change was applied");
     };
     store.decideInbox(alice,pending(store,pr_review),"approve");
-    check(row(store.board(alice),"taskId",question).at("prRefs").at(0).at("status") == "approved",
+    check(db.exec("SELECT status='approved' FROM pr_review_items WHERE id="+std::to_string(review)) == 1,
           "PR approval failed to update the linked review");
     store.decideInbox(owner,pending(store,grant_request),"approve");
     check(access.permits("review",{"repository","github.com/org/report","read"},true),"inbox grant bypassed canonical approval");
@@ -300,17 +289,17 @@ void exercise(const std::filesystem::path& path) {
     script.managed = question;
     store.receive(localOwner,intake("report","unused","turn"),"block","Report the blocker");
     runtime.runConversations();
-    const auto blocked = store.board(reader,"report","blocked");
-    check(row(blocked,"taskId",question).at("blockerReason") == "Waiting for a signed report" &&
+    const auto blockerReason = [&](Id task) { return store.task(task).value("blockerReason",std::string{}); };
+    check(blockerReason(question) == "Waiting for a signed report" &&
           row(store.history(question),"kind","blocker_recorded").at("data").at("blockerReason") == "Waiting for a signed report",
-          "blocker tool did not update the board and history");
+          "blocker tool did not update the task and history");
     store.receive(alice,intake("report","unused","turn"),"clear","Clear the blocker");
     runtime.runConversations();
-    check(store.board(reader,"report","blocked").empty() && row(store.history(question),"kind","blocker_cleared").is_object(),
+    check(blockerReason(question).empty() && row(store.history(question),"kind","blocker_cleared").is_object(),
           "explicitly clearing an independent blocker left the task blocked");
     store.receive(alice,intake("report","unused","turn"),"wait-blocker","The question is blocking");
     runtime.runConversations();
-    check(row(store.board(reader,"report","blocked"),"taskId",question).at("blockerReason") == "Waiting for the branch",
+    check(blockerReason(question) == "Waiting for the branch",
           "the recorded blocker lost its progress condition");
     const auto withdrawing = pending(store,user_question);
     store.receive(localOwner,intake("report","unused","turn"),"withdraw","Withdraw the question");
@@ -319,7 +308,7 @@ void exercise(const std::filesystem::path& path) {
         check(remaining.at("itemKind") != "user_question","withdrawn question remained in the Inbox");
     const auto withdrawn = store.task(question);
     const auto& sessionQuestionTarget = withdrawn.at("question").at("target");
-    check(withdrawn.at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
+    check(withdrawn.at("wait").is_null() && !withdrawn.contains("blockerReason") &&
           row(store.history(question),"kind","question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
           "withdraw action did not close and journal the question");
     check(sessionQuestionTarget.at("waitId").is_null() && sessionQuestionTarget.at("eventId") == withdrawn.at("eventId") &&
@@ -383,7 +372,8 @@ void chatDecision(const std::filesystem::path& path) {
     script.managed = taskId;
     store.receive(alice,routing,"report-blocker","The question is blocking");
     runtime.runConversations();
-    check(store.board(alice,"report","blocked").size() == 1,"question-linked blocker was not projected");
+    check(store.task(taskId).value("blockerReason",std::string{}) == "Waiting for the branch",
+          "question-linked blocker was not recorded");
     const auto task = store.task(taskId);
     const auto& wait = task.at("wait");
     const auto item = pending(store,InboxKind::user_question,"report");
@@ -397,7 +387,7 @@ void chatDecision(const std::filesystem::path& path) {
     const auto history = store.decisionHistory(owner);
     check(history.size() == 1 && history.at(0).at("decidedBy") == alice.id && history.at(0).at("decision") == "answer" &&
           history.at(0).at("targetRevision") == item.targetRevision && store.inbox(owner,"report").empty() &&
-          store.board(alice,"report","blocked").empty(),
+          !store.task(taskId).contains("blockerReason"),
           "the chat answer did not use the canonical decision audit");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,item,"answer",{{"text","Draft"}}); },
                                   "the Inbox applied an answer after chat decided the wait");
