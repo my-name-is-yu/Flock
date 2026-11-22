@@ -252,8 +252,12 @@ function selectLocation() {
   const id = /^\d+$/.test(requestedAnchor ?? '') ? Number(requestedAnchor) : 0;
   const anchor = peerId && Number.isSafeInteger(id) ? id : 0;
   const preferred = saved('flock-selected-bot', null);
-  selectBot(bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null, peerId,
-    { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
+  const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
+  if (!peerId && view?.dm && view.id === selectedBot) {
+    leavePeerConversation(false);
+    return;
+  }
+  selectBot(selectedBot, peerId, { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
 }
 function peerLink(botId, peerId, label, className, anchor = 0) {
   const link = node('a', className, label);
@@ -1115,6 +1119,15 @@ function peerExchangeLink(peer, activeBot, eventIds) {
 
 function peerExchangeForEvent(eventId) {
   return eventId ? elements.timeline.querySelector(`[data-peer-events~="${eventId}"]`) : null;
+}
+
+function leavePeerConversation(updateHistory = true) {
+  const { id, dm } = view;
+  const anchor = dm.fromPeerLink && readingPositions.has(timelineKey(id)) ? dm.anchor : 0;
+  selectBot(id, null, { updateHistory });
+  const picker = elements['peer-picker'];
+  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements.profile : picker);
+  target.focus({ preventScroll: true });
 }
 
 function peerThread(events, dm, keep) {
@@ -2074,14 +2087,7 @@ elements['close-navigation'].addEventListener('click', () => openNavigation(fals
 narrow.addEventListener('change', () => openNavigation(false, false));
 for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
-elements['peer-back'].addEventListener('click', () => {
-  const { anchor, fromPeerLink } = view.dm;
-  const restoreFocus = fromPeerLink && readingPositions.has(timelineKey(view.id));
-  selectBot(view.id);
-  const picker = elements['peer-picker'];
-  const link = restoreFocus && peerExchangeForEvent(anchor);
-  (link || (picker.hidden ? elements.profile : picker)).focus({ preventScroll: true });
-});
+elements['peer-back'].addEventListener('click', () => leavePeerConversation());
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
