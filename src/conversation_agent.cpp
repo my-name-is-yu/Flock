@@ -209,9 +209,10 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
                     result = shared.record(std::move(result));
                 }
             }
+            const auto tool = field(decision,"tool");
             if ((decision.contains("rejection") && result.value("untrustedData",false)) ||
-                modelCallRedactor(message.bot,field(decision,"tool"),args,message.routing.contains("gitEvent"))
-                    .containsProtected(args)) {
+                modelArgumentsContainProtected(modelCallRedactor(message.bot,tool,args,message.routing.contains("gitEvent")),
+                                               tool,args)) {
                 args = Json::object();
                 result = toolFailure("Saved tool history is unavailable. Check the target before retrying.");
             }

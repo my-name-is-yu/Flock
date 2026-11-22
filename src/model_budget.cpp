@@ -12,6 +12,11 @@ bool redactsProse(std::string_view tool, std::string_view key) {
     return false;
 }
 
+bool sharedMemoryTool(std::string_view tool) {
+    return tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
+           tool == "apply_memory_edit" || tool == "revert_memory_edit";
+}
+
 bool argumentsMayHaveBeenRedacted(const Decision& call) {
     if (!call.args.is_object()) return SecretRedactor::hasRedactionPlaceholder(call.args);
     for (const auto& [key,value] : call.args.items()) {
@@ -21,6 +26,15 @@ bool argumentsMayHaveBeenRedacted(const Decision& call) {
     }
     return false;
 }
+}
+
+bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
+    if (!args.is_object()) return scrub.containsProtected(args);
+    for (const auto& [key,value] : args.items()) {
+        const bool protocolKey = redactsProse(tool,key) || (tool == "reply" && key == "suggestions");
+        if ((!protocolKey && scrub.containsProtected(key)) || scrub.containsProtected(value)) return true;
+    }
+    return false;
 }
 
 Id modelCallLimit(const Json& config) {
@@ -115,31 +129,36 @@ Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view 
 
 SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                               bool gitNotification) const {
-    if (gitNotification || isGitTool(tool) || args.contains("docId")) return sharedRedactor();
+    if (gitNotification || isGitTool(tool) || (sharedMemoryTool(tool) && args.contains("docId")))
+        return sharedRedactor();
     return redactor(bot);
 }
 
 ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered,
-                                      bool gitNotification, bool legacy) const {
-    const auto scrub = modelCallRedactor(bot,call.tool,call.args,gitNotification);
+                                      bool gitNotification, bool legacy) {
     std::string rejection;
     if (std::ranges::find(offered,call.tool) == offered.end()) {
         rejection = "Tool unavailable for this turn";
-        if (scrub.containsProtected(call.tool)) call.tool.clear();
+        if (redactor(bot).containsProtected(call.tool)) call.tool.clear();
+    } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
+               !Access(*this).permits(bot,{"shared_memory",field(call.args,"docId"),
+                   (call.tool == "read_memory" || call.tool == "memory_history") ? "read" : "write"},true)) {
+        rejection = "Memory access denied";
     } else {
+        const auto scrub = modelCallRedactor(bot,call.tool,call.args,gitNotification);
         // These prose fields already have an explicit redaction contract in reply and memory handlers.
         if (call.args.is_object()) {
             for (auto& [key,value] : call.args.items())
                 if (value.is_string() && redactsProse(call.tool,key))
                     value = scrub.text(value.get_ref<const std::string&>());
         }
-        if (scrub.containsProtected(call.args))
+        if (modelArgumentsContainProtected(scrub,call.tool,call.args))
             rejection = "Tool arguments contain protected material. Use a secret reference where supported.";
         else if (legacy && argumentsMayHaveBeenRedacted(call))
             rejection = "Saved tool arguments may have been redacted. Submit a fresh call.";
+        if (rejection.empty()) call.reason = scrub.text(call.reason);
     }
-    if (rejection.empty()) call.reason = scrub.text(call.reason);
-    else {
+    if (!rejection.empty()) {
         call.args = Json::object();
         call.reason.clear();
     }

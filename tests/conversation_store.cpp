@@ -257,6 +257,25 @@ void protectedArgumentKeyCannotReachTaskIntake() {
           "A protected top-level key reached task intake, persistence, or conversation history");
 }
 
+void rejectedSessionReadStillAllowsAnOrdinaryReply() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto access = store.access();
+    access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),"text");
+    bool rejected = false;
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        const auto steps = turn(input);
+        if (steps.empty()) return {"flock_session_search",{{"query","text"}},"Find matching Sessions"};
+        rejected = steps.at(0).at("result").at("ok") == false;
+        return say("The search was blocked.");
+    };
+    const auto message = receive(store,"protected-session-read","Find my previous Sessions.");
+    execution.runtime.runConversations();
+    check(rejected && reply(store,message).at("text") == "The search was blocked.",
+          "a rejected Session read or a protocol key matching a secret prevented a reply");
+}
+
 void savedCallsAreCheckedBeforeExecution() {
     Fixture fixture;
     Store store(fixture.database());
@@ -553,6 +572,7 @@ int main() {
         savedDecisionIsAppliedWithoutAnotherModelCall();
         missingToolCannotBeAddedAfterInferenceStarts();
         protectedArgumentKeyCannotReachTaskIntake();
+        rejectedSessionReadStillAllowsAnOrdinaryReply();
         savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
         sessionNoteIsNotResentAfterARestart();

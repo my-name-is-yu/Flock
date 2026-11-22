@@ -36,6 +36,8 @@ Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, 
 
 enum class RequestJournal { record, skip };
 
+bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
+
 struct ModelCall : Decision {
     std::string rejection;
 };
@@ -191,7 +193,7 @@ struct Store::Impl {
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
-                             bool gitNotification, bool legacy = false) const;
+                             bool gitNotification, bool legacy = false);
     CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
