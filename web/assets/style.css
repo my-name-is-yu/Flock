@@ -146,11 +146,13 @@ svg { display: block; }
 
 @media (max-width: 700px) {
   .workspace { grid-template-columns: minmax(0, 1fr); transition: none; }
-  .workspace.nav-open .main { display: none; }
+  .workspace .main { transition: transform .26s cubic-bezier(0.32, 0.72, 0, 1); }
+  .workspace.nav-open .main { transform: translateX(18px) scale(.985); }
   .narrow-only { display: grid; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .workspace { transition: none; }
+  .workspace, .workspace .main { transition: none; }
+  .workspace.nav-open .main { transform: none; }
   .icon-button, .text-button, .button { transition-property: background-color, color; }
   .icon-button:active:not(:disabled), .text-button:active:not(:disabled), .button:active:not(:disabled) { transform: none; }
   *, *::before, *::after { scroll-behavior: auto !important; }
