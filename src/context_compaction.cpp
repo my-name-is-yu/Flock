@@ -189,15 +189,23 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     Id offset = identifier(args,"offset",false,0);
     Id queryMessage = message.id, queryStep = step;
     auto needle = conversation_storage::text(args,"query",512,false);
-    if (args.contains("cursor")) {
-        const auto cursor = identifier(args,"cursor",true);
-        auto saved = query(R"SQL(
+    if (args.contains("cursor") || offset) {
+        const bool exactCursor = args.contains("cursor");
+        if (!exactCursor && !args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
+        const std::string lookup = R"SQL(
 SELECT c.message_id,c.byte_offset,c.redaction_revision,c.end_message_id,c.query_message_id,c.query_step,
-       json_extract(s.decision,'$[0].args.query')
+       coalesce(json_extract(s.decision,'$[0].args.query'),'') AS search_query
 FROM conversation_expansion_cursors c
 JOIN conversation_steps s ON s.message_id=c.query_message_id AND s.step=c.query_step
-WHERE c.id=? AND c.bot_id=?
-)SQL",{cursor,bot});
+WHERE c.bot_id=?1
+)SQL";
+        auto saved = exactCursor
+            ? query((lookup + " AND c.id=?2").c_str(),{bot,identifier(args,"cursor",true)})
+            : query((lookup + R"SQL(
+ AND c.message_id=?2 AND c.byte_offset=?3
+GROUP BY c.redaction_revision,c.end_message_id,search_query
+LIMIT 2
+)SQL").c_str(),{bot,start,offset});
         if (!saved.next() || saved.json(2)!=revision)
             throw Conflict("Expansion cursor is stale or unknown. Read again from the start of the message.");
         auto originalNeedle = saved.string(6);
@@ -212,13 +220,8 @@ WHERE c.id=? AND c.bot_id=?
         queryMessage = saved.number(4);
         queryStep = saved.number(5);
         needle = std::move(originalNeedle);
-    } else if (offset) {
-        if (!args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
-        auto saved = query("SELECT DISTINCT redaction_revision FROM conversation_expansion_cursors "
-                           "WHERE bot_id=? AND message_id=? AND byte_offset=? LIMIT 2",{bot,start,offset});
-        // Numeric offsets issued before this change or shared by different views are ambiguous.
-        if (!saved.next() || saved.json(0)!=revision || saved.next())
-            throw Conflict("Expansion offset is stale or unknown. Restart at the message and use nextCursor to continue.");
+        if (!exactCursor && saved.next())
+            throw Conflict("Expansion offset is ambiguous. Use nextCursor from the original search.");
     }
     if (end<start) throw Conflict("No compacted messages in this range");
     auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",

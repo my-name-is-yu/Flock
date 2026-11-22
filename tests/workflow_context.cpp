@@ -238,6 +238,22 @@ void expansionCursorKeepsItsSearchRange() {
             !continued.contains("nextCursor"),"A cursor resumed a wider range or lost its search filter");
 }
 
+void legacyOffsetsCannotSelectBetweenSearches() {
+    Fixture f;
+    const auto message = f.turn("ALPHA BETA " + std::string(3000,'x'));
+    const auto end = f.turn("ALPHA detail");
+    f.call("compact_conversation",{{"endMessageId",end},{"summary","Two searches"}});
+    const auto alpha = f.call("expand_context",{{"query","ALPHA"}});
+    const auto beta = f.call("expand_context",{{"query","BETA"}});
+    require(alpha.at("nextOffset") == beta.at("nextOffset") && alpha.at("nextMessageId") == message,
+            "the fixture did not issue the same byte position for two searches");
+    f.turn("Continue overlapping search","expand_context",
+           {{"startMessageId",message},{"offset",alpha.at("nextOffset")}});
+    require(f.bot.result.at("ok") == false,"an ambiguous offset resumed the wrong search");
+    const auto exact = f.call("expand_context",{{"cursor",alpha.at("nextCursor")}});
+    require(exact.at("messages").back().at("messageId") == end,"the exact cursor did not recover its original filter");
+}
+
 void freshStandaloneSessionIncludesEarlierEvidence() {
     Fixture f;
     f.call("start_workflow",{{"request","Compare the options"},{"stages",Json::array({{{"stageId","compare"},{"role","collect"}}})}});
@@ -740,6 +756,7 @@ int main() {
         expansionRedactsBeforeSearchAndPaging();
         expansionRejectsStaleCursors();
         expansionCursorKeepsItsSearchRange();
+        legacyOffsetsCannotSelectBetweenSearches();
         freshStandaloneSessionIncludesEarlierEvidence();
         verifyAfterRestart(false);
         verifyAfterRestart(true);
