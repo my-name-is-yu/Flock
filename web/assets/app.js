@@ -593,7 +593,9 @@ function renderHeader() {
     const pair = [dm.id, dm.peerId].sort().map(participant);
     if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
       elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot)));
-      elements['peer-heading'].textContent = pair.map(({ name }) => name).join(' & ');
+      const heading = elements['peer-heading'];
+      heading.textContent = pair.map(({ name }) => name).join(' & ');
+      heading.title = heading.textContent;
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -1190,24 +1192,20 @@ function peerMessage(event, from, anchored) {
   const row = node('article', 'msg group-start peer-dm-message');
   row.id = `event-${event.id}`;
   row.toggleAttribute('data-anchored', anchored);
+  const metadata = node('div', 'msg-meta');
+  metadata.append(node('span', 'msg-name', from.name), eventTime(event));
+  const line = node('div', 'msg-line');
+  const bubble = node('div', 'bubble');
   if (forwardedMessage) {
-    const content = node('div', 'peer-forward-content');
+    const quote = node('blockquote', 'peer-forwarded-message');
     const label = node('div', 'peer-forward-meta');
-    label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
-    const card = node('div', 'bubble peer-forwarded-message');
-    card.append(node('p', 'event-text', forwardedMessage.text));
-    content.append(label, card);
-    row.append(content);
+    label.append(icon('forward'), node('span', null, 'Forwarded message'), eventTime(forwardedMessage));
+    quote.append(label, node('p', 'event-text', forwardedMessage.text));
+    bubble.append(quote);
   }
-  if (text || !forwardedMessage) {
-    const metadata = node('div', 'msg-meta');
-    metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
-    const line = node('div', 'msg-line');
-    const bubble = node('div', 'bubble');
-    bubble.append(node('p', 'event-text', text));
-    line.append(avatar(from, 'msg-avatar'), bubble);
-    row.append(metadata, line);
-  }
+  if (text || !forwardedMessage) bubble.append(node('p', 'event-text', text));
+  line.append(avatar(from, 'msg-avatar'), bubble);
+  row.append(metadata, line);
   return row;
 }
 
