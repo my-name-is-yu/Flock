@@ -259,7 +259,7 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     {
         std::lock_guard lock(mutex);
         const auto message = loadTurnMessage(ctx.messageId);
-        if (!message.channelScope.empty() || !Access(*this).permitsPerson(message.actor,ctx.bot,Role::decide))
+        if (!message.channelScope.empty() || !Access(*this).permitsPerson(turnActor(message),ctx.bot,Role::decide))
             throw DecisionDenied{};
     }
     const auto grant = authorizedBotToolScope(ctx.bot,call);
@@ -270,14 +270,17 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
         return result;
     }
     Json content;
+    bool failed = false;
     if (call.tool == "web_search") content = ctx.settings.web->search(toolText(args,"query",256));
     else if (call.tool == "web_fetch") content = ctx.settings.web->fetch(toolText(args,"url",2048));
     else if (call.tool == "mcp_discover") {
         const auto collection = args.at("collection") == "tools" ? McpCollection::tools : McpCollection::resources;
         content = ctx.settings.mcp->discover(ctx.bot,grant->resource,collection,field(args,"cursor"));
-    } else if (call.tool == "mcp_call_tool")
-        content = ctx.settings.mcp->invoke(grant->resource,toolText(args,"name",128),args.at("arguments"));
-    else if (call.tool == "mcp_read_resource")
+    } else if (call.tool == "mcp_call_tool") {
+        auto result = ctx.settings.mcp->invoke(grant->resource,toolText(args,"name",128),args.at("arguments"));
+        failed = result.isError;
+        content = std::move(result.data);
+    } else if (call.tool == "mcp_read_resource")
         content = ctx.settings.mcp->readResource(grant->resource,toolText(args,"uri",2048));
     else if (call.tool == "skill_list") {
         content = Json::array();
@@ -289,7 +292,6 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
         const auto [root,relative] = skillFile(ctx,*grant,args,path);
         content = readToolFile(root,relative,sharedRedactor());
     } else content = inspectAttachment(ctx.bot,ctx.messageId,args);
-    const bool failed = call.tool == "mcp_call_tool" && content.is_object() && content.value("isError",false);
     const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();
     if (call.tool == "web_fetch" && content.value("truncated",false))
         content["text"] = scrub.text(field(content,"text"),true);

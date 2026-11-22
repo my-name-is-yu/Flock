@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS git_pr_heads(
 CREATE TABLE IF NOT EXISTS git_mutations(
  invocation TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), dedupe TEXT, result TEXT,
  PRIMARY KEY(task_id,invocation), UNIQUE(task_id,dedupe));
+CREATE TABLE IF NOT EXISTS git_task_reads(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL REFERENCES tasks(id),
+ invocation TEXT NOT NULL, tool TEXT NOT NULL, target TEXT NOT NULL, result TEXT NOT NULL,
+ UNIQUE(task_id,invocation));
+CREATE INDEX IF NOT EXISTS git_task_reads_by_task ON git_task_reads(task_id,id);
 CREATE TABLE IF NOT EXISTS git_webhook_events(
  id INTEGER PRIMARY KEY, host TEXT NOT NULL, event_id TEXT NOT NULL, repo TEXT NOT NULL,
  data TEXT NOT NULL, payload_digest TEXT, UNIQUE(host,event_id), UNIQUE(host,payload_digest));
@@ -68,6 +73,7 @@ INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,eve
  DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
 )SQL",{repo.host,repo.repo,pr.number,eventCursor,pr.headSha});
     }
+    gitWebhooksDrainedAt.reset();
     return true;
 }
 
@@ -153,11 +159,10 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                       {base.host,base.repo,id,context.taskId}).next()) continue;
             candidates.push_back({{"prNumber",id},{"url",pr.url},{"headSha",pr.headSha},{"awaitingReview",pr.awaitingReview}});
         }
-        auto pending = query("SELECT id,target_revision,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'",
+        auto pending = query("SELECT id,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'",
                              {request.operationId});
-        const auto revision = task.value("currentRevision",Id{0});
         const bool hasPending = pending.next();
-        if (!hasPending || pending.number(1) != revision || pending.json(2) != candidates) {
+        if (!hasPending || pending.json(1) != candidates) {
             if (hasPending) exec("UPDATE pr_review_items SET status='superseded' WHERE id=?",{pending.number(0)});
             insertPrReview(task,"https://" + base.resource() + "/pulls","Reconcile pull request creation",
                 "Verify the original PR for " + head.resource() + ":" + headRef + " into " + baseRef +

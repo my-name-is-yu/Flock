@@ -12,10 +12,11 @@ constexpr int countScanPages = 160;
 using Clock = std::chrono::steady_clock;
 
 template<class Read>
-auto withSession(const std::filesystem::path& directory, const SessionTarget& target, Read read)
+auto withSession(const std::filesystem::path& directory, const SessionTarget& target, Read read,
+                 SessionReadDeadline deadline = {})
     -> decltype(read(std::declval<Client&>())) {
     try {
-        Client client(loadCredential(directory,target.environmentId));
+        Client client(loadCredential(directory,target.environmentId),deadline);
         return read(client);
     } catch (const Failure& error) {
         if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||
@@ -67,7 +68,7 @@ std::optional<Json> readLocalItem(Client& client, const SessionTarget& target, s
 }
 
 std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& directory, const SessionTarget& target,
-                                              bool includeMessages) {
+                                              bool includeMessages, SessionReadDeadline deadline) {
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionMetadata> {
         const auto page = readThread(client,target.threadId,"messages",includeMessages ? sessionPageLimit : 1,
                                      includeMessages ? 240 : 1,{{"beforePosition",maxHistoryPosition}});
@@ -94,7 +95,7 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
             }
         }
         return metadata;
-    });
+    },deadline);
 }
 
 std::optional<SessionEventPage> sessionEvents(const std::filesystem::path& directory, const SessionTarget& target,

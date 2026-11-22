@@ -71,9 +71,11 @@ struct Provider : Model {
     Json seen;
     Json content;
     std::function<void(const ModelInput&)> beforeTurn;
+    std::function<void(const Json&)> inspectRequest;
     std::function<std::vector<Decision>(const Json&)> followStep;
     ModelTurn decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
+        if (inspectRequest) inspectRequest(request);
         auto output = Json::array();
         auto emit = [&](const Decision& action) {
             auto args = action.args;
@@ -112,8 +114,8 @@ struct LocalT3 : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-    void interrupt(const std::string&,const Json&,const RunRef&) override {}
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget&,bool) override {
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget&,bool,SessionReadDeadline) override {
         return SessionMetadata{std::string(historyMarker),"private-project","private-project","running",
                                "2026-11-21T00:00:00Z","2026-11-21T00:00:00Z",{},false};
     }
@@ -163,9 +165,9 @@ struct FakeMcp : McpTools {
         if (cursor == "tools-page-2") return {{"tools",{"second"}}};
         return {{"tools",{"lookup"}},{"nextCursor","tools-page-2"}};
     }
-    Json invoke(std::string_view, std::string_view name, const Json& args) override {
+    McpToolResult invoke(std::string_view, std::string_view name, const Json& args) override {
         ++calls;
-        return {{"toolName",name},{"arguments",args}};
+        return {{{"toolName",name},{"arguments",args}},false};
     }
     Json readResource(std::string_view, std::string_view uri) override { ++reads; return {{"uri",uri}}; }
 };
@@ -351,13 +353,15 @@ void workspaceAndLifecycle(Fixture& f) {
           stderrStages.at("stderr").get<std::string>().find("missing-stage-one") != std::string::npos &&
           stderrStages.at("stderr").get<std::string>().find("missing-stage-two") != std::string::npos,
           "Pipeline did not capture last-stage stdout and all-stage stderr");
+    // Each stream stays below the cap on its own, but their combined output exceeds it.
     const std::string longMissing(2000,'m');
     const auto capped = f.until(f.pipeline(Json::array({
         Json::array({"cat","missing-"+longMissing}),Json::array({"cat","missing-"+longMissing}),
-        Json::array({"cat","missing-"+longMissing}),Json::array({"yes"})})),
-        [](const Json& state) { return state.at("state") == "exited"; },5s);
-    check(capped.at("truncated") == true &&
-          capped.at("stdout").get<std::string>().size()+capped.at("stderr").get<std::string>().size() <= workspaceOutputLimit,
+        Json::array({"cat","missing-"+longMissing}),Json::array({"printf","%04096d","0"})})),finished,5s);
+    const auto stdoutBytes = capped.at("stdout").get_ref<const std::string&>().size();
+    const auto stderrBytes = capped.at("stderr").get_ref<const std::string&>().size();
+    check(capped.at("truncated") == true && stdoutBytes > 0 && stderrBytes > 0 &&
+          stdoutBytes + stderrBytes <= workspaceOutputLimit,
           "Pipeline output did not enforce the shared stdout/stderr cap");
     const int processMarkerBase = 100000 + static_cast<int>(getpid()%100000)*10;
     const std::array<std::string,4> stoppedArguments{
@@ -476,6 +480,39 @@ void workspaceAndLifecycle(Fixture& f) {
     check(f.status(mutating).at("state") == "unknown_after_restart","Running command was not reconciled on restart");
     f.runtime->runConversations();
     check(read(root/"mutation") == "x","An unknown-state mutating command ran again");
+}
+
+void workspaceResultSurvivesARejectedTerminalWrite(Fixture& f) {
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open((f.home/"state.db").c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Fixture writer open failed");
+    const auto sql = [&](const char* statement) {
+        check(sqlite3_exec(db.get(),statement,nullptr,nullptr,nullptr) == SQLITE_OK,"Fixture write failed");
+    };
+    sql("CREATE TRIGGER reject_workspace_result BEFORE UPDATE OF exit_code ON workspace_commands "
+        "BEGIN SELECT RAISE(ABORT,'terminal write rejected'); END");
+    const auto command = f.command(Json::array({"sh","-c","printf x >> terminal-attempts; printf stdout; printf stderr >&2; exit 7"}));
+    bool rejected = false;
+    const auto deadline = std::chrono::steady_clock::now()+5s;
+    while (std::chrono::steady_clock::now() < deadline && !rejected) {
+        try { f.runtime->tickConcurrent(); }
+        catch (const std::runtime_error& error) {
+            check(std::string_view(error.what()) == "terminal write rejected","Unexpected workspace error");
+            rejected = true;
+        }
+        if (!rejected) std::this_thread::sleep_for(5ms);
+    }
+    check(rejected,"The failed terminal workspace write was swallowed");
+    sql("DROP TRIGGER reject_workspace_result");
+    const auto result = f.status(command);
+    const auto attempts = read(f.home/"workspaces"/"alpha"/"terminal-attempts");
+    check(result.at("state") == "exited" && result.at("stdout") == "stdout" &&
+          attempts == "x" && result.at("stderr").get<std::string>().ends_with("stderr") && result.at("exitCode") == 7,
+          "Retry lost the original command result (attempts " + attempts + "): " + result.dump());
+    const auto next = f.command(Json::array({"printf","next"}));
+    check(f.until(next,[](const auto& row) { return row.at("state") == "exited"; }).at("stdout") == "next",
+          "The terminal retry left the Bot's command slot occupied");
 }
 
 void mountedWorkspaceDirectoryIdentity() {
@@ -656,6 +693,108 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     check(f.run(write).at("ok") == true && fs::is_regular_file(path),"A new user message could not request an action");
 }
 
+void escapedToolHistoryFitsBridgeAndCanBeReread() {
+    Fixture f;
+    f.grant({"workspace","alpha","read"});
+    const auto root = f.home/"workspaces"/"alpha";
+    fs::create_directories(root);
+    const auto data = [](unsigned i) {
+        return "Evidence for slot " + std::to_string(i) + " 根" + std::string(8169,'\x01');
+    };
+    std::vector<Decision> batch;
+    for (unsigned i = 0; i < 8; ++i) {
+        const auto file = std::to_string(i) + ".txt";
+        write(root/file,data(i));
+        batch.push_back(call("workspace_read_file",{{"path",file}}));
+    }
+    constexpr unsigned batches = 19, calls = batches * 8;
+    unsigned requests = 0;
+    f.model.inspectRequest = [&](const Json& request) {
+        ++requests;
+        check(request.dump().size() <= 8 * 1024 * 1024,"Serialized request exceeded the production bridge limit");
+        const auto context = Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+        check(context.at("event").at("text") == "Check the fixture","Tool evidence displaced the current user message");
+    };
+    Json firstRef, secondRef;
+    bool recovered = false, revoked = false;
+    f.model.followStep = [&](const Json& steps) -> std::vector<Decision> {
+        if (steps.size() < calls) return batch;
+        if (steps.size() == calls) {
+            check(steps.front().at("result").at("evidenceOmitted") == true &&
+                  steps.front().at("result").at("untrustedData") == true,
+                  "The earlier result disappeared without an explicit evidence status");
+            firstRef = steps.at(0).at("result").at("resultRef");
+            secondRef = steps.at(1).at("result").at("resultRef");
+            check(firstRef != secondRef,"Parallel results shared a reference");
+            for (unsigned i = 0; i < 8; ++i)
+                check(steps.at(calls - 8 + i).at("result").at("text") == data(i),
+                      "The latest batch lost evidence or changed call order");
+            return {call("read_tool_result",firstRef)};
+        }
+        const auto& reread = steps.back().at("result").at("result");
+        if (steps.size() == calls+1) {
+            check(reread.at("ok") == true && reread.at("text") == data(0) &&
+                  steps.back().at("result").at("args").at("path") == "0.txt",
+                  "The omitted result was lost, rerun, or resolved to the wrong slot after restart");
+            recovered = true;
+            return {call("read_tool_result",secondRef)};
+        }
+        check(reread.at("accessRevoked") == true && !reread.contains("text") &&
+              !steps.at(calls).at("result").at("result").contains("text"),
+              "A reread or its replay bypassed current workspace authorization");
+        revoked = true;
+        return {};
+    };
+    f.batch(batch,batches * 9);
+    check(requests == batches,"The stress fixture did not finish all batches before pausing");
+    write(root/"0.txt","Changed on disk after the original read");
+    f.restart();
+    f.approve();
+    f.restart();
+    f.approve();
+    f.store->access().resourceGrant(owner,"alpha",{"workspace","alpha","read"},GrantChange::revoke);
+    f.approve();
+    check(recovered && revoked && requests == batches+3,"The paused turn did not finish all recovery checks");
+    f.model.followStep = {};
+    check(f.run(call("read_tool_result",firstRef)).at("ok") == false,"A reference was accepted from another turn");
+}
+
+void protectedArgumentsDoNotChangeToolTargets() {
+    Fixture f;
+    const std::string marker = "protected-model-argument-fixture";
+    auto access = f.store->access();
+    access.submitSecret(owner,"alpha",access.requestSecret("alpha",{"argument-fixture"}),marker);
+    f.grant({"workspace","alpha","write"});
+    f.grant({"mcp_server","fixture","invoke"});
+    const auto calls = f.mcp->calls.load();
+    const auto workspace = f.home/"workspaces"/"alpha";
+    const auto writeFile = [](std::string path) {
+        return call("workspace_write_file",{{"path",std::move(path)},{"text","Fixture data"}});
+    };
+    const auto invoke = [](Json arguments) {
+        return call("mcp_call_tool",{{"server","fixture"},{"name","lookup"},{"arguments",std::move(arguments)}});
+    };
+    auto sensitivePath = writeFile(marker + ".txt");
+    sensitivePath.reason = "Write " + marker;
+    const auto steps = f.batch({sensitivePath,invoke({{"query",{{marker,"protected key"},{"[redacted]","public key"}}}}),
+                                writeFile("public-arguments.txt")});
+    check(steps.size() == 3 && steps[0].at("result").at("ok") == false && steps[1].at("result").at("ok") == false &&
+          steps[2].at("result").at("ok") == true && f.mcp->calls == calls &&
+          !fs::exists(workspace/(marker + ".txt")) && !fs::exists(workspace/"[redacted].txt") &&
+          read(workspace/"public-arguments.txt") == "Fixture data",
+          "A protected path or structured key changed an effect, or a safe sibling did not execute");
+    const auto persisted = f.sql("SELECT decision || result FROM conversation_steps WHERE step=1 AND message_id=" +
+                                 std::to_string(f.lastMessage));
+    check(persisted.find(marker) == persisted.npos && steps.dump().find(marker) == std::string::npos &&
+          f.model.content.dump().find(marker) == std::string::npos &&
+          f.store->conversation("alpha").dump().find(marker) == std::string::npos,
+          "Rejected arguments exposed protected material");
+
+    const Json publicArgs{{"query",{{"[redacted]","literal key"}}}};
+    check(f.run(invoke(publicArgs)).at("data").at("arguments") == publicArgs && f.mcp->calls == calls+1,
+          "A public structured argument changed during dispatch");
+}
+
 void freshConversationStepArrays(Fixture& f) {
     const auto message = std::to_string(f.lastMessage);
     check(f.sql("SELECT json_type(decision) || ':' || json_type(result) FROM conversation_steps WHERE message_id=" +
@@ -671,25 +810,79 @@ void freshConversationStepArrays(Fixture& f) {
     }
 }
 
-void mcpSessionPagination(Fixture& f, std::string_view url) {
-    write(f.home/"bot-tools.json",Json{{"mcpServers",{{"one",{{"url",url}}},{"two",{{"url",url}}}}}}.dump());
-    const auto adapter = app::loadBotTools(f.home)->mcp;
-    const auto first = adapter->discover("alpha","one",McpCollection::tools,{});
+void mcpSessionPagination(McpTools& adapter) {
+    const auto first = adapter.discover("alpha","one",McpCollection::tools,{});
     const auto cursor = first.at("nextCursor").get<std::string>();
     check(first.at("tools") == Json::array({"first"}) && cursor != "session-bound",
           "The first page did not return an opaque continuation");
     const auto expectDenied = [&](std::string_view bot, std::string_view server, McpCollection collection) {
-        try { adapter->discover(bot,server,collection,cursor); }
+        try { adapter.discover(bot,server,collection,cursor); }
         catch (const Conflict&) { return; }
         throw std::runtime_error("A discovery cursor was accepted outside its original scope or after use");
     };
     expectDenied("beta","one",McpCollection::tools);
     expectDenied("alpha","two",McpCollection::tools);
     expectDenied("alpha","one",McpCollection::resources);
-    const auto next = adapter->discover("alpha","one",McpCollection::tools,cursor);
+    const auto next = adapter.discover("alpha","one",McpCollection::tools,cursor);
     check(next.at("tools") == Json::array({"second"}) && !next.contains("nextCursor"),
           "MCP continuation did not reach the original session");
     expectDenied("alpha","one",McpCollection::tools);
+}
+
+void mcpToolOutcomes(Fixture& f) {
+    const auto invoke = [](std::string_view name, std::string_view server = "one") {
+        return call("mcp_call_tool",{{"server",server},{"name",name},{"arguments",Json::object()}});
+    };
+    const auto expectUnknown = [](const Json& result, std::string_view name) {
+        check(result.at("ok") == false && result.value("delivery","") == "unknown" && !result.contains("data"),
+              "Malformed MCP result was exposed as evidence: " + std::string(name));
+    };
+
+    f.grant({"mcp_server","one","invoke"});
+    f.batch({invoke("numeric-content")},2);
+    f.restart();
+    f.approve();
+    expectUnknown(f.model.seen.at(0).at("result"),"numeric-content after restart");
+
+    for (const auto* name : {"missing-content","invalid-block","invalid-resource","invalid-resource-mime-type",
+                             "invalid-annotations","invalid-structured-content","invalid-is-error"})
+        expectUnknown(f.run(invoke(name)),name);
+
+    const auto success = f.run(invoke("extension"));
+    check(success.at("ok") == true && success.at("untrustedData") == true &&
+          success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
+          success.at("data").at("content").at(1).at("payload") == 7 &&
+          success.at("data").at("structuredContent").at("count") == 1,
+          "Valid MCP content and extensions did not reach the model");
+
+    const auto compatible = f.run(invoke("compatible-content"));
+    check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
+          "Valid resource alternatives or legacy extensions were rejected");
+
+    const auto failure = f.run(invoke("tool-failure"));
+    check(failure.at("ok") == false && !failure.contains("delivery") && failure.at("untrustedData") == true &&
+          failure.at("data").at("content").at(0).at("text") == "Tool failed" &&
+          !failure.at("data").contains("isError"),"Definite MCP tool failure did not survive credential redaction");
+
+    const auto rejected = f.run(invoke("rejected"));
+    check(rejected.at("ok") == false && !rejected.contains("delivery") && rejected.contains("error"),
+          "JSON-RPC rejection was classified as an ambiguous dispatch");
+
+    f.grant({"mcp_server","failed-init","invoke"});
+    const auto initFailure = f.run(invoke("never-dispatched","failed-init"));
+    check(initFailure.at("ok") == false && !initFailure.contains("delivery") && initFailure.contains("error"),
+          "MCP initialization failure was classified as an ambiguous dispatch");
+}
+
+void mcpLoopback(Fixture& f, std::string_view url) {
+    write(f.home/"bot-tools.json",Json{{"mcpServers",{
+        {"one",{{"url",url},{"tokenEnv","FLOCK_MCP_TEST_TOKEN"}}},
+        {"two",{{"url",url}}},
+        {"failed-init",{{"url",std::string(url) + "/failed-init"}}}
+    }}}.dump());
+    f.tools->mcp = app::loadBotTools(f.home)->mcp;
+    mcpSessionPagination(*f.tools->mcp);
+    mcpToolOutcomes(f);
 }
 
 void approvalWhileAnotherTurnIsInferring(Fixture& f) {
@@ -712,12 +905,18 @@ void approvalWhileAnotherTurnIsInferring(Fixture& f) {
 
 int main(int argc, char** argv) {
     try {
-        Fixture fixture;
-        if (argc == 2) {
-            mcpSessionPagination(fixture,argv[1]);
+        if (argc == 2 && std::string_view(argv[1]) == "--tool-history") {
+            escapedToolHistoryFitsBridgeAndCanBeReread();
             return 0;
         }
+        Fixture fixture;
+        if (argc == 2) {
+            mcpLoopback(fixture,argv[1]);
+            return 0;
+        }
+        protectedArgumentsDoNotChangeToolTargets();
         workspaceAndLifecycle(fixture);
+        workspaceResultSurvivesARejectedTerminalWrite(fixture);
         mountedWorkspaceDirectoryIdentity();
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);

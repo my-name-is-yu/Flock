@@ -127,8 +127,8 @@ public:
     Observation observe(const std::string& env, const Json& config, const RunRef& run) override {
         return inner.observe(env,config,run);
     }
-    void interrupt(const std::string& env, const Json& config, const RunRef& run) override {
-        inner.interrupt(env,config,run);
+    InterruptOutcome interrupt(const std::string& env, const Json& config, const RunRef& run) override {
+        return inner.interrupt(env,config,run);
     }
     Excerpt read(const ReadRequest& req) override { return inner.read(req); }
 private:

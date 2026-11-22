@@ -1281,7 +1281,8 @@ function eventCard(event, context, place, report) {
     }
     replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
-    copy = data.report || 'The session submitted a report.';
+    copy = data.evidenceStatus === 'report_unavailable' ? 'The Run ended and its report is unavailable.'
+      : data.report || 'The session submitted a report.';
     text.textContent = copy;
     const link = runIcon(data.run);
     if (link) text.append(link);
@@ -1290,6 +1291,7 @@ function eventCard(event, context, place, report) {
     if (data.status && data.status !== 'completed') {
       bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
     }
+    if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
     const outcome = data.runStatus;
@@ -2611,6 +2613,7 @@ new ResizeObserver(updateFindOverlap).observe(findPanel);
 const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
+  onRefreshError: retrySync,
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {
