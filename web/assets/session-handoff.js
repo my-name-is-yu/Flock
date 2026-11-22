@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const status = $('status');
-const channelFromHash = () => /^#channel=([1-9][0-9]*)$/.exec(location.hash)?.[1];
-let channel = channelFromHash();
+const savedChannel = new URLSearchParams(location.search).get('channel') ?? '';
+let channel = /^[1-9][0-9]*$/.test(savedChannel) ? savedChannel : /^#channel=([1-9][0-9]*)$/.exec(location.hash)?.[1];
 let busy = false;
 let question;
 const labels = {
@@ -152,6 +152,20 @@ async function run(work, message) {
   }
 }
 
+async function loadRecent() {
+  const recent = await request('');
+  $('recent').hidden = recent.length === 0;
+  $('recent-links').replaceChildren(...recent.map((item) => {
+    const row = document.createElement('li');
+    const link = document.createElement('a');
+    link.href = '/session-handoff.html?channel=' + item.channelId;
+    link.textContent = `${item.mode === 'coordinate' ? 'Coordination' : 'Consultation'} with ${item.botId}`;
+    link.title = item.runId;
+    row.append(link);
+    return row;
+  }));
+}
+
 $('accept').addEventListener('submit', (event) => {
   event.preventDefault();
   const field = event.currentTarget.elements.invitation;
@@ -162,6 +176,7 @@ $('accept').addEventListener('submit', (event) => {
     channel = String(invited.channelId);
     history.replaceState(null, '', '#channel=' + channel);
     render(invited);
+    await loadRecent();
   }, 'Could not accept the invitation. Copy it from T3 and check your Flock access.');
 });
 
@@ -185,4 +200,5 @@ $('answer').addEventListener('submit', (event) => {
   }, 'Could not record the answer. Refresh the handoff and try again.');
 });
 
+void loadRecent().catch(() => {});
 if (channel) void run(async () => render(await request(`/${channel}`)), 'This handoff is unavailable.');

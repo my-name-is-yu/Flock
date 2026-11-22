@@ -342,6 +342,25 @@ JOIN specialist_delegations d ON d.id=l.delegation_id WHERE d.channel_id=? ORDER
     return result;
 }
 
+std::vector<SessionHandoffView> SessionHandoff::recent(const Person& person) const {
+    auto& db = *store_.p_;
+    std::vector<Id> channels;
+    {
+        std::lock_guard lock(db.mutex);
+        auto rows = db.query(R"SQL(
+SELECT h.channel_id FROM session_handoffs h JOIN return_channels c ON c.id=h.channel_id
+WHERE c.person_id=? ORDER BY h.channel_id DESC LIMIT 25
+)SQL", {person.id});
+        while (rows.next()) channels.push_back(rows.number(0));
+    }
+    std::vector<SessionHandoffView> result;
+    for (const auto channel : channels) {
+        try { result.push_back(view(person,channel)); }
+        catch (const Conflict&) { continue; }
+    }
+    return result;
+}
+
 RootDeliveryView SessionHandoff::consult(const Person& person, Id channel, Model& model,
                                          const IntakeResolver& intake, const Runtime::SoulLoader& soul) {
     const auto status = view(person, channel);

@@ -200,7 +200,10 @@ void sessionHandoffs(const std::filesystem::path& directory) {
           opening.at("reply").is_null() && opening.dump().find(credential) == std::string::npos &&
           opening.dump().find(t3Person) == std::string::npos,"opening status changed the origin or exposed credentials");
     const auto path = "/api/session-handoffs/" + std::to_string(opening.at("channelId").get<Id>());
+    check(browser.get("/api/session-handoffs").at(0).at("channelId") == opening.at("channelId"),
+          "the authenticated person could not reopen their saved handoff");
     browser.client.set_default_headers({{"Authorization",bobCredential}});
+    check(browser.get("/api/session-handoffs").empty(),"another person's handoff appeared in the list");
     Browser::checked(browser.client.Get(path),403);
     browser.post(path + "/resume",Json::object(),403);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});

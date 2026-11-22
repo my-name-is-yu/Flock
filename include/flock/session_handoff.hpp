@@ -41,6 +41,7 @@ public:
     SessionHandoffView answerWork(const Person&, Id channel, Id generation, std::string_view delegation,
                                   std::string_view stage, Id wait, std::string_view text);
     SessionHandoffView view(const Person&, Id channel) const;
+    std::vector<SessionHandoffView> recent(const Person&) const;
     RootDeliveryView consult(const Person&, Id channel, Model&, const IntakeResolver&,
                              const Runtime::SoulLoader&);
     SessionHandoffView step(const Person&, Id channel, Model&, const IntakeResolver&,

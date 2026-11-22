@@ -95,6 +95,17 @@ void withHandoff(const WebCallbacks& callbacks, const httplib::Request& req, htt
 }
 
 void sessionHandoffRoutes(httplib::Server& server, const WebCallbacks& callbacks) {
+    server.Get("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
+        withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {
+            auto list = Json::array();
+            for (const auto& view : handoff.recent(actor)) {
+                const auto& origin = view.origin.invitation;
+                list.push_back({{"channelId",view.channel},{"botId",origin.botId},{"runId",origin.target.runId},
+                                {"mode",view.coordination ? "coordinate" : "consult"}});
+            }
+            reply(res,200,list);
+        });
+    });
     server.Post("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
         withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {
             const auto body = objectBody(req,3);
