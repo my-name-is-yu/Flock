@@ -1,7 +1,4 @@
-#include "flock/web.hpp"
-#include "flock/channels.hpp"
-
-#include <httplib.h>
+#include "http_fixture.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -14,12 +11,8 @@
 #include <set>
 
 using namespace flockv0;
+using namespace flockv0::http_test;
 namespace {
-constexpr auto privateValue = "private-token-value";
-
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
 
 struct TestDirectory {
     std::filesystem::path path;
@@ -90,30 +83,6 @@ WebCallbacks callbacks() {
         }
     };
 }
-
-class Browser {
-public:
-    explicit Browser(const WebServer& server) : client("127.0.0.1",static_cast<int>(server.port())),
-        origin("http://127.0.0.1:" + std::to_string(server.port())) {}
-
-    Json get(const std::string& path) { return checked(client.Get(path),200); }
-    Json post(const std::string& path, const Json& data, int status = 200) {
-        return checked(client.Post(path,headers(),data.dump(),"application/json"),status);
-    }
-    Id request(std::string_view bot, std::string_view text) {
-        return post("/api/requests",{{"botId",bot},{"request",text}},201).at("taskId");
-    }
-    httplib::Headers headers() const { return {{"Origin",origin},{"Sec-Fetch-Site","same-origin"},{"X-Flock-Action","1"}}; }
-    static Json checked(const httplib::Result& response, int status) {
-        if (!response) throw std::runtime_error("HTTP request failed: " + httplib::to_string(response.error()));
-        if (response->status != status)
-            throw std::runtime_error("Unexpected HTTP " + std::to_string(response->status) + " from " + response->body.substr(0,240));
-        check(response->body.find(privateValue) == std::string::npos,"private connection value entered HTTP response");
-        return Json::parse(response->body);
-    }
-    httplib::Client client;
-    std::string origin;
-};
 
 void pageAssets(Browser& browser, const std::string& html) {
     const std::regex tags(R"(<(script|link)\b[^>]*>)");
@@ -763,11 +732,11 @@ void accessEndpoints(const std::filesystem::path& path) {
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
-    cb.authenticate = webIdentities(file);
+    configureWebIdentities(store,file,cb);
     const auto link = path.parent_path()/"identity-link";
     std::filesystem::create_symlink(file,link);
     bool rejected = false;
-    try { webIdentities(link); } catch (const Conflict&) { rejected = true; }
+    try { configureWebIdentities(store,link,cb); } catch (const Conflict&) { rejected = true; }
     check(rejected,"symlink identity file accepted");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
@@ -835,130 +804,6 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/view?bot=release"),403);
 }
 
-void channelEndpoints(const std::filesystem::path& database) {
-    struct Transport final : ChannelTransport {
-        std::string preview;
-        std::vector<Json> replies;
-        ChannelDelivery send(std::string_view, const ChannelOrigin& origin, std::string_view operation,
-                             const Json& payload) override {
-            if (operation == "publish_artifact") {
-                const auto url = payload.at("url").get<std::string>();
-                check(url.starts_with("https://previews.example.com/"),"Preview publication is missing its configured origin");
-                preview = url.substr(std::string_view("https://previews.example.com").size());
-            }
-            if (operation == "reply") replies.push_back({{"origin",origin.json()},{"payload",payload}});
-            return {ChannelDelivery::State::accepted,"posted"};
-        }
-        ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
-    };
-    struct ChannelModel final : Model {
-        Json local;
-        Decision decide(const ModelInput& input) override {
-            if (input.event["kind"] == "intake")
-                return {"delegate",{{"instruction","Prepare"},{"doneWhen","Prepared"}},"The work needs a Session"};
-            if (input.event["turn"].empty()) {
-                if (input.event["text"] == "Request local") return {"request_local_machine_connection",local,{}};
-                if (input.event["channel"]["channelKind"] == "slack")
-                    return {"publish_artifact",{{"title","Show preview"},{"html","<p>Preview</p>"}},{}};
-            }
-            return {"reply",{{"text","Thread reply"},{"suggestions",{"Get started"}}},{}};
-        }
-    };
-    Store store(database);
-    const Person root{"admin",true}, owner{"alice",false};
-    store.access().personGrant(root,"release",owner.id,Role::decide,GrantChange::grant);
-    store.access().resourceGrant(root,"release",{"environment","local-env","launch"},GrantChange::grant);
-    const auto transport = std::make_shared<Transport>();
-    const auto authenticate = [](auto credential,auto workspace) {
-        return credential == "Bearer fixture-channel" && workspace == "W";
-    };
-    const auto authorize = [&](auto workspace, auto user) -> std::optional<ChannelSender> {
-        if (workspace == "W" && user == "U")
-            return ChannelSender{"release",owner.id};
-        return std::nullopt;
-    };
-    for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
-        store.connectChannel({channel,channelCapabilities(channel),authenticate,authorize,transport});
-    for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
-        for (const auto op : {"use","read"})
-            store.access().resourceGrant(root,"release",channelScope({channel,"W","",""},op),GrantChange::grant);
-    auto cb = callbacks();
-    cb.authenticate = [=](std::string_view token) {
-        return token == "Bearer fixture-owner" ? owner : Person{};
-    };
-    const std::string sessionCredential(32,'s');
-    const auto config = database.parent_path() / "session-bridge.json";
-    std::ofstream(config) << Json{{"localMachines",{{"fixture",owner.id}}},{"sessionBridgeCredentialEnv","FLOCK_HTTP_TEST_SESSION_KEY"},
-                                 {"artifactBaseUrl","https://previews.example.com"}}.dump();
-    setenv("FLOCK_HTTP_TEST_SESSION_KEY",sessionCredential.c_str(),1);
-    configureChannelBridges(store,config,cb);
-    unsetenv("FLOCK_HTTP_TEST_SESSION_KEY");
-    const auto server = startWeb(store,0,cb);
-    Browser browser(*server);
-    httplib::Client bridge("127.0.0.1",static_cast<int>(server->port()));
-    const std::string slack = "/api/channels/slack/events", imessage = "/api/channels/imessage/events";
-    Json event{{"workspaceId","W"},{"threadRef","thread"},{"externalMessageId","id"},{"senderId","U"},{"text","Preview"}};
-    const auto image = decodeAttachment("iVBORw0KGgo=",8);
-    event["attachments"] = Json::array({{{"name","image.png"},{"mimeType","image/png"},{"contentBase64",encodeAttachment(image)}}});
-    Browser::checked(bridge.Post(slack,event.dump(),"application/json"),401);
-    const httplib::Headers credential{{"Authorization","Bearer fixture-channel"}};
-    auto spoofed = event;
-    spoofed["senderId"] = "unknown";
-    Browser::checked(bridge.Post(slack,credential,spoofed.dump(),"application/json"),403);
-    const auto a = Browser::checked(bridge.Post(slack,credential,event.dump(),"application/json"),201);
-    event.erase("attachments");
-    const auto b = Browser::checked(bridge.Post(imessage,credential,event.dump(),"application/json"),201);
-    check(a != b,"HTTP channels collided");
-    check(Browser::checked(bridge.Post(imessage,credential,event.dump(),"application/json"),201) == b,"HTTP replay changed receipt");
-    ChannelModel model;
-    FixedT3 t3;
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
-    runtime.runConversations();
-    check(transport->replies.size() == 2 && transport->replies[0]["payload"]["suggestions"].size() == 1,
-          "Channel replies or getting-started suggestions missing");
-    const auto preview = bridge.Get(transport->preview,httplib::Headers{{"Sec-Fetch-Site","cross-site"}});
-    check(preview && preview->status == 200 && preview->body == "<p>Preview</p>" &&
-          preview->get_header_value("Content-Type").starts_with("text/html") &&
-          preview->get_header_value("Content-Security-Policy").starts_with("sandbox"),"Artifact preview missing sandbox or HTML");
-    Browser::checked(bridge.Get("/api/artifacts/flock-00000000000000000000000000000000"),404);
-    Browser::checked(bridge.Get("/api/channels/local-connections"),401);
-    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    const auto history = browser.get("/api/conversation?bot=release").at("events");
-    check(history.size() == 4 && history.at(0).at("data").at("channel").at("channelKind") == "slack" &&
-          history.at(1).at("data").at("channel").at("channelKind") == "imessage","HTTP conversation does not show channel intake");
-    const auto attachment = history[0]["data"]["attachments"][0]["id"].get<Id>();
-    const auto file = browser.client.Get("/api/channels/attachments/" + std::to_string(attachment));
-    check(file && file->status == 200 && file->body == image,"HTTP screenshot download missing");
-    const auto task = store.submit(cb.intake("release","Prepare"));
-    for (int i = 0; i < 3; ++i) runtime.tick();
-    model.local = store.task(task).at("activeRun");
-    check(model.local.is_object(),"Fixture Session did not start");
-    const auto localFile = std::filesystem::canonical(database.parent_path()) / "session-local.txt";
-    std::ofstream(localFile) << "Approved only for this Session";
-    model.local["machineId"] = "fixture";
-    model.local["rules"] = Json::array({{{"operation","read_file"},{"path",localFile.string()}}});
-    browser.post("/api/messages",{{"botId","release"},{"text","Request local"},{"clientMessageId","local-1"}},201);
-    runtime.runConversations();
-    const auto connections = browser.get("/api/channels/local-connections");
-    check(connections.size() == 1 && connections[0]["status"] == "pending","Local request HTTP listing");
-    const auto id = connections[0].at("id");
-    const auto endpoint = "/api/channels/local-operations";
-    auto request = model.local;
-    request.erase("rules");
-    request.update(Json{{"environmentId","local-env"},{"operation","read_file"},{"path",localFile.string()}});
-    const httplib::Headers bridgeIdentity{{"Authorization","Bearer " + sessionCredential}};
-    Browser::checked(bridge.Post(endpoint,credential,request.dump(),"application/json"),401);
-    Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
-    browser.post("/api/channels/local-connections/decide",{{"id",id},{"approve",true}});
-    check(Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),200).at("text") ==
-          "Approved only for this Session","Approved Session could not read its file through the bridge");
-    auto otherRun = request;
-    otherRun["runId"] = "different-run";
-    Browser::checked(bridge.Post(endpoint,bridgeIdentity,otherRun.dump(),"application/json"),403);
-    browser.post("/api/channels/local-connections/disconnect",{{"id",id}});
-    Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
-    check(browser.get("/api/channels/local-connections")[0]["status"] == "disconnected","Local decision endpoints");
-}
 } // namespace
 
 int main() {

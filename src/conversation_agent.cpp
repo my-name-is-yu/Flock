@@ -336,7 +336,7 @@ ORDER BY j.id DESC LIMIT ?
     event.update(channel);
     Json machines = Json::array();
     for (const auto& [id,machine] : localMachines)
-        if (Access(const_cast<Impl&>(*this)).permitsPerson({std::string(machine->owner()),false},message.bot,Role::decide))
+        if (permitsLocalMachineOwner(machine->owner(),message.bot))
             machines.push_back(id);
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
                      {"localMachines",std::move(machines)}}},{"event",std::move(event)},{"history",std::move(history)}};

@@ -184,7 +184,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
 #ifdef FLOCK_WITH_WEB
-    const auto identityFile = web ? std::getenv("FLOCK_WEB_IDENTITIES_FILE") : nullptr;
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
@@ -194,11 +193,13 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
         },
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
-        identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
+        {},
         [&](const BotChange& change) { bots.apply(change); },
     };
-    if (const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE"))
-        configureChannelBridges(store,bridges,callbacks);
+    const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
+        configureWebIdentities(store,identities,callbacks);
+    if (bridges) configureChannelBridges(store,bridges,callbacks);
     std::unique_ptr<WebServer> server;
     if (web) {
         server = startWeb(store,port,std::move(callbacks));

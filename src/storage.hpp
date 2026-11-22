@@ -62,7 +62,8 @@ struct Store::Impl {
     SecretStore secrets{path.parent_path()};
     std::map<ChannelKind,ChannelConnector> channels;
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
-    std::string artifactOrigin;
+    std::vector<std::string> rootPeople;
+    std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     void migrateAccess();
     void migrateChannels();
@@ -74,6 +75,7 @@ struct Store::Impl {
     std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
+    bool permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const;
     Json localMachineTool(std::string_view bot, std::string_view scope, const Decision&);
     void queueChannelReply(Id source, Id reply, const Json&);
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);

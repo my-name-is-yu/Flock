@@ -125,6 +125,21 @@ void Store::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> ma
     p_->localMachines[std::move(id)] = std::move(machine);
 }
 
+void Store::setRootPeople(std::vector<std::string> ids) {
+    std::lock_guard lock(p_->mutex);
+    p_->rootPeople = std::move(ids);
+}
+
+void Store::setWebOrigin(std::string origin) {
+    std::lock_guard lock(p_->mutex);
+    p_->webOrigin = std::move(origin);
+}
+
+bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
+    const Person person{std::string(owner),std::ranges::find(rootPeople,owner) != rootPeople.end()};
+    return Access(const_cast<Impl&>(*this)).permitsPerson(person,bot,Role::decide);
+}
+
 Json Store::Impl::localMachineTool(std::string_view bot, std::string_view scope, const Decision& decision) {
     if (decision.tool != "request_local_machine_connection") return nullptr;
     const auto& args = decision.args;
@@ -132,7 +147,7 @@ Json Store::Impl::localMachineTool(std::string_view bot, std::string_view scope,
     const auto machine = localMachines.find(machineId);
     if (machine == localMachines.end()) throw Conflict("Local machine is unavailable");
     const auto owner = machine->second->owner();
-    if (!Access(*this).permitsPerson({std::string(owner),false},bot,Role::decide))
+    if (!permitsLocalMachineOwner(owner,bot))
         throw ChannelAccessDenied("The machine owner cannot review requests for this Bot");
     auto session = query(R"SQL(
 SELECT t.id,r.environment_id FROM runs r JOIN tasks t ON t.id=r.task_id
@@ -154,16 +169,27 @@ WHERE bot_id=? AND task_id=? AND environment_id=? AND thread_id=? AND machine_id
 )SQL",{bot,task,environment,thread,machineId});
     const auto rules = localRules(args);
     redactor(bot).requirePublic({thread,run,machineId,owner,rules});
+    Id id;
+    std::string status = "pending";
     if (connection.next()) {
         if (connection.json(1) != rules || connection.string(3) != owner)
             throw Conflict("Resolve the existing request before changing its rules");
-        return {{"ok",true},{"connectionId",connection.number(0)},{"status",connection.string(2)}};
-    }
-    exec(R"SQL(
+        id = connection.number(0);
+        status = connection.string(2);
+    } else {
+        exec(R"SQL(
 INSERT INTO local_machine_connections(bot_id,task_id,environment_id,thread_id,requested_run_id,machine_id,machine_owner,rules,status)
 VALUES(?,?,?,?,?,?,?,?,'pending'))SQL",{bot,task,environment,thread,run,machineId,owner,rules});
-    return {{"ok",true},{"connectionId",last()},{"status","pending"},
-            {"reviewUrl","/settings/" + std::string(bot) + "/access#local-connections"}};
+        id = last();
+    }
+    Json result{{"ok",true},{"connectionId",id},{"status",status}};
+    if (status == "pending") {
+        if (!scope.empty() && webOrigin.empty())
+            result["reviewInstructions"] = "On the Flock host, start Flock Web and open this Bot's Settings, then Access, then Local machine connections.";
+        else
+            result["reviewUrl"] = (scope.empty() ? std::string{} : webOrigin) + "/settings/" + std::string(bot) + "/access#local-connections";
+    }
+    return result;
 }
 
 Json Store::runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun,
@@ -186,7 +212,7 @@ AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
 AND json_extract(t.data,'$.activeRun.runId')=r.run_id
 AND json_extract(t.data,'$.environmentId')=r.environment_id
 )SQL",{environment,authenticatedRun.threadId,authenticatedRun.runId,machineId,owner});
-    if (!connection.next() || !Access(*p_).permitsPerson({std::string(owner),false},connection.string(0),Role::decide))
+    if (!connection.next() || !p_->permitsLocalMachineOwner(owner,connection.string(0)))
         throw ChannelAccessDenied("The Session has no approved local connection");
     const auto bot = connection.string(0);
     const auto rules = connection.json(1);

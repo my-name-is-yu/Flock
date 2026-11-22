@@ -64,7 +64,7 @@ struct RecordedTransport final : ChannelTransport {
     ChannelDelivery send(std::string_view key, const ChannelOrigin& origin, std::string_view action, const Json& payload) override {
         const auto [item,inserted] = sent.emplace(key,"out-"+std::to_string(sent.size()+1));
         check(inserted,"Duplicate outbound call");
-        effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload}});
+        effects.push_back({{"origin",origin.json()},{"action",action},{"payload",payload},{"externalMessageId",item->second}});
         if (loseNextSlackReply && origin.kind == ChannelKind::slack && action == "reply") {
             loseNextSlackReply = false;
             return {};
@@ -214,7 +214,7 @@ void channels(const std::filesystem::path& database) {
     runtime.runConversations();
     check(transport->effects.size() == 8,"Unsupported notices were repeated on replay");
 
-    std::string artifact;
+    std::string artifact, attachmentPost, artifactPost;
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& results = input.event.at("turn");
         switch (results.size()) {
@@ -227,6 +227,8 @@ void channels(const std::filesystem::path& database) {
         default: {
             for (const auto& entry : results) check(entry["result"]["delivery"] == "accepted","Channel action was not sent");
             artifact = results.back()["result"]["url"];
+            attachmentPost = results.at(2).at("result").at("externalMessageId");
+            artifactPost = results.at(3).at("result").at("externalMessageId");
             const auto& sent = input.event.at("channel").at("sentMessages");
             check(sent.back().at("text") == "Updated","Accepted edit is missing from sent-message context");
             return reply("Actions completed.");
@@ -244,17 +246,30 @@ void channels(const std::filesystem::path& database) {
         const auto& earlier = input.event.at("earlierAttachments");
         const auto& results = input.event.at("turn");
         check(earlier.at(0).at("id") == attachment,"Earlier screenshot was not discoverable in-thread");
-        if (results.empty()) {
+        switch (results.size()) {
+        case 0: {
+            const auto& sent = input.event.at("channel").at("sentMessages");
+            for (const auto& id : {attachmentPost,artifactPost})
+                check(std::ranges::any_of(sent,[&](const Json& post) { return post.at("externalMessageId") == id; }),
+                      "Accepted non-reply post is missing from sent-message context");
+            return {"channel_edit_message",{{"externalMessageId",attachmentPost},{"text","Updated attachment"}},{}};
+        }
+        case 1:
+            check(results.at(0).at("result").at("delivery") == "accepted","Attachment post edit was rejected");
+            return {"channel_edit_message",{{"externalMessageId",artifactPost},{"text","Updated preview"}},{}};
+        case 2:
+            check(results.at(1).at("result").at("delivery") == "accepted","Artifact post edit was rejected");
             check(input.images.empty(),"Earlier screenshot was injected without selecting it");
             return {"read_channel_attachment",{{"attachmentId",attachment}},{}};
+        default:
+            check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)} &&
+                  results.at(2).at("result").at("imageIncluded") == true,"Earlier screenshot did not reach the model");
+            return reply("I can still see the screenshot.");
         }
-        check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)} &&
-              results.at(0).at("result").at("imageIncluded") == true,"Earlier screenshot did not reach the model");
-        return reply("I can still see the screenshot.");
     };
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","followup","Look at the screenshot again"),intake);
     runtime.runConversations();
-    check(transport->effects.size() == 14,"Screenshot follow-up did not reach the originating thread");
+    check(transport->effects.size() == 16,"Non-reply edits or screenshot follow-up did not reach the originating thread");
     store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"read"),GrantChange::revoke);
     check(!store.attachment(owner,attachment),"Attachment download ignored revocation");
     bool denied = false;
@@ -266,7 +281,7 @@ void channels(const std::filesystem::path& database) {
     };
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","revoked","Forward the screenshot"),intake);
     runtime.runConversations();
-    check(denied && transport->effects.size() == 15,"Bot attachment reference ignored revocation");
+    check(denied && transport->effects.size() == 17,"Bot attachment reference ignored revocation");
     store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"use"),GrantChange::revoke);
     check(!store.artifact(artifactId),"Public preview survived source channel revocation");
     check(ChannelOrigin{slack,"a:b","c","d"}.key() != ChannelOrigin{slack,"a","b:c","d"}.key(),"Dedupe delimiters collide");
@@ -356,6 +371,75 @@ void taskUpdates(const std::filesystem::path& database) {
     store.receiveChannel(channel,"fixture-auth",answer,intake);
     runtime.runConversations();
     check(transport->effects.size() == 7,"Task replay repeated a channel update");
+}
+
+void taskQuestionChoices(const std::filesystem::path& database) {
+    Store store(database);
+    SessionAdapter t3;
+    Script model;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    connect(store,transport);
+    grant(store,"release");
+    const auto channel = ChannelKind::slack;
+    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
+    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    t3.observeRun = [](const RunRef& run) {
+        Observation observed;
+        observed.kind = Observation::Kind::Question;
+        observed.question.requestId = "question-" + run.runId;
+        return observed;
+    };
+    model.decideNext = [](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "question")
+            return {"ask_user",{{"question","Continue?"},{"choices",{"Yes","No"}}},"The Session needs approval to continue"};
+        if (input.event.at("turn").empty()) return {"start_task",{{"request",input.event.at("text")}},{}};
+        return reply("Task started.");
+    };
+    const auto start = [&](const std::string& project) {
+        store.receiveChannel(channel,"fixture-auth",event("choice-thread",project,project),
+            [&](std::string_view bot, std::string_view text) {
+                auto route = intake(bot,text);
+                route.projectId = project;
+                return route;
+            });
+        for (int i = 0; i < 8; ++i) runtime.tick();
+        const auto task = store.activeTasks("release").at(0);
+        check(task.at("state") == "waiting" && transport->effects.back().at("payload").at("suggestions") == Json::array({"Yes","No"}),
+              "The task question was not posted");
+        return std::pair{task,transport->effects.back().at("externalMessageId")};
+    };
+    const auto [first,firstPost] = start("first");
+    const auto [second,secondPost] = start("second");
+    check(first.at("id") != second.at("id") && firstPost != secondPost && store.task(first.at("id")).at("state") == "waiting",
+          "Both questions must be open at the same time");
+    auto answer = event("choice-thread","answer-first","Yes");
+    answer["replyToExternalMessageId"] = firstPost;
+    auto wrongThread = answer;
+    wrongThread["threadRef"] = "another-thread";
+    rejects([&] { store.receiveChannel(channel,"fixture-auth",wrongThread,intake); });
+
+    bool answered = false;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& anchor = input.event.at("replyTo");
+        check(anchor.at("taskId") == first.at("id") && anchor.at("messageId") == first.at("wait").at("messageId") &&
+              anchor.at("waitId") == first.at("wait").at("id"),"Posted choice lost its exact journal target");
+        const auto& turn = input.event.at("turn");
+        const auto apply = [&](const Json& task) -> Decision {
+            return {"answer_task_question",{{"taskId",task.at("id")},{"waitId",task.at("wait").at("id")},{"text","Yes"}},{}};
+        };
+        if (turn.empty()) return apply(second);
+        check(turn.at(0).at("result").at("ok") == false,"Selection was applied to the other open question");
+        if (turn.size() == 1) return apply(first);
+        answered = turn.at(1).at("result").at("ok") == true;
+        return reply("Answer received.");
+    };
+    const auto receipt = store.receiveChannel(channel,"fixture-auth",answer,intake);
+    runtime.runConversations();
+    check(answered && store.task(second.at("id")).at("state") == "waiting","Only the selected question should be answered");
+    check(store.receiveChannel(channel,"fixture-auth",answer,intake) == receipt,"Choice replay changed the receipt");
+    answer["replyToExternalMessageId"] = secondPost;
+    rejects([&] { store.receiveChannel(channel,"fixture-auth",answer,intake); });
 }
 
 void local(const std::filesystem::path& database, const std::string& path) {
@@ -463,6 +547,7 @@ int main() {
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
         taskUpdates(temp.path / "task-updates.db");
+        taskQuestionChoices(temp.path / "task-question-choices.db");
         local(temp.path / "local.db",std::filesystem::canonical(path).string());
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

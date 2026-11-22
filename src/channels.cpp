@@ -38,6 +38,11 @@ ChannelOrigin originFrom(const Json& data) {
             field(data,"workspaceId"),field(data,"threadRef"),field(data,"externalMessageId")};
 }
 
+std::string channelScopeKey(const VerifiedChannelMessage& message) {
+    const auto& origin = message.origin;
+    return Json::array({channelName(origin.kind),origin.workspaceId,origin.threadRef,message.senderId,message.personId}).dump();
+}
+
 std::string limitation(const ChannelCapabilities& caps, std::string_view operation, bool canPublish) {
     if (operation == "reply" && !caps.supportsReplies) return "This channel does not support threaded replies.";
     if (operation == "channel_edit_message" && !caps.supportsEdit) return "This channel does not support editing messages.";
@@ -152,6 +157,12 @@ void Store::Impl::migrateChannels() {
       state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','unknown','accepted','rejected','unsupported')),
       external_id TEXT NOT NULL DEFAULT '', next_attempt INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT ''))SQL");
     exec("CREATE INDEX IF NOT EXISTS channel_delivery_due ON channel_deliveries(next_attempt) WHERE state IN ('pending','unknown')");
+    exec(R"SQL(CREATE VIEW IF NOT EXISTS channel_posts AS
+      SELECT d.rowid AS sequence,d.reply_id,d.external_id,d.payload,c.scope_key,m.bot_id
+      FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
+      JOIN messages m ON m.id=c.message_id
+      WHERE d.state='accepted' AND d.external_id!=''
+      AND d.operation IN ('reply','channel_send_attachment','publish_artifact'))SQL");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_notices(
       source_id INTEGER NOT NULL REFERENCES channel_messages(message_id), reason TEXT NOT NULL,
       PRIMARY KEY(source_id,reason)))SQL");
@@ -215,6 +226,16 @@ Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const 
     if (!sender || !p_->permitsChannel(sender->botId,origin,senderId,sender->personId,"use"))
         throw ChannelAccessDenied("Channel sender is not authorized");
     VerifiedChannelMessage message{origin,senderId,sender->personId,{}};
+    Id replyTo = 0;
+    if (event.contains("replyToExternalMessageId")) {
+        auto target = p_->query(R"SQL(
+SELECT reply_id FROM channel_posts
+WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 2
+)SQL",{sender->botId,channelScopeKey(message),required(event,"replyToExternalMessageId",128)});
+        if (!target.next()) throw Conflict("The channel reply target is not available");
+        replyTo = target.number(0);
+        if (target.next()) throw Conflict("The channel reply target is ambiguous");
+    }
     const auto files = event.value("attachments",Json::array());
     if (!files.is_array() || files.size() > attachmentCount) throw Conflict("Too many attachments");
     const auto& caps = connector.capabilities;
@@ -236,7 +257,7 @@ Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const 
     }
     auto text = field(event,"text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return receive(sender->botId,origin.key(),text,0,&message,[&] { return routing(sender->botId,text); });
+    return receive(sender->botId,origin.key(),text,replyTo,&message,[&] { return routing(sender->botId,text); });
 }
 
 void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
@@ -258,10 +279,8 @@ void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const Verified
     }
     if (query("SELECT 1 FROM channel_messages WHERE event_key=?",{message.origin.key()}).next())
         throw Conflict("Channel event already belongs to another Bot");
-    const auto& origin = message.origin;
-    const auto scope = Json::array({channelName(origin.kind),origin.workspaceId,origin.threadRef,message.senderId,message.personId});
     exec("INSERT INTO channel_messages VALUES(?,?,?,?,?,?)",
-         {id,origin.key(),scope.dump(),origin.json(),message.senderId,message.personId});
+         {id,message.origin.key(),channelScopeKey(message),message.origin.json(),message.senderId,message.personId});
     Id position = 0;
     for (const auto& file : message.attachments) {
         scrub.requirePublic({file.name,file.mimeType,file.bytes});
@@ -308,18 +327,18 @@ ORDER BY a.message_id DESC,a.position LIMIT 24
     }
     if (!images) return context;
     auto sent = query(R"SQL(
-WITH scoped AS (
-  SELECT d.rowid AS sequence,d.operation,d.external_id,d.payload
+WITH edits AS (
+  SELECT d.rowid AS sequence,d.payload
   FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
   JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND c.scope_key=? AND d.state='accepted'
-  AND d.operation IN ('reply','channel_edit_message')
+  AND d.operation='channel_edit_message'
 )
 SELECT post.external_id,coalesce((
-  SELECT json_extract(edit.payload,'$.text') FROM scoped edit WHERE edit.operation='channel_edit_message'
+  SELECT json_extract(edit.payload,'$.text') FROM edits edit WHERE edit.sequence>post.sequence
   AND json_extract(edit.payload,'$.externalMessageId')=post.external_id ORDER BY edit.sequence DESC LIMIT 1
-),json_extract(post.payload,'$.text'))
-FROM scoped post WHERE post.operation='reply' AND post.external_id!='' ORDER BY post.sequence DESC LIMIT 10
-)SQL",{bot,row.string(3)});
+),json_extract(post.payload,'$.text'),json_extract(post.payload,'$.title'),json_extract(post.payload,'$.name'))
+FROM channel_posts post WHERE post.bot_id=? AND post.scope_key=? ORDER BY post.sequence DESC LIMIT 10
+)SQL",{bot,row.string(3),bot,row.string(3)});
     auto& messages = context["channel"]["sentMessages"] = Json::array();
     while (sent.next()) messages.push_back({{"externalMessageId",sent.string(0)},{"text",bounded(sent.string(1),500)}});
     context["channel"]["capabilities"] = {{"supportsReplies",caps.supportsReplies},{"supportsEdit",caps.supportsEdit},
@@ -456,11 +475,8 @@ Json Store::Impl::channelTool(Id message, std::string_view bot, const Decision& 
     std::string html;
     if (tool == "channel_edit_message") {
         const auto target = required(args,"externalMessageId",128);
-        if (!query(R"SQL(
-SELECT 1 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
-JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND c.scope_key=? AND d.operation='reply'
-AND d.state='accepted' AND d.external_id=?
-)SQL",{bot,source.string(3),target}).next())
+        if (!query("SELECT 1 FROM channel_posts WHERE bot_id=? AND scope_key=? AND external_id=?",
+                   {bot,source.string(3),target}).next())
             throw Conflict("The target must be a message this Bot sent in this channel thread");
         if (query(R"SQL(
 SELECT 1 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
@@ -599,8 +615,9 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         } catch (const std::exception&) {}
         if (outcome.state == ChannelDelivery::State::unknown) continue;
         std::lock_guard lock(mutex);
-        const auto scrub = redactor(bot);
-        const auto external = scrub.text(bounded(outcome.externalMessageId,128));
+        auto& external = outcome.externalMessageId;
+        if (external.size() > 128 || external.find('\0') != external.npos ||
+            !conversation_storage::hasText(external) || redactor(bot).text(external) != external) external.clear();
         const auto next = outcome.state == ChannelDelivery::State::accepted ? "accepted" :
                           outcome.state == ChannelDelivery::State::notSent ? "pending" : "rejected";
         exec("UPDATE channel_deliveries SET state=?,external_id=? WHERE id=? AND state='unknown'",

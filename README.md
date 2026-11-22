@@ -148,14 +148,17 @@ Include the provider's `externalMessageId` for an accepted post. Return
 `not_sent` only with definitive evidence that a send has no provider effect.
 This allows Flock to retry with the same key. The bridge should apply
 `suggestions` from the reply payload using the channel's available controls
-or plain text.
+or plain text. When a user selects a posted suggestion, including a task
+question choice, send its label as `text` and the post's provider message ID
+as `replyToExternalMessageId`. Reuse the target and choice event ID on retries.
 
 To publish HTML artifacts in a channel, set an HTTPS `artifactBaseUrl`
 and proxy only its artifact preview path to Flock. Published links contain
 random access tokens, honor current workspace permission, and serve sandboxed HTML.
 
 Local machine entries name the Flock host and its owner. The owner can review
-requests under **Bot access settings → Local machine connections**. Each
+requests under **Bot access settings → Local machine connections**. Open
+approval links in a browser on the Flock host, where Web listens on loopback. Each
 approval lists exact absolute paths for `read_file` or `list_directory`
 within one active Session. A trusted Session bridge authenticates the caller
 and sends its verified `environmentId`, `threadId` and `runId` with

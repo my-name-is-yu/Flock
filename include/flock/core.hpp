@@ -30,7 +30,7 @@ Id modelCallLimit(const Json& config);
 struct Intake {
     std::string botId, request, environmentId, projectId;
     Json config = Json::object();
-    std::string scheduleId;
+    std::string scheduleId{};
     Seconds scheduledAt = 0;
 };
 struct BotNotes { std::string soul, memory; };
@@ -167,6 +167,8 @@ public:
                         const std::function<Intake(std::string_view, std::string_view)>& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
+    void setRootPeople(std::vector<std::string> ids);
+    void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
     void decideLocalConnection(const Person&, Id id, bool approve);
@@ -190,7 +192,7 @@ struct RuntimeOptions {
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
-    std::function<std::vector<PeerBot>(std::string_view)> peers;
+    std::function<std::vector<PeerBot>(std::string_view)> peers = {};
 };
 class Runtime {
 public:

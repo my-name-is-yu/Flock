@@ -228,6 +228,18 @@ Json operationData(const Json& body, std::string_view operation) {
     return Json::object();
 }
 
+bool localApprovalNavigation(const Request& req) {
+    if (req.method != "GET" || req.has_header("Origin") ||
+        req.get_header_value("Sec-Fetch-Site") != "cross-site" ||
+        req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
+        req.get_header_value("Sec-Fetch-Dest") != "document") return false;
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    if (!path.starts_with(prefix)) return false;
+    path.remove_prefix(prefix.size());
+    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+}
+
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
@@ -340,6 +352,7 @@ public:
     ~LoopbackServer() override {
         server_.stop();
         worker_.join();
+        store_.setWebOrigin({});
     }
     unsigned port() const override { return port_; }
 
@@ -359,7 +372,8 @@ private:
         const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
         const bool sameOrigin = origins == 1 && origin == "http://" + host;
         if ((origins != 0 && !sameOrigin) || (req.has_header("Sec-Fetch-Site") &&
-            (req.get_header_value_count("Sec-Fetch-Site") != 1 || (fetchSite != "same-origin" && fetchSite != "none")))) {
+            (req.get_header_value_count("Sec-Fetch-Site") != 1 ||
+             (fetchSite != "same-origin" && fetchSite != "none" && !localApprovalNavigation(req))))) {
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
@@ -554,6 +568,8 @@ private:
 } // namespace
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
-    return std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
+    return server;
 }
 } // namespace flockv0
