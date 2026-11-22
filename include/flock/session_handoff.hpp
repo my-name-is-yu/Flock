@@ -49,6 +49,8 @@ public:
     std::vector<std::pair<Id,std::string>> pending(Id after) const;
 
 private:
+    void reconcileReplies(const Person&, Id channel, std::string_view bot);
+
     Store& store_;
     RootGate& gate_;
     T3PersonBinding bindsPerson_;

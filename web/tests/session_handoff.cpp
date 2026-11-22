@@ -27,6 +27,7 @@ class Gate final : public RootGate {
 public:
     std::atomic<bool> canActivate{false}, applied{false};
     std::atomic<bool> coordinationSealed{false}, canAcknowledgeFreeze{false}, freezeAcknowledged{false};
+    std::atomic<bool> advanceCoordination{false}, coordinationApplied{false};
     std::atomic<unsigned> sends{0}, reads{0};
 
     std::optional<RootGateCapabilities> capabilities(std::string_view environment) override {
@@ -70,12 +71,17 @@ public:
         const auto grant = readGrant(ref,token);
         if (!grant) return {};
         if (!grant->sealed) return RootSealStatus{*grant,{},{},false};
-        return RootSealStatus{*grant,{"accepted-before-seal"},"seal-marker",freezeAcknowledged};
+        std::lock_guard lock(mutex);
+        return RootSealStatus{*grant,{coordinationCommandId},"seal-marker",freezeAcknowledged};
     }
 
     std::optional<RootProgressPage> events(const RootGrantRef& ref, Id after, std::string_view token) override {
         if (token != coordinatorCredential || !readGrant(ref,token)) return {};
         if (after == 0) return RootProgressPage{target,5,{{"decision-needed",5,"decisionNeeded","pending","A decision is needed"}}};
+        if (advanceCoordination && after == 5)
+            return RootProgressPage{target,6,{{"checks-ready",6,"progress","running","Checks are ready"}}};
+        if (advanceCoordination && after == 6)
+            return RootProgressPage{target,7,{{"another-decision",7,"decisionNeeded","pending","Another decision is needed"}}};
         return RootProgressPage{target,after,{}};
     }
 
@@ -89,6 +95,15 @@ public:
     }
 
     RootGateReply readReceipt(const RootCommandRef& ref, std::string_view token) override {
+        if (token == coordinatorCredential) {
+            std::lock_guard lock(mutex);
+            check(ref.grant == coordinatorGrant().ref,"receipt changed the coordination grant");
+            if (coordinationCommandId.empty()) return {RootGateReply::Kind::AuthoritativelyAbsent,{},{}};
+            check(ref.commandId == coordinationCommandId,"receipt changed the admitted coordination command");
+            if (!coordinationApplied) return pending(ref);
+            return {RootGateReply::Kind::Found,RootReceipt{ref,"release",RootDeliveryState::Applied,
+                                                          "native-turn","coordination-item"},{}};
+        }
         check(ref.grant == rootGrant().ref && token == credential,"receipt lookup changed the grant");
         if (!sends) return {RootGateReply::Kind::AuthoritativelyAbsent,{},{}};
         if (!applied) return pending(ref);
@@ -96,6 +111,13 @@ public:
     }
 
     RootGateReply send(const RootCommand& command, std::string_view token) override {
+        if (token == coordinatorCredential) {
+            std::lock_guard lock(mutex);
+            check(command.ref.grant == coordinatorGrant().ref && command.text == "Start the checks" &&
+                  !coordinationSealed && coordinationCommandId.empty(),"replayed or misdirected coordination send");
+            coordinationCommandId = command.ref.commandId;
+            return pending(command.ref);
+        }
         check(command.ref.grant == rootGrant().ref && command.text == "Keep the existing checks" &&
               token == credential,"root send changed the Bot's scoped reply or exact Run");
         ++sends;
@@ -104,7 +126,7 @@ public:
 
 private:
     std::mutex mutex;
-    std::string coordinatorGrantId;
+    std::string coordinatorGrantId, coordinationCommandId;
     RootGrant coordinatorGrant() const {
         return {{target,coordinatorGrantId,1},"source-message","release",coordination,coordinationSealed};
     }
@@ -123,7 +145,10 @@ public:
         if (input.event.at("kind") == "root_coordination") {
             ++coordinationCalls;
             if (input.event.at("answer").is_null()) {
-                check(input.event.at("progress").at(0).at("kind") == "decisionNeeded", "wrong event for the coordinator");
+                const auto& kind = input.event.at("progress").at(0).at("kind");
+                if (kind == "progress")
+                    return {{{"root_guidance",{{"text","Start the checks"}},"Ready to proceed"}}};
+                check(kind == "decisionNeeded", "wrong event for the coordinator");
                 return {{{"handoff_question",{{"text","Which test suite should run?"}},"A person must decide"}}};
             }
             check(input.event.at("answer").at("question") == "Which test suite should run?" &&
@@ -165,6 +190,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     catch (const Conflict&) { rejected = true; }
     check(rejected,"one remote person was mapped to two local actors");
     cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,gate,cb.bindT3Person);
+    const auto handoffs = cb.sessionHandoffs;
     cb.sessionHandoffModel = &model;
     cb.sessionHandoffSoul = [](std::string_view bot) {
         check(bot == "release","web supplied the wrong Bot profile");
@@ -247,6 +273,13 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     browser.post(coordPath + "/step",Json::object());
     browser.post(coordPath + "/step",Json::object());
     check(model.coordinationCalls == 2,"a repeated event or answer rescheduled a decision");
+    gate.advanceCoordination = true;
+    const auto guidance = browser.post(coordPath + "/step",Json::object()).at("reply");
+    check(guidance.at("state") == "providerPending","coordination guidance prematurely appeared as Applied");
+    const auto commandId = guidance.at("commandId");
+    const auto laterQuestion = browser.post(coordPath + "/step",Json::object());
+    check(laterQuestion.at("pendingQuestion").at("eventId") == "another-decision" && laterQuestion.at("reply") == guidance,
+          "a subsequent question hid the in-flight coordination reply");
     const auto frozen = browser.post(coordPath + "/freeze",Json::object());
     check(frozen.at("mode") == "coordinate" && frozen.at("frozen") == true && frozen.at("sealed") == false &&
           frozen.at("generation") == 2 && frozen.at("released") == false,
@@ -255,13 +288,23 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     gate.coordinationSealed = true;
     const auto sealing = browser.post(coordPath + "/resume",Json::object());
     check(sealing.at("sealed") == true && sealing.at("frozen") == true && sealing.at("released") == false &&
-          sealing.at("residualCommandIds") == Json::array({"accepted-before-seal"}) && sealing.at("sealMarker") == "seal-marker",
+          sealing.at("residualCommandIds") == Json::array({commandId}) && sealing.at("sealMarker") == "seal-marker",
           "remote seal hid residuals or was represented as final release before acknowledgment");
     gate.canAcknowledgeFreeze = true;
     const auto released = browser.post(coordPath + "/resume",Json::object());
     check(released.at("released") == true && released.at("releaseAcknowledged") == true &&
           released.at("generation") == 2 && browser.get(coordPath) == released && db.tasks().empty(),
           "acknowledged two-barrier take-back was not durable and independently visible");
+    const auto channel = coordinating.at("channelId").get<Id>();
+    const auto awaiting = handoffs->pending(0);
+    check(awaiting.size() == 1 && awaiting.front().first == channel,
+          "the background worker dropped a released handoff with an unresolved residual");
+    gate.coordinationApplied = true;
+    const auto late = browser.post(coordPath + "/step",Json::object());
+    check(late.at("released") == true && late.at("reply").at("commandId") == commandId &&
+          late.at("reply").at("state") == "applied" && late.at("reply").at("provider").at("nativeItemId") == "coordination-item" &&
+          handoffs->pending(0).empty() && model.coordinationCalls == 4,
+          "an admitted residual did not settle by read-only reconciliation after release");
 }
 }
 

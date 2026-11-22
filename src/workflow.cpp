@@ -4,6 +4,8 @@
 
 namespace flockv0 {
 namespace {
+constexpr std::size_t maxFindingsBytes = 2000;
+
 Seconds deadlineSeconds(const Json& args, Seconds inherited = 0) {
     if (!args.contains("softDeadlineSeconds")) return inherited;
     const auto& value = args.at("softDeadlineSeconds");
@@ -154,10 +156,10 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
     auto owner = query("SELECT stop_requested,request,delegation_id,peer_request_id,input_artifact_version"
                        " FROM workflows WHERE id=? AND bot_id=?",{id,bot});
     if (!owner.next()) throw Conflict("Unknown workflow");
-    const auto scrub = redactor(bot);
+    const bool peer = !owner.string(2).empty();
+    const auto scrub = peer ? sharedRedactor() : redactor(bot);
     const bool stopping = owner.number(0);
     Json result = {{"ok",true},{"workflowId",id},{"request",owner.string(1)},{"stages",Json::array()},{"artifacts",Json::array()},{"verdicts",Json::array()}};
-    const bool peer = !owner.string(2).empty();
     if (peer) {
         result["origin"] = {{"kind","received_peer_work"},{"delegationId",owner.string(2)},{"requestId",owner.string(3)}};
         result["inputArtifactVersion"] = owner.string(4);
@@ -208,7 +210,15 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
         Json item = {{"stageId",evidence.string(0)},{"taskId",evidence.number(1)},{"artifactVersion",evidence.string(2)},
                      {"messageId",evidence.number(4)},{"runRef",report.at("run")},{"resultRunId",report.at("resultRunId")},
                      {"itemId",report.at("itemId")}};
-        if (!evidence.string(3).empty()) item["verdict"] = evidence.string(3);
+        if (!evidence.string(3).empty()) {
+            item["verdict"] = evidence.string(3);
+            if (peer) {
+                const auto parsed = Json::parse(field(report,"report"),nullptr,false);
+                const auto findings = field(parsed,"findings");
+                if (conversation_storage::hasText(findings))
+                    item["findings"] = bounded(scrub.text(findings),maxFindingsBytes);
+            }
+        }
         auto& records = result[item.contains("verdict") ? "verdicts" : "artifacts"];
         records.push_back(std::move(item));
     }
@@ -440,12 +450,16 @@ void Store::Impl::appendStageRequirements(std::string& instruction, const Json& 
     auto stage = query("SELECT s.spec,s.input,w.request FROM workflow_stages s"
                        " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?", {task.at("id")});
     if (!stage.next()) throw Conflict("Missing workflow stage assignment");
-    const auto role = field(stage.json(0),"role"), pin = stage.string(1);
+    const auto spec = stage.json(0);
+    const auto role = field(spec,"role"), pin = stage.string(1);
     if (role=="verify") instruction += "\n\nRequested change: " + stage.string(2);
     if (!pin.empty()) instruction += "\n\nPinned input artifact version: " + pin;
-    if (task.contains("workflowParentTaskId"))
+    if (task.contains("workflowParentTaskId")) {
+        instruction += "\nAssigned check: " + field(spec,"name") + " (" + field(spec,"stageId") + ").";
         instruction += "\nCheck that HEAD is the pinned commit and keep the assigned worktree unchanged.";
-    if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
+        instruction += "\nVerify that exact version. Return only a JSON object with artifactVersion, verdict (pass or fail), "
+                       "and findings (briefly name the check you actually ran and its observed result).";
+    } else if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
     else if (role=="implement") instruction += "\n\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
 }
 
@@ -473,7 +487,8 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto result = Json::parse(field(report,"report"),nullptr,false);
     const auto version = field(result,"artifactVersion");
     bool ok = field(report,"status")=="completed" && !report.value("truncated",false);
-    if (task.contains("workflowParentTaskId")) ok = ok && !field(report,"itemId").empty();
+    if (task.contains("workflowParentTaskId"))
+        ok = ok && !field(report,"itemId").empty() && conversation_storage::hasText(field(result,"findings"));
     std::string output;
     if (role=="verify") {
         const auto verdict = field(result,"verdict");

@@ -36,6 +36,10 @@ Json workQuestion(const Json& task, const SecretRedactor& scrub) {
     return {{"waitId",wait.at("id")},{"text",scrub.text(field(wait,"text"))}};
 }
 
+constexpr int applied = static_cast<int>(RootDeliveryState::Applied);
+constexpr int failed = static_cast<int>(RootDeliveryState::Failed);
+constexpr int rejected = static_cast<int>(RootDeliveryState::Rejected);
+
 }
 
 void Store::Impl::initializeSessionHandoffSchema() {
@@ -123,10 +127,8 @@ SessionHandoffView SessionHandoff::accept(const Person& person, const RootInvita
 SessionHandoffView SessionHandoff::resume(const Person& person, Id channel) {
     const auto current = view(person, channel);
     if (!current.opening) {
-        RootDelivery delivery(store_,gate_);
-        delivery.observeGrant(person,channel);
-        if (current.reply)
-            delivery.reconcile(person,current.origin.invitation.botId,channel,current.reply->ref.commandId);
+        RootDelivery(store_,gate_).observeGrant(person,channel);
+        reconcileReplies(person,channel,current.origin.invitation.botId);
         return view(person, channel);
     }
     auto& db = *store_.p_;
@@ -161,6 +163,31 @@ SessionHandoffView SessionHandoff::resume(const Person& person, Id channel) {
     }
     RootDelivery(store_, gate_).bind(person, channel, credential);
     return view(person, channel);
+}
+
+void SessionHandoff::reconcileReplies(const Person& person, Id channel, std::string_view bot) {
+    auto& db = *store_.p_;
+    std::vector<std::string> commands;
+    {
+        std::lock_guard lock(db.mutex);
+        auto rows = db.query(R"SQL(
+SELECT d.command_id FROM root_deliveries d JOIN root_gate_channels g ON g.channel_id=d.channel_id
+WHERE d.channel_id=? AND d.state NOT IN (?,?) AND (d.state<>? OR EXISTS (
+ SELECT 1 FROM json_each(g.residual_commands) residual WHERE residual.value=d.command_id
+)) ORDER BY d.rowid LIMIT 16
+)SQL", {channel,applied,failed,rejected});
+        while (rows.next()) commands.push_back(rows.string(0));
+    }
+    RootDelivery delivery(store_,gate_);
+    for (const auto& command : commands) {
+        const auto reply = delivery.reconcile(person,bot,channel,command);
+        if (reply.state == RootDeliveryState::Applied || reply.state == RootDeliveryState::Failed ||
+            reply.state == RootDeliveryState::Rejected) {
+            std::lock_guard lock(db.mutex);
+            db.exec("UPDATE handoff_decisions SET settled=1 WHERE channel_id=? AND command_id=?",
+                    {channel,command});
+        }
+    }
 }
 
 SessionHandoffView SessionHandoff::freeze(const Person& person, Id channel) {
@@ -270,15 +297,12 @@ LEFT JOIN root_gate_channels g ON g.channel_id=h.channel_id WHERE h.channel_id=?
         }
         result.eventCursor = row.number(8);
         if (auto decision = db.query(R"SQL(
-SELECT event_id,position,command_id,kind,text,settled FROM handoff_decisions
+SELECT event_id,position,kind,text,settled FROM handoff_decisions
 WHERE channel_id=? AND kind<>'wait_for_root' ORDER BY rowid DESC LIMIT 1
 )SQL", {channel}); decision.next()) {
             result.latestDecision = {{"eventId",decision.string(0)},{"position",decision.number(1)},
-                                     {"kind",decision.string(3)},{"text",decision.string(4)},
-                                     {"settled",decision.number(5) != 0}};
-            if (decision.string(3) == "root_guidance" &&
-                db.query("SELECT 1 FROM root_deliveries WHERE channel_id=? AND command_id=?",
-                         {channel, decision.string(2)}).next()) commandId = decision.string(2);
+                                     {"kind",decision.string(2)},{"text",decision.string(3)},
+                                     {"settled",decision.number(4) != 0}};
         }
         if (!result.opening && !result.sealed && !result.frozen) {
             auto question = db.query(R"SQL(
@@ -320,7 +344,8 @@ WHERE d.channel_id=? ORDER BY d.rowid LIMIT 16
                 for (const auto& source : settled.value("references",Json::array())) {
                     evidence.push_back({{"threadId",field(source,"threadId")},{"runId",field(source,"runId")},
                                         {"itemId",field(source,"itemId")},{"stageId",field(source,"stageId")},
-                                        {"verdict",field(source,"verdict")},{"commit",field(source,"artifactVersion")}});
+                                        {"verdict",field(source,"verdict")},{"commit",field(source,"artifactVersion")},
+                                        {"findings",field(source,"findings")}});
                 }
                 work["result"]["evidence"] = std::move(evidence);
             }
@@ -331,10 +356,8 @@ SELECT l.action_id FROM specialist_launches l
 JOIN specialist_delegations d ON d.id=l.delegation_id WHERE d.channel_id=? ORDER BY l.rowid
 )SQL", {channel});
         while (children.next()) result.admittedChildIds.push_back(children.string(0));
-        if (const auto* consult = std::get_if<ConsultPermit>(&participation);
-            consult && db.query("SELECT 1 FROM root_deliveries WHERE channel_id=? AND command_id=?",
-                                {channel, consult->commandId}).next())
-            commandId = consult->commandId;
+        if (auto reply = db.query("SELECT command_id FROM root_deliveries WHERE channel_id=? ORDER BY rowid DESC LIMIT 1",
+                                  {channel}); reply.next()) commandId = reply.string(0);
         tx.commit();
     }
     if (!commandId.empty())
@@ -404,7 +427,11 @@ SessionHandoffView SessionHandoff::step(const Person& person, Id channel, Model&
     if (current.opening) return resume(person, channel);
     RootDelivery delivery(store_, gate_);
     const auto grant = delivery.observeGrant(person, channel);
-    if (!grant.verified || grant.sealed || grant.frozen) return view(person, channel);
+    if (!grant.verified) return view(person, channel);
+    if (grant.sealed || grant.frozen) {
+        reconcileReplies(person,channel,current.origin.invitation.botId);
+        return view(person,channel);
+    }
     const auto activation = ParticipationStore(store_).coordination(person, channel);
     if (!activation.acknowledgment) throw Conflict("Coordination is still opening");
     const auto& invitation = current.origin.invitation;
@@ -491,7 +518,7 @@ AND NOT answer_consumed ORDER BY rowid LIMIT 1
         if (!answer) {
             auto work = db.query(R"SQL(
 SELECT j.id,j.data FROM specialist_delegations d JOIN journal j ON j.task_id=d.sender_task
-WHERE d.channel_id=? AND d.generation=? AND j.kind='specialist_result'
+WHERE d.channel_id=? AND d.generation=? AND d.parent_id IS NULL AND j.kind='specialist_result'
 AND NOT EXISTS (SELECT 1 FROM handoff_reviewed_results r WHERE r.channel_id=d.channel_id AND r.journal_id=j.id)
 ORDER BY j.id LIMIT 1
 )SQL", {channel,grant.generation});
@@ -532,6 +559,17 @@ ORDER BY j.id LIMIT 1
         std::vector<std::string> tools{"handoff_question","wait_for_root"};
         if (!unresolvedEffect) tools.push_back("root_guidance");
         auto peers = Json::array();
+        auto work = Json::array();
+        bool awaitingSpecialist = false;
+        for (const auto& assignment : current.work) {
+            if (assignment.contains("parentDelegationId")) continue;
+            const auto result = assignment.find("result");
+            awaitingSpecialist = awaitingSpecialist || result == assignment.end();
+            work.push_back({{"executor",clean(field(assignment,"executor"))},
+                            {"purpose",clean(field(assignment,"purpose"))},
+                            {"commit",clean(field(assignment,"commit"))},
+                            {"status",clean(result == assignment.end() ? field(assignment,"state") : field(*result,"status"))}});
+        }
         auto resultEvidence = Json(nullptr);
         const auto peerScope = Scope::workDelegate(ref.target.environmentId, ref.target.threadId);
         if (runtime_ && peers_ && activation.binding.request.allowDelegation &&
@@ -544,7 +582,7 @@ ORDER BY j.id LIMIT 1
                     peers.push_back({{"botId",clean(request.botId)},{"role",clean(peer.role)}});
             }
             if (!peers.empty()) pin = delivery.inputCommit(person, channel);
-            if (pin && !unresolvedEffect) tools.push_back("delegate_specialist");
+            if (pin && !unresolvedEffect && !awaitingSpecialist) tools.push_back("delegate_specialist");
             else peers = Json::array();
         }
         if (workResult) {
@@ -559,14 +597,16 @@ ORDER BY j.id LIMIT 1
             if (sameInput) for (const auto& item : result.value("references",Json::array())) {
                 if (sources.size() == 8) break;
                 sources.push_back({{"stage",clean(field(item,"stageId"))},{"verdict",clean(field(item,"verdict"))},
-                                   {"runId",clean(field(item,"runId"))},{"itemId",clean(field(item,"itemId"))}});
+                                   {"runId",clean(field(item,"runId"))},{"itemId",clean(field(item,"itemId"))},
+                                   {"findings",clean(field(item,"findings"))}});
             }
             resultEvidence["evidence"] = std::move(sources);
         }
         const ModelInput input{
             {{"botId",bot},{"goal",clean(activation.binding.request.goal)}},
             {{"kind","root_coordination"},{"progress",std::move(events)},{"sharedContext",std::move(context)},
-             {"specialists",peers},{"answer",answer ? Json{{"question",clean(answer->question)},
+             {"specialists",peers},{"specialistWork",std::move(work)},
+             {"answer",answer ? Json{{"question",clean(answer->question)},
                                                            {"text",clean(answer->text)}} : Json(nullptr)},
              {"specialistResult",std::move(resultEvidence)}},
             Json::array(), std::move(note), tools,
@@ -644,10 +684,13 @@ LEFT JOIN root_gate_channels g ON g.channel_id=c.id
 LEFT JOIN coordination_activations a ON a.channel_id=c.id
 LEFT JOIN consult_permits p ON p.channel_id=c.id
 LEFT JOIN root_deliveries d ON d.channel_id=c.id AND d.command_id=p.command_id
-WHERE c.id>? AND (g.grant_id IS NULL OR (a.channel_id IS NOT NULL AND NOT g.release_acknowledged) OR
+WHERE c.id>? AND (g.grant_id IS NULL OR (a.channel_id IS NOT NULL AND (NOT g.release_acknowledged OR EXISTS (
+ SELECT 1 FROM root_deliveries pending JOIN json_each(g.residual_commands) residual ON residual.value=pending.command_id
+ WHERE pending.channel_id=c.id AND pending.state NOT IN (?,?)
+))) OR
  (p.channel_id IS NOT NULL AND ((NOT g.sealed AND NOT g.frozen AND d.state IS NULL) OR d.state IN (0,1,2,6))))
 ORDER BY c.id LIMIT 16
-)SQL", {after});
+)SQL", {after,applied,failed});
     std::vector<std::pair<Id,std::string>> result;
     while (rows.next()) result.emplace_back(rows.number(0),rows.string(1));
     return result;

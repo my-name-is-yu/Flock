@@ -785,6 +785,32 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         });
     }
 
+    std::optional<Delivery> replaySpecialistLaunch(Id id, const Command& command) {
+        if (command.tool != "delegate" || command.authGeneration.empty() || !command.candidate.threadId.empty()) return {};
+        const auto origin = [&]() -> std::optional<SpecialistOrigin> {
+            std::lock_guard lock(db.mutex);
+            if (!db.query("SELECT 1 FROM specialist_launches WHERE task_id=? AND action_id=?",
+                          {id,command.actionId}).next()) return {};
+            return specialistOrigin(id);
+        }();
+        if (!origin || !verifySpecialistWorkspace(command,origin->commit) ||
+            t3.authGeneration(command.environmentId,command.config) != command.authGeneration) return {};
+        const Person person{origin->person};
+        const auto generation = observeSpecialistGrant(person,origin->channel);
+        if (generation != origin->generation || observeSpecialistInput(person,origin->channel) != origin->commit)
+            return {};
+        {
+            std::lock_guard lock(db.mutex);
+            const auto current = db.load(id);
+            if (current.at("state") == "cancelling" || terminal(current) || current.at("actionId") != command.actionId ||
+                !specialistAdmission(*origin,command,current,generation)) return {};
+        }
+        // Pinned T3 launch keys use the original OAuth session's namespace.
+        auto replay = t3.send(command);
+        if (replay.kind == Delivery::Kind::Accepted) return replay;
+        return {};
+    }
+
     void deliver(const Json& task, Json action) {
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
@@ -856,8 +882,13 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }) || specialistBlocked) return;
         } else if (action["phase"] != "started") return;
         try {
-            if (!firstSend) outcome = t3.reconcile(cmd);
-            else outcome = launchAllowed() ? t3.send(cmd) : denied;
+            if (firstSend) outcome = launchAllowed() ? t3.send(cmd) : denied;
+            else {
+                outcome = t3.reconcile(cmd);
+                if (outcome.kind == Delivery::Kind::Unknown) {
+                    if (auto replay = replaySpecialistLaunch(id,cmd)) outcome = std::move(*replay);
+                }
+            }
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
@@ -1693,10 +1724,12 @@ SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.work
             auto evidence = Json::array();
             for (const auto& verdict : checked.at("verdicts")) {
                 const auto& run = verdict.at("runRef");
-                evidence.push_back({{"environmentId",current.at("environmentId")},{"threadId",run.at("threadId")},
+                Json source{{"environmentId",current.at("environmentId")},{"threadId",run.at("threadId")},
                     {"runId",verdict.at("resultRunId")},{"itemId",verdict.at("itemId")},{"link",run.at("link")},
                     {"stageId",verdict.at("stageId")},{"verdict",verdict.at("verdict")},
-                    {"artifactVersion",verdict.at("artifactVersion")}});
+                    {"artifactVersion",verdict.at("artifactVersion")}};
+                if (verdict.contains("findings")) source["findings"] = verdict.at("findings");
+                evidence.push_back(std::move(source));
             }
             const bool passed = pin==origin->commit && checked.at("status")=="completed" && evidence.size()==2;
             const auto status = !pin ? "input_unverified" : *pin!=origin->commit ? "stale" : passed ? "completed" : "failed";

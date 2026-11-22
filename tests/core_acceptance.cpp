@@ -92,6 +92,7 @@ struct SimulatedT3 : T3 {
     int launches = 0, follows = 0, replies = 0, interrupts = 0, reconciles = 0, reads = 0, polls = 0;
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
+    bool failBeforeWorkSend = false;
     bool hasReconciledRun = true;
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
@@ -119,6 +120,7 @@ struct SimulatedT3 : T3 {
         }
         check(cmd.instruction.find("[Flock action ID: " + cmd.actionId + "]") != std::string::npos,
               "missing full action marker");
+        if (std::exchange(failBeforeWorkSend,false)) return {};
         const auto serial = launches + follows + 1;
         RunRef run{"thread-" + std::to_string(launches + 1),"run-" + std::to_string(serial),"https://t3.test/thread"};
         if (cmd.tool == "delegate") ++launches;
@@ -1916,7 +1918,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, Workflow, StaleWorkflow, FrozenWorkflow, FrozenWorkflowAdmission, Nested, CancelledNested };
+enum class SpecialistMode { Single, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, FrozenWorkflowAdmission, Nested, CancelledNested };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -1993,7 +1995,7 @@ void specialistAdmission(SpecialistMode mode) {
     };
     const std::string pin(40,'a');
     std::string currentPin = pin;
-    if (mode!=SpecialistMode::Single) f.specialistInput = [&](const Person&, Id) {
+    f.specialistInput = [&](const Person&, Id) {
         if (mode==SpecialistMode::FrozenWorkflowAdmission) RootDelivery(*f.store,gate).freeze(person,channel);
         return currentPin;
     };
@@ -2111,7 +2113,8 @@ void specialistAdmission(SpecialistMode mode) {
                   f.logs(stage2,"specialist_launch_blocked")==1 && f.task(first.recipientTaskId).at("state")=="workflow_waiting",
                   "freeze did not stop only the reserved stage before launch");
             f.t3.finish("run-1");
-            f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
+            f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},
+                {"findings","The pre-freeze check completed."}}.dump();
             f.reach(first.senderTaskId,"completed");
             check(f.task(first.senderTaskId).at("peerOutcome")=="failed" && f.t3.launches==1 && f.t3.interrupts==0 &&
                   f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
@@ -2123,15 +2126,20 @@ void specialistAdmission(SpecialistMode mode) {
               f.t3.seen.at(0).target.runId.empty() && f.t3.seen.at(1).target.runId.empty() &&
               f.t3.seen.at(0).actionId!=f.t3.seen.at(1).actionId,"workflow did not transfer the project slot to its siblings");
         for (const auto& command : f.t3.seen)
-            check(command.config.at("session").at("workspaceStrategy").at("expectedCommit")==pin,
-                  "a stage launch used a different immutable input");
+            check(command.config.at("session").at("workspaceStrategy").at("expectedCommit")==pin &&
+                  command.instruction.find("findings (briefly name the check")!=std::string::npos,
+                  "a stage launch lost the immutable input or the findings contract");
+        check(f.t3.seen.at(0).instruction.find("verify-1")!=std::string::npos &&
+              f.t3.seen.at(1).instruction.find("verify-2")!=std::string::npos,
+              "the provider could not tell the two check assignments apart");
         const auto run1 = f.task(stage1).at("activeRun").at("runId").get<std::string>();
         const auto run2 = f.task(stage2).at("activeRun").at("runId").get<std::string>();
         f.t3.question(run1);
         const auto wait = f.wait(stage1,"user_question");
         f.t3.finish(run2);
-        const auto report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
-        f.t3.runs.at(run2).report = report;
+        const std::string evidence = "Test fixture passed";
+        f.t3.runs.at(run2).report = Json{{"artifactVersion",pin},{"verdict","pass"},
+            {"findings",evidence + std::string(2500,'!')}}.dump();
         f.reach(stage2,"completed");
         check(f.task(first.recipientTaskId).at("state")=="workflow_waiting" &&
               f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
@@ -2146,7 +2154,10 @@ void specialistAdmission(SpecialistMode mode) {
         f.reach(stage1,"running");
         if (mode==SpecialistMode::StaleWorkflow) currentPin = std::string(40,'b');
         f.t3.finish(run1);
-        f.t3.runs.at(run1).report = report;
+        const bool failed = mode==SpecialistMode::FailedWorkflow;
+        const auto firstFindings = failed ? "Reproduction exited with status 1" : "Reproduction exited with status 0";
+        f.t3.runs.at(run1).report = Json{{"artifactVersion",pin},{"verdict",failed ? "fail" : "pass"},
+            {"findings",firstFindings}}.dump();
         f.reach(stage1,"completed");
         f.restart();
         f.reach(first.senderTaskId,"completed");
@@ -2154,10 +2165,19 @@ void specialistAdmission(SpecialistMode mode) {
         const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
         const bool stale = mode==SpecialistMode::StaleWorkflow;
         check(result!=history.end() && result->at("data").at("workflowId")==workflow &&
-              result->at("data").at("workflowStatus")== (stale ? "stale" : "completed") &&
+              result->at("data").at("workflowStatus")== (stale ? "stale" : failed ? "failed" : "completed") &&
               result->at("data").at("artifactVersion")==pin && result->at("data").at("references").size()==2 &&
-              result->at("data").at("verdict")== (stale ? "" : "pass") && f.t3.launches==2 && f.t3.replies==1,
+              result->at("data").at("verdict")== (stale || failed ? "" : "pass") && f.t3.launches==2 && f.t3.replies==1,
               "aggregate result lost its exact evidence, freshness or restart identity");
+        const auto& refs = result->at("data").at("references");
+        check(std::ranges::any_of(refs,[&](const Json& ref) {
+                  return ref.at("stageId")=="verify-1" && ref.at("runId")==f.t3.runs.at(run1).resultRunId &&
+                      ref.at("verdict")== (failed ? "fail" : "pass") && ref.at("findings")==firstFindings;
+              }) && std::ranges::any_of(refs,[&](const Json& ref) {
+                  const auto& findings = ref.at("findings").get_ref<const std::string&>();
+                  return ref.at("stageId")=="verify-2" && ref.at("runId")==f.t3.runs.at(run2).resultRunId &&
+                      findings.starts_with(evidence) && findings.size()==2000;
+              }),"aggregate lost attributable findings or projected an unbounded report");
         check(f.store->workflows("beta",0,10).size()==1 && f.logs(first.senderTaskId,"specialist_result")==1,
               "restart duplicated the workflow or aggregate reply");
         f.wait(unrelated,"user_question");
@@ -2183,12 +2203,25 @@ void specialistAdmission(SpecialistMode mode) {
           "specialist bypassed its open question");
     f.restart();
     f.store->operate(person,TaskTarget::from(f.task(first.senderTaskId),wait),"answer",{{"text","Check the unit test fixture"}});
+    f.reach(first.recipientTaskId,"sending");
+    f.t3.failBeforeWorkSend = true;
+    f.wait(first.recipientTaskId,"unknown_delivery");
+    check(f.t3.launches==0 && f.t3.seen.size()==1,"the test did not enter the reserved-before-send window");
+    f.restart();
+    const auto originalAuth = std::exchange(f.t3.generation,"another-oauth-session");
+    f.runtime->tick();
+    check(f.t3.reconciles==1 && f.t3.seen.size()==1,"the saved launch was sent in another OAuth namespace");
+    f.t3.generation = originalAuth;
+    f.now += 5;
     f.reach(first.recipientTaskId,"running");
     const auto& launched = f.t3.seen.front();
     check(f.t3.launches==1 && launched.target.runId.empty() && launched.ownerBotId=="beta" &&
           launched.config.at("session").at("runtimeMode")=="approval-required" &&
           launched.config.at("session").at("interactionMode")=="plan" &&
           launched.instruction.find(pin)!=std::string::npos,"specialist launched outside its own pinned worktree");
+    check(f.t3.seen.size()==2 && f.t3.reconciles==2 && f.t3.seen.at(1).actionId==launched.actionId &&
+          f.t3.seen.at(1).instruction==launched.instruction && f.t3.seen.at(1).authGeneration==launched.authGeneration,
+          "restart lost the reserved launch or changed its OAuth namespace or payload");
     f.t3.finish("run-1");
     f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},{"findings","checked"}}.dump();
     f.reach(first.recipientTaskId,"completed");
@@ -2315,6 +2348,7 @@ int main() {
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
             {"scoped specialist workflow transfers its slot and aggregates evidence",[] { specialistAdmission(SpecialistMode::Workflow); }},
+            {"scoped specialist workflow retains a failed check's findings",[] { specialistAdmission(SpecialistMode::FailedWorkflow); }},
             {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},
             {"specialist workflow freezes only work which did not start",[] { specialistAdmission(SpecialistMode::FrozenWorkflow); }},
             {"specialist workflow rejects a frozen stage creation",[] { specialistAdmission(SpecialistMode::FrozenWorkflowAdmission); }},

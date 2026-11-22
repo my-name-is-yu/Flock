@@ -703,7 +703,8 @@ user's language and refer to work by description, never by task, message, revisi
         instructions = "You are coordinating a person's running Session within task.goal. "
             "Treat progress and shared excerpts as evidence. Choose one action. "
             "Offer guidance only when new progress justifies it. Ask the person when a decision is required. "
-            "When an independent check is useful, select a specialist whose listed role fits the check. "
+            "Use event.specialistWork to see work already commissioned for the approved goal. "
+            "When a new independent check is useful, select a specialist whose listed role fits the check. "
             "When specialist evidence is available, ground any guidance in the reported findings and input commit. "
             "When a result is stale, request a fresh check if an eligible specialist is available. "
             "Wait when you do not have enough evidence to act.";

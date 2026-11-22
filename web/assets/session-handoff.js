@@ -107,7 +107,8 @@ function render(view) {
     const notes = [work.purpose, `Requested by: ${workers.get(work.parentDelegationId) ?? view.botId}`,
       `Required evidence: ${work.doneWhen}`, `Input commit: ${work.commit}`,
       ...(work.result ? [work.result.report, ...work.result.evidence.map((source) =>
-        [source.stageId, source.verdict, source.threadId, source.runId, source.itemId].filter(Boolean).join(' · '))] : []),
+        [source.stageId, source.verdict, source.findings, source.threadId, source.runId, source.itemId]
+          .filter(Boolean).join(' · '))] : []),
     ];
     for (const note of notes) {
       const row = document.createElement('li');
