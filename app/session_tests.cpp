@@ -67,7 +67,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
                 tool = "reply";
                 args = {{"text","The investigation is no longer readable."},{"reason","Explain the status"}};
             }
-            return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},
+            return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},{"status","completed"},
                                     {"name",tool},{"arguments",args.dump()}}}),request);
         }
     } model(store,shared);

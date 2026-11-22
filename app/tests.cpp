@@ -500,7 +500,8 @@ void responseContract() {
               !fields.contains("botId"),"Session tool bounds or authenticated identity changed");
     }
     const auto modelCall = [](std::string_view tool, const Json& args) {
-        return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"arguments",args.dump()}}});
+        return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"status","completed"},
+                             {"arguments",args.dump()}}});
     };
     const Json searchArgs{{"reason","Find yesterday’s staging investigation"},{"query","staging"},
                           {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
