@@ -594,6 +594,86 @@ void resumeRestoresCancelledTaskDirections() {
           "resume omitted the original intent, criteria, or accepted directions");
 }
 
+void resumeBatchesOversizedPendingBacklog() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing(std::string(16000,'i')));
+    f.script("Set criteria",{change(old,{{"doneWhen",std::string(8000,'c')},{"instruction",std::string(8000,'d')}})});
+    f.receive("criteria","Set criteria");
+    f.reach(old,"running");
+
+    std::vector<std::string> specs;
+    for (int i = 1; i <= 9; ++i) {
+        const auto marker = "SPEC-" + std::to_string(i);
+        specs.push_back(marker + std::string(14000,'x') + "END-" + std::to_string(i));
+        f.script(marker,{send(old,{{"instruction",specs.back()}})});
+        f.receive(marker,marker);
+    }
+    f.store->operate(old,0,"cancel");
+    f.t3.finish("run-1","Cancelled work settled");
+    f.reach(old,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(old))
+        if (row["kind"] == "cancelled") anchor = row.at("id");
+    f.script("Resume",{start({{"request",std::string(16000,'r')},{"sourceResultMessageId",anchor},{"resume",true}})});
+    f.receive("resume","Resume",anchor);
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    std::vector<Json> shown;
+    const auto recordBatch = [&](const ModelInput& input) {
+        if (!input.task.contains("userInstructions")) return;
+        shown.push_back(input.task.at("userInstructions"));
+        if (shown.back().size() < input.task.at("pendingInstructionCount").get<std::size_t>())
+            check(std::ranges::find(input.tools,"complete") == input.tools.end(),"completion could skip unseen instructions");
+    };
+    f.model.beforeIntake = recordBatch;
+    f.model.beforeComplete = recordBatch;
+    f.t3.loseNextSend = true;
+    f.reach(next,"waiting");
+    const auto inherited = f.task(next).at("pendingInstructions");
+    check(inherited.size() == specs.size() && f.t3.sent.back().tool == "delegate",
+          "unconfirmed delegate lost part of the inherited backlog");
+    for (std::size_t i = 0; i < specs.size(); ++i)
+        check(inherited[i].at("text") == specs[i],"unconfirmed delivery changed an inherited specification");
+
+    const auto wait = f.task(next).at("wait");
+    check(wait.at("reason") == "unknown_delivery","missing acknowledgement did not enter delivery recovery");
+    f.store->operate(next,wait.at("id"),"reconcile");
+    f.reach(next,"running");
+    const auto remaining = f.task(next).at("pendingInstructions");
+    check(!remaining.empty() && remaining.size() < inherited.size(),"delegate did not consume a bounded batch");
+    f.restart();
+    check(f.task(next).at("pendingInstructions") == remaining,"restart lost the outstanding batch");
+    for (std::size_t batch = 0; batch < specs.size(); ++batch) {
+        f.t3.finish(f.task(next).at("activeRun").at("runId").get<std::string>(),"Batch applied");
+        if (f.task(next).at("pendingInstructions").empty()) break;
+        f.reach(next,"deciding");
+        f.reach(next,"running");
+        check(f.t3.sent.back().tool == "follow_up","a subsequent batch did not continue the Session");
+    }
+    f.reach(next,"completed");
+    check(f.task(next).value("pendingInstructions",Json::array()).empty(),"completed with inherited work pending");
+
+    check(f.t3.sent.size() == shown.size() + 1,"expected one resumed Session command per model batch");
+    for (std::size_t batch = 0; batch < shown.size(); ++batch)
+        for (const auto& item : shown[batch])
+            check(f.t3.sent[batch + 1].instruction.find(item.at("text").get<std::string>()) != std::string::npos,
+                  "Session command differed from the batch shown to the model");
+    std::string dispatched;
+    for (const auto& cmd : f.t3.sent) {
+        check(cmd.instruction.size() + 2 * cmd.actionId.size() + 36 <= 120000,"Session prompt exceeded T3 preflight");
+        dispatched += cmd.instruction;
+    }
+    std::size_t cursor = 0;
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto pos = dispatched.find(specs[i],cursor);
+        check(pos != dispatched.npos,"Session commands omitted, truncated or reordered a specification");
+        cursor = pos + specs[i].size();
+        for (const auto marker : {"SPEC-","END-"}) {
+            const auto token = marker + std::to_string(i + 1);
+            check(dispatched.find(token,dispatched.find(token) + 1) == dispatched.npos,"duplicated specification marker");
+        }
+    }
+}
+
 void appendWaitsForSafeBoundary() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1261,6 +1341,7 @@ int main() {
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
+        resumeBatchesOversizedPendingBacklog();
         appendWaitsForSafeBoundary();
         settledInstructionsCanBeAcknowledgedWithoutAnotherRun();
         twoInstructionsFromOneMessageAreTrackedSeparately();

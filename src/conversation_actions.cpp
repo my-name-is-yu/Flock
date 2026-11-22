@@ -31,20 +31,31 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
         // Excerpt only earlier deliveries. Pending directions follow them in acceptance order.
         auto rows = query("SELECT data FROM journal WHERE task_id=? AND kind='instruction_accepted'"
                           " ORDER BY id DESC",{priorId});
-        Json instructions = Json::array();
+        Json delivered = Json::array();
         std::size_t remaining = 8000;
-        while (remaining && instructions.size() < 20 && rows.next()) {
+        while (remaining && delivered.size() < 20 && rows.next()) {
             const auto item = rows.json(0);
             if (pendingIds.contains({item.at("messageId").get<Id>(),item.at("step").get<int>()})) continue;
             const auto text = bounded(field(item,"text"),remaining);
             remaining -= text.size();
-            instructions.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",text}});
+            delivered.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",text}});
         }
-        std::reverse(instructions.begin(),instructions.end());
-        for (const auto& item : pending)
-            instructions.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",item.at("text")}});
+        std::reverse(delivered.begin(),delivered.end());
         task["restartContext"] = {{"intent",prior.at("intent")},{"taskId",priorId},
-                                  {"pendingInstructions",std::move(instructions)}};
+                                  {"deliveredInstructions",std::move(delivered)}};
+        for (const auto& item : pending) {
+            Json entry = {{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",item.at("text")},
+                          {"revisionId",nullptr},{"conflicting",false}};
+            if (item.contains("source")) {
+                const auto& source = item.at("source");
+                entry["source"] = source;
+                auto& refs = task["sourceResultRefs"];
+                if (std::ranges::none_of(refs,[&](const Json& ref) { return ref.at("messageId") == source.at("messageId"); }))
+                    refs.push_back(source);
+            }
+            task["pendingInstructions"].push_back(entry);
+            journal(id,"instruction_accepted",entry);
+        }
     }
     save(task);
     return id;
