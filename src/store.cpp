@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 #include <system_error>
+#include <tuple>
 
 namespace flockv0 {
 namespace {
@@ -202,7 +203,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         initializeAutomationSchema();
         initializeGitSchema();
         initializeBoardInboxSchema();
-        exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
+        exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
+             " WHERE kind IN ('run_started','report')");
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -616,6 +618,28 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     return task;
 }
 
+Json Store::Impl::sessionTask(Id id) const {
+    auto task = taskDetails(id,false);
+    // A settled report identifies the assigned Run even when its result came from a later Run.
+    auto reports = query(R"SQL(
+SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
+       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
+FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+)SQL",{id});
+    using RunKey = std::tuple<std::string,std::string,std::string>;
+    std::map<RunKey,std::string> statuses;
+    while (reports.next()) {
+        auto status = reports.string(3);
+        if (!status.empty())
+            statuses.insert_or_assign(RunKey{reports.string(0),reports.string(1),reports.string(2)},std::move(status));
+    }
+    for (auto& run : task.at("runs")) {
+        const auto status = statuses.find({field(run,"environmentId"),field(run,"threadId"),field(run,"runId")});
+        if (status != statuses.end()) run["status"] = status->second;
+    }
+    return task;
+}
+
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
     restoreWaitAnchor(*this,result);
@@ -684,22 +708,22 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
                           " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
                           " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
+    while (rows.next()) result.push_back(p_->sessionTask(rows.number(0)));
     return result;
 }
 
 std::pair<Id,Json> Store::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
     std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind='run_started'");
+    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
     newest.next();
     const auto through = newest.number(0);
     auto tasks = Json::array();
     if (after && *after < through) {
         auto rows = p_->query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
-WHERE j.kind='run_started' AND j.id>? AND j.id<=? AND t.bot_id=?
+WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",{*after,through,bot});
-        while (rows.next()) tasks.push_back(p_->taskDetails(rows.number(0),false));
+        while (rows.next()) tasks.push_back(p_->sessionTask(rows.number(0)));
     }
     return {through,std::move(tasks)};
 }
@@ -736,6 +760,17 @@ Json Store::conversation(std::string_view bot, Id before, unsigned limit, Conver
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
+  WHEN page.kind='completed' AND json_extract(page.data,'$.source.status') IS NULL
+       AND length(json_extract(page.data,'$.source.runId'))>0
+       THEN json_set(page.data,'$.source.status',(
+         SELECT json_extract(r.data,'$.status') FROM journal r
+         WHERE r.task_id=page.task_id AND r.kind='report' AND r.id<page.id
+           AND json_extract(r.data,'$.environmentId')=json_extract(page.data,'$.source.environmentId')
+           AND json_extract(r.data,'$.run.threadId')=json_extract(page.data,'$.source.threadId')
+           AND json_extract(r.data,'$.resultRunId')=json_extract(page.data,'$.source.runId')
+           AND coalesce(json_extract(r.data,'$.itemId'),'')=coalesce(json_extract(page.data,'$.source.itemId'),'')
+           AND coalesce(json_extract(r.data,'$.revisionId'),0)=coalesce(json_extract(page.data,'$.revisionId'),0)
+         ORDER BY r.id DESC LIMIT 1))
   WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',

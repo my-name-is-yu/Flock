@@ -169,6 +169,8 @@ Json eventView(const Json& event) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
             if (!run.is_null()) {
+                const auto status = field(source,"status");
+                if (!status.empty() && !field(run,"runId").empty()) details["runStatus"] = status;
                 copyFields(run,source,{"itemId"});
                 details["run"] = std::move(run);
             }
@@ -279,7 +281,7 @@ Json sessionGroup(const Json& task) {
         if (!seen.emplace(field(session,"environmentId"),thread).second) continue;
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
-        session["state"] = active ? displayState(task) : "ended";
+        session["state"] = active ? displayState(task) : run->value("status","ended");
         sessions.push_back(std::move(session));
     }
     auto group = taskSummary(task);

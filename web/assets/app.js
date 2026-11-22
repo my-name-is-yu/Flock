@@ -36,10 +36,14 @@ const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long'
 const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
+const sessionEndLabels = {
+  completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
+  interrupted: 'Interrupted', rolled_back: 'Rolled back', ended: 'Ended',
+};
 const stateLabels = {
+  ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
-  cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
-  failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
+  cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
 const waitLabels = {
@@ -725,7 +729,9 @@ function renderActivity() {
   const ended = [];
   for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended'));
+      if (activeKeys.has(key(task.id, session))) continue;
+      const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+      ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
     }
   }
   const rows = [];
@@ -760,6 +766,7 @@ const icons = {
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
   forward: '<path d="m14.5 7 5 5-5 5"/><path d="M19 12h-9a5.5 5.5 0 0 0-5.5 5.5V19"/>',
+  resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
@@ -994,8 +1001,14 @@ function eventCard(event, context, place, report) {
     }
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
-    bubble.classList.add('completed');
-    text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', 'Complete: '), document.createTextNode(data.text ?? ''));
+    const outcome = data.runStatus;
+    if (outcome === 'completed') {
+      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Session complete: '));
+    } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
+      const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
+      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Session ${stateLabels[outcome].toLowerCase()}: `));
+    }
+    text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
@@ -1907,7 +1920,8 @@ function render(scroll, liveAfterId) {
 
 function mergeSessionTasks(context, tasks) {
   for (const task of tasks) {
-    if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
+    // A history page can arrive after a live update for the same task.
+    if (task.generation >= (context.loadedSessions.get(task.id)?.generation ?? 0))
       context.loadedSessions.set(task.id, task);
   }
 }

@@ -249,7 +249,7 @@ public:
     // Distinct active state and replanning combinations, grouped by Bot ID.
     Json activeTaskStatesByBot() const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
-    // Journal position and tasks with a newly recorded Run since that position.
+    // Journal position and tasks with a Run start or settled report since that position.
     // On the initial read only the position is needed, before loading the first page.
     std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
