@@ -3,6 +3,7 @@
 #include "views.hpp"
 #include "access_routes.hpp"
 #include "board_inbox_routes.hpp"
+#include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
 
 #include <httplib.h>
@@ -275,6 +276,7 @@ public:
         });
         web::accessRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
+        web::gitRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });
@@ -359,6 +361,7 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
+        if (req.method == "POST" && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
         if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
             res.set_header("WWW-Authenticate","Basic realm=\"Flock\"");
             error(res,401,"identity_required");

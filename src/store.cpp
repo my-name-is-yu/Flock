@@ -158,6 +158,7 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         migrateConversation();
         migrateModelBudget();
         migrateBoardInbox();
+        migrateGit();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -177,6 +178,9 @@ void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
     exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
          {task["state"], task["generation"], task, task["environmentId"], task["id"]});
+    exec("UPDATE pr_review_items SET target_generation=?,target_revision=? WHERE status='pending' AND task_id=?"
+         " AND id IN (SELECT inbox_id FROM git_inbox_items WHERE task_id=?)",
+         {task["generation"],task.value("currentRevision",Id{0}),task["id"],task["id"]});
 }
 Json Store::Impl::queueBlocker(Id id) const {
     auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"
@@ -608,7 +612,7 @@ FROM (
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
     AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
       AND json_extract(j.data,'$.recipient') IS NOT 'user'))
-  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
+  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=? AND kind<>'git_webhook'
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id

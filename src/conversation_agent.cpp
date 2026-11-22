@@ -117,10 +117,10 @@ std::optional<Message> Store::Impl::turnMessage(Id id) const {
     auto row = query(R"SQL(
 SELECT m.reply_to,m.bot_id,m.text,m.routing,m.person_id,m.person_root
 FROM messages m JOIN journal j ON j.id=m.id
-WHERE m.id=? AND j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
+WHERE m.id=? AND j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
 AND NOT EXISTS (
   SELECT 1 FROM journal prior WHERE prior.conversation_bot_id=m.bot_id AND prior.id<m.id
-  AND prior.kind='conversation_message' AND json_extract(prior.data,'$.status') IS NULL)
+  AND prior.kind IN ('conversation_message','git_webhook') AND json_extract(prior.data,'$.status') IS NULL)
 )SQL",{id});
     if (!row.next()) return std::nullopt;
     return Message{id,row.number(0),row.string(1),row.string(2),row.json(3),{row.string(4),row.number(5) != 0}};
@@ -309,9 +309,11 @@ ORDER BY j.id DESC LIMIT ?
         const auto decision = steps.json(0);
         turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
     }
+    auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
+                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
+    if (message.routing.contains("gitEvent")) event["gitEvent"] = message.routing.at("gitEvent");
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
-            {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
+            {"event",std::move(event)},
             {"history",std::move(history)}};
 }
 
@@ -561,7 +563,9 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         }
     }
     const auto status = effectStatus(actions);
-    const Json linked = touched.size() == 1 ? Json(*touched.begin()) : Json(nullptr);
+    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
+    const Json linked = webhook.is_object() ? webhook.at("taskId") :
+        touched.size() == 1 ? Json(*touched.begin()) : Json(nullptr);
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linked,unixTime(),message.bot});
     const auto reply = last();
@@ -569,25 +573,26 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
                  {"status",status},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = suggestions;
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
-    exec("UPDATE journal SET task_id=?,data=? WHERE id=?",{linked,Json{{"status",status}},message.id});
+    exec("UPDATE journal SET task_id=?,data=json_set(data,'$.status',?) WHERE id=?",{linked,status,message.id});
     exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
          {reply,message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
     const bool ja = japanese(message.text);
-    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_reply','{}',?)",
-         {unixTime(),message.bot});
+    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
+    exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
+         {webhook.is_object() ? webhook.at("taskId") : Json(nullptr),unixTime(),message.bot});
     const auto reply = last();
     exec("UPDATE journal SET data=? WHERE id=?",
          {Json{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
                {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
                           : "The model call limit is exhausted. Approve one more model call to continue."}},reply});
-    exec("UPDATE journal SET data=json_object('status','needs_you') WHERE id=?",{message.id});
+    exec("UPDATE journal SET data=json_set(data,'$.status','needs_you') WHERE id=?",{message.id});
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes) {
+bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes, GitHost* gitHost) {
     std::optional<Message> message;
     {
         std::lock_guard lock(mutex);
@@ -598,6 +603,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     }
     if (!message) return true;
     const bool ja = japanese(message->text);
+    const auto webhook = message->routing.value("gitEvent",Json(nullptr));
+    auto tools = webhook.is_object() ? std::vector<std::string>{"reply"} : turnTools;
+    if (gitHost) {
+        if (webhook.is_object()) {
+            tools.insert(tools.end(),{"git_pr_status","git_commit_status","git_read_ci_logs"});
+        } else tools.insert(tools.end(),gitTools().begin(),gitTools().end());
+    }
     const auto finish = [&](std::string text, std::string_view route) {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -643,7 +655,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 if (!turnMessage(id)) return true;
                 const auto context = turnInput(*message,step);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
+                         .notes = botNotes,.tools = tools,.feedback = {},.config = message->routing.at("config")};
                 auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
                                       " AND reserved_attempt IS NOT NULL",{id});
                 if (reserved.next()) {
@@ -674,6 +686,12 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             transaction.commit();
         }
 
+        if (webhook.is_object() && std::ranges::find(tools,decision->tool) == tools.end()) {
+            std::lock_guard lock(mutex);
+            exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",
+                 {Json{{"ok",false},{"error","Tool unavailable for a Git notification"}},id,step});
+            continue;
+        }
         if (decision->tool == "message_session" || decision->tool == "interrupt_session") {
             Json effect;
             {
@@ -720,7 +738,23 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         }
 
         Json result;
-        if (decision->tool == "check_environment_readiness") {
+        if (isGitTool(decision->tool)) {
+            try {
+                if (!gitHost) throw Conflict("Git host is not connected");
+                auto call = *decision;
+                if (webhook.is_object()) {
+                    const auto owner = webhook.at("taskId").get<Id>();
+                    if ((call.args.contains("taskId") && call.args.at("taskId") != owner) ||
+                        field(call.args,"host") != field(webhook,"host") || field(call.args,"repo") != field(webhook,"repo") ||
+                        (call.tool == "git_pr_status" && call.args.value("prNumber",Id{0}) != webhook.at("prNumber")) ||
+                        (call.tool == "git_read_ci_logs" && call.args.value("jobId",Id{0}) != webhook.at("jobId")))
+                        throw Conflict("Git notification tools must use the watched target");
+                    call.args["taskId"] = owner;
+                }
+                result = gitTool(*gitHost,message->bot,0,message->routing,call,
+                                 "turn/" + std::to_string(id) + "/" + std::to_string(step));
+            } catch (const std::exception& error) { result = {{"ok",false},{"error",error.what()}}; }
+        } else if (decision->tool == "check_environment_readiness") {
             try {
                 result = readiness(message->bot,message->routing,decision->args,t3);
                 result["ok"] = true;

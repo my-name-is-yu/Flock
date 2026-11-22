@@ -3,6 +3,7 @@ const labels = {
   model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
   unknown_delivery: 'Delivery confirmation', grant_request: 'Access request',
   protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
+  pr_reconciliation: 'Pull request reconciliation',
   budget: 'Run allowance', model_failure: 'Model failure', t3_input: 'Action in T3',
   auth: 'T3 sign-in', settings: 'T3 settings',
   blocked: 'Blocked', waiting: 'Waiting', queued: 'Queued', deciding: 'Evaluating',
@@ -21,6 +22,7 @@ const actions = {
   grant_request: [['approve', 'Approve access'], ['deny', 'Deny']],
   protected_input: [['supply', 'Save protected value']],
   bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
+  pr_reconciliation: [['acknowledge', 'Acknowledge']],
   pr_review: [['approve', 'Approve review'], ['request_changes', 'Request changes']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];

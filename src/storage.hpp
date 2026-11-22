@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/board_inbox.hpp"
+#include "flock/git_host.hpp"
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -61,6 +62,14 @@ struct Store::Impl {
     SecretStore secrets{path.parent_path()};
     void migrateAccess();
     void migrateBoardInbox();
+    void migrateGit();
+    Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
+                 std::string_view invocation, std::optional<Id> generation = {});
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&);
+    void deliverGitWebhooks();
+    void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
+                      std::string_view title, std::string_view prompt);
+    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt);
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);
@@ -87,7 +96,7 @@ struct Store::Impl {
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&, GitHost*);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     std::optional<conversation::Message> turnMessage(Id messageId) const;
     Json turnInput(const conversation::Message&, int step) const;

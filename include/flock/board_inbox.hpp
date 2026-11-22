@@ -4,7 +4,7 @@
 namespace flockv0 {
 enum class InboxKind {
     user_question, extra_run, deadline, model_budget, conversation_model_budget,
-    unknown_delivery, grant_request, protected_input, bot_change, pr_review
+    unknown_delivery, grant_request, protected_input, bot_change, pr_review, pr_reconciliation
 };
 
 std::string_view inboxKindName(InboxKind);

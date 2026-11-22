@@ -1223,6 +1223,25 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
     void accept(const Json& snapshot, const Json& event, const Decision& decision) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
+        if (isGitTool(tool)) {
+            Json result;
+            try {
+                result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
+                                    "event/" + event.at("id").dump(),snapshot.at("generation").get<Id>());
+            } catch (const std::exception& error) { result = {{"ok",false},{"error",error.what()}}; }
+            change(snapshot,[&](Json& current) {
+                auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
+                if (!row.next()) return false;
+                auto data = row.json(0);
+                if (!data.contains("gitResults")) data["gitResults"] = Json::array();
+                data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
+                    Json{{"tool",tool},{"result",std::move(result)}}));
+                if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
+                db.exec("UPDATE events SET data=? WHERE id=?",{data,event.at("id")});
+                return true;
+            });
+            return;
+        }
         static const std::map<std::string_view,std::set<std::string_view>> arguments{
             {"delegate",{"instruction","doneWhen"}},
             {"answer_session_question",{"requestId","answers"}},
@@ -1400,6 +1419,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 }
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
+            if (options.gitHost && task["activeRun"].is_null() && event["kind"] == "result")
+                tools.insert(tools.end(),gitTools().begin(),gitTools().end());
             if (task.value("newSessionRequired",false)) std::erase(tools,"follow_up");
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
@@ -1509,10 +1530,11 @@ Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeO
     : p_(std::make_unique<Impl>(store,model,t3,std::move(notes),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
+    p_->db.deliverGitWebhooks();
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes,p_->options.gitHost.get())) break;
     }
 }
 void Runtime::tick() {
@@ -1531,13 +1553,14 @@ void Runtime::tickConcurrent() {
     };
     collect(p_->conversationWorkers);
     collect(p_->workers);
+    p_->db.deliverGitWebhooks();
     constexpr auto maxConversationWorkers = 4u;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {
         for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes,p_->options.gitHost.get());
                 }));
             }
         }

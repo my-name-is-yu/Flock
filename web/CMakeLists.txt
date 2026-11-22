@@ -1,4 +1,5 @@
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 FetchContent_Declare(flock_httplib
   URL https://codeload.github.com/yhirose/cpp-httplib/tar.gz/refs/tags/v0.67.0
@@ -17,13 +18,18 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp access_routes.cpp board_inbox_routes.cpp identity.cpp views.cpp "${flock_web_asset_header}")
+add_library(flock_web server.cpp access_routes.cpp board_inbox_routes.cpp git_routes.cpp identity.cpp views.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
-target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads)
+target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads OpenSSL::Crypto)
 target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
+  add_executable(flock_web_git_webhooks tests/git_webhooks.cpp)
+  target_include_directories(flock_web_git_webhooks SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
+  target_link_libraries(flock_web_git_webhooks PRIVATE flock_web Threads::Threads OpenSSL::Crypto)
+  target_compile_options(flock_web_git_webhooks PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_web_git_webhooks COMMAND flock_web_git_webhooks)
   find_program(FLOCK_NODE_EXECUTABLE node)
   find_program(FLOCK_CHROME_EXECUTABLE NAMES chromium chromium-browser google-chrome "Google Chrome"
     PATHS "/Applications/Google Chrome.app/Contents/MacOS")

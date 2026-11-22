@@ -98,3 +98,27 @@ resolving additional scoped resources. The transport must establish the calling 
 A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
 adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
 External adapters must call these checks for each protected operation.
+
+### GitHub repositories and PR notifications
+
+Set `FLOCK_GITHUB_TOKEN` in the daemon environment to connect GitHub. Give the
+token access to the intended repositories and API operations. In Bot settings,
+grant `repository` operations on the lowercase resource ID
+`github.com/owner/repo`. Use `read` for repository, PR, commit, CI and issue reads,
+`pr` to open and update PRs, request reviewers and write PR comments, `review`
+to submit reviews, and `issues` to change issues and write issue comments.
+A PR from a separate head repository also requires `read` there.
+
+Set `FLOCK_GITHUB_WEBHOOK_SECRET` to the secret configured for a GitHub JSON
+webhook. Forward signed deliveries to `POST /api/git/webhooks/github.com` on the
+Flock loopback listener, preserving the body and GitHub signature and delivery
+headers. Subscribe to pull request, review, comment, check, workflow job and
+code scanning events as needed. Events with a matching watch go to the owning
+Bot, which needs `read` on the repository. Configure the workflow job event to
+include the job ID the Bot needs to read a failed job's log.
+
+A lost PR creation response leaves a durable operation. Asking the Bot to retry
+with the same exact repository and branch pair checks for the original PR
+across all states. If its identity remains unresolved, the Decision Inbox shows
+a reconciliation item. Acknowledging it records your decision and leaves the
+creation outcome unresolved.

@@ -1,6 +1,7 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "git_github.hpp"
 
 #ifdef FLOCK_WITH_T3
 #include "flock/t3_mcp.hpp"
@@ -146,6 +147,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     bool fixed = false, web = true;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
+    if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) options.gitHost = makeGitHubHost(token);
     while (!args.empty()) {
         const auto option = args.pop("run option");
         if (option == "--fixed") fixed = true;
@@ -184,6 +186,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     std::unique_ptr<WebServer> server;
     if (web) {
         const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
+        const auto* gitWebhookSecret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET");
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
             [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
@@ -195,6 +198,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
             options.peers,
             identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
             [&](const BotChange& change) { bots.apply(change); },
+            gitWebhookSecret ? gitWebhookSecret : "",
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

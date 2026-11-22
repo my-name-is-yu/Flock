@@ -125,7 +125,7 @@ std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigne
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
 SELECT j.conversation_bot_id,min(j.id) FROM journal j
-WHERE j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
+WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
 GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
 )SQL",{limit});
     std::vector<std::pair<std::string,Id>> result;
