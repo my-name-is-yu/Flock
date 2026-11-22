@@ -236,6 +236,7 @@ public:
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
                         auto view = web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr);
                         view["historyCursor"] = changes.through;
+                        view["changedMessageIds"] = Json::array();
                         if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
                             view["changedMessageIds"] = changed->second;
                         view["sessionCursor"] = sessionThrough;
