@@ -4,8 +4,16 @@
   align-items: end;
   gap: .5rem;
 }
-.board-inbox-nav { padding: .3rem .85rem .65rem; }
-.board-inbox-nav button, .board-inbox button:not(.icon-button), .board-inbox select {
+.board-inbox-nav { display: grid; gap: .1rem; padding: 0 .7rem var(--space-2); }
+.board-inbox-nav button {
+  display: flex; align-items: center; gap: .75rem; width: 100%; padding: .4rem .55rem;
+  border: 0; border-radius: var(--radius-md); background: none; color: var(--text-2);
+  font-size: .875rem; font-weight: 500; text-align: left;
+}
+.board-inbox-nav button:hover { background: var(--hover); color: var(--text); }
+/* Center icons in the avatar column so labels line up with Bot names. */
+.board-inbox-nav svg { flex: none; width: 2.6rem; height: 1.2rem; }
+.board-inbox button:not(.icon-button), .board-inbox select {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   padding: .38rem .65rem;
@@ -14,7 +22,7 @@
   font: inherit;
   font-size: var(--text-sm);
 }
-.board-inbox-nav button:hover, .board-inbox button:not(.icon-button):hover { background: var(--hover); }
+.board-inbox button:not(.icon-button):hover { background: var(--hover); }
 .board-inbox { width: min(49rem, calc(100% - 1.5rem)); height: min(46rem, 88dvh); }
 .board-inbox-filters label, .board-inbox-form label {
   display: grid;
@@ -31,11 +39,9 @@
   overflow-wrap: anywhere;
 }
 .board-inbox-card h3 { font-size: var(--text-md); }
-.board-inbox-card p, .board-inbox-card dd { white-space: pre-wrap; }
-.board-inbox-card p, .board-inbox-card dl, .board-inbox-card a { font-size: var(--text-sm); }
-.board-inbox-card dl { display: grid; grid-template-columns: auto 1fr; gap: .3rem .8rem; margin: 0; }
-.board-inbox-card dd { margin: 0; }
-.board-inbox-card dt, .board-inbox-meta, #work-view-message { color: var(--text-2); }
+.board-inbox-card p { white-space: pre-wrap; }
+.board-inbox-card p, .board-inbox-card a { font-size: var(--text-sm); }
+.board-inbox-meta, #work-view-message { color: var(--text-2); }
 .board-inbox-card a { color: var(--accent); justify-self: start; }
 .board-inbox-form input, .board-inbox-form textarea {
   width: min(100%, 32rem);

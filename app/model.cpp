@@ -320,7 +320,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("text","The user's answer.");
     } else if (name == "record_task_blocker" || name == "withdraw_task_question") {
         const bool record = name == "record_task_blocker";
-        description = record ? "Record or clear what is blocking an active task on the board."
+        description = record ? "Record or clear what is blocking an active task."
                              : "Withdraw an open question the task no longer needs answered.";
         integer("taskId","The active task.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
@@ -612,8 +612,8 @@ understand what they want, then act with your tools and end the turn with reply.
 
 Tasks do the work: start_task creates one, send_to_task records an instruction for an active task's next
 safe point, change_task changes its intent, criteria, or environment, answer_task_question answers a task's
-open user_question, and cancel_task stops the whole task. Use record_task_blocker to put an active
-blocker on the board and withdraw_task_question when an open question no longer needs an answer. message_session delivers a note to a running
+open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
+blocks an active task and withdraw_task_question when an open question no longer needs an answer. message_session delivers a note to a running
 Session immediately, and interrupt_session interrupts that Run without closing the task. read_result and find_tasks let you inspect results and older
 tasks. Each result appears in event.turn. If a
 result says delivery is unknown, check the target before repeating the action. When a

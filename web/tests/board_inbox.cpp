@@ -27,25 +27,18 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     };
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
-    Browser::checked(browser.client.Get("/api/board"),401);
     Browser::checked(browser.client.Get("/api/inbox"),401);
     browser.client.set_default_headers({{"Authorization","Bearer reviewer"}});
     const auto js = browser.client.Get("/board-inbox.js");
     const auto css = browser.client.Get("/board-inbox.css");
-    check(js && js->status == 200 && css && css->status == 200,"board and inbox assets were not embedded");
-    const auto board = browser.get("/api/board").at("tasks");
-    check(board.size() == 1 && board.at(0).at("botName") == "Release" &&
-          board.at(0).at("doneWhen") == "Summarize user-facing changes" &&
-          browser.get("/api/board?bot=release&status=waiting").at("tasks") == board &&
-          browser.get("/api/board?bot=triage").at("tasks").empty() &&
-          browser.get("/api/board?status=terminal").at("tasks").empty(),
-          "board endpoint returned incorrect profile, task, or visibility");
-    Browser::checked(browser.client.Get("/api/board?status=active&status=waiting"),400);
+    check(js && js->status == 200 && css && css->status == 200,"inbox assets were not embedded");
+    Browser::checked(browser.client.Get("/api/board"),404);
     const auto inbox = browser.get("/api/inbox").at("items");
-    check(inbox.size() == 1 && inbox.at(0).at("itemKind") == "user_question" &&
+    check(inbox.size() == 1 && inbox.at(0).at("itemKind") == "user_question" && inbox.at(0).at("botName") == "Release" &&
           inbox.at(0).at("choices").size() == 2 &&
           inbox.at(0).at("prompt") == "利用者向けの変更だけを載せますか？" &&
           browser.get("/api/inbox?bot=release").at("items") == inbox &&
+          browser.get("/api/inbox?bot=triage").at("items").empty() &&
           store.task(release) == before && store.history(release) == history &&
           browser.get("/api/inbox/history").at("decisions").empty(),
           "inbox GET failed to preserve the question or changed storage");
