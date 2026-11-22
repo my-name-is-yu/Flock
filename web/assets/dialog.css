@@ -62,14 +62,7 @@
 
 .settings-hero {
   position: relative; display: grid; justify-items: center; gap: .7rem;
-  padding: 2.3rem 1.25rem 1.85rem; border-radius: var(--radius-lg);
-  background:
-    radial-gradient(circle 3px at 14px 14px, light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08)) 99%, transparent),
-    radial-gradient(circle 3px at calc(100% - 14px) 14px, light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08)) 99%, transparent),
-    radial-gradient(circle 3px at 14px calc(100% - 14px), light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08)) 99%, transparent),
-    radial-gradient(circle 3px at calc(100% - 14px) calc(100% - 14px), light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08)) 99%, transparent),
-    var(--detail-card);
-  border: 1px solid light-dark(rgb(0 0 0 / .05), rgb(255 255 255 / .05));
+  padding: 1.25rem 1.25rem .75rem;
 }
 .settings-avatar-button {
   position: relative; display: grid; place-items: center; padding: 0; border: 0;
