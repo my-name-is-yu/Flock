@@ -311,12 +311,16 @@ public:
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
                     if (req.path == "/api/view") {
-                        const auto after = req.has_param("changesAfter")
+                        const auto changesAfter = req.has_param("changesAfter")
                             ? std::optional{queryId(req,"changesAfter",true)} : std::nullopt;
-                        auto changes = store_.conversationChangesSince(after,id);
-                        auto view = web::botView(store_,*bot);
+                        const auto sessionsAfter = req.has_param("sessionsAfter")
+                            ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
+                        const auto changes = store_.conversationChangesSince(changesAfter,id);
+                        const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
+                        auto view = web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr);
                         view["historyCursor"] = changes.through;
                         view["changedMessageIds"] = changes.messages[id];
+                        view["sessionCursor"] = sessionThrough;
                         json(res,200,view);
                     } else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));

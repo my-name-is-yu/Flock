@@ -568,13 +568,12 @@ function renderActivity() {
     if (loading) elements['wait-list'].append(...skeletonRows(1));
     else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
   }
-  const groups = new Map(view?.loadedSessions);
-  for (const task of data?.sessionTasks ?? []) groups.set(task.id, task);
+  const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
   const active = data?.activeSessions ?? [];
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  if (!changed('sessions', view?.id, loading, groups, active)) return;
   const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
   const activeKeys = new Set();
   const live = [];
@@ -585,7 +584,7 @@ function renderActivity() {
     live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state, true));
   }
   const ended = [];
-  for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
+  for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
       if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
     }
@@ -868,8 +867,7 @@ function workingLine(data) {
   dots.append(node('span'), node('span'), node('span'));
   let label = presenceLabels.thinking;
   if (data.presence === 'working') {
-    const active = data.activeSessions?.[0];
-    label = data.sessionTasks?.find((task) => task.id === active?.taskId)?.request ?? presenceLabels.working;
+    label = data.activeSessions?.[0]?.request ?? presenceLabels.working;
   }
   const text = node('span', 'working-label', label);
   text.title = label;
@@ -1510,8 +1508,17 @@ function render(scroll) {
   renderDetail();
 }
 
+function mergeSessionTasks(context, tasks) {
+  for (const task of tasks) {
+    // Runs are append-only. A delayed history page must not hide a newer Session.
+    if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
+      context.loadedSessions.set(task.id, task);
+  }
+}
+
 function mergeLatest(context, latest) {
-  if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
+  if (!context.data) context.sessionsBefore = latest.sessionsBefore;
+  mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
   const reply = replies.get(context.id);
   if (!reply || sendingMessages.has(context.id)) return;
@@ -1550,7 +1557,10 @@ async function refreshView(context, scroll) {
   const isCurrent = () => context === view;
   try {
     const params = new URLSearchParams({ bot: context.id });
-    if (context.data) params.set('changesAfter', context.data.historyCursor);
+    if (context.data) {
+      params.set('changesAfter', context.data.historyCursor);
+      params.set('sessionsAfter', context.data.sessionCursor);
+    }
     const latest = await api(`view?${params}`);
     await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
     if (!isCurrent()) return;
@@ -1626,7 +1636,7 @@ async function loadSessions() {
   try {
     const page = await api(botQuery('sessions', context.id, cursor));
     if (context !== view) return;
-    for (const task of page.sessionTasks) context.loadedSessions.set(task.id, task);
+    mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
   } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
   finally {

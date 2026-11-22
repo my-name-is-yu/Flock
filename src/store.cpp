@@ -156,6 +156,7 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateConversation();
         migrateModelBudget();
+        exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -531,6 +532,23 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
     Json result = Json::array();
     while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
     return result;
+}
+
+std::pair<Id,Json> Store::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
+    std::lock_guard lock(p_->mutex);
+    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind='run_started'");
+    newest.next();
+    const auto through = newest.number(0);
+    auto tasks = Json::array();
+    if (after && *after < through) {
+        // Start with the new journal entries, even for a Bot with many historical tasks.
+        auto rows = p_->query(R"SQL(
+SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
+WHERE j.kind='run_started' AND j.id>? AND j.id<=? AND t.bot_id=?
+)SQL",{*after,through,bot});
+        while (rows.next()) tasks.push_back(p_->taskDetails(rows.number(0),false));
+    }
+    return {through,std::move(tasks)};
 }
 
 namespace {

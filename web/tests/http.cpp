@@ -248,6 +248,11 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
 }
 
 void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
+    const auto original = browser.get("/api/view?bot=triage");
+    const auto viewPath = [](const Json& page) {
+        return "/api/view?bot=triage&changesAfter=" + page.at("historyCursor").dump() +
+            "&sessionsAfter=" + page.at("sessionCursor").dump();
+    };
     std::set<Id> expectedTasks = {triage};
     for (int i = 0; i < 8; ++i) {
         const auto id = std::to_string(i);
@@ -258,6 +263,17 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
     };
     for (int attempt = 0; attempt < 20 && !allRunsStarted(); ++attempt) runtime.tick();
     check(allRunsStarted(),"session fixtures did not each start one Run");
+
+    const auto updates = browser.get(viewPath(original));
+    check(updates.contains("historyCursor") && updates.contains("changedMessageIds") && updates.contains("sessionCursor"),
+          "a view refresh did not return both history cursors");
+    auto expectedAdded = expectedTasks;
+    expectedAdded.erase(triage);
+    for (const auto& task : updates.at("sessionTasks"))
+        check(expectedAdded.erase(task.at("id").get<Id>()) == 1,"refresh returned an unexpected Session task");
+    check(expectedAdded.empty(),"refresh missed new Sessions outside the newest page");
+    check(browser.get(viewPath(updates)).at("sessionTasks").empty(),
+          "refresh returned unchanged Session history");
 
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");

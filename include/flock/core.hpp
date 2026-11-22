@@ -148,6 +148,9 @@ public:
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json activeTasks(std::string_view botId) const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
+    // Journal position and tasks with a newly recorded Run since that position.
+    // On the initial read only the position is needed, before loading the first page.
+    std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // Latest completion or Session report for the Task's current revision.
     Json latestTaskResult(Id taskId) const;
