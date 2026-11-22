@@ -18,7 +18,7 @@ export function resolveLook(given) {
     };
 }
 /** Resting view: turned a little and seen a little from above, so the volume reads without dominating. */
-export const BASE_YAW = -0.3;
+export const BASE_YAW = 0.3;
 export const BASE_PITCH = 0.2;
 /**
  * Following a look target: the body turns toward it by up to these angles

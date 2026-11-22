@@ -1,4 +1,4 @@
-import { accentColor, showAvatar } from '/avatars.js';
+import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
@@ -76,6 +76,7 @@ let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -91,9 +92,21 @@ function button(text, className, click) {
   if (click) el.addEventListener('click', click);
   return el;
 }
+customElements.define('flock-avatar', class extends HTMLElement {
+  #handle;
+
+  connectedCallback() {
+    this.#handle = showAvatar(this, this.bot, { still: false });
+  }
+
+  disconnectedCallback() {
+    this.#handle?.destroy();
+  }
+});
+
 function avatar(bot, className = '') {
-  const host = node('span', `avatar ${className}`.trim());
-  showAvatar(host, bot);
+  const host = node('flock-avatar', `avatar ${className}`.trim());
+  host.bot = bot;
   return host;
 }
 function runHref(run) {
@@ -261,6 +274,7 @@ const sidebarIcons = {
 const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
+const sidebarEntries = new Map();
 
 let botDraft = null;
 function sidebarBots() {
@@ -286,37 +300,34 @@ function closeMenu(restore = true) {
   if (!botId) return;
   setMenu(null, restore ? `menu:${botId}` : null);
 }
-function togglePin(bot) {
-  if (pins.has(bot.id)) pins.delete(bot.id);
-  else pins.add(bot.id);
+function togglePin(botId) {
+  if (pins.has(botId)) pins.delete(botId);
+  else pins.add(botId);
   save('flock-pins', [...pins]);
-  setMenu(null, `menu:${bot.id}`);
+  setMenu(null, `menu:${botId}`);
 }
 let settingsReturnFocus = null;
 function openSettingsFromMenu(botId) {
   settingsReturnFocus = botId;
   openDetail({ kind: 'settings' });
 }
-function openBotSettings(bot) {
+function openBotSettings(botId) {
   menu = null;
-  if (view?.id !== bot.id) selectBot(bot.id);
+  if (view?.id !== botId) selectBot(botId);
   else renderBots();
-  if (view?.data) openSettingsFromMenu(bot.id);
-  else if (view) view.openSettingsOnLoad = bot.id;
+  if (view?.data) openSettingsFromMenu(botId);
+  else if (view) view.openSettingsOnLoad = botId;
 }
-function menuButton(bot) {
-  const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
+function menuButton(botId) {
+  const toggle = button(null, 'row-menu', () => (menu === botId ? closeMenu() : setMenu(botId, 'first')));
   toggle.innerHTML = sidebarIcons.more;
-  toggle.dataset.focus = `menu:${bot.id}`;
-  toggle.setAttribute('aria-label', `${bot.name} menu`);
+  toggle.dataset.focus = `menu:${botId}`;
   toggle.setAttribute('aria-haspopup', 'menu');
-  toggle.setAttribute('aria-expanded', menu === bot.id);
   toggle.addEventListener('keydown', (event) => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     event.preventDefault();
-    setMenu(bot.id, event.key === 'ArrowDown' ? 'first' : 'last');
+    setMenu(botId, event.key === 'ArrowDown' ? 'first' : 'last');
   });
-  if (menu === bot.id) toggle.setAttribute('aria-controls', 'bot-menu');
   return toggle;
 }
 function menuPopover(bot) {
@@ -325,8 +336,8 @@ function menuPopover(bot) {
   list.setAttribute('role', 'menu');
   list.setAttribute('aria-label', `${bot.name} menu`);
   const actions = [
-    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot)],
-    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot)],
+    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot.id)],
+    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   actions.forEach(([label, icon, run], index) => {
     const item = button(null, null, run);
@@ -352,60 +363,109 @@ function menuPopover(bot) {
   });
   return list;
 }
-function presenceText(bot) {
-  return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
-}
-function botRow(bot) {
-  const row = node('div', 'bot-row');
-  const active = view?.id === bot.id;
-  row.classList.toggle('selected', active);
-  row.classList.toggle('menu-open', menu === bot.id);
-  const select = button(null, 'bot-select', () => selectBot(bot.id));
-  select.dataset.focus = `bot:${bot.id}`;
-  if (active) select.setAttribute('aria-current', 'true');
+function createSidebarEntry(botId) {
+  const row = node('div');
+  const select = button(null, '', () => selectBot(botId));
+  select.dataset.focus = `bot:${botId}`;
+  const face = node('span');
+  const avatarHost = node('span', 'avatar');
+  const pinPresence = node('span');
+  face.append(avatarHost, pinPresence);
+
   const name = node('span', 'bot-name');
-  name.append(node('span', 'bot-name-text', bot.name));
-  if (bot.presence === 'waiting') name.append(node('span', 'presence-dot'));
+  const nameText = node('span', 'bot-name-text');
+  const presenceDot = node('span', 'presence-dot');
+  name.append(nameText, presenceDot);
   const preview = node('span', 'bot-preview');
-  if (busyPresence.has(bot.presence)) {
-    const dots = node('span', 'working-dots');
-    dots.setAttribute('aria-hidden', 'true');
-    dots.append(node('i'), node('i'), node('i'));
-    preview.append(dots);
-  }
-  preview.append(bot.preview || 'No conversation yet');
+  const dots = node('span', 'working-dots');
+  dots.setAttribute('aria-hidden', 'true');
+  dots.append(node('i'), node('i'), node('i'));
+  const previewText = document.createTextNode('');
+  preview.append(dots, previewText);
   const text = node('span', 'bot-text');
   text.append(name, preview);
-  select.append(avatar(bot, 'bot-avatar'), text);
-  const status = presenceText(bot);
-  if (status) select.append(status);
-  row.append(select, menuButton(bot));
-  if (menu === bot.id) row.append(menuPopover(bot));
-  return row;
-}
-function pinTile(bot, index) {
-  const tile = node('div', 'pin-tile');
-  const active = view?.id === bot.id;
-  tile.classList.toggle('selected', active);
-  tile.classList.toggle('menu-open', menu === bot.id);
-  const select = button(null, 'pin', () => selectBot(bot.id));
-  select.dataset.focus = `bot:${bot.id}`;
-  if (active) select.setAttribute('aria-current', 'true');
-  const shortcut = index < 9 ? index + 1 : null;
-  if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
-  const face = node('span', 'pin-face');
-  face.append(avatar(bot, 'pin-avatar'));
-  if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
-  select.append(face, node('span', 'pin-name', bot.name));
-  const status = presenceText(bot);
-  if (status) select.append(status);
+
+  const pinName = node('span', 'pin-name');
+  const status = node('span', 'sr-only');
+  select.append(face, text, pinName, status);
   const tooltip = node('span', 'pin-tooltip');
   tooltip.setAttribute('aria-hidden', 'true');
-  tooltip.append(node('span', null, bot.name));
-  if (shortcut) tooltip.append(node('kbd', null, `⌥⇧${shortcut}`));
-  tile.append(select, tooltip, menuButton(bot));
-  if (menu === bot.id) tile.append(menuPopover(bot));
-  return tile;
+  const tooltipName = node('span');
+  const shortcutLabel = node('kbd');
+  tooltip.append(tooltipName, shortcutLabel);
+  const toggle = menuButton(botId);
+  row.append(select, tooltip, toggle);
+
+  let previousBot;
+  let avatarHandle;
+  let popover;
+  return {
+    row,
+    update(bot, pinIndex) {
+      const pinned = pinIndex >= 0;
+      const active = view?.id === botId;
+      const expanded = menu === botId;
+      row.className = pinned ? 'pin-tile' : 'bot-row';
+      row.classList.toggle('selected', active);
+      row.classList.toggle('menu-open', expanded);
+      select.className = pinned ? 'pin' : 'bot-select';
+      if (active) select.setAttribute('aria-current', 'true');
+      else select.removeAttribute('aria-current');
+
+      face.className = pinned ? 'pin-face' : '';
+      avatarHost.classList.toggle('pin-avatar', pinned);
+      avatarHost.classList.toggle('bot-avatar', !pinned);
+      tooltip.hidden = pinName.hidden = !pinned;
+      text.hidden = pinned;
+      const shortcut = pinned && pinIndex < 9 ? pinIndex + 1 : null;
+      shortcutLabel.hidden = shortcut === null;
+      if (shortcut) {
+        shortcutLabel.textContent = `⌥⇧${shortcut}`;
+        select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
+      } else select.removeAttribute('aria-keyshortcuts');
+
+      if (previousBot?.name !== bot.name) {
+        nameText.textContent = pinName.textContent = tooltipName.textContent = bot.name;
+        toggle.setAttribute('aria-label', `${bot.name} menu`);
+        popover?.setAttribute('aria-label', `${bot.name} menu`);
+      }
+      if (!previousBot || previousBot.preview !== bot.preview) {
+        previewText.data = bot.preview || 'No conversation yet';
+      }
+      const hasPresence = activePresence.has(bot.presence);
+      presenceDot.hidden = bot.presence !== 'waiting';
+      dots.hidden = !busyPresence.has(bot.presence);
+      pinPresence.hidden = !pinned || !hasPresence;
+      pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
+      status.hidden = !hasPresence;
+      if (hasPresence && previousBot?.presence !== bot.presence) status.textContent = stateLabels[bot.presence];
+
+      toggle.setAttribute('aria-expanded', expanded);
+      if (expanded) {
+        toggle.setAttribute('aria-controls', 'bot-menu');
+        if (!popover) {
+          popover = menuPopover(bot);
+          row.append(popover);
+        }
+      } else if (popover) {
+        toggle.removeAttribute('aria-controls');
+        popover.remove();
+        popover = null;
+      }
+      if (!previousBot || JSON.stringify(previousBot.avatar) !== JSON.stringify(bot.avatar)) {
+        avatarHandle?.destroy();
+        avatarHandle = showAvatar(avatarHost, bot, { still: false, state: presenceMotion(bot.presence) });
+      } else if (previousBot.presence !== bot.presence) {
+        const nextMotion = presenceMotion(bot.presence);
+        if (presenceMotion(previousBot.presence) !== nextMotion) avatarHandle?.update({ state: nextMotion });
+      }
+      previousBot = bot;
+    },
+    destroy() {
+      avatarHandle?.destroy();
+      row.remove();
+    },
+  };
 }
 function skeletonRows(count, className = 'skeleton-row') {
   return Array.from({ length: count }, () => {
@@ -431,6 +491,19 @@ function draftRow(draft) {
   row.append(select);
   return row;
 }
+
+function placeSidebarRows(container, rows) {
+  const wanted = new Set(rows);
+  for (const child of [...container.children]) {
+    if (!wanted.has(child)) child.remove();
+  }
+  let next = container.firstElementChild;
+  for (const row of rows) {
+    if (row === next) next = next.nextElementSibling;
+    else container.insertBefore(row, next);
+  }
+}
+
 function renderBots() {
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
@@ -438,15 +511,29 @@ function renderBots() {
   const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
   const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
-  elements.pinned.replaceChildren(...pinned.map(pinTile));
+  const activeIds = new Set(source.map((bot) => bot.id));
+  for (const [id, entry] of sidebarEntries) {
+    if (!activeIds.has(id)) {
+      entry.destroy();
+      sidebarEntries.delete(id);
+    }
+  }
+  for (const { id } of source) {
+    if (!sidebarEntries.has(id)) sidebarEntries.set(id, createSidebarEntry(id));
+  }
+  const rowFor = ({ id }) => sidebarEntries.get(id).row;
+  placeSidebarRows(elements.pinned, pinned.map(rowFor));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
-  list.replaceChildren(...unpinnedByPresence.map(botRow));
-  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
-  if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
-  if (focusedSidebarKey) focusKey(focusedSidebarKey);
+  const rows = unpinnedByPresence.map(rowFor);
+  if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
+  if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
+  else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
+  placeSidebarRows(list, rows);
+  pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
+  unpinnedByPresence.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
 const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
@@ -478,9 +565,10 @@ function renderHeader() {
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
-  if (bot && nextScopeKey !== scopeKey) {
-    showAvatar(elements['activity-scope-avatar'], bot);
-    elements['activity-scope-name'].textContent = bot.name;
+  if (nextScopeKey !== scopeKey) {
+    scopeAvatar?.destroy();
+    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
+    if (bot) elements['activity-scope-name'].textContent = bot.name;
   }
   scopeKey = nextScopeKey;
   if (!bot || dm) {
@@ -491,15 +579,13 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' :
-    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, followPointer: true });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
+  }
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -1287,12 +1373,9 @@ function openEditAppearance(bot) {
 }
 
 function generalContent(bot) {
-  const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
   const face = node('span', 'settings-avatar');
-  detailAvatar = { state: presence, mount: () => {
-    return showAvatar(face, bot, { still: false, state: presence });
-  } };
+  detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
   hero.append(
     face,
     node('p', 'settings-name', bot.name),
@@ -1432,11 +1515,6 @@ function renderDetail() {
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
     if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
-    const presence = view.data.presence ?? 'idle';
-    if (detailAvatar && detailAvatar.state !== presence) {
-      detailAvatar.handle?.update({ state: presence });
-      detailAvatar.state = presence;
-    }
     return;
   }
   labelDetail(null);
