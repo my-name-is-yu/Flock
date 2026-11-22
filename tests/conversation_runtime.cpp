@@ -1693,6 +1693,141 @@ void notesReachTheRunningSession() {
           "a note for a finished task reached T3");
 }
 
+void newSessionsReceivePersistedTaskDecisions() {
+    for (const bool explicitFresh : {false,true}) {
+        Fixture f;
+        const auto intent = "Measure the cold-start fixture, including " + std::string(4800,'i') + " the cache-disabled case";
+        const auto criteria = "Report " + std::string(4500,'c') + " p99 and raw samples";
+        constexpr auto startText = "Measure the cold-start fixture";
+        f.script(startText,{start({{"request",intent},{"doneWhen",criteria}})});
+        f.receive("start-handoff",startText);
+        const Id id = f.store->tasks("alpha").front().at("id");
+        const auto direction = "Use the pinned input. " + std::string(5000,'d') + " Keep its checksum in the report.";
+        f.script("Use the pinned input",{send(id,{{"instruction",direction}})});
+        f.receive("pinned-input","Use the pinned input");
+        f.model.questions[id] = {{"question","Which dataset?"}};
+        f.reach(id,"waiting");
+        const auto wait = f.task(id).at("wait");
+        constexpr auto userAnswer = "Use dataset Cobalt-492";
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text",userAnswer}});
+        f.reach(id,"running");
+
+        constexpr auto steer = "Use nanoseconds in the exported table";
+        f.script(steer,{note(id)});
+        const auto noteReceipt = f.receive("delivered-steer",steer);
+        check(f.conversationMessage(noteReceipt.at("messageId"))["deliveredToT3"] == true,
+              "the fixture did not deliver the running Session's steer");
+        constexpr auto rejected = "Use the unconfirmed override";
+        if (explicitFresh) {
+            f.script("Start with fresh context",{[&](const ModelInput&) {
+                return Decision{"continue_fresh_session",{{"taskId",id},{"instruction","Use a clean checkout"}},
+                                "The user requested a fresh Session"};
+            }});
+            f.receive("fresh-handoff","Start with fresh context");
+        } else {
+            f.model.onResult = [](const ModelInput&) {
+                return Decision{"delegate",{{"instruction","Inspect this independently"}},"Use an independent Session"};
+            };
+        }
+        f.t3.finish("run-1","First evidence");
+        f.script(rejected,{note(id)});
+        f.receive("rejected-steer",rejected);
+        check(f.lastTurn().front()["result"]["ok"] == false,"the fixture accepted a steer to a settled Run");
+        f.restart();
+        f.reach(id,"sending");
+        constexpr auto readyDirection = "Include the kernel version";
+        f.script(readyDirection,{send(id)});
+        f.receive("ready-direction",readyDirection);
+        f.restart();
+        f.reach(id,"running");
+        const auto& command = f.t3.sent.back();
+        const auto task = f.task(id);
+        check(f.t3.sent.size() == 2 && command.tool == "delegate" && task["runs"].size() == 2 &&
+              task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
+              task["runs"][0]["revisionId"] == task["runs"][1]["revisionId"],
+              "the replacement did not start a separate Session for the same revision");
+        for (const std::string_view text : {std::string_view(intent),std::string_view(criteria),
+                std::string_view(direction),std::string_view(userAnswer),std::string_view(steer),
+                std::string_view(readyDirection)}) {
+            const auto at = command.instruction.find(text);
+            check(at != command.instruction.npos && at == command.instruction.rfind(text),
+                  "the new Session lost, shortened or duplicated a task decision");
+        }
+        check(command.instruction.find(rejected) == command.instruction.npos &&
+              command.instruction.find(direction) < command.instruction.find(userAnswer) &&
+              command.instruction.find(userAnswer) < command.instruction.find(steer),
+              "the new Session replayed an undelivered steer or reordered user decisions");
+
+        f.model.onResult = [](const ModelInput&) {
+            return Decision{"follow_up",{{"instruction","Check the last measurement again"}},"Verify in the same Session"};
+        };
+        f.t3.finish("run-2","Second evidence");
+        f.reach(id,"deciding");
+        f.reach(id,"running");
+        const auto& follow = f.t3.sent.back();
+        check(follow.tool == "follow_up" && task["runs"][1]["threadId"] == follow.target.threadId &&
+              follow.instruction.find(direction) == follow.instruction.npos &&
+              follow.instruction.find(userAnswer) == follow.instruction.npos &&
+              follow.instruction.find(steer) == follow.instruction.npos,
+              "the same-Thread follow-up replayed the new-Session handoff");
+    }
+}
+
+void revisedSessionDoesNotReplaySupersededDecisions() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Measure the retired dataset"));
+    constexpr auto oldDirection = "Use the retired runner";
+    f.script(oldDirection,{send(id)});
+    f.receive("old-direction",oldDirection);
+    f.model.questions[id] = {{"question","Which retired account?"}};
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    constexpr auto oldAnswer = "Use account Old-149";
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text",oldAnswer}});
+    f.reach(id,"running");
+    constexpr auto oldSteer = "Send the retired output to Archive-25";
+    f.script(oldSteer,{note(id)});
+    f.receive("old-steer",oldSteer);
+    f.script("Use the replacement suite",{change(id,{{"intent","Measure the replacement dataset"},
+        {"doneWhen","Report median throughput"},{"environment","クラウドMac"}})});
+    f.receive("replace-contract","Use the replacement suite");
+    f.restart();
+    f.t3.finish("run-1","The prior Run settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the revised Session did not start");
+    const auto& command = f.t3.sent.back();
+    check(command.tool == "delegate" && command.environmentId == "cloud" &&
+          command.instruction.find("Measure the replacement dataset") != command.instruction.npos &&
+          command.instruction.find("Report median throughput") != command.instruction.npos &&
+          command.instruction.find("Use the replacement suite") != command.instruction.npos,
+          "the revised Session lost its current contract or instruction");
+    for (const auto stale : {"Measure the retired dataset","Report baseline latency",oldDirection,oldAnswer,oldSteer})
+        check(command.instruction.find(stale) == command.instruction.npos,
+              "a superseded task decision reached the revised Session");
+}
+
+void oversizedAuthoritativeHandoffBlocksDelivery() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    for (int i = 0; i < 9; ++i) {
+        const auto key = "large-direction-" + std::to_string(i);
+        f.script(key,{send(id,{{"instruction",key + std::string(14000,'x')}})});
+        f.receive(key,key);
+    }
+    f.model.onResult = [](const ModelInput&) {
+        return Decision{"delegate",{{"instruction","Start an independent Session"}},"Verify independently"};
+    };
+    f.t3.finish("run-1","Previous Run settled");
+    f.reach(id,"sending");
+    f.restart();
+    f.reach(id,"waiting");
+    const auto task = f.task(id);
+    check(f.t3.sent.size() == 1 && task["pendingInstructions"].size() == 9 &&
+          task["wait"]["reason"] == "settings" &&
+          task["wait"]["text"].get<std::string>().find("size limit") != std::string::npos,
+          "a new Session silently received an incomplete authoritative handoff");
+}
+
 void interruptLeavesTheTaskOpen() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1778,6 +1913,9 @@ int main() {
         startCriteriaAreUsedForFirstDelegation();
         environmentsResolveByNameOrId();
         notesReachTheRunningSession();
+        newSessionsReceivePersistedTaskDecisions();
+        revisedSessionDoesNotReplaySupersededDecisions();
+        oversizedAuthoritativeHandoffBlocksDelivery();
         interruptLeavesTheTaskOpen();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";
     } catch (const std::exception& e) {

@@ -81,6 +81,7 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
                     task["requestedDoneWhen"] = done;
                     task["criteriaSourceMessageId"] = messageId;
                 }
+                journal(task.at("id"),"task_contract_changed",{{"messageId",messageId}});
             }
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
