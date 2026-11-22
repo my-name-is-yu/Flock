@@ -85,6 +85,8 @@ void runningSessions(const std::filesystem::path& path) {
     const auto ernestHistory = Scope::sessionRead("env",adapter.running.at("Ernest").threadId);
     check(access.permits("Ernest",ernestHistory,true) && !access.permits("Reviewer",ernestHistory,true) &&
           !access.permits("Ernest",ernestHistory,false),"Session ownership or OAuth scope incorrect");
+    check(!access.permits("Ernest",Scope::sessionCoordinate("env",adapter.running.at("Ernest").threadId),true),
+          "Session ownership implicitly granted coordination");
     access.resourceGrant(owner,"Reviewer",ernestHistory,GrantChange::grant);
     check(access.permits("Reviewer",ernestHistory,true) &&
           !access.permits("Reviewer",Scope::sessionRead("other",adapter.running.at("Ernest").threadId),true),

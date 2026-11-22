@@ -185,6 +185,7 @@ public:
 class GitHost;
 struct GitWebhook;
 class Access;
+class ParticipationStore;
 struct Person;
 struct ConfiguredSchedule;
 struct ScheduleImportError;
@@ -295,6 +296,7 @@ private:
     std::unique_ptr<Impl> p_;
     friend class Runtime;
     friend class Access;
+    friend class ParticipationStore;
 };
 
 struct BotTools;

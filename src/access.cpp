@@ -13,7 +13,8 @@ bool identifier(std::string_view id) {
 const Json& resourceOperations() {
     static const Json catalog{
         {"service",{"read","use","manage"}},{"repository",{"read","write","pr","review","issues"}},
-        {"secret",{"use"}},{"session",{"read"}},{"mcp_server",{"discover","invoke","read_resource"}},
+        {"secret",{"use"}},{"session",{"read","coordinate"}},{"consult",{"reply-once"}},{"work",{"delegate"}},
+        {"mcp_server",{"discover","invoke","read_resource"}},
         {"environment",{"inspect","configure","launch"}},{"shared_memory",{"read","write"}},
         {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"skill",{"list","read"}},{"attachment",{"inspect"}},{"bot_admin",{"create_bot","rename_bot"}}};
     return catalog;
@@ -39,11 +40,23 @@ Scope Scope::sessionRead(std::string_view environment, std::string_view thread) 
     return {"session",Json::array({environment,thread}).dump(),"read"};
 }
 
+Scope Scope::consultReply(std::string_view environment, std::string_view thread) {
+    return {"consult",Json::array({environment,thread}).dump(),"reply-once"};
+}
+
+Scope Scope::sessionCoordinate(std::string_view environment, std::string_view thread) {
+    return {"session",Json::array({environment,thread}).dump(),"coordinate"};
+}
+
+Scope Scope::workDelegate(std::string_view environment, std::string_view thread) {
+    return {"work",Json::array({environment,thread}).dump(),"delegate"};
+}
+
 bool Scope::valid() const {
     const auto& catalog = resourceOperations();
     const auto it = catalog.find(kind);
     if (it==catalog.end() || std::find(it->begin(),it->end(),operation)==it->end()) return false;
-    if (kind=="session") {
+    if (kind=="session" || kind=="consult" || kind=="work") {
         if (resource.size()>8192) return false;
         const auto ref = Json::parse(resource,nullptr,false);
         return ref.is_array() && ref.size()==2 && ref[0].is_string() && ref[1].is_string() &&
@@ -95,7 +108,7 @@ CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeou
 bool Access::permits(std::string_view bot, const Scope& s, bool upstream) const {
     if (!upstream || !s.valid()) return false;
     std::lock_guard lock(db_.mutex);
-    if (s.kind=="session" && db_.query(R"SQL(
+    if (s.kind=="session" && s.operation=="read" && db_.query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id
  WHERE r.environment_id=json_extract(?1,'$[0]') AND r.thread_id=json_extract(?1,'$[1]') AND t.bot_id=?2 LIMIT 1
 )SQL",{s.resource,bot}).next()) return true;
