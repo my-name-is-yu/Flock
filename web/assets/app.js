@@ -10,7 +10,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -591,8 +591,7 @@ function renderHeader() {
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
   }
   const offline = connection === 'offline';
-  const presenceText = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
-  const status = view?.data?.canDecide === false ? `View only · ${presenceText}` : presenceText;
+  const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
   profile.dataset.state = offline ? 'offline' : presence;
   profile.title = `${bot.name} · ${status}`;
@@ -795,6 +794,11 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
+function readOnlyChoices(choices) {
+  const options = node('ul', 'read-only-choices');
+  for (const choice of choices) options.append(node('li', null, choice));
+  return options;
+}
 function pausedActions(turn) {
   const actions = node('div', 'event-actions');
   const waitMessageId = turn.messageId;
@@ -914,6 +918,8 @@ function eventCard(event, context, place) {
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
+    const choices = pendingWait?.wait.choices ?? data.choices;
+    if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
@@ -929,7 +935,10 @@ function eventCard(event, context, place) {
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
     if (paused && context.canDecide) extras.push(pausedActions(paused));
-    else if (context.canDecide && data.suggestions?.length) extras.push(suggestionActions(event));
+    else if (data.suggestions?.length) {
+      if (context.canDecide) extras.push(suggestionActions(event));
+      else bubble.append(readOnlyChoices(data.suggestions));
+    }
     if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
@@ -1218,9 +1227,12 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = context?.data?.canDecide === true && !context.dm;
+  const available = !!context?.data && !context.dm;
+  const canDecide = available && context.data.canDecide === true;
   elements['composer-container'].hidden = !available;
-  if (!available) return;
+  elements.composer.hidden = !canDecide;
+  elements['view-only-notice'].hidden = !available || canDecide;
+  if (!canDecide) return;
   const reply = replies.get(context.id);
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
@@ -1535,7 +1547,7 @@ function waitContent(context, task) {
     primary.append(runLink);
   }
   if (!canDecide) {
-    reason.append(node('p', 'wait-why', 'View only'));
+    if (wait.choices?.length) reason.append(readOnlyChoices(wait.choices));
     if (runLink) content.push(primary);
     return content;
   }
@@ -1637,10 +1649,10 @@ function renderDetail() {
   }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, turn, [...pendingWaits])) {
+    if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
       elements['detail-title'].textContent = waitLabel('model_budget');
       elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
-      if (turn) elements['detail-body'].append(view.data.canDecide === true ? pausedActions(turn) : node('p', 'wait-why', 'View only'));
+      if (turn && view.data.canDecide === true) elements['detail-body'].append(pausedActions(turn));
     }
     return;
   }
