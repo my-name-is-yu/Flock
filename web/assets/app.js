@@ -7,7 +7,7 @@ import { mountBoardInbox } from '/board-inbox.js';
 import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
-import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 
 const byId = (id) => document.getElementById(id);
@@ -214,12 +214,16 @@ function conversationUrl(botId, peerId) {
 function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
-  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) { renderBots(); return; }
+  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
+    if (view.source) backToLatest();
+    else renderBots();
+    return;
+  }
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    sessionsBefore: 0, ...existing, source: null, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
@@ -812,8 +816,8 @@ const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.curren
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  const choices = task.wait.choices ?? [];
-  if (choices.length) {
+  const choices = task.wait.choices;
+  if (hasQuestionChoices(choices)) {
     const key = questionKey(task);
     const selections = context.questionChoices ??= new Map();
     actions.append(questionChoiceForm({
@@ -830,9 +834,9 @@ function questionActions(context, task, { dialog = false } = {}) {
       },
     }));
   }
-  const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
+  const reply = questionReplyButton(() => {
     if (view?.id === context.id) beginReply(target);
-  });
+  }, dialog);
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
   return actions;
@@ -911,6 +915,50 @@ function sourceAction(source, label = 'Open source') {
   control.dataset.timelineAction = `source:${source.messageId}`;
   return control;
 }
+function backToLatest() {
+  view.source = null;
+  view.pendingSource = null;
+  render('bottom');
+  elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  elements.conversation.focus({ preventScroll: true });
+}
+function cardSourceAction(bot, id, close) {
+  const botId = bot.id;
+  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
+  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', async () => {
+    close();
+    selectBot(botId);
+    if (!exact) {
+      backToLatest();
+      return;
+    }
+    const context = view;
+    // A later jump or Jump to latest replaces this request; only the newest one may apply.
+    const request = context.pendingSource = { id };
+    let page;
+    try {
+      page = await api(botQuery('conversation', botId, id + 1));
+    } catch {}
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
+    if (!page?.events.some((event) => event.id === id)) {
+      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+      return;
+    }
+    context.source = { id, bot, events: page.events };
+    renderTimeline();
+    const target = byId(`event-${id}`);
+    if (target) {
+      // Scroll only the conversation; scrollIntoView would also shift the page around it.
+      const scroller = elements.conversation;
+      const box = scroller.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      scroller.scrollTop += row.top - box.top - (box.height - row.height) / 2;
+      target.focus({ preventScroll: true });
+    }
+    updateJumpToLatest();
+  });
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
@@ -973,7 +1021,7 @@ function eventCard(event, context, place, report) {
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
-  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
@@ -987,7 +1035,7 @@ function eventCard(event, context, place, report) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
-    } else {
+    } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
       extras.push(resolution);
@@ -1192,7 +1240,12 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
+function timelineAtEnd(scroller, viewportHeight = scroller.clientHeight) {
+  return scroller.scrollHeight - scroller.scrollTop - viewportHeight <= 4;
+}
+
 function rememberReadingPosition() {
+  if (view?.source) return;
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
@@ -1233,17 +1286,21 @@ function updateJumpToLatest() {
   frame.toggleAttribute('data-history-above', top > 1);
   frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
   const control = elements['jump-to-latest'];
-  if (control.hidden === atBottom) return;
-  if (atBottom && document.activeElement === control) scroller.focus({ preventScroll: true });
-  control.hidden = atBottom;
+  // An earlier page opened from a card is never the latest, even when scrolled to its end.
+  const hidden = !view?.source && atBottom;
+  if (control.hidden === hidden) return;
+  if (hidden && document.activeElement === control) scroller.focus({ preventScroll: true });
+  control.hidden = hidden;
 }
 
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
   const older = elements.older;
-  const data = view?.data;
+  const source = view?.source;
+  const data = source ? null : view?.data;
   const context = timelineContext();
-  const events = [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
-  older.hidden = !context?.olderBefore;
+  const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
+  elements.conversation.classList.toggle('viewing-source', !!source);
+  older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
   const peerStatus = elements['peer-status'];
@@ -1256,9 +1313,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const moveScroll = () => {
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
-      // The restored offset already includes the returning composer's height.
-      composerHeight = elements['composer-container'].offsetHeight;
       restoreReadingPosition(position);
+      // The restored offset already includes the returning composer's height.
+      timelineHeight = scroller.clientHeight;
+      timelineWidth = scroller.clientWidth;
+      scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
       readingPositions.delete(key);
     } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
@@ -1273,13 +1332,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     moveScroll();
     return;
   }
-  if (changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) {
+  if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
     scroller.setAttribute('aria-label', 'Conversation history');
-    updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
+    updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
     moveScroll();
   }
-  const canAnimate = liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+  const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
     !reducedMotion.matches && !document.querySelector('dialog[open]');
   if (canAnimate) {
     const id = replyArrivalId(events, liveAfterId);
@@ -1287,13 +1346,15 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   }
 }
 
-function conversationRows(data, events, keep) {
+function conversationRows(data, events, keep, source) {
   const timeline = {
-    bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
     // Source lookups do not establish the latest message in the live conversation.
-    latestWebMessageId: data ? events.findLast((event) =>
+    latestWebMessageId: data && !source ? events.findLast((event) =>
       event.kind === 'conversation_message' && !event.data.channel?.channelKind)?.id : undefined,
-    canDecide: data?.canDecide === true,
+    // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
+    canDecide: !source && data?.canDecide === true,
+    readOnly: !!source,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
@@ -1338,12 +1399,14 @@ function conversationRows(data, events, keep) {
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${event.id}`,
-      [event, report, botVersion, timeline.canDecide, event.id === timeline.latestWebMessageId, place.groupStart, place.taskStart, place.afterQuestion, wait,
+      [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
+        place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
+    row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
@@ -1461,8 +1524,12 @@ function scheduleNoticeFade(context, notice) {
 function fitMessage() {
   const field = elements.message;
   if (!field.offsetParent) return;
+  const scroller = elements.conversation;
+  const atBottom = timelineAtEnd(scroller);
   field.style.height = 'auto';
   field.style.height = `${field.scrollHeight}px`;
+  // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
+  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
 function renderComposer() {
   const context = view;
@@ -2139,6 +2206,11 @@ async function submit(event) {
   if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
+  context.pendingSource = null;
+  if (context.source) {
+    context.source = null;
+    render('bottom');
+  }
   const { composer } = context;
   const reply = composer.reply;
   const fields = { botId: context.id, text: composer.text };
@@ -2202,17 +2274,24 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
-elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
-const timelineSize = new ResizeObserver(updateJumpToLatest);
-timelineSize.observe(elements.conversation);
-timelineSize.observe(elements.timeline);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
+  if (view?.source) {
+    backToLatest();
+    return;
+  }
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
+});
+elements.conversation.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && view?.source) {
+    event.preventDefault();
+    event.stopPropagation();
+    backToLatest();
+  }
 });
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
@@ -2274,17 +2353,62 @@ elements.composer.addEventListener('keydown', (event) => {
     elements['cancel-reply'].click();
   }
 });
-let composerHeight = 0;
-function resizeComposerAndKeepTimelineAtBottom() {
-  const height = elements['composer-container'].offsetHeight;
-  const composerGrowth = height - composerHeight;
-  composerHeight = height;
-  const scroller = elements.conversation;
-  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
-  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
-  fitMessage();
+new ResizeObserver(fitMessage).observe(elements['composer-container']);
+
+const scroller = elements.conversation;
+let timelineHeight = scroller.clientHeight;
+let timelineWidth = scroller.clientWidth;
+scroller.classList.add('follow-newest');
+scroller.addEventListener('scroll', () => {
+  updateJumpToLatest();
+  // A resize can also scroll the timeline. Only update the reading position at the settled size.
+  if (scroller.clientHeight === timelineHeight && scroller.clientWidth === timelineWidth) {
+    scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
+  }
+}, { passive: true });
+new ResizeObserver(() => {
+  const height = scroller.clientHeight;
+  const width = scroller.clientWidth;
+  const widthChanged = width !== timelineWidth;
+  const resized = height !== timelineHeight || widthChanged;
+  // At the same width, a scroll can already have moved away from the previous bottom.
+  const wasAtBottom = widthChanged || timelineAtEnd(scroller, timelineHeight);
+  timelineHeight = height;
+  timelineWidth = width;
+  if (width > 0 && resized && wasAtBottom && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
+  updateJumpToLatest();
+}).observe(scroller);
+// The timeline grows without resizing the scroller, which changes the history fades.
+new ResizeObserver(updateJumpToLatest).observe(elements.timeline);
+
+const visualViewport = window.visualViewport;
+if (visualViewport) {
+  const touchInput = matchMedia('(any-pointer: coarse)');
+  let viewportFrame = null;
+  const updateKeyboardViewport = () => {
+    if (viewportFrame !== null) return;
+    viewportFrame = requestAnimationFrame(() => {
+      viewportFrame = null;
+      const height = Math.floor(visualViewport.height);
+      // Leave browser chrome and pinch zoom alone. Use the fallback only when the keyboard shrinks the visual viewport.
+      const keyboardOverlaysLayout = touchInput.matches && document.activeElement === elements.message &&
+        !elements.message.readOnly && Math.abs(visualViewport.scale - 1) < .01 && window.innerHeight - height > 80;
+      if (keyboardOverlaysLayout) {
+        workspace.style.setProperty('--keyboard-viewport-height', `${height}px`);
+        workspace.style.setProperty('--keyboard-viewport-top', `${visualViewport.offsetTop}px`);
+      } else {
+        workspace.style.removeProperty('--keyboard-viewport-height');
+        workspace.style.removeProperty('--keyboard-viewport-top');
+      }
+      workspace.classList.toggle('keyboard-viewport', keyboardOverlaysLayout);
+    });
+  };
+  visualViewport.addEventListener('resize', updateKeyboardViewport);
+  visualViewport.addEventListener('scroll', updateKeyboardViewport);
+  window.addEventListener('resize', updateKeyboardViewport);
+  elements.message.addEventListener('focus', updateKeyboardViewport);
+  elements.message.addEventListener('blur', updateKeyboardViewport);
 }
-new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });
@@ -2358,4 +2482,4 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 
-mountBoardInbox(api);
+mountBoardInbox(api, cardSourceAction);
