@@ -1,4 +1,5 @@
 #include "flock/web.hpp"
+#include "flock/bot_profile.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
 
@@ -20,20 +21,7 @@ using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t maxStandardPayload = 128 * 1024;
-constexpr std::size_t maxAvatarImageBytes = 5 * 1024 * 1024;
-constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
-constexpr std::array<std::string_view,7> allowedShapes = {
-    "mug", "sprout", "controller", "lightbulb", "chat", "watering-can", "barbell"
-};
-constexpr std::array<std::string_view,8> allowedIcons = {
-    "star", "orbit", "zap", "compass", "feather", "hexagon", "telescope", "sparkles"
-};
-constexpr std::array<std::string_view,4> allowedRoles = {
-    "reviewer", "builder", "researcher", "custom"
-};
-constexpr std::array<std::string_view,4> allowedImageTypes = {
-    "image/png", "image/jpeg", "image/webp", "image/gif"
-};
+constexpr std::size_t maxProfilePayload = 4 * ((avatar::maxImageBytes + 2) / 3) + maxStandardPayload;
 enum class Mutation { Message, Request, Operation };
 
 void json(Response& res, int status, const Json& body) {
@@ -82,32 +70,6 @@ const Json* botById(const Json& bots, std::string_view id) {
     return bot == bots.end() ? nullptr : &*bot;
 }
 
-template <std::size_t N>
-bool inList(const std::array<std::string_view,N>& list, std::string_view value) {
-    return std::find(list.begin(),list.end(),value) != list.end();
-}
-
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(first,last - first + 1));
-}
-
-std::size_t utf8Codepoints(std::string_view text) {
-    std::size_t count = 0;
-    for (const unsigned char ch : text)
-        if ((ch & 0xC0) != 0x80) ++count;
-    return count;
-}
-
-bool validHexColor(std::string_view color) {
-    if ((color.size() != 4 && color.size() != 7) || color[0] != '#') return false;
-    return std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) {
-        return std::isxdigit(ch) != 0;
-    });
-}
-
 int base64Digit(unsigned char ch) {
     if (ch >= 'A' && ch <= 'Z') return ch - 'A';
     if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
@@ -145,36 +107,17 @@ std::string decodeBase64(std::string_view input, std::size_t maxBytes) {
     return out;
 }
 
-std::string detectImageType(std::string_view bytes) {
-    if (bytes.size() < 8 || bytes.size() > maxAvatarImageBytes) throw InputError("invalid_image");
-    const auto byte = [&](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
-    if (byte(0) == 0x89 && byte(1) == 'P' && byte(2) == 'N' && byte(3) == 'G' &&
-        byte(4) == 0x0D && byte(5) == 0x0A && byte(6) == 0x1A && byte(7) == 0x0A)
-        return "image/png";
-    if (byte(0) == 0xFF && byte(1) == 0xD8 && byte(2) == 0xFF) return "image/jpeg";
-    if (bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a")) return "image/gif";
-    if (bytes.size() >= 12 && bytes.substr(0,4) == "RIFF" && bytes.substr(8,4) == "WEBP")
-        return "image/webp";
-    throw InputError("invalid_image");
-}
-
 struct ParsedProfile {
     Json profile;
     std::optional<AvatarImage> image;
 };
 
 ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImageForUpload) {
-    const auto rawName = body.find("name");
-    if (rawName == body.end() || !rawName->is_string()) throw InputError("invalid_name");
-    const auto name = trim(rawName->get_ref<const std::string&>());
-    if (name.empty() || name.size() > 128 || utf8Codepoints(name) > 32 ||
-        std::any_of(name.begin(),name.end(),[](unsigned char ch) { return ch < 32 || ch == 127; }))
-        throw InputError("invalid_name");
-
-    Json profile = {{"name",name}};
+    const auto name = botProfileName(body.value("name",Json()));
+    if (!name) throw InputError("invalid_name");
+    Json profile = {{"name",*name}};
     if (allowRole && body.contains("role")) {
-        if (!body["role"].is_string() || !inList(allowedRoles,body["role"].get_ref<const std::string&>()))
-            throw InputError("invalid_role");
+        if (!avatar::validRole(body["role"])) throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
     const auto avatarIt = body.find("avatar");
@@ -182,40 +125,17 @@ ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImag
     if (avatarIt == body.end() && !allowRole) return {std::move(profile),std::nullopt};
     if (avatarIt == body.end() || !avatarIt->is_object()) throw InputError("invalid_avatar");
     const auto& source = *avatarIt;
-    const auto kind = web::field(source,"kind");
-    std::string color = "#69c9ac";
-    if (source.contains("color")) {
-        if (!source["color"].is_string() || !validHexColor(source["color"].get_ref<const std::string&>()))
-            throw InputError("invalid_avatar");
-        color = source["color"].get<std::string>();
-    }
+    profile["avatar"] = avatar::appearance(source);
+    if (profile["avatar"].is_null()) throw InputError("invalid_avatar");
     std::optional<AvatarImage> image;
-    if (kind == "shape") {
-        const auto example = web::field(source,"example");
-        if (!inList(allowedShapes,example)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","shape"},{"example",example},{"color",color}};
-    } else if (kind == "icon") {
-        const auto icon = web::field(source,"icon");
-        if (!inList(allowedIcons,icon)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","icon"},{"icon",icon},{"color",color}};
-    } else if (kind == "upload") {
-        Json avatar = {{"kind","upload"},{"color",color}};
-        if (source.contains("filename")) {
-            if (!source["filename"].is_string() || source["filename"].get_ref<const std::string&>().size() > 256)
-                throw InputError("invalid_avatar");
-            avatar["filename"] = source["filename"];
-        }
+    if (profile["avatar"]["kind"] == "upload") {
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
-            auto bytes = decodeBase64(source["imageData"].get_ref<const std::string&>(),maxAvatarImageBytes);
-            auto type = detectImageType(bytes);
-            image = AvatarImage{std::move(type),std::move(bytes)};
-        } else if (requireImageForUpload) {
-            throw InputError("invalid_image");
-        }
-        profile["avatar"] = std::move(avatar);
-    } else {
-        throw InputError("invalid_avatar");
+            auto bytes = decodeBase64(source["imageData"].get_ref<const std::string&>(),avatar::maxImageBytes);
+            const auto* format = avatar::imageFormat(bytes);
+            if (!format) throw InputError("invalid_image");
+            image = AvatarImage{std::string(format->contentType),std::move(bytes)};
+        } else if (requireImageForUpload) throw InputError("invalid_image");
     }
     return {std::move(profile),std::move(image)};
 }
@@ -279,12 +199,20 @@ public:
         server_.Get("/api/bots",[this](const Request&, Response& res) {
             json(res,200,botList());
         });
+        server_.Get("/avatar-catalog.js",[](const Request&, Response& res) {
+            auto imageTypes = Json::array();
+            for (const auto& format : avatar::imageFormats) imageTypes.push_back(format.contentType);
+            const Json catalog = {{"allowedShapes",avatar::allowedShapes},{"allowedIcons",avatar::allowedIcons},
+                {"allowedRoles",avatar::allowedRoles},{"imageTypes",imageTypes},{"maxImageBytes",avatar::maxImageBytes}};
+            res.set_content("export default " + catalog.dump() + ";","text/javascript; charset=utf-8");
+        });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
             if (!callbacks_.botAvatar) return error(res,404,"avatar_not_found");
             const auto image = callbacks_.botAvatar(id);
-            if (!image || !inList(allowedImageTypes,image->contentType) || image->bytes.empty())
+            const auto* format = image ? avatar::imageFormat(image->bytes) : nullptr;
+            if (!format || format->contentType != image->contentType)
                 return error(res,404,"avatar_not_found");
             res.set_content(image->bytes.data(),image->bytes.size(),image->contentType);
         });
@@ -417,25 +345,26 @@ private:
         return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{};
     }
 
-    bool grantsPeer(std::string_view bot, std::string_view peer) const {
-        return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
+    std::map<std::string,std::set<std::string>> peerConnections(const Json& known) const {
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& bot : known) {
+            const auto id = web::field(bot,"id");
+            if (id.empty()) continue;
+            for (const auto& peer : store_.peerPartners(id))
+                if (id != peer) connections[id].insert(peer);
+            for (const auto& entry : peers(id)) {
+                const auto& peer = entry.intake.botId;
+                if (id == peer || !botById(known,peer)) continue;
+                connections[id].insert(peer);
+                connections[peer].insert(id);
+            }
+        }
+        return connections;
     }
 
     Json botList() const {
         auto list = web::botList(store_,bots());
-        std::set<std::string> known;
-        for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::set<std::string>> connections;
-        for (const auto& id : known) {
-            for (const auto& entry : peers(id)) {
-                const auto& peer = entry.intake.botId;
-                if (id == peer || !known.contains(peer)) continue;
-                connections[id].insert(peer);
-                connections[peer].insert(id);
-            }
-            for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].insert(peer);
-        }
+        auto connections = peerConnections(list);
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
             for (const auto& id : connections[web::field(bot,"id")]) entries.push_back({{"id",id}});
@@ -448,12 +377,8 @@ private:
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
-        const bool configured = botById(known,peer) != nullptr;
-        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
-            const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end())
-                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        }
+        if (!peerConnections(known)[std::string(bot)].contains(peer))
+            return botById(known,peer) ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         json(res,200,web::peerConversation(store_,bot,peer,before));
     }
 
@@ -474,18 +399,20 @@ private:
                     const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
                     if (previous) return json(res,201,*previous);
                 }
-                Intake intake;
+                std::optional<Intake> intake;
                 try { intake = callbacks_.intake(bot,request); }
-                catch (const std::exception&) {
-                    if (!message) return error(res,422,"intake_settings");
+                catch (const Conflict&) { return error(res,422,"intake_settings"); }
+                if (!intake) {
+                    if (!message) return error(res,422,"bot_unconfigured");
+                    intake.emplace();
                 }
-                // The caller supplies only a Bot and text. Routing and config come from the callback.
-                intake.botId = bot;
-                intake.request = request;
-                intake.scheduleId.clear();
-                intake.scheduledAt = 0;
-                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
-                return json(res,201,{{"taskId",store_.submit(intake)}});
+                // Routing and settings come from the callback, and a profile alone can receive chat.
+                intake->botId = bot;
+                intake->request = request;
+                intake->scheduleId.clear();
+                intake->scheduledAt = 0;
+                if (message) return json(res,201,store_.receive(*intake,clientMessageId,request,replyTo));
+                return json(res,201,{{"taskId",store_.submit(*intake)}});
             }
             const auto operation = requiredText(body,"operation",32);
             if (body.contains("waitMessageId")) {
@@ -498,7 +425,13 @@ private:
             const auto wait = bodyId(body,"waitId");
             const auto data = operationData(body,operation);
             if (web::field(store_.task(id),"botId") != bot) return error(res,404,"task_not_found");
-            store_.operate(id,wait,operation,data);
+            if (operation == "reconcile") {
+                store_.reconcile(id,wait,data,[&](std::string_view botId) {
+                    const auto current = callbacks_.intake(botId,"");
+                    if (!current) throw Conflict("Bot has no execution settings");
+                    return *current;
+                });
+            } else store_.operate(id,wait,operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const Conflict&) {

@@ -5,6 +5,11 @@
 namespace flockv0::app {
 namespace {
 class DemoModel final : public Model {
+public:
+    explicit DemoModel(std::string question) : question_(std::move(question)) {}
+
+private:
+    std::string question_;
     Decision decide(const ModelInput& in) override {
         const auto event = in.event.value("kind","");
         if (event == "conversation_turn") {
@@ -21,19 +26,19 @@ class DemoModel final : public Model {
                 return {"reply",{{"text",text}},"The fixed demo reports what it did."};
             }
             const auto& reply = in.event.at("replyTo");
-            if (reply.is_object() && reply.value("kind","") == "task_question" && reply.value("current",false)) {
+            const auto text = in.event.value("text","");
+            const auto kind = reply.is_object() ? reply.value("kind","") : "";
+            if (kind == "task_question" && !question_.empty() && reply.value("text","") == bounded(question_,1000) &&
+                reply.value("current",false)) {
                 return {"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
-                    {"text",in.event.value("text","")}},"The user replied to the demo question."};
+                    {"text",text}},"The user replied to the configured demo question."};
             }
-            if (reply.is_object() && reply.value("kind","") == "result")
-                return {"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."};
-            // A reply to the Bot's explanation of a result asks about that same result.
-            if (reply.is_object() && reply.value("kind","") == "bot_message") {
-                const auto source = reply.value("inReplyTo",Json::object()).value("replyToMessageId",Json(nullptr));
-                if (!source.is_null())
-                    return {"read_result",{{"messageId",source}},"The user followed up on an explained demo result."};
-            }
-            return {"start_task",{{"request",in.event.value("text","")}},"Fixed demo intake."};
+            if (kind == "result" && text == "Explain this result")
+                return {"read_result",{{"messageId",reply["messageId"]}},"The user requested a demo result explanation."};
+            if ((kind.empty() || kind == "bot_message") && text == "Run a demo task")
+                return {"start_task",{{"request",text}},"The user selected the demo task."};
+            return {"reply",{{"text","This is the fixed Flock demo."},{"suggestions",Json::array({"Run a demo task"})}},
+                "Offer the explicit demo action."};
         }
         if (event == "result" && std::ranges::find(in.tools,"complete") != in.tools.end()) {
             return {"complete",{{"report",in.event.value("report","")}},
@@ -44,11 +49,8 @@ class DemoModel final : public Model {
             for (const auto& row : in.history)
                 if (row.value("kind","") == "user_answer") answer = row.value("data",Json::object()).value("text","");
             const auto request = in.task.value("request","");
-            if (answer.empty() && request.starts_with("ask:")) {
-                auto question = request.substr(4);
-                if (question.find_first_not_of(" \t\r\n") == std::string::npos) question = "What should the demo Session focus on?";
-                return {"ask_user",{{"question",question}},"The demo request calls for a user answer before work begins."};
-            }
+            if (answer.empty() && !question_.empty() && std::ranges::find(in.tools,"ask_user") != in.tools.end())
+                return {"ask_user",{{"question",question_}},"The demo was configured to request an answer."};
             Json args = {{"instruction",request + (answer.empty() ? "" : "\nUser answer: " + answer)}};
             if (in.task.value("doneWhen","").empty()) args["doneWhen"] = "The demo Session returns a completion report.";
             return {"delegate",std::move(args),"A demo Session can handle this request."};
@@ -89,6 +91,6 @@ class DemoT3 final : public T3 {
 };
 } // namespace
 
-std::unique_ptr<Model> makeDemoModel() { return std::make_unique<DemoModel>(); }
+std::unique_ptr<Model> makeDemoModel(std::string question) { return std::make_unique<DemoModel>(std::move(question)); }
 std::unique_ptr<T3> makeDemoT3() { return std::make_unique<DemoT3>(); }
 } // namespace flockv0::app

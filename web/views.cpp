@@ -1,4 +1,5 @@
 #include "views.hpp"
+#include "flock/bot_profile.hpp"
 
 #include <array>
 #include <charconv>
@@ -72,24 +73,13 @@ Json runView(const Json& run, std::string_view environment) {
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
-    if (source.is_string()) return source;
-    Json view = Json::object();
-    copyFields(view,source,{"kind","example","icon","color","eyeColor","filename","version"});
-    if (field(source,"kind") == "upload") {
-        const auto version = field(source,"version");
-        const bool hasImage = !version.empty() || !field(source,"file").empty() || !field(source,"imageUrl").empty();
-        if (hasImage && !botId.empty()) {
-            auto url = "/api/bot-avatar?bot=" + threadSegment(botId);
-            if (!version.empty()) url += "&v=" + threadSegment(version);
-            view["imageUrl"] = std::move(url);
-        }
+    auto view = avatar::appearance(source);
+    if (view.is_null()) return view;
+    const auto version = field(source,"version");
+    if (view["kind"] == "upload" && !version.empty() && !botId.empty()) {
+        view["version"] = version;
+        view["imageUrl"] = "/api/bot-avatar?bot=" + threadSegment(botId) + "&v=" + threadSegment(version);
     }
-    const auto definition = source.value("definition",source);
-    Json shape = Json::object();
-    copyFields(shape,definition,{"version","id","name"});
-    if (definition.contains("body")) copyFields(shape["body"] = Json::object(),definition["body"],{"path"});
-    if (definition.contains("eyes")) copyFields(shape["eyes"] = Json::object(),definition["eyes"],{"x","y","spacing","scale"});
-    if (shape.contains("body") && shape.contains("eyes")) view["definition"] = shape;
     return view;
 }
 
@@ -98,8 +88,10 @@ Json botSummary(const Json& bot) {
     const auto name = field(bot,"name");
     Json summary = {{"id",id},{"name",name.empty() ? id : name}};
     copyFields(summary,bot,{"role"});
-    if (bot.contains("avatar") && (bot["avatar"].is_string() || bot["avatar"].is_object()))
-        summary["avatar"] = avatarView(bot["avatar"],id);
+    if (bot.contains("avatar")) {
+        auto appearance = avatarView(bot["avatar"],id);
+        if (!appearance.is_null()) summary["avatar"] = std::move(appearance);
+    }
     return summary;
 }
 
@@ -111,11 +103,35 @@ Json settingsView(const Json& bot) {
         for (const auto& schedule : bot["cron"]) {
             if (!schedule.is_object()) continue;
             Json row = Json::object();
-            copyFields(row,schedule,{"id","schedule","expression","cron","timezone","timeZone","request","enabled"});
+            copyFields(row,schedule,{"id","schedule","timezone","request"});
             cron.push_back(std::move(row));
         }
     }
     return view;
+}
+
+struct WaitCopy {
+    std::string_view reason, label, text, operationLabel;
+};
+constexpr WaitCopy waitCopy[] = {
+    {"user_question","Question from the Bot","The Bot is waiting for your answer.",""},
+    {"budget","Approval for one more run","This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.","Approve one more run"},
+    {"model_budget","Approval for another model call","This request reached its model call limit. You can approve one more model call.","Approve one more model call"},
+    {"model_failure","Retry decision","The Bot could not decide on the next step after several attempts. You can retry.","Retry decision"},
+    {"t3_input","Action in T3","Open the session in T3 to approve or answer.",""},
+    {"deadline","Deadline extension","This request reached its deadline. You can set a new one.","Extend deadline"},
+    {"unknown_delivery","Delivery unconfirmed","Flock could not confirm whether T3 received the last message. Reconcile checks T3 again without resending anything.","Reconcile"},
+    {"auth","T3 sign-in needed","Sign in to T3 again, then reconcile.","Reconcile"},
+    {"settings","T3 settings","Fix the T3 connection or execution settings, then reconcile.","Reconcile"}
+};
+
+void describeWait(Json& view, std::string_view reason) {
+    const auto copy = std::ranges::find(waitCopy,reason,&WaitCopy::reason);
+    view["label"] = copy == std::end(waitCopy) ? "Waiting for input" : copy->label;
+    if (field(view,"text").empty())
+        view["text"] = copy == std::end(waitCopy) ? "Refresh the pending request." : copy->text;
+    if (copy != std::end(waitCopy) && !copy->operationLabel.empty())
+        view["operationLabel"] = copy->operationLabel;
 }
 
 // Adapter errors are useful in the CLI but can include connection settings. Publish the reason code.
@@ -125,6 +141,7 @@ Json waitView(const Json& wait) {
     copyFields(view,wait,{"id","messageId","reason","decisionReason"});
     const auto reason = field(wait,"reason");
     if (reason == "user_question" || reason == "t3_input") copyFields(view,wait,{"text"});
+    describeWait(view,reason);
     if (reason == "user_question" && wait.contains("choices") && wait["choices"].is_array()) {
         auto& choices = view["choices"] = Json::array();
         for (const auto& choice : wait["choices"])
@@ -176,7 +193,7 @@ Json eventView(const Json& event) {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
-        copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
+        copyFields(details,data,{"text","messageId","replyToMessageId","taskId","status","effectStatus","deliveredToT3"});
         if (const auto actions = data.find("actions"); actions != data.end() && actions->is_array()) {
             details["actions"] = Json::array();
             for (const auto& action : *actions) {
@@ -230,8 +247,10 @@ Json currentWait(const Json& task) {
     const auto& wait = task.at("wait");
     const auto env = field(task,"environmentId");
     auto& view = result["wait"] = waitView(wait);
+    view["allowedOperations"] = waitOperations(task);
     view["run"] = runView(wait.at("run"),env);
     if (view["run"].is_null()) view["run"] = runView(task.at("lastRun"),env);
+    if (!view["run"].is_null()) view["run"]["actionRequired"] = field(wait,"reason") == "t3_input";
     return result;
 }
 
@@ -249,6 +268,7 @@ Json taskSessions(const Json& task) {
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
         session["state"] = active ? displayState(task) : "ended";
+        session["active"] = active;
         sessions.push_back(std::move(session));
     }
     return sessions;
@@ -269,7 +289,7 @@ Json activity(Store& store, std::string_view bot) {
         const auto& blocker = task.at("blockedBy");
         if (state == "queued" && !blocker.is_null()) {
             auto queued = taskSummary(task);
-            queued["blockedBy"] = Json::object();
+            queued["blockedBy"] = {{"hidden",true}};
             if (field(blocker,"botId") == bot) {
                 queued["blockedBy"] = taskSummary(blocker);
                 copyFields(queued["blockedBy"],blocker,{"botId"});
@@ -285,7 +305,28 @@ Json activity(Store& store, std::string_view bot) {
             result["activeSessions"].push_back(std::move(active));
         }
     }
+    auto& paused = result["pausedConversations"] = Json::array();
+    for (const auto& turn : store.pausedConversations(bot)) {
+        Json view = {{"allowedOperations",Json::array({"approve"})}};
+        copyFields(view,turn,{"messageId","text","status"});
+        describeWait(view,"model_budget");
+        paused.push_back(std::move(view));
+    }
+    if (!paused.empty()) {
+        const auto waiting = std::ranges::find(priority,"waiting") - std::begin(priority);
+        highest = std::max(highest,static_cast<std::size_t>(waiting));
+    }
     result["presence"] = priority[highest];
+    return result;
+}
+
+Json historyPage(const Json& events) {
+    const bool more = events.size() > conversationSize;
+    Json result = {{"events",Json::array()},{"olderBefore",0}};
+    auto& page = result["events"];
+    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
+        page.push_back(eventView(*event));
+    if (more) result["olderBefore"] = page.front().at("id");
     return result;
 }
 } // namespace
@@ -307,25 +348,13 @@ Json botList(Store& store, const Json& bots) {
     return result;
 }
 
+
 Json conversation(Store& store, std::string_view bot, Id before) {
-    const auto events = store.conversation(bot,before,conversationSize + 1);
-    const bool more = events.size() > conversationSize;
-    Json result = {{"events",Json::array()},{"olderBefore",0}};
-    auto& page = result["events"];
-    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
-        page.push_back(eventView(*event));
-    if (more) result["olderBefore"] = page.front().at("id");
-    return result;
+    return historyPage(store.conversation(bot,before,conversationSize + 1));
 }
 
 Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before) {
-    const auto events = store.peerConversation(bot,peer,before,conversationSize + 1);
-    const bool more = events.size() > conversationSize;
-    Json result = {{"messages",Json::array()},{"hasOlder",more}};
-    auto& page = result["messages"];
-    for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
-        page.push_back(eventView(*event));
-    return result;
+    return historyPage(store.peerConversation(bot,peer,before,conversationSize + 1));
 }
 
 Json sessions(Store& store, std::string_view bot, Id before) {
@@ -384,14 +413,6 @@ Json botView(Store& store, const Json& bot) {
     result.update(activity(store,id));
     result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
-    auto& paused = result["pausedConversations"] = Json::array();
-    for (const auto& turn : store.pausedConversations(id)) {
-        Json view = Json::object();
-        copyFields(view,turn,{"messageId","text","route"});
-        paused.push_back(std::move(view));
-    }
-    if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
-        result["presence"] = "waiting";
     return result;
 }
 } // namespace flockv0::web

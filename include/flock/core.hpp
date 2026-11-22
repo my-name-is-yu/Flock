@@ -117,6 +117,9 @@ public:
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
+// Operations available for a task's current wait.
+Json waitOperations(const Json& task);
+
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -137,6 +140,9 @@ public:
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
     void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
+    // Loads corrected settings for a current, unsent settings wait. The loader must not call Store.
+    using ReconcileSettings = std::function<Intake(std::string_view botId)>;
+    void reconcile(Id taskId, Id waitId, Json data, const ReconcileSettings& loadSettings);
     Json task(Id taskId) const;
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.

@@ -6,6 +6,7 @@ std::string field(const Json&, std::string_view);
 Json botList(Store&, const Json&);
 Json botSettings(const Json&);
 Json botView(Store&, const Json&);
+// Both chat streams return chronological events and an exclusive olderBefore cursor.
 Json conversation(Store&, std::string_view bot, Id before);
 Json peerConversation(Store&, std::string_view bot, std::string_view peer, Id before);
 Json sessions(Store&, std::string_view bot, Id before);

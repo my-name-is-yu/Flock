@@ -86,8 +86,12 @@ build/app/flock answer TASK_ID WAIT_ID "Use main"
 
 For an offline demonstration, use a separate Flock home and start
 `flock run --fixed`, with `--no-web` if the build omits Web support. A request
-starting with `ask:` produces a demo Bot question, and replying lets the
-fixture Session run to completion.
+submitted with `flock submit BOT REQUEST` runs in the fixture Session. In Web
+chat, send a message and select **Run a demo task** to start a task. To exercise
+a task question, start the Runtime with
+`flock run --fixed --demo-question "Which dataset should I use?"`.
+Reply to the displayed question to let the fixture Session continue. To
+inspect a result, reply to that result with `Explain this result`.
 
 ## Model call allowance
 

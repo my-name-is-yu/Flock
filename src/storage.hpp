@@ -60,7 +60,7 @@ struct Store::Impl {
     std::optional<conversation::Message> turnMessage(Id messageId) const;
     Json turnInput(const conversation::Message&, int step) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&);
-    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
+    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, bool failed);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, std::string_view bot) const;
     Json writableTask(const Json& args, const conversation::Message&) const;

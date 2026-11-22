@@ -1,26 +1,13 @@
 import { DEFAULT_COLOR, getExample, renderAvatarSvg, validateAvatar } from '/vendor/open-bot-avatar/index.js';
 import { mountAvatar } from '/vendor/open-bot-avatar/dom/index.js';
 
-export const AVATAR_SHAPES = [
-  ['mug', 'Mug'],
-  ['sprout', 'Sprout'],
-  ['controller', 'Controller'],
-  ['lightbulb', 'Lightbulb'],
-  ['chat', 'Chat'],
-  ['watering-can', 'Watering can'],
-  ['barbell', 'Barbell'],
-];
+import catalog from '/avatar-catalog.js';
 
-export const AVATAR_ICONS = [
-  ['star', 'Star'],
-  ['orbit', 'Orbit'],
-  ['zap', 'Bolt'],
-  ['compass', 'Compass'],
-  ['feather', 'Feather'],
-  ['hexagon', 'Hexagon'],
-  ['telescope', 'Telescope'],
-  ['sparkles', 'Sparkle'],
-];
+export { catalog };
+const title = (id) => id[0].toUpperCase() + id.slice(1).replaceAll('-', ' ');
+const iconLabels = { zap: 'Bolt', sparkles: 'Sparkle' };
+export const AVATAR_SHAPES = catalog.allowedShapes.map((id) => [id, title(id)]);
+export const AVATAR_ICONS = catalog.allowedIcons.map((id) => [id, iconLabels[id] ?? title(id)]);
 
 export const AVATAR_COLORS = [
   ['Coral', '#ee8d85'],
@@ -55,7 +42,7 @@ const galleryColors = {
   'watering-can': '#14b3a5',
   barbell: '#f2384b',
 };
-const defaultShapeOrder = Object.keys(galleryColors);
+const defaultShapeOrder = catalog.allowedShapes;
 const ink = '#14121c';
 const lightInk = '#fafaff';
 const hex = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
@@ -69,6 +56,8 @@ function luminance(color) {
   });
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
+
+export function needsAvatarOutline(color) { return luminance(color) > 0.72; }
 
 export function contrastingEyeColor(color) {
   const body = luminance(color);
@@ -93,7 +82,7 @@ export function resolveAvatar(bot) {
 
   let hash = 2166136261;
   for (const char of id) hash = Math.imul(hash ^ char.codePointAt(0), 16777619) >>> 0;
-  const avatar = typeof bot?.avatar === 'string' ? { example: bot.avatar } : (bot?.avatar ?? {});
+  const avatar = bot?.avatar ?? {};
   const example = getExample(avatar?.example) ?? getExample(defaultShapeOrder[hash % defaultShapeOrder.length]);
   const definition = avatar?.definition;
   let validated;
@@ -174,8 +163,7 @@ export function showAvatar(host, bot, { still = true, state = 'idle', followPoin
 
   const shape = resolved.shape;
   host.classList.add('avatar-kind-shape');
-  const isPale = luminance(shape.color) > 0.72;
-  host.classList.toggle('mug-outline', isPale);
+  host.classList.toggle('mug-outline', needsAvatarOutline(shape.color));
   if (still) {
     host.innerHTML = renderAvatarSvg(shape.definition, {
       color: shape.color,

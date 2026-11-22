@@ -2,6 +2,8 @@ import {
   AVATAR_COLORS,
   AVATAR_ICONS,
   AVATAR_SHAPES,
+  catalog,
+  needsAvatarOutline,
   resolveAvatar,
   showAvatar,
 } from '/avatars.js';
@@ -18,8 +20,9 @@ const RANDOM_NAMES = [
   'Nimbus', 'Sol', 'Pebble', 'Scout', 'Fig', 'Ollie', 'Pogo', 'Nova',
 ];
 
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-const ALLOWED_MIME = /^image\/(png|jpeg|webp|gif)$/;
+const uploadFormats = catalog.imageTypes.map((type) => ({ 'image/webp': 'WebP' }[type] ?? type.split('/')[1].toUpperCase()));
+const uploadLimit = `${catalog.maxImageBytes / (1024 * 1024)} MiB`;
+const uploadDescription = `${new Intl.ListFormat('en', { type: 'disjunction' }).format(uploadFormats)}, up to ${uploadLimit}`;
 
 const UI_ICONS = {
   'chevron-right': '<path d="m9.5 6.5 5.5 5.5-5.5 5.5"/>',
@@ -121,8 +124,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           <label class="studio-drop" id="studio-drop" for="studio-photo">
             ${uiIcon('upload')}
             <strong id="studio-upload-label">Choose an image</strong>
-            <span>PNG, JPEG, WebP or GIF, up to 5 MB</span>
-            <input id="studio-photo" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+            <span>${uploadDescription}</span>
+            <input id="studio-photo" type="file" accept="${catalog.imageTypes.join(',')}">
           </label>
           <button class="dialog-button quiet studio-remove-upload" id="studio-remove-upload" type="button" hidden>Remove image</button>
           <p class="studio-error" id="studio-upload-error" role="alert" hidden></p>
@@ -247,6 +250,10 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     if (state.kind === 'icon') {
       return { kind: 'icon', icon: state.icon, color: state.color };
     }
+    if (state.definition) {
+      return { kind: 'shape', definition: state.definition, color: state.color,
+        ...(state.originalAvatar?.eyeColor && { eyeColor: state.originalAvatar.eyeColor }) };
+    }
     return { kind: 'shape', example: state.shape, color: state.color };
   }
 
@@ -296,7 +303,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
           color: resolved.shape.color,
           eyeColor: resolved.shape.eyeColor,
         });
-        els.heroAvatar.classList.toggle('mug-outline', resolved.shape.color.toLowerCase() === '#e1dfdf' || resolved.shape.color.toLowerCase() === '#f4f4f4');
+        els.heroAvatar.classList.toggle('mug-outline', needsAvatarOutline(resolved.shape.color));
       } else {
         destroyHero();
         heroHandle = showAvatar(els.heroAvatar, previewBot(avatar), {
@@ -306,7 +313,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
         });
         heroRenderedKind = 'shape';
       }
-      const look = `${avatar.example}|${avatar.color}`;
+      const look = `${resolved.shape.definition.id}|${resolved.shape.color}`;
       if (look !== celebratedLook) {
         celebratedLook = look;
         if (state.lookChanged) celebrate();
@@ -341,7 +348,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     }
     for (const btn of els.gallery.querySelectorAll('button')) {
       const value = btn.dataset.value;
-      const selected = (kind === 'shape' ? state.shape : state.icon) === value;
+      const selected = (kind === 'shape' ? !state.definition && state.shape : state.icon) === value;
       btn.setAttribute('aria-pressed', String(selected));
       if (renderedGalleryKind !== kind || renderedGalleryColor !== state.color) {
         const optionAvatar = kind === 'shape'
@@ -402,8 +409,8 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   function handleSelectedFile(file) {
     const generation = ++uploadGeneration;
     if (!file) return;
-    if (!ALLOWED_MIME.test(file.type) || file.size > MAX_UPLOAD_BYTES) {
-      setUploadError('Choose a PNG, JPEG, WebP or GIF up to 5 MB.');
+    if (!catalog.imageTypes.includes(file.type) || file.size > catalog.maxImageBytes) {
+      setUploadError(`Choose ${uploadDescription}.`);
       els.photo.value = '';
       return;
     }
@@ -444,18 +451,14 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.save.textContent = saveLabel();
 
     // Snapshot the request before any await so it always targets the Bot this editor opened.
-    const target = { mode, botId: state.botId, role: state.role, look: { ...state } };
+    const target = { mode, botId: state.botId, role: state.role, look: { ...state }, appearance: currentDraftAvatar() };
     try {
       let avatar;
       const { look } = target;
       if (target.mode === 'create' || look.lookChanged) {
-        avatar = { kind: look.kind, color: look.color };
-        if (look.kind === 'shape') {
-          avatar.example = look.shape;
-        } else if (look.kind === 'icon') {
-          avatar.icon = look.icon;
-        } else if (look.kind === 'upload') {
-          if (look.filename) avatar.filename = look.filename;
+        avatar = { ...target.appearance };
+        if (look.kind === 'upload') {
+          delete avatar.imageUrl;
           if (look.uploadFile) {
             avatar.imageData = await readFileAsBase64(look.uploadFile);
           } else if (!look.existingImageUrl) {
@@ -475,7 +478,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     } catch (error) {
       const messages = {
         invalid_name: 'Enter a name between 1 and 32 characters.',
-        invalid_image: 'Choose a PNG, JPEG, WebP or GIF up to 5 MB.',
+        invalid_image: `Choose ${uploadDescription}.`,
         invalid_avatar: 'Check the selected avatar options and try again.',
         bot_not_found: 'This Bot no longer exists.',
         bot_management_unavailable: 'Bot editing is unavailable on this server.',
@@ -507,7 +510,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
   els.start.addEventListener('click', (event) => {
     const preset = event.target.closest('button[data-preset]')?.dataset.preset;
-    if (!preset) return;
+    if (!catalog.allowedRoles.includes(preset)) return;
     state.role = preset;
     setStep('editor');
   });
@@ -546,8 +549,10 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   els.gallery.addEventListener('click', (event) => {
     const btn = event.target.closest('button[data-value]');
     if (!btn) return;
-    if (state.kind === 'shape') state.shape = btn.dataset.value;
-    else if (state.kind === 'icon') state.icon = btn.dataset.value;
+    if (state.kind === 'shape') {
+      state.definition = null;
+      state.shape = btn.dataset.value;
+    } else if (state.kind === 'icon') state.icon = btn.dataset.value;
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
@@ -566,6 +571,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
   els.shuffle.addEventListener('click', () => {
     if (state.kind === 'shape') {
+      state.definition = null;
       state.shape = pickDifferent(AVATAR_SHAPES.map(([id]) => id), state.shape);
     } else if (state.kind === 'icon') {
       state.icon = pickDifferent(AVATAR_ICONS.map(([id]) => id), state.icon);
@@ -686,6 +692,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       uploadFile: null,
       filename: resolved.kind === 'upload' ? resolved.filename : '',
       originalAvatar: bot.avatar ?? null,
+      definition: bot.avatar?.definition ?? null,
       lookChanged: false,
     };
     if (!dialog.open) dialog.showModal();

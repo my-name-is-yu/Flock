@@ -8,6 +8,8 @@
 #include <iostream>
 #include <set>
 #include <sstream>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -85,6 +87,37 @@ void cronSyntaxAndTimeZones() {
     rejects<Conflict>([] { Cron("* * * * *","Not/A_Zone"); },"unknown time zone accepted");
 }
 
+void cronCardsAndExecutionShareValidation() {
+    Sandbox temp;
+    const auto directory = temp.path / "bots" / "release";
+    auto config = botConfig();
+    config["avatar"] = "mug";
+    config["cron"] = Json::array({
+        {{"id","daily"},{"schedule","0 * * * *"},{"timezone","Etc/UTC"},{"request","Check release"}}
+    });
+    createBot(directory,config,"Release","");
+    Bots bots(temp.path / "bots");
+    check(bots.cards().at(0).at("cron") == config["cron"] && !bots.cards().at(0).contains("avatar"),"card must use canonical schedules and structured avatars");
+    config["cron"].push_back(config["cron"].front());
+    write(directory / "config.json",config.dump());
+    Store store(temp.path / "state.db");
+    unsigned failures = 0;
+    Scheduler scheduler(bots,store,0,[&](auto,auto) { ++failures; });
+    scheduler.tick(0);
+    check(bots.cards().at(0).at("cron").empty() && failures == 1 && store.tasks().empty(),
+          "duplicate schedule IDs must invalidate the same schedules for cards and the scheduler");
+    config["cron"].erase(1);
+    config["cron"][0]["timezone"] = "Invalid/Zone";
+    write(directory / "config.json",config.dump());
+    scheduler.tick(60);
+    check(bots.cards().at(0).at("cron").empty() && failures == 2 && store.tasks().empty(),
+          "an invalid timezone must be unavailable in cards and the scheduler");
+    config["cron"] = Json::array();
+    config["modelProvider"] = "unsupported";
+    write(directory / "config.json",config.dump());
+    rejects<Conflict>([&] { bots.get("release"); },"unsupported model provider loaded as executable config");
+}
+
 void cronIntakeAndRestart() {
     Sandbox temp;
     const auto folder = temp.path / "bots" / "release";
@@ -142,10 +175,11 @@ public:
 class NotesT3 final : public T3 {
 public:
     std::vector<Command> commands;
-    bool finished = false;
+    bool finished = false, settingsError = false;
     std::string authGeneration(const std::string&,const Json&) override { return "test-auth"; }
     Delivery send(const Command& command) override {
         commands.push_back(command);
+        if (settingsError) return {Delivery::Kind::Settings,{},"Invalid fixture session settings",true};
         return {Delivery::Kind::Accepted,{"thread-" + command.actionId,"run-" + command.actionId,"link"},{}};
     }
     Delivery reconcile(const Command&) override { throw std::runtime_error("Unexpected reconcile"); }
@@ -371,7 +405,7 @@ void notesAcrossConversationAndWork() {
     runtime.runConversations();
     const auto failure = store.conversation(firstIntake.botId).back().at("data");
     check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
-          failure.at("route") == "error" &&
+          failure.at("status") == "error" &&
           failure.at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
           "an unreadable note must prompt repair without calling the model or creating work");
 
@@ -618,40 +652,48 @@ void fixedDemoWithUserCriteriaAndContinuation() {
           sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
 }
 
-void fixedDemoFollowUpKeepsTheExplainedResult() {
+void fixedDemoRequiresExplicitIntent() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
     const Intake intake{"demo","Measure the result","local","project"};
-    const auto task = store.submit(intake);
-    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
-    const auto result = store.latestTaskResult(task).at("id").get<Id>();
-    const auto replyTo = [&](Id message) {
+    const auto send = [&](std::string_view key, std::string_view text, Id anchor = 0) {
+        const auto message = store.receive(intake,key,text,anchor).at("messageId");
+        runtime.runConversations();
         for (const auto& row : store.conversation("demo"))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
-        return Json(nullptr);
+        throw std::runtime_error("Missing demo reply");
     };
-    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
-    runtime.runConversations();
-    const auto explanation = replyTo(question);
-    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
-        .at("messageId").get<Id>();
-    runtime.runConversations();
-    check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
-          "a follow-up to the fixed demo's explanation started work instead of reading the same result");
+    const auto greeting = send("hello","Hello");
+    check(greeting.at("suggestions") == Json::array({"Run a demo task"}) && store.tasks().empty(),
+          "greeting created work or omitted the explicit demo action");
+    send("start","Run a demo task",greeting.at("messageId"));
+    const auto tasks = store.tasks();
+    check(tasks.size() == 1,"the explicit demo action did not create one task");
+    const auto task = tasks.front().at("id").get<Id>();
+    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
+    const auto result = store.latestTaskResult(task).at("id").get<Id>();
+    const auto plain = send("thanks","Thanks",result);
+    const auto explanation = send("explain","Explain this result",result);
+    const auto other = send("wrong-target","Explain this result",plain.at("messageId"));
+    check(store.tasks("demo").size() == 1 && plain.at("text") == greeting.at("text") &&
+          other.at("actions").empty() && explanation.at("text") != plain.at("text"),
+          "demo result explanation did not require intent and a result anchor");
 }
 
 void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    const auto demo = makeDemoModel();
+    const auto demo = makeDemoModel("Which dataset should I use?");
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
-    const Intake intake{"demo","ask: Which dataset should I use?","local","project"};
+    const Intake intake{"demo","Measure the result","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
+    check(store.task(task).at("wait").at("text") == "Which dataset should I use?",
+          "the explicit demo question was not used");
     const auto question = store.task(task).at("wait").at("messageId").get<Id>();
 
     store.receive(intake,"dataset-answer","Use the release dataset",question);
@@ -776,18 +818,27 @@ void botProfilesAndAvatars() {
     });
     const auto loaded = bots.get("release");
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
-          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          loaded.projectId == "project-canonical",
           "editing profile altered existing Bot execution configuration");
+    check(std::ranges::any_of(bots.cards(),[](const Json& card) {
+        return card.at("id") == "release" && card.at("avatar").at("icon") == "compass";
+    }),"edited Bot card did not retain the selected icon");
 
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
     std::filesystem::create_directories(customDir);
-    const Json customAvatar = {{"definition",{{"id","badge"},{"body",{{"path","M0 0h10v10z"}}}}},{"color","#123456"},{"eyeColor","#0000ff"}};
+    const Json definition = {{"version",1},{"id","badge"},{"name","Badge"},
+        {"body",{{"path","M10 10H90V90H10Z"}}},{"eyes",{{"x",50},{"y",50},{"spacing",20},{"scale",1}}}};
+    const Json customAvatar = {{"kind","shape"},{"definition",definition},{"color","#123456"},{"eyeColor","#0000ff"}};
     { std::ofstream(customDir / "config.json") << Json{{"name","Custom"},{"avatar",customAvatar}}.dump(); }
     { std::ofstream(customDir / "avatar.png") << pngBytes; }
     const auto customRenamed = bots.updateProfile("custom",{{"name","Custom Two"}});
     check(customRenamed.at("name") == "Custom Two" && customRenamed.at("avatar") == customAvatar,
           "name-only update replaced a custom avatar");
+    auto recolored = customAvatar;
+    recolored["color"] = "#fedcba";
+    check(bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",recolored}}).at("avatar") == recolored,
+          "recoloring a custom avatar replaced its definition");
     bots.updateProfile("custom",{
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
@@ -805,12 +856,79 @@ void botProfilesAndAvatars() {
     std::ifstream bigFile(bigDir / "config.json");
     check(std::string(std::istreambuf_iterator<char>(bigFile),{}) == bigText,"rejected save changed config.json");
 }
+void cliCommands(const std::filesystem::path& executable) {
+    Sandbox home;
+    const auto invoke = [&](std::initializer_list<std::string> cliArgs, int expectedStatus) {
+        std::vector<std::string> args{executable.string(),"--home",home.path.string()};
+        args.insert(args.end(),cliArgs);
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        const auto output = home.path / "cli-output";
+        const auto child = fork();
+        check(child >= 0,"could not start CLI fixture");
+        if (child == 0) {
+            const int fd = open(output.c_str(),O_WRONLY | O_CREAT | O_TRUNC,0600);
+            if (fd < 0 || dup2(fd,STDOUT_FILENO) < 0 || dup2(fd,STDERR_FILENO) < 0) _exit(126);
+            close(fd);
+            execv(argv[0],argv.data());
+            _exit(127);
+        }
+        int status = 0;
+        check(waitpid(child,&status,0) == child,"could not collect CLI fixture");
+        std::ifstream stream(output);
+        std::ostringstream bytes;
+        bytes << stream.rdbuf();
+        const auto text = bytes.str();
+        check(WIFEXITED(status) && WEXITSTATUS(status) == expectedStatus,"unexpected CLI result: " + text);
+        return text;
+    };
+    const auto help = invoke({"--help"},0);
+    check(help.find("--no-web") != std::string::npos && help.find("--headless") == std::string::npos &&
+          invoke({"run","--fixed","--headless"},1).find("Unknown run option: --headless") != std::string::npos &&
+          invoke({"run","--fixed","--no-web","--unexpected"},1).find("Unknown run option: --unexpected") != std::string::npos,
+          "CLI should expose the canonical Web flag only");
+
+    const auto directory = home.path / "bots" / "release";
+    auto config = botConfig();
+    createBot(directory,config,"","");
+    const Bots bots(home.path / "bots");
+    Store store(home.path / "flock.sqlite3");
+    const auto first = store.submit(bots.get("release").intake("First"));
+    const auto second = store.submit(bots.get("release").intake("Second"));
+    check(Json::parse(invoke({"tasks","release","--before",std::to_string(second),"--limit","1"},0)).at(0).at("id") == first,
+          "tasks did not apply its Bot filter and before cursor");
+    const auto initial = store.history(first).at(0).at("id").get<Id>();
+    check(Json::parse(invoke({"history",std::to_string(first),"--after",std::to_string(initial),"--limit","1"},0)).empty(),
+          "history did not apply its exclusive after cursor");
+    invoke({"tasks","--after","1"},1);
+    invoke({"history",std::to_string(first),"--before","1"},1);
+
+    NotesModel model;
+    NotesT3 t3;
+    t3.settingsError = true;
+    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    for (int i = 0; i < 8 && store.task(first).at("state") != "waiting"; ++i) runtime.tick();
+    const auto waiting = store.task(first);
+    const auto wait = waiting.at("wait").at("id").get<Id>();
+    check(waiting.at("wait").at("reason") == "settings","CLI fixture did not reach an unsent settings wait");
+    config["session"]["runtimeMode"] = "approval-required";
+    write(directory / "config.json",config.dump());
+    const auto stale = invoke({"reconcile",std::to_string(first),std::to_string(wait + 1)},1);
+    check(stale.find("Waiting item is no longer current") != std::string::npos && store.task(first) == waiting,
+          "CLI reconcile changed a stale wait");
+    const auto reconciled = Json::parse(invoke({"reconcile",std::to_string(first),std::to_string(wait)},0));
+    check(reconciled.at("config").at("session").at("runtimeMode") == "approval-required" &&
+          reconciled.at("state") == "sending","CLI reconcile did not delegate settings refresh to the Store");
 }
 
-int main() {
+}
+
+int main(int argc, char** argv) {
     try {
         cronSyntaxAndTimeZones();
         cronIntakeAndRestart();
+        cronCardsAndExecutionShareValidation();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();
@@ -818,8 +936,10 @@ int main() {
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
-        fixedDemoFollowUpKeepsTheExplainedResult();
+        fixedDemoRequiresExplicitIntent();
         botProfilesAndAvatars();
+        const auto executable = argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path(argv[0]).parent_path() / "flock";
+        cliCommands(executable);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

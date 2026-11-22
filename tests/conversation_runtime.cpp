@@ -1179,7 +1179,7 @@ void unknownSessionDeliverySurvivesTurnFailure() {
     for (const auto* text : {"Send the note","Interrupt the run"}) {
         const auto receipt = f.receive(text,text);
         const auto response = f.response(receipt);
-        check(f.lastTurn()[0]["result"]["delivery"] == "unknown" && response["route"] == "error" &&
+        check(f.lastTurn()[0]["result"]["delivery"] == "unknown" && response["status"] == "error" &&
               response["text"].get<std::string>().find("Check the Session") != std::string::npos,
               "An uncertain Session action was reported as safe to retry");
     }

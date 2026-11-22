@@ -53,7 +53,9 @@ struct FixedT3 : T3 {
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
     Delivery send(const Command& command) override {
         if (command.tool == "delegate") {
-            if (command.projectId == "settings") return {Delivery::Kind::Settings,{},privateValue};
+            if (command.projectId == "settings" &&
+                command.config.value("session",Json::object()).value("runtimeMode","") != "approval-required")
+                return {Delivery::Kind::Settings,{},privateValue,true};
             const auto& project = command.projectId;
             const auto link = project == "triage" ? "http://localhost:3773/linked%20env/thread-triage" : "javascript:unexpected";
             return {Delivery::Kind::Accepted,{"thread-" + project,"run-" + project + "-" + std::to_string(++launches[project]),link},{}};
@@ -75,15 +77,19 @@ WebCallbacks callbacks() {
                 {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
                     {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
                         {"request","前日の変更を確認する"},{"token",privateValue}}})},
-                    {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
+                    {"avatar",{{"kind","shape"},{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
                 {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
                 {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
                 {{"id","broken"},{"name","Broken"}},
+                {{"id","bad-config"},{"name","Bad config"}},
+                {{"id","profile-only"},{"name","Profile only"}},
             });
         },
-        [](std::string_view bot, std::string_view request) -> Intake {
+        [](std::string_view bot, std::string_view request) -> std::optional<Intake> {
             if (bot == "broken") throw std::runtime_error(privateValue);
-            return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
+            if (bot == "bad-config") throw Conflict(privateValue);
+            if (bot == "profile-only") return std::nullopt;
+            return Intake{std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
                 std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
         }
     };
@@ -147,7 +153,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/app.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
+    for (const auto* path : {"/app.js","/avatar-catalog.js","/avatars.js","/bot-editor.js","/bot-editor.css","/style.css","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
@@ -167,7 +173,14 @@ void boundary(Browser& browser) {
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
-    browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
+    check(browser.post("/api/messages",{{"botId","broken"},{"clientMessageId","broken"},{"text","test"}},500)
+              .at("error") == "server_error","unexpected intake failures must propagate to the server error handler");
+    check(browser.post("/api/messages",{{"botId","bad-config"},{"clientMessageId","bad-config"},{"text","test"}},422)
+              .at("error") == "intake_settings","invalid configuration was treated as a profile-only Bot");
+    check(browser.post("/api/messages",{{"botId","profile-only"},{"clientMessageId","profile-only"},{"text","hello"}},201)
+              .at("status") == "received","a profile without execution settings could not receive chat");
+    check(browser.get("/api/view?bot=broken").at("events").empty() &&
+          browser.get("/api/view?bot=bad-config").at("events").empty(),"failed intake recorded a message");
 }
 
 void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
@@ -406,7 +419,7 @@ void peerConversation(const std::filesystem::path& path) {
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
         const auto empty = browser.get(primary);
-        check(empty.at("messages").empty() && empty.at("hasOlder") == false &&
+        check(empty.at("events").empty() && empty.at("olderBefore") == 0 &&
               !empty.contains("canSend") && browser.get(reverse) == empty,
               "an unused permitted pair did not open as the same read-only history");
         browser.post("/api/peer-messages",{{"botId","release"},{"peerId","triage"},
@@ -416,16 +429,16 @@ void peerConversation(const std::filesystem::path& path) {
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=triage&peer=settings"),403);
 
         seedPeerHistory(browser,runtime,t3);
-        history = browser.get(primary).at("messages");
-        check(history.size() == 2 && history == browser.get(reverse).at("messages"),
+        history = browser.get(primary).at("events");
+        check(history.size() == 2 && history == browser.get(reverse).at("events"),
               "an exchange was missing, duplicated, or different from the opposite Bot page");
         check(history.at(0).at("data").at("text") == "判定基準を教えて" &&
               history.at(1).at("data").at("text") == "再現条件を確認してください" &&
               history.at(0).at("id").get<Id>() < history.at(1).at("id").get<Id>(),
               "the conversation lost its messages or order");
-        check(browser.get(separate).at("messages").empty(),"an exchange leaked to another allowed pair");
+        check(browser.get(separate).at("events").empty(),"an exchange leaked to another allowed pair");
         const auto before = std::to_string(history.back().at("id").get<Id>());
-        check(browser.get(std::string(reverse) + "&before=" + before).at("messages") == Json::array({history.front()}),
+        check(browser.get(std::string(reverse) + "&before=" + before).at("events") == Json::array({history.front()}),
               "the peer history cursor repeated the anchor or skipped older messages");
 
         const auto checkProjection = [](const Json& messages) {
@@ -443,17 +456,30 @@ void peerConversation(const std::filesystem::path& path) {
         Store store(path);
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
-        check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
+        check(browser.get(primary).at("events") == history,"restarting lost the conversation");
         allowed = false;
-        check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
+        check(browser.get(reverse).at("events") == history,"removing a grant lost existing history");
         configured = false;
-        check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
+        check(browser.get(primary).at("events") == history,"removing a peer's configuration lost history");
         const auto list = browser.get("/api/bots");
         const auto release = std::ranges::find_if(list,[](const Json& bot) { return bot.at("id") == "release"; });
         check(release != list.end() && std::ranges::any_of(release->at("peers"),[](const Json& peer) {
             return peer == Json{{"id","triage"}};
         }),"the picker lost the archived conversation or exposed a send action");
     }
+}
+
+void privateQueueBlocker(const std::filesystem::path& path) {
+    Store store(path);
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    store.submit({"triage","Private task label","local-env","shared-private"});
+    const auto blocked = store.submit({"release","Waiting on a private task","local-env","shared-private"});
+    const auto queue = browser.get("/api/view?bot=release").at("queued");
+    const auto hidden = std::ranges::find_if(queue,[&](const Json& row) { return row.at("id") == blocked; });
+    check(hidden != queue.end() && hidden->at("blockedBy") == Json{{"hidden",true}},
+          "a private queue blocker needs a marker without identifying data");
+
 }
 
 void exercise(const std::filesystem::path& path) {
@@ -496,6 +522,9 @@ void exercise(const std::filesystem::path& path) {
           triagePage["waits"][0]["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage" &&
           triagePage["sessionTasks"][0]["sessions"][0]["link"] == "http://localhost:3773/linked%20env/thread-triage",
           "T3 links did not preserve environment and Thread ownership");
+    check(waits[0]["wait"]["allowedOperations"] == Json::array({"cancel","answer"}) &&
+          triagePage["waits"][0]["wait"]["allowedOperations"] == Json::array({"cancel"}),
+          "wait operations did not match task eligibility");
     const auto settingsPage = browser.get("/api/view?bot=settings");
     check(settingsPage["waits"][0]["id"] == settings && settingsPage["waits"][0]["wait"]["reason"] == "settings",
           "configuration failure was not classified");
@@ -550,8 +579,19 @@ void exercise(const std::filesystem::path& path) {
     finished.settled = true;
     runtime = std::make_unique<Runtime>(store,model,t3,notes);
     tick(*runtime,2);
-    server = startWeb(store,port,callbacks());
+    auto corrected = callbacks();
+    corrected.intake = [read = corrected.intake](std::string_view bot, std::string_view request) {
+        auto intake = read(bot,request);
+        if (bot == "settings") intake->config["session"] = {{"runtimeMode","approval-required"}};
+        return intake;
+    };
+    server = startWeb(store,port,std::move(corrected));
     Browser reopened(*server);
+    reopened.post("/api/operations",{{"botId","settings"},{"taskId",settings},{"operation","reconcile"},
+        {"waitId",settingsPage["waits"][0]["wait"]["id"]},{"session",{{"runtimeMode","client-override"}}}});
+    tick(*runtime,2);
+    check(cli.task(settings).at("state") == "running" && t3.launches["settings"] == 1,
+          "Web reconciliation did not use the corrected settings for the unsent action");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
           hasEvent(page["events"],"completed","text","Draft complete"),
@@ -659,6 +699,8 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     const auto server = startWeb(store,0,std::move(cb));
     Browser browser(*server);
 
+    browser.post("/api/bots",{{"name","Legacy"},{"avatar","sprout"}},400);
+
     // 1x1 transparent PNG (67 bytes) base64
     const std::string validPngBase64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -729,6 +771,12 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(iconed.at("avatar").at("kind") == "icon" && iconed.at("avatar").at("icon") == "sparkles",
           "switching to icon avatar failed");
     Browser::checked(browser.client.Get("/api/bot-avatar?bot=bot-1"),404);
+    const Json definition = {{"version",1},{"id","badge"},{"name","Badge"},
+        {"body",{{"path","M10 10H90V90H10Z"}}},{"eyes",{{"x",50},{"y",50},{"spacing",20},{"scale",1}}}};
+    const auto recolored = browser.post("/api/bots/profile",{{"botId","bot-1"},{"name","Scout"},
+        {"avatar",{{"kind","shape"},{"definition",definition},{"color","#123456"}}}});
+    check(recolored.at("avatar").at("definition") == definition &&
+          recolored.at("avatar").at("color") == "#123456","profile update dropped the custom shape");
 
     // Reject invalid inputs cleanly.
     browser.post("/api/bots",{
@@ -755,6 +803,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
 int main() {
     try {
         TestDirectory directory;
+        privateQueueBlocker(directory.path / "private-queue.db");
         exercise(directory.path / "state.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");

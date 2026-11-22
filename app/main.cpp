@@ -21,7 +21,7 @@ namespace flockv0::app {
 namespace {
 constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
-  run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand|prefill]
+  run [--fixed [--demo-question QUESTION]] [--no-web] [--port PORT] [--session-read off|on_demand|prefill]
   bots
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
@@ -144,12 +144,18 @@ void requestStop(int) { stopRequested = 1; }
 
 void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bots& bots) {
     bool fixed = false, web = true;
+    std::string demoQuestion;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
     while (!args.empty()) {
         const auto option = args.pop("run option");
         if (option == "--fixed") fixed = true;
-        else if (option == "--no-web" || option == "--headless") web = false;
+        else if (option == "--no-web") web = false;
+        else if (option == "--demo-question") {
+            demoQuestion = args.pop("demo question");
+            if (demoQuestion.find_first_not_of(" \t\r\n") == std::string::npos || demoQuestion.size() > 8000)
+                throw Conflict("Demo question must contain 1 to 8,000 bytes of text");
+        }
         else if (option == "--port") port = static_cast<unsigned>(number(args,"port",0,65535));
         else if (option == "--session-read") {
             options.sessionRead = args.pop("session read mode");
@@ -157,6 +163,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
                 throw Conflict("Session read mode must be off, on_demand or prefill");
         } else throw Conflict("Unknown run option: " + option);
     }
+    if (!demoQuestion.empty() && !fixed) throw Conflict("--demo-question requires --fixed");
 #ifndef FLOCK_WITH_WEB
     if (web) throw Conflict("This build does not include the Web UI. Run with --no-web.");
 #endif
@@ -166,7 +173,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
-        model = makeDemoModel();
+        model = makeDemoModel(std::move(demoQuestion));
         t3 = makeDemoT3();
     }
 #ifdef FLOCK_WITH_T3
@@ -185,7 +192,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     if (web) {
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
-            [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+            [&](std::string_view botId,std::string_view request) { return bots.configuredIntake(botId,request); },
             [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
             [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
                 return bots.updateProfile(botId,profile,image);
@@ -228,41 +235,44 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
             else if (flag == "--question") details["questionId"] = args.pop("question ID");
             else throw Conflict("Unknown reconciliation option: " + flag);
         }
-        const auto status = store.task(task);
-        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
-            (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
-            const auto bot = bots.get(status["botId"].get<std::string>());
-            const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
-            const auto& environment = status.at("environmentId");
-            const bool allowed = environment == bot.environmentId ||
-                std::ranges::find(destinations,environment) != destinations.end();
-            if (!allowed || status["projectId"] != Json(bot.projectId))
-                throw Conflict("The project route changed. Cancel this task and submit a new request.");
-            details["session"] = bot.settings.value("session",Json::object());
-        }
+        store.reconcile(task,wait,std::move(details),[&](std::string_view botId) {
+            return bots.get(botId).intake("");
+        });
+        print(store.task(task));
+        return;
     }
     args.end();
     store.operate(task,wait,operation,details);
     print(store.task(task));
 }
 
-void taskCommand(Store& store, const std::string& command, Arguments& args) {
-    Id task = 0, cursor = 0;
+struct PageOptions {
+    Id cursor = 0;
     unsigned limit = 50;
-    std::string bot;
-    if (command == "history") task = number(args,"task ID");
-    else if (!args.empty() && !args.peek().starts_with("--")) bot = args.pop("Bot ID");
+};
+
+PageOptions pageOptions(Arguments& args, std::string_view cursorFlag) {
+    PageOptions page;
     while (!args.empty()) {
         const auto flag = args.pop("pagination option");
-        if ((command == "history" && flag == "--after") || (command == "tasks" && flag == "--before"))
-            cursor = number(args,"cursor",0);
-        else if (flag == "--limit") limit = static_cast<unsigned>(number(args,"limit",1,200));
+        if (flag == cursorFlag) page.cursor = number(args,"cursor",0);
+        else if (flag == "--limit") page.limit = static_cast<unsigned>(number(args,"limit",1,200));
         else throw Conflict("Unknown pagination option: " + flag);
     }
-    if (command == "history") {
-        if (!store.hasTask(task)) throw Conflict("Task does not exist");
-        print(store.history(task,cursor,limit));
-    } else print(store.tasks(bot,cursor,limit));
+    return page;
+}
+
+void listTasks(Store& store, Arguments& args) {
+    const auto bot = !args.empty() && !args.peek().starts_with("--") ? args.pop("Bot ID") : std::string{};
+    const auto page = pageOptions(args,"--before");
+    print(store.tasks(bot,page.cursor,page.limit));
+}
+
+void showHistory(Store& store, Arguments& args) {
+    const auto task = number(args,"task ID");
+    const auto page = pageOptions(args,"--after");
+    if (!store.hasTask(task)) throw Conflict("Task does not exist");
+    print(store.history(task,page.cursor,page.limit));
 }
 
 int runCli(Arguments& args) {
@@ -297,7 +307,8 @@ int runCli(Arguments& args) {
         const auto id = number(args,"task ID");
         args.end();
         print(store.task(id));
-    } else if (command == "history" || command == "tasks") taskCommand(store,command,args);
+    } else if (command == "tasks") listTasks(store,args);
+    else if (command == "history") showHistory(store,args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" ||
              command == "reconcile" || command == "cancel") operate(store,bots,command,args);
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");

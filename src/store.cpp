@@ -355,6 +355,51 @@ bool answerableQuestion(const Json& task, Id waitId) {
            wait.at("run") == task.at("activeRun") && wait.at("eventId") == task.at("eventId");
 }
 
+namespace {
+bool canCorrectSessionSettings(const Json& wait, const Json& action) {
+    return field(wait,"reason") == "settings" && (action.is_null() || action["phase"] == "ready");
+}
+
+std::string_view waitOperation(std::string_view reason) {
+    if (reason == "user_question") return "answer";
+    if (reason == "budget" || reason == "model_budget") return "approve";
+    if (reason == "model_failure") return "retry";
+    if (reason == "deadline") return "extend";
+    if (reason == "unknown_delivery" || reason == "auth" || reason == "settings") return "reconcile";
+    return {};
+}
+}
+
+Json waitOperations(const Json& task) {
+    auto operations = Json::array();
+    const auto& wait = task.at("wait");
+    if (task["state"] != "waiting" || !wait.is_object()) return operations;
+    operations.push_back("cancel");
+    const auto operation = waitOperation(field(wait,"reason"));
+    if (!operation.empty() && (operation != "answer" || answerableQuestion(task,wait.at("id"))))
+        operations.push_back(operation);
+    return operations;
+}
+
+void Store::reconcile(Id id, Id waitId, Json data, const ReconcileSettings& loadSettings) {
+    std::lock_guard lock(p_->mutex);
+    Transaction transaction(p_->db);
+    const auto task = p_->load(id);
+    const auto& wait = task.at("wait");
+    if (loadSettings && task["state"] == "waiting" && wait.is_object() && wait["id"] == waitId &&
+        canCorrectSessionSettings(wait,p_->outbox(task))) {
+        const auto current = loadSettings(field(task,"botId"));
+        const auto destinations = current.config.value("conversationEnvironments",Json::object());
+        const auto& environment = task.at("environmentId");
+        if (task["projectId"] != current.projectId || (environment != current.environmentId &&
+            std::ranges::find(destinations,environment) == destinations.end()))
+            throw Conflict("The project route changed. Cancel this task and submit a new request.");
+        data["session"] = current.config.value("session",Json::object());
+    }
+    p_->operate(id,waitId,"reconcile",data);
+    transaction.commit();
+}
+
 void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Json& data, bool fromConversation) {
     if (!data.is_object()) throw Conflict("Operation data must be an object");
     auto task = load(id);
@@ -368,6 +413,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     if (task["state"] != "waiting" || wait.is_null() || wait["id"] != waitId)
         throw Conflict("Waiting item is no longer current");
     const auto reason = field(wait,"reason");
+    if (waitOperation(reason) != operation) throw Conflict("Operation is unavailable for this waiting item");
     std::string next = "deciding";
     if (operation == "answer") {
         if (!answerableQuestion(task,waitId)) throw Conflict("That question is no longer answerable");
@@ -389,21 +435,21 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     } else if (operation == "approve" && reason == "model_budget") {
         approveModelCall(taskModelBudget(task),"task_decision",0,id,task.at("eventId"));
         journal(id,"model_budget_granted",{{"waitId",waitId}});
-    } else if (operation == "retry" && reason == "model_failure") {
+    } else if (operation == "retry") {
         exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?", {task["eventId"]});
         task.erase("feedback");
         journal(id, "model_retry", {{"waitId",waitId}});
-    } else if (operation == "extend" && reason == "deadline") {
+    } else if (operation == "extend") {
         if (!data.contains("deadline") || !data["deadline"].is_number_integer() ||
             data["deadline"].get<Seconds>() <= unixTime()) throw Conflict("The new deadline must be in the future");
         task["deadline"] = data["deadline"];
         next = "running";
         journal(id, "deadline_extended", {{"deadline",task["deadline"]},{"waitId",waitId}});
-    } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
+    } else if (operation == "reconcile") {
         if (data.contains("session")) {
             const auto action = outbox(task);
             const auto& session = data["session"];
-            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready") || !session.is_object())
+            if (!canCorrectSessionSettings(wait,action) || !session.is_object())
                 throw Conflict("Session settings can only be corrected before an unsent action");
             for (auto item = session.begin(); item != session.end(); ++item) {
                 if ((item.key() == "workspaceStrategy" && item->is_object()) ||

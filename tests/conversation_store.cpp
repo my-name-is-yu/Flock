@@ -270,7 +270,7 @@ void modelFailureReportsWhatWasAlreadyDone() {
     const auto message = receive(store,"failure","Write a release note and a changelog");
     execution.runtime.runConversations();
     const auto response = reply(store,message);
-    check(response["route"] == "error" && response["status"] == "error" && response["effectStatus"] == "working" &&
+    check(response["status"] == "error" && response["effectStatus"] == "working" &&
           response["text"].get<std::string>().find("Already done for this message") != std::string::npos &&
           response["text"].get<std::string>().find("Write a release note") != std::string::npos &&
           store.tasks("alpha").size() == 1,"The error reply hid the work the turn had already started");
@@ -287,7 +287,7 @@ void notesFailureEndsTheTurnWithoutWork() {
     const auto message = receive(store,"notes","Write a release note");
     execution.runtime.runConversations();
     const auto response = reply(store,message);
-    check(response["route"] == "error" && response["text"].get<std::string>().find("SOUL.md is unreadable") != std::string::npos &&
+    check(response["status"] == "error" && response["text"].get<std::string>().find("SOUL.md is unreadable") != std::string::npos &&
           store.tasks("alpha").empty(),"A notes failure started work or hid the cause");
 }
 
@@ -336,7 +336,7 @@ void toolErrorsReturnToTheModel() {
     check(store.task(mine) == before && store.task(foreign)["pendingInstructions"].is_null() &&
           store.tasks("alpha").size() == 1,"A failed call changed a task");
     const auto response = reply(store,message);
-    check(response["route"] == "reply" && response["suggestions"] == Json::array({"1.4","1.5"}) &&
+    check(response["status"] == "ok" && response["suggestions"] == Json::array({"1.4","1.5"}) &&
           response["status"] == "ok","The reply or its suggestions were not saved");
 }
 
@@ -575,7 +575,7 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     const auto later = receive(store,"later","Thanks");
     execution.runtime.runConversations();
     const auto pauses = store.pausedConversations("alpha");
-    check(pauses.size() == 1 && pauses[0]["route"] == "model_budget" && reply(store,paused)["route"] == "model_budget" &&
+    check(pauses.size() == 1 && pauses[0]["status"] == "paused" && reply(store,paused)["status"] == "paused" &&
           reply(store,later)["text"] == "You're welcome.","A paused turn blocked a later message or was not reported");
     const auto waitMessage = pauses[0]["messageId"].get<Id>();
     store.approveMessageModelCall("alpha",waitMessage);
@@ -586,7 +586,7 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     execution.runtime.runConversations();
     Json answered;
     for (const auto& row : store.conversation("alpha",0,200))
-        if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["route"] == "reply")
+        if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == paused && row["data"]["status"] == "ok")
             answered = row["data"];
     check(answered["text"] == "Nothing yet." &&
           fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(paused)) == 2 &&

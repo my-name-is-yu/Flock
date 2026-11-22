@@ -594,7 +594,7 @@ Json performSessionEffect(T3& t3, const Json& effect) {
 }
 }
 
-void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route) {
+void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, bool failed) {
     Json actions = Json::array();
     std::set<Id> touched;
     std::vector<std::string> uncertain;
@@ -608,12 +608,12 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         actions.push_back({{"tool",steps.json(0).at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
         touched.insert(result.at("taskId").get<Id>());
     }
-    if (route == "error" && !uncertain.empty()) {
+    if (failed && !uncertain.empty()) {
         text = japanese(message.text) ? "操作が届いたか確認できません。再送する前にセッションを確認してください。"
             : "Delivery is unknown. Check the Session before repeating these actions.";
         for (const auto& action : uncertain) text += "\n- " + action;
     }
-    if (route == "error" && !actions.empty()) {
+    if (failed && !actions.empty()) {
         const bool ja = japanese(message.text);
         text += ja ? "\n\nこのメッセージで実行済みの操作:" : "\n\nAlready done for this message:";
         for (const auto& action : actions) {
@@ -626,13 +626,13 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linked,unixTime(),message.bot});
     const auto reply = last();
-    Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",text},{"route",route},
-                 {"effectStatus",status},{"status",route == "error" ? "error" : "ok"},{"actions",actions}};
+    Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",text},
+                 {"effectStatus",status},{"status",failed ? "error" : "ok"},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = suggestions;
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?",{linked,Json{{"status",status}},message.id});
     exec("UPDATE conversation_turns SET status=? WHERE message_id=?",
-         {route == "error" ? "failed" : "completed",message.id});
+         {failed ? "failed" : "completed",message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -641,7 +641,7 @@ void Store::Impl::pauseTurn(const Message& message) {
          {unixTime(),message.bot});
     const auto reply = last();
     exec("UPDATE journal SET data=? WHERE id=?",
-         {Json{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","paused"},
+         {Json{{"messageId",reply},{"replyToMessageId",message.id},{"status","paused"},
                {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
                           : "The model call limit is exhausted. Approve one more model call to continue."}},reply});
     exec("UPDATE journal SET data=json_object('status','needs_you') WHERE id=?",{message.id});
@@ -659,11 +659,11 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     }
     if (!message) return true;
     const bool ja = japanese(message->text);
-    const auto finish = [&](std::string text, std::string_view route) {
+    const auto fail = [&](std::string text) {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!turnMessage(id)) return;
-        finishTurn(*message,std::move(text),nullptr,route);
+        finishTurn(*message,std::move(text),nullptr,true);
         transaction.commit();
     };
     BotNotes botNotes;
@@ -672,9 +672,8 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     } catch (const std::exception& error) {
         const auto diagnostic = Json::parse(Json(error.what()).dump(
             -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
-        finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
-                  : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
-               "error");
+        fail(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
+                  : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.");
         return true;
     }
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
@@ -720,10 +719,10 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                          {unixTime()+2,id});
                     return true;
                 }
-                finish(failure,"error");
+                fail(failure);
                 return true;
             } catch (const std::exception&) {
-                finish(failure,"error");
+                fail(failure);
                 return true;
             }
             std::lock_guard lock(mutex);
@@ -803,7 +802,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 }
                 exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",
                      {Json{{"ok",true}},id,step});
-                finishTurn(*current,std::move(reply),suggestions,"reply");
+                finishTurn(*current,std::move(reply),suggestions,false);
                 transaction.commit();
                 return true;
             } catch (const ToolError& error) {
@@ -828,9 +827,8 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",{result,id,step});
         transaction.commit();
     }
-    finish(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
-              : "I stopped because handling this message took too many steps. Send it again if needed.",
-           "error");
+    fail(ja ? "このメッセージの処理が長くなりすぎたため中断しました。必要なら、もう一度送ってください。"
+              : "I stopped because handling this message took too many steps. Send it again if needed.");
     return true;
 }
 
