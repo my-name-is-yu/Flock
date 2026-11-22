@@ -111,7 +111,6 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
             try {
-                // Keep the avatar upload format's tolerance for unused padding bits.
                 image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),
                                            AvatarImage::maxBytes,Base64Padding::AllowUnusedBits));
             } catch (const std::invalid_argument&) {
