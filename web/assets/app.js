@@ -80,6 +80,7 @@ let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let profileMotion;
 let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
@@ -96,21 +97,9 @@ function button(text, className, click) {
   if (click) el.addEventListener('click', click);
   return el;
 }
-customElements.define('flock-avatar', class extends HTMLElement {
-  #handle;
-
-  connectedCallback() {
-    this.#handle = showAvatar(this, this.bot, { still: false });
-  }
-
-  disconnectedCallback() {
-    this.#handle?.destroy();
-  }
-});
-
 function avatar(bot, className = '') {
-  const host = node('flock-avatar', `avatar ${className}`.trim());
-  host.bot = bot;
+  const host = node('span', `avatar ${className}`.trim());
+  showAvatar(host, bot);
   return host;
 }
 function runHref(run) {
@@ -583,13 +572,18 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
+  const motion = presenceMotion(presence);
+  const look = { state: motion, followPointer: motion === 'idle' };
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, followPointer: true });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, ...look });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
+  } else if (profileMotion !== motion) {
+    profileAvatar?.update(look);
   }
+  profileMotion = motion;
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
