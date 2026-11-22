@@ -1254,7 +1254,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             {"source",{{"environmentId",field(event,"environmentId")},
                 {"threadId",field(event.value("run",Json(nullptr)),"threadId")},
                 {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")},
-                {"link",field(event.value("run",Json(nullptr)),"link")}}}});
+                {"status",field(event,"status")},{"link",field(event.value("run",Json(nullptr)),"link")}}}});
         saveTask(current);
     }
 
