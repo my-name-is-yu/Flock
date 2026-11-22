@@ -253,8 +253,16 @@ int main(int argc, char** argv) {
               steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
                                      {"clientRequestId","flock-turn-7-2"}},
               "a note reaches the running Run through T3 steer without starting another Run");
+        fixture({{"scenario", "resumed"}});
+        delivery = adapter->send(note);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "continued",
+              "a note reaches T3's restart continuation of the assigned Run");
+        fixture({{"scenario", "manual-active"}});
+        auto before = effects("t3_thread_send").size();
+        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
+              "a note is refused while an unrelated Run is active in the Thread");
         fixture({{"scenario", "settled"}});
-        const auto before = effects("t3_thread_send").size();
+        before = effects("t3_thread_send").size();
         check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
               "a note for a settled Run is refused without contacting T3");
         fixture({{"scenario", "running"}});

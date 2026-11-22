@@ -643,9 +643,10 @@ async function copyMessage(control, text) {
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
+  // A choice is a complete answer to this question, so it goes to the task without a conversation turn.
   for (const choice of task.wait.choices ?? []) {
     const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
-      if (view?.id === context.id) beginReply(target, choice);
+      if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
     });
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);

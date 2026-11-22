@@ -618,6 +618,31 @@ void fixedDemoWithUserCriteriaAndContinuation() {
           sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
 }
 
+void fixedDemoFollowUpKeepsTheExplainedResult() {
+    Sandbox fixture;
+    Store store(fixture.path / "state.db");
+    const auto demo = makeDemoModel();
+    const auto t3 = makeDemoT3();
+    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    const Intake intake{"demo","Measure the result","local","project"};
+    const auto task = store.submit(intake);
+    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
+    const auto result = store.latestTaskResult(task).at("id").get<Id>();
+    const auto replyTo = [&](Id message) {
+        for (const auto& row : store.conversation("demo"))
+            if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
+        return Json(nullptr);
+    };
+    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
+    runtime.runConversations();
+    const auto explanation = replyTo(question);
+    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
+        .at("messageId").get<Id>();
+    runtime.runConversations();
+    check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
+          "a follow-up to the fixed demo's explanation started work instead of reading the same result");
+}
+
 void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
@@ -793,6 +818,7 @@ int main() {
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
         fixedDemoAnswersAnAnchoredQuestion();
+        fixedDemoFollowUpKeepsTheExplainedResult();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

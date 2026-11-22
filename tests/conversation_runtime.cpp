@@ -451,7 +451,40 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
 }
 
-void pausedTurnHoldsCompletion() {
+void suggestionsStayWithTheBotMessage() {
+    Fixture f;
+    const auto suggest = [](Json choices) {
+        return Step([choices](const ModelInput&) {
+            return Decision{"reply",{{"text","Which one?"},{"suggestions",choices}},"Offer choices"};
+        });
+    };
+    f.script("Pick a name for one",{suggest({"Juniper","Maple"})});
+    const auto first = f.receive("names-a","Pick a name for one");
+    f.script("Pick a name for another",{suggest({"Maple","Juniper"})});
+    const auto second = f.receive("names-b","Pick a name for another");
+    f.script("2番目",{say("OK.")});
+    f.receive("second-a","2番目",f.response(first)["messageId"].get<Id>());
+    const auto afterFirst = f.model.turnInputs.back();
+    f.receive("second-b","2番目",f.response(second)["messageId"].get<Id>());
+    const auto afterSecond = f.model.turnInputs.back();
+    const auto botEntry = [](const ModelInput& input, std::string_view text) {
+        for (const auto& entry : input.history)
+            if (entry["role"] == "bot" && entry["text"] == text) return entry;
+        return Json(nullptr);
+    };
+    check(afterFirst.event["replyTo"]["suggestions"] == Json::array({"Juniper","Maple"}) &&
+          afterSecond.event["replyTo"]["suggestions"] == Json::array({"Maple","Juniper"}) &&
+          afterFirst.event["replyTo"]["inReplyTo"]["text"] == "Pick a name for one" &&
+          botEntry(afterSecond,"Which one?")["suggestions"].is_array(),
+          "a reply to a Bot message lost the order of the suggestions it offered");
+
+    f.script("Pick a login fix",{suggest({"Fix login","Fix login"}),say("Which login fix: web or mobile?")});
+    const auto duplicate = f.receive("duplicate","Pick a login fix");
+    check(f.lastTurn()[0]["result"]["ok"] == false && !f.response(duplicate).contains("suggestions"),
+          "duplicate suggestions were offered as separate choices");
+}
+
+void pausedTurnDoesNotHoldCompletion() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
@@ -459,18 +492,23 @@ void pausedTurnHoldsCompletion() {
     f.reach(id,"deciding");
     auto limited = f.routing();
     limited.config["modelCallLimit"] = 1;
+    std::string seen;
     f.script("Check what is running, then change the criteria",{
         [](const ModelInput&) { return Decision{"find_tasks",Json::object(),"Look first"}; },
-        change(id,{{"doneWhen","Report p95 timing"}})});
-    const auto receipt = f.store->receive(limited,"paused","Check what is running, then change the criteria");
+        [&](const ModelInput& input) {
+            for (const auto& task : input.task.at("tasks"))
+                if (task.at("taskId") == id) seen = task.at("state");
+            return Decision{"reply",{{"text","It already finished."}},"Report the current state"};
+        }});
+    f.store->receive(limited,"paused","Check what is running, then change the criteria");
     f.tick();
-    check(f.store->pausedConversations("alpha").size() == 1 && f.event(id,"completed").is_null(),
-          "a task completed while a turn that may change it was paused");
+    f.tick();
+    check(f.store->pausedConversations("alpha").size() == 1 && !f.event(id,"completed").is_null(),
+          "a turn waiting for a model call approval held the task's completion");
     f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
     f.tick();
-    check(f.task(id)["doneWhen"] == "Report p95 timing" && f.event(id,"completed").is_null(),
-          "the approved turn did not apply its change before completion");
-    (void)receipt;
+    check(f.store->pausedConversations("alpha").empty() && seen == "completed",
+          "the approved turn did not see the task as it is now");
 }
 
 void cancelledReportCanBeReferencedWithoutRestarting() {
@@ -1168,7 +1206,8 @@ int main() {
         questionAnswerReachesTheBotBeforeContinuingWork();
         answersStayOnTheirQuestion();
         answersNeedTheirOwnReplyTargetAndAStableTask();
-        pausedTurnHoldsCompletion();
+        pausedTurnDoesNotHoldCompletion();
+        suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
         appendWaitsForSafeBoundary();

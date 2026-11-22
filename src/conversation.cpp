@@ -70,15 +70,11 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     return revision;
 }
 
-// True while a turn of this Bot may still change its tasks, including one paused for a model call approval.
+// True while a message of this Bot has not been read yet. A turn paused for a model call approval does not hold
+// completion: it may wait indefinitely, and once approved it sees the tasks as they are then.
 bool Store::Impl::conversationPending(std::string_view bot) const {
-    return query(R"SQL(
-SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'
-AND json_extract(data,'$.status') IS NULL
-UNION ALL
-SELECT 1 FROM conversation_turns t JOIN messages m ON m.id=t.message_id WHERE m.bot_id=? AND t.status='paused'
-LIMIT 1
-)SQL",{bot,bot}).next();
+    return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
+                 " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
 }
 
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
