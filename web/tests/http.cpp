@@ -139,6 +139,41 @@ void pageAssets(Browser& browser, const std::string& html) {
     check(hasScript && hasStylesheet,"landing page does not load its script and stylesheet");
 }
 
+void inspectors(const std::filesystem::path& path) {
+    struct InspectorModel : Model {
+        Id boundary = 0;
+        Decision decide(const ModelInput& input) override {
+            if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
+                return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes"}},"Summarize earlier work"};
+            if (input.event.at("turn").empty() && input.event.at("text")=="Release")
+                return {"start_workflow",{{"request","Prepare a release"}},"Use a separate verifier"};
+            return {"reply",{{"text","Recorded"}},"Acknowledge the request"};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto){return BotNotes{};});
+    const auto routing = callbacks().intake("release","");
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    model.boundary = store.receive(routing,"a","Original release instructions").at("messageId");
+    store.receive(routing,"b","Summarize");
+    store.receive(routing,"c","Release");
+    runtime.runConversations();
+    const auto summaries = browser.get("/api/compactions?bot=release");
+    const auto workflows = browser.get("/api/workflows?bot=release");
+    const auto view = browser.get("/api/view?bot=release");
+    check(summaries.size()==1 && summaries[0]["endMessageId"]==model.boundary &&
+          summaries[0]["summary"]=="Preserve the release notes" && view.at("compactions")==summaries,
+          "summary or its covered range missing from the inspector");
+    check(workflows.size()==1 && workflows[0]["stages"].size()==2 && view.at("workflows")==workflows,
+          "workflow stages missing from the Bot view");
+    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
+          "inspectors mixed Bot histories");
+    check(browser.get("/api/conversation?bot=release").dump().find("Original release instructions")!=std::string::npos,
+          "summary removed the original message from the HTTP audit history");
+}
+
 void boundary(Browser& browser) {
     auto landing = browser.client.Get("/");
     check(landing && landing->status == 200 && !landing->body.empty() &&
@@ -167,6 +202,10 @@ void boundary(Browser& browser) {
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
+    for (const std::string path : {"/api/compactions","/api/workflows"}) {
+        check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
+        Browser::checked(browser.client.Get(path+"?bot=missing"),404);
+    }
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
 }
 
@@ -755,6 +794,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
 int main() {
     try {
         TestDirectory directory;
+        inspectors(directory.path / "inspectors.db");
         exercise(directory.path / "state.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");

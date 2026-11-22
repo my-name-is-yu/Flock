@@ -288,7 +288,7 @@ public:
                 return error(res,404,"avatar_not_found");
             res.set_content(image->bytes.data(),image->bytes.size(),image->contentType);
         });
-        for (const auto path : {"/api/view","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -304,6 +304,8 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/compactions") return json(res,200,store_.compactions(id,before));
+                    if (req.path == "/api/workflows") return json(res,200,store_.workflows(id,before));
                     if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
                     else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));

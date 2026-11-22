@@ -170,6 +170,11 @@ struct Runtime::Impl {
         auto rows = db.query(R"SQL(
 SELECT id FROM project_execution_queue WHERE position=1
 UNION
+SELECT sibling.task_id FROM project_execution_queue q JOIN workflow_stages head ON head.task_id=q.id
+JOIN workflow_stages sibling USING(workflow_id) JOIN tasks t ON t.id=sibling.task_id
+WHERE q.position=1 AND t.environment_id=q.environment_id AND t.project_id=q.project_id
+AND t.state NOT IN ('completed','cancelled')
+UNION
 SELECT id FROM tasks WHERE state NOT IN ('completed','cancelled') AND (
   COALESCE(json_extract(data,'$.environmentReleased'),0)=1 OR
   (state='queued' AND json_extract(data,'$.replanning')=1 AND json_extract(data,'$.pendingEnvironmentId')<>environment_id)
@@ -285,6 +290,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     task.erase("replanInterruptAt");
                 }
                 if (state == "cancelling") cancelDone(task);
+                else if (task.contains("workflowId") && !replanning && !hasPending(task))
+                    db.finishStage(task,data);
                 else task["state"] = "deciding";
                 return true;
             }
@@ -343,13 +350,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     Observation observe(const Json& task) {
+        Observation observation;
         try {
-            return t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
+            observation = t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
         } catch (const std::exception&) {
-            Observation observation;
             observation.kind = Observation::Kind::Unavailable;
-            return observation;
         }
+        if (task.contains("workflowId")) db.stageObservation(task,observation,options.clock());
+        return observation;
     }
 
     void cancel(const Json& task) {
@@ -385,7 +393,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             cancellationNote(task,"Waiting for the assigned Run's delegated work to settle");
             return;
         }
-        if (observed.kind == Observation::Kind::Unavailable) {
+        if (observed.kind == Observation::Kind::Unavailable && !task.contains("workflowId")) {
             cancellationNote(task,"Cannot locate or observe the assigned Run");
             return;
         }
@@ -473,6 +481,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     if (!waitingSender) return false;
                 }
             }
+            if (current.erase("freshRequested")) current["newSessionRequired"] = true;
             if (target != old) {
                 current["environmentId"] = target;
                 current["newSessionRequired"] = true;
@@ -604,6 +613,9 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 else {
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
+                    if (task.contains("workflowId"))
+                        db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0 WHERE task_id=?",
+                                {options.clock(),id});
                     task["activeRun"] = runJson(outcome.run);
                     task["activeRun"]["environmentId"] = task["environmentId"];
                     task["activeRun"]["revisionId"] = action.value("revisionId",Json(nullptr));
@@ -672,6 +684,10 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
                 if (!change(task,[&](Json& current) {
                     db.exec("UPDATE outbox SET phase='started',auth_generation=? WHERE id=?", {cmd.authGeneration,action["id"]});
+                    if (current.contains("workflowId") && cmd.tool != "answer_session_question")
+                        db.exec("UPDATE workflow_stages SET status='running',deadline=CASE WHEN json_extract(spec,'$.softDeadlineSeconds')>0 "
+                                "THEN ?+json_extract(spec,'$.softDeadlineSeconds') ELSE 0 END WHERE task_id=? AND status='pending'",
+                                {options.clock(),id});
                     if (cmd.tool != "answer_session_question" && current["deadline"] == 0)
                         current["deadline"] = options.clock() + current["config"].value("runTimeoutSeconds",1800);
                     db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
@@ -843,9 +859,10 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             };
             for (const auto& item : pending)
                 if (item.contains("source")) quoteSource(item.at("source"));
-            if (task["lastRun"].is_null()) {
+            if (task.value("newSessionRequired",false) || task["lastRun"].is_null()) {
                 for (const auto& source : task.value("sourceResultRefs",Json::array()))
-                    if (source["taskId"] == task.value("sourceTaskId",Id{0})) quoteSource(source);
+                    if (task.value("newSessionRequired",false) || source["taskId"] == task.value("sourceTaskId",Id{0}))
+                        quoteSource(source);
             }
             instruction += "\n\n[Flock action ID: " + action + "]";
             task["deadline"] = 0;
@@ -1446,7 +1463,13 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
         else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
-        else if (state == "queued") activate(task);
+        else if (state == "queued" && task.contains("workflowId")) {
+            change(task,[&](Json& current) {
+                queueAction(current,actionId(),"delegate",field(current,"stageAssignment"),Json::object(),
+                            pendingBatch(current).instructions);
+                return true;
+            });
+        } else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;
             if (task["activeRun"].is_null() && !task["lastRun"].is_null() && hasPending(task)) {
@@ -1465,6 +1488,16 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 action = db.outbox(task);
             }
             if (!action.is_null()) deliver(task,action);
+        } else if (task.contains("workflowId") && state == "waiting" && field(task["wait"],"reason")=="unknown_delivery") {
+            Json action;
+            {
+                std::lock_guard lock(db.mutex);
+                action = db.outbox(task);
+            }
+            const auto now = options.clock();
+            if (action.is_object() && action.at("phase")=="started" && now>=task.value("workflowReconcileAt",Seconds{}) &&
+                change(task,[&](Json& current) { current["workflowReconcileAt"] = now+5; return true; }))
+                deliver(task,action);
         } else if (!task["activeRun"].is_null() && (state == "running" || state == "waiting"))
             ingest(task,observe(task));
     }
@@ -1482,6 +1515,7 @@ void Runtime::runConversations() {
 }
 void Runtime::tick() {
     runConversations();
+    p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->eligible()) p_->step(id);
 }
 void Runtime::tickConcurrent() {
@@ -1507,6 +1541,7 @@ void Runtime::tickConcurrent() {
             }
         }
     }
+    p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->eligible()) {
         if (!p_->workers.contains(id))
             p_->workers.emplace(id,std::async(std::launch::async,[this,id] { p_->step(id); }));

@@ -30,7 +30,9 @@ constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "cancel_task","message_session","interrupt_session","read_result",
-                                         "find_tasks","reply"};
+                                         "find_tasks","start_workflow","workflow_status","instruct_workflow_stage",
+                                         "stop_workflow_stage","stop_workflow","compact_conversation",
+                                         "expand_context","continue_fresh_session","reply"};
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -89,6 +91,10 @@ Json taskState(const Json& task, Id messageId) {
     Json view = {{"generation",task.at("generation")},{"revisionId",task.value("currentRevision",Id{0})},
                  {"state",task.at("state")},{"doneWhen",bounded(field(task,"doneWhen"),1600)},
                  {"replanning",task.value("replanning",false)},{"wait",waitView(task.value("wait",Json(nullptr)),messageId)}};
+    if (task.contains("workflowId")) {
+        view["workflowId"] = task.at("workflowId");
+        view["stageId"] = task.at("stageId");
+    }
     if (const auto intent = field(task,"intent"); !intent.empty()) view["intent"] = bounded(intent,1000);
     return view;
 }
@@ -245,16 +251,19 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     }
 
     Json history = Json::array();
+    const auto summaries = compactions(message.bot,0,1);
+    const bool compacted = !summaries.empty() && summaries.front().at("endMessageId") < message.id;
+    const Id boundary = compacted ? summaries.front().at("endMessageId").get<Id>() : 0;
     {
         auto rows = query(R"SQL(
 SELECT j.id,j.task_id,j.kind,j.data,m.text FROM journal j
 LEFT JOIN tasks t ON t.id=j.task_id LEFT JOIN messages m ON m.id=j.id
-WHERE j.id<? AND (
+WHERE j.id<? AND j.id>? AND (
   (j.conversation_bot_id=? AND j.kind IN ('conversation_message','conversation_reply')) OR
   (j.conversation_bot_id IS NULL AND t.bot_id=? AND j.kind IN ('waiting','report','completed','cancelled')))
 ORDER BY j.id DESC LIMIT ?
-)SQL",{message.id,message.bot,message.bot,historyLimit});
-        std::size_t remaining = historyBytes;
+)SQL",{message.id,boundary,message.bot,message.bot,historyLimit});
+        std::size_t remaining = historyBytes - (compacted ? summaries.front().dump().size() : 0);
         while (rows.next() && remaining > 0) {
             const auto kind = rows.string(2);
             const auto data = rows.json(3);
@@ -283,6 +292,11 @@ ORDER BY j.id DESC LIMIT ?
             entry["text"] = std::move(body);
             history.push_back(std::move(entry));
         }
+        if (compacted) {
+            auto summary = summaries.front();
+            summary["kind"] = "conversation_compaction";
+            history.push_back(std::move(summary));
+        }
         std::reverse(history.begin(),history.end());
     }
 
@@ -304,7 +318,13 @@ ORDER BY j.id DESC LIMIT ?
         const auto decision = steps.json(0);
         turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
     }
-    return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
+    Json workflows = Json::array();
+    auto recent = query("SELECT w.id,CASE WHEN m.id>? THEN m.text ELSE '' END FROM workflows w JOIN messages m ON m.id=w.message_id "
+                        "WHERE w.bot_id=? AND m.id<=? ORDER BY w.id DESC LIMIT 12",{boundary,message.bot,message.id});
+    while (recent.next())
+        workflows.push_back({{"workflowId",recent.number(0)},{"request",bounded(recent.string(1),300)}});
+    return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
+                     {"workflows",std::move(workflows)}}},
             {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
                       {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
             {"history",std::move(history)}};
@@ -337,6 +357,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return result;
     };
 
+    if (tool == "compact_conversation" || tool == "expand_context" || tool == "continue_fresh_session")
+        return contextTool(tool,args,bot,message.id,step,routing);
+    if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
+        tool == "stop_workflow_stage" || tool == "stop_workflow")
+        return workflowTool(tool,args,bot,message.id,step,routing);
     if (tool == "start_task") {
         const auto request = text(args,"request",messageSize,true);
         const auto doneWhen = text(args,"doneWhen",8000,false);

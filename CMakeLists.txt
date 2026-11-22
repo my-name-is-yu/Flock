@@ -15,7 +15,7 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
-                       src/model_budget.cpp src/runtime.cpp)
+                       src/workflow.cpp src/context_compaction.cpp src/model_budget.cpp src/runtime.cpp)
 target_include_directories(flock_core PUBLIC include)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
@@ -27,6 +27,9 @@ target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(flock_workflow_context tests/workflow_context.cpp)
+  target_link_libraries(flock_workflow_context PRIVATE flock_core)
+  add_test(NAME flock_workflow_context COMMAND flock_workflow_context)
   add_executable(flock_core_tests tests/core.cpp)
   target_link_libraries(flock_core_tests PRIVATE flock_core)
   add_test(NAME flock_core COMMAND flock_core_tests)

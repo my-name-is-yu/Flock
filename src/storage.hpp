@@ -43,6 +43,15 @@ struct Store::Impl {
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
     Json queueBlocker(Id) const;
+    void migrateWorkflow();
+    void migrateCompaction();
+    Json compactions(std::string_view bot, Id before, unsigned limit) const;
+    Json contextTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
+    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
+    Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
+    void advanceWorkflows(Seconds now);
+    void stageObservation(const Json& task, const Observation&, Seconds now);
+    void finishStage(Json& task, const Json& report);
     void migrateConversation();
     void migrateModelBudget();
     std::string messageModelBudget(Id messageId);

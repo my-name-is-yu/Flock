@@ -221,7 +221,7 @@ std::string displayState(const Json& task) {
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt","workflowId","stageId","inputArtifactVersion"});
     return result;
 }
 
@@ -383,6 +383,8 @@ Json botView(Store& store, const Json& bot) {
     auto result = conversation(store,id,0);
     result.update(activity(store,id));
     result.update(sessions(store,id,0));
+    result["workflows"] = store.workflows(id);
+    result["compactions"] = store.compactions(id,0,1);
     result["bot"] = settingsView(bot);
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {

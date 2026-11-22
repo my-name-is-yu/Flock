@@ -563,7 +563,7 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  if (!changed('sessions', view?.id, loading, [...groups.values()], active, data?.workflows, data?.compactions)) return;
   const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
   const activeKeys = new Set();
   const live = [];
@@ -587,6 +587,24 @@ function renderActivity() {
     const heading = node('h3', 'activity-group');
     heading.append(node('span', null, label), node('span', 'activity-group-count', items.length));
     rows.push(heading, ...items);
+  }
+  for (const workflow of data?.workflows ?? []) {
+    const section = node('details');
+    section.append(node('summary', null, `Workflow · ${workflow.status.replaceAll('_', ' ')}`));
+    for (const stage of workflow.stages) {
+      const attention = stage.needsAttention ? ' · Needs attention' : '';
+      section.append(node('p', null, `${stage.name} · ${stage.status.replaceAll('_', ' ')}${attention}`));
+    }
+    for (const check of workflow.verdicts) {
+      section.append(node('p', null, `${check.stageId} · ${check.verdict} · ${check.artifactVersion}`));
+    }
+    rows.push(section);
+  }
+  for (const summary of data?.compactions ?? []) {
+    const section = node('details');
+    section.append(node('summary', null, `Conversation summary · ${summary.originalCount} messages`),
+      node('p', null, summary.summary));
+    rows.push(section);
   }
   const list = elements['session-list'];
   list.setAttribute('aria-busy', loading);

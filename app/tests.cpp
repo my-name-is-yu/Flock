@@ -445,7 +445,9 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
-                   "message_session","interrupt_session","read_result","find_tasks","reply"};
+                   "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
+                   "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
+                   "expand_context","continue_fresh_session"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
@@ -453,7 +455,15 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 10 &&
+    check(turn.at("tools").at(0).at("tools").size() == 18 &&
+          turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId","role"}) &&
+          turnTool("workflow_status")["required"].back() == "workflowId" &&
+          turnTool("instruct_workflow_stage")["required"].back() == "instruction" &&
+          turnTool("stop_workflow_stage")["required"].back() == "stageId" &&
+          turnTool("stop_workflow")["required"].back() == "workflowId" &&
+          turnTool("compact_conversation")["required"].back() == "summary" &&
+          turnTool("expand_context")["properties"].contains("compactionId") &&
+          turnTool("continue_fresh_session")["required"].back() == "taskId" &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
