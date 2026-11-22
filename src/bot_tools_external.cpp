@@ -259,7 +259,7 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     {
         std::lock_guard lock(mutex);
         const auto message = loadTurnMessage(ctx.messageId);
-        if (!message.channelScope.empty() || !Access(*this).permitsPerson(message.actor,ctx.bot,Role::decide))
+        if (!message.channelScope.empty() || !Access(*this).permitsPerson(turnActor(message),ctx.bot,Role::decide))
             throw DecisionDenied{};
     }
     const auto grant = authorizedBotToolScope(ctx.bot,call);

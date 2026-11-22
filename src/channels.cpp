@@ -257,7 +257,8 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     }
     auto text = field(event,"text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return receive({sender->personId,false},sender->botId,origin.key(),text,replyTo,&message,[&] { return routing(sender->botId,text); });
+    return receive({sender->personId,false},sender->botId,origin.key(),text,replyTo,conversation::PrincipalSource::channel,
+                   &message,[&] { return routing(sender->botId,text); });
 }
 
 void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {

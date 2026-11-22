@@ -21,6 +21,8 @@ struct WebCallbacks {
     std::function<Seconds()> clock = unixTime;
     std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};
     std::string githubWebhookSecret = {};
+    // Required for queued messages with a custom authenticator. Resolve by person ID without credentials.
+    WebIdentityResolver resolveIdentity = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

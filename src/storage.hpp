@@ -87,6 +87,7 @@ struct Store::Impl {
     std::map<ChannelKind,ChannelConnector> channels;
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
     std::vector<std::string> rootPeople;
+    WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     void initializeChannelSchema();
@@ -212,6 +213,7 @@ struct Store::Impl {
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
+    Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;

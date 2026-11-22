@@ -211,7 +211,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         options.clock,
     };
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
-    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"))
         configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     std::unique_ptr<WebServer> server;
