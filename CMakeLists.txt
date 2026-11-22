@@ -30,6 +30,12 @@ flock_fetch_cctz()
 
 add_executable(flock_workspace_supervisor src/workspace_supervisor.cpp)
 target_compile_options(flock_workspace_supervisor PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_path(LIBSECCOMP_INCLUDE_DIR seccomp.h REQUIRED)
+  find_library(LIBSECCOMP_LIBRARY NAMES seccomp REQUIRED)
+  target_include_directories(flock_workspace_supervisor PRIVATE ${LIBSECCOMP_INCLUDE_DIR})
+  target_link_libraries(flock_workspace_supervisor PRIVATE ${LIBSECCOMP_LIBRARY})
+endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp

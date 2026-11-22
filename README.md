@@ -197,3 +197,31 @@ credential from `sessionBridgeCredentialEnv`, held by the bridge. C++ adapters
 can use `Store::runLocalMachineOperation` with the same authenticated Run.
 The host opens paths without following symlinks. Reusable execution
 environments are configured through Bot settings.
+
+## Bot workspace commands
+
+`workspace_run_command` keeps the existing single-command `argv` form and also
+accepts a structured pipeline on macOS and Linux:
+
+```json
+{"pipeline":[["cat","allowed.txt"],["wc","-c"]]}
+```
+
+Pass argv arrays, not shell text: metacharacters are literal argument data.
+Pipelines contain 1–4 stages using only system `/bin` or `/usr/bin` executables
+named `cat`, `cut`, `echo`, `grep`, `head`, `printf`, `sleep`, `sort`, `tail`,
+`tee`, `tr`, `uniq`, `wc`, or `yes`. Scripts, shells, interpreters, workspace
+executables, and other helpers are rejected before launch; use a T3 Session
+for them, builds, and tests. This allowlist is a partial supported subset, not
+a security boundary; the platform sandbox remains the security boundary.
+
+Commands use noninteractive stdin, one active command per Bot, a shared
+10-second wall limit, and a combined 8 KiB stdout/stderr capture. Each pipeline
+payload stage receives a CPU limit of `max(1, floor(5/N))` seconds, with core
+dumps disabled, a 1 MiB file-size limit, and 64 open files. Linux builds
+require libseccomp and `/usr/bin/bwrap` with the requested seccomp filtering
+support; filtering errors fail closed. macOS keeps its fork-denying sandbox.
+An outcome that cannot be confirmed after restart or supervisor failure is
+`unknown_after_restart` and is never replayed automatically.
+These are per-process limits; they do not guarantee a strict aggregate CPU
+ceiling for trusted Bubblewrap monitor overhead.
