@@ -3,6 +3,7 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 
 const byId = (id) => document.getElementById(id);
@@ -785,15 +786,28 @@ async function copyMessage(control, text) {
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
+const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.currentRevision ?? 0, task.generation]);
+
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  for (const choice of task.wait.choices ?? []) {
-    const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
-      if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
-    });
-    option.disabled = pendingWaits.has(task.wait.id);
-    actions.append(option);
+  const choices = task.wait.choices ?? [];
+  if (choices.length) {
+    const key = questionKey(task);
+    const selections = context.questionChoices ??= new Map();
+    actions.append(questionChoiceForm({
+      key, prompt: target.summary, choices, dialog, answer: selections.get(key), busy: pendingWaits.has(task.wait.id),
+      select(answer) {
+        selections.set(key, answer);
+        for (const form of document.querySelectorAll('.question-choice-form')) {
+          if (form.dataset.questionKey === key) updateQuestionChoiceForm(form, answer, pendingWaits.has(task.wait.id));
+        }
+      },
+      submit(answer) {
+        const current = view === context && context.data?.waits.find((item) => item.wait.id === task.wait.id);
+        if (current && questionKey(current) === key) void operate(context, current, 'answer', { text: answer });
+      },
+    }));
   }
   const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
     if (view?.id === context.id) beginReply(target);
@@ -1751,7 +1765,12 @@ function renderDetail() {
     return;
   }
   if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
-  for (const control of elements['detail-body'].querySelectorAll('button, input')) control.disabled = pendingWaits.has(task.wait.id);
+  const busy = pendingWaits.has(task.wait.id);
+  for (const control of elements['detail-body'].querySelectorAll('button, input')) {
+    if (!control.closest('.question-choice-form')) control.disabled = busy;
+  }
+  const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
+  if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
 }
 function render(scroll) {
   renderBots();
@@ -1779,6 +1798,10 @@ function mergeLatest(context, latest) {
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
+  if (context.questionChoices?.size) {
+    const current = new Set(latest.waits.map(questionKey));
+    for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
+  }
   const composer = context.composer = composerDrafts(context.id, latest.composerPerson);
   if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text) {
     composer.closeReply();
