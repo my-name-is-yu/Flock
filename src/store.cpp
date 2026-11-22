@@ -624,7 +624,7 @@ Json Store::Impl::sessionTask(Id id) const {
     auto reports = query(R"SQL(
 SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
        json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
-FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",{id});
     using RunKey = std::tuple<std::string,std::string,std::string>;
     std::map<RunKey,std::string> statuses;
