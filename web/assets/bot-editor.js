@@ -135,9 +135,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
         <div class="studio-bar">
           <div class="studio-tabs" id="studio-tabs" role="group" aria-label="Avatar source">
-            <button type="button" data-kind="shape" aria-pressed="true">Shapes</button>
-            <button type="button" data-kind="icon" aria-pressed="false">Icons</button>
-            <button type="button" data-kind="upload" aria-pressed="false">Upload</button>
+            <button type="button" data-kind="shape" data-label="Shapes" aria-pressed="true">Shapes</button>
+            <button type="button" data-kind="icon" data-label="Icons" aria-pressed="false">Icons</button>
+            <button type="button" data-kind="upload" data-label="Upload" aria-pressed="false">Upload</button>
           </div>
           <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" title="Shuffle appearance">${uiIcon('shuffle')}</button>
         </div>
@@ -477,11 +477,34 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     }
   }
 
+  function syncTabsIndicator(animate = false) {
+    const active = els.tabs.querySelector('button[aria-pressed="true"]');
+    if (!active || !active.offsetWidth) return;
+    const x = `${active.offsetLeft}px`;
+    const w = `${active.offsetWidth}px`;
+    const wasReady = els.tabs.classList.contains('seg-ready');
+    if (wasReady && els.tabs.style.getPropertyValue('--seg-x') === x && els.tabs.style.getPropertyValue('--seg-w') === w) {
+      return;
+    }
+    if (animate && wasReady && !prefersReducedMotion()) {
+      if (!els.tabs.classList.contains('seg-animated')) {
+        els.tabs.classList.add('seg-animated');
+        void els.tabs.offsetWidth;
+      }
+    } else {
+      els.tabs.classList.remove('seg-animated');
+    }
+    els.tabs.style.setProperty('--seg-x', x);
+    els.tabs.style.setProperty('--seg-w', w);
+    els.tabs.classList.add('seg-ready');
+  }
+
   function renderAppearance({ animateTabSwitch = false, prevKind = state.kind, animateChoices = false } = {}) {
     els.studio.style.setProperty('--avatar-color', state.color);
     for (const tab of els.tabs.querySelectorAll('button[data-kind]')) {
       tab.setAttribute('aria-pressed', String(tab.dataset.kind === state.kind));
     }
+    syncTabsIndicator(animateTabSwitch);
     renderGallery({ animateChoices });
     renderPreviews();
     renderTextPreview();
@@ -517,6 +540,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     dialog.setAttribute('aria-labelledby', step === 'start' ? 'studio-start-title' : 'studio-title');
     setSubmitError('');
     if (step === 'start') {
+      els.tabs.classList.remove('seg-animated');
       destroyHero();
       onDraft?.(null);
       if (animate && prevStep === 'editor') {
@@ -762,12 +786,12 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   els.removeUpload.addEventListener('click', () => {
     uploadGeneration++;
     revokeObjectUrl();
+    const prevKind = state.kind;
     state.uploadFile = null;
     state.uploadPreviewUrl = '';
     state.existingImageUrl = '';
     state.filename = '';
     // Without an image the avatar falls back to the shape, so show and save that.
-    const prevKind = state.kind;
     state.kind = 'shape';
     state.lookChanged = true;
     els.photo.value = '';
@@ -779,8 +803,13 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
   els.save.addEventListener('click', () => void saveProfile());
 
+  window.addEventListener('resize', () => {
+    if (dialog.open && step === 'editor') syncTabsIndicator(false);
+  });
+
   dialog.addEventListener('close', () => {
     uploadGeneration++;
+    els.tabs.classList.remove('seg-animated');
     destroyHero();
     revokeObjectUrl();
     els.photo.value = '';

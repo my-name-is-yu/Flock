@@ -61,6 +61,13 @@
   padding: .4rem var(--detail-pad) var(--detail-pad);
 }
 .dialog-body > * { flex-shrink: 0; min-width: 0; }
+@keyframes detail-section-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.dialog-body.section-switching > * {
+  animation: detail-section-enter 190ms ease-out both;
+}
 
 .settings-hero {
   position: relative; display: grid; justify-items: center; gap: .7rem;
@@ -226,6 +233,8 @@ a.settings-row svg { margin-left: auto; }
   .settings-name-button:active, .dialog-button:active:not(:disabled), .peer-choice:active { transform: none; }
   .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
   .settings-row svg { transition: none; transform: none; }
+  .detail-tab { transition: none; }
+  .dialog-body.section-switching > * { animation: none; }
 }
 .peer-picker-list { display: grid; gap: .15rem; padding: 0; margin: 0; list-style: none; }
 .peer-choice {

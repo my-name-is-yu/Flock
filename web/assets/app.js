@@ -224,15 +224,62 @@ function setConnection(state) {
   elements['connection-text'].textContent = state === 'offline' ? 'Could not connect to the runtime' : '';
   renderHeader();
 }
-function renderTheme(mode) {
+let themeSwitchTimer = 0;
+function resolvedTheme(mode) {
+  return mode === 'system'
+    ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : mode;
+}
+function syncThemeIndicator(animate = false) {
+  const group = elements['theme-switch'];
+  const active = group?.querySelector('button[aria-pressed="true"]');
+  if (!group || !active || !active.offsetWidth) return;
+  const x = `${active.offsetLeft}px`;
+  const w = `${active.offsetWidth}px`;
+  const wasReady = group.classList.contains('seg-ready');
+  if (wasReady && group.style.getPropertyValue('--seg-x') === x && group.style.getPropertyValue('--seg-w') === w) {
+    return;
+  }
+  if (animate && wasReady && !reducedMotion.matches) {
+    if (!group.classList.contains('seg-animated')) {
+      group.classList.add('seg-animated');
+      void group.offsetWidth;
+    }
+  } else {
+    group.classList.remove('seg-animated');
+  }
+  group.style.setProperty('--seg-x', x);
+  group.style.setProperty('--seg-w', w);
+  group.classList.add('seg-ready');
+}
+function renderTheme(mode, animate = false) {
   for (const option of elements['theme-switch'].querySelectorAll('button')) {
     option.setAttribute('aria-pressed', option.dataset.themeMode === mode);
   }
+  syncThemeIndicator(animate);
 }
 function setTheme(mode) {
+  const group = elements['theme-switch'];
+  const active = group.querySelector('button[aria-pressed="true"]');
+  const prevMode = active?.dataset.themeMode ?? 'system';
+  const prevResolved = resolvedTheme(prevMode);
+  const nextResolved = resolvedTheme(mode);
   save('flock-theme', mode);
+  if (!reducedMotion.matches) {
+    if (group.classList.contains('seg-ready')) group.classList.add('seg-animated');
+    if (prevResolved !== nextResolved) {
+      const root = document.documentElement;
+      root.classList.add('theme-switching');
+      clearTimeout(themeSwitchTimer);
+      themeSwitchTimer = setTimeout(() => {
+        root.classList.remove('theme-switching');
+        themeSwitchTimer = 0;
+      }, 260);
+    }
+    void document.documentElement.offsetWidth;
+  }
   document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
-  renderTheme(mode);
+  renderTheme(mode, true);
 }
 const mainElement = byId('main');
 const navBackdrop = byId('nav-backdrop');
@@ -2076,14 +2123,22 @@ function releaseDetailAvatar() {
   detailAvatar?.handle?.destroy();
   detailAvatar = null;
 }
+let detailSectionTimer = 0;
+function clearDetailSectionTransition() {
+  clearTimeout(detailSectionTimer);
+  detailSectionTimer = 0;
+  elements['detail-body'].classList.remove('section-switching');
+}
 function closeDetail() {
   detail = null;
+  clearDetailSectionTransition();
   releaseDetailAvatar();
   if (elements.detail.open) elements.detail.close();
 }
 function openDetail(selection) {
   if (!view?.data) return;
   decisions.close({ focus: false });
+  clearDetailSectionTransition();
   detail = selection.kind === 'settings' ? { section: 'general', ...selection } : selection;
   signatures.delete('detail');
   renderDetail();
@@ -2094,6 +2149,7 @@ function openDetail(selection) {
 }
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
+  clearDetailSectionTransition();
   releaseDetailAvatar();
   const origin = detailOrigin;
   detailOrigin = null;
@@ -2108,7 +2164,17 @@ function selectSection(section, focus = false) {
   if (detail?.kind !== 'settings' || detail.section === section) return;
   detail.section = section;
   renderDetail();
-  elements['detail-body'].scrollTop = 0;
+  const body = elements['detail-body'];
+  body.scrollTop = 0;
+  clearDetailSectionTransition();
+  if (!reducedMotion.matches) {
+    void body.offsetWidth;
+    body.classList.add('section-switching');
+    detailSectionTimer = setTimeout(() => {
+      body.classList.remove('section-switching');
+      detailSectionTimer = 0;
+    }, 220);
+  }
   if (focus) byId(`detail-tab-${section}`)?.focus();
 }
 function renderDetailNav(sections, current) {
@@ -2793,7 +2859,10 @@ const decisions = mountBoardInbox({
 });
 
 const savedTheme = saved('flock-theme', 'system');
-renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
+renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system', false);
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => syncThemeIndicator(false)).observe(elements['theme-switch']);
+}
 elements['theme-switch'].addEventListener('click', (event) => {
   const option = event.target.closest('button[data-theme-mode]');
   if (option) setTheme(option.dataset.themeMode);

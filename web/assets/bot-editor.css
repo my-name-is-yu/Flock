@@ -157,19 +157,63 @@
 .studio-close:active { transform: scale(.92); }
 
 .studio-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
-.studio-tabs { display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
+.studio-tabs {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--raised);
+}
+.studio-tabs::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  z-index: 0;
+  width: var(--seg-w, 0px);
+  transform: translateX(var(--seg-x, 0px));
+  border-radius: var(--radius-sm);
+  background: var(--overlay);
+  box-shadow: 0 1px 3px var(--shadow-color);
+  opacity: 0;
+  pointer-events: none;
+}
+.studio-tabs.seg-ready::before { opacity: 1; }
+.studio-tabs.seg-animated::before {
+  transition: transform 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
+              width 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
+              background-color 220ms cubic-bezier(.2, .8, .2, 1),
+              box-shadow 220ms cubic-bezier(.2, .8, .2, 1);
+}
 .studio-tabs button {
+  position: relative;
+  z-index: 1;
+  display: inline-grid;
+  place-items: center;
   border: 0;
   border-radius: var(--radius-sm);
   padding: .3rem .75rem;
   background: none;
   color: var(--text-2);
   font-size: var(--text-sm);
-  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, box-shadow var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+  transition: color 180ms ease, transform var(--dur-press) var(--ease-out);
+}
+.studio-tabs button::after {
+  content: attr(data-label);
+  font-weight: 600;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  user-select: none;
+  pointer-events: none;
 }
 .studio-tabs button:hover { color: var(--text); }
 .studio-tabs button:active { transform: scale(.96); }
-.studio-tabs button[aria-pressed="true"] { background: var(--overlay); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px var(--shadow-color); }
+.studio-tabs button[aria-pressed="true"] { color: var(--text); font-weight: 600; }
+.studio-tabs:not(.seg-ready) button[aria-pressed="true"] { background: var(--overlay); box-shadow: 0 1px 3px var(--shadow-color); }
 .studio-shuffle {
   transition: background-color .15s ease, color .15s ease, opacity .15s ease, transform .15s cubic-bezier(.23, 1, .32, 1);
 }
@@ -346,4 +390,5 @@
     transform: none;
   }
   .studio-name-random:active { transform: none; }
+  .studio-tabs.seg-animated::before { transition: none; }
 }
