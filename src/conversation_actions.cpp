@@ -138,7 +138,6 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             transaction.commit();
             return true;
         }
-        // This checkpoint admits the external write. Later local changes may race an in-flight request.
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{effect->checkpoint(),id,step});
         if (!sqlite3_changes(db)) return false;
