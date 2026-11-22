@@ -3,6 +3,7 @@ import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { createComposerDraftStore } from '/composer-drafts.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -66,10 +67,8 @@ function save(key, value) {
 }
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
-const drafts = new Map();
-const replies = new Map();
+const composerDrafts = createComposerDraftStore();
 const sendingMessages = new Set();
-const pendingMessages = new Map();
 const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
@@ -164,25 +163,6 @@ const peerQuery = ({ id: bot, peerId: peer }, before) =>
   `peer-conversation?${new URLSearchParams(before ? { bot, peer, before } : { bot, peer })}`;
 const timelineContext = () => view?.dm ?? view;
 const showingComposer = (bot) => view?.id === bot && !view?.dm;
-const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
-
-function pendingMessage(bot) {
-  if (!pendingMessages.has(bot)) {
-    try {
-      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
-      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
-    } catch {}
-  }
-  return pendingMessages.get(bot);
-}
-function rememberMessage(bot, pending) {
-  if (pending) pendingMessages.set(bot, pending);
-  else pendingMessages.delete(bot);
-  try {
-    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
-    else sessionStorage.removeItem(messageStorageKey(bot));
-  } catch {}
-}
 
 function setConnection(state) {
   if (connection === state) return;
@@ -225,9 +205,6 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
-  const pending = botId && pendingMessage(botId);
-  if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
-  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
     if (updateHistory) history.pushState(null, '', url);
@@ -733,11 +710,10 @@ function renderActivity() {
 }
 
 function beginReply(target, text = '') {
-  if (!target.messageId || sendingMessages.has(view.id)) return;
+  const composer = view?.composer;
+  if (!target.messageId || !composer || sendingMessages.has(composer)) return;
   if (view.dm) selectBot(view.id);
-  const current = replies.get(view.id);
-  if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
-  if (current?.messageId !== target.messageId || text) replies.set(view.id, { ...target, text });
+  composer.openReply(target, text);
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -922,6 +898,11 @@ function eventCard(event, context, place) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
       extras.push(resolution);
+      if (data.reason === 'user_question' && view.composer?.textAt(event.id)) {
+        extras.push(button('View reply draft', 'text-button', () => beginReply({
+          kind: 'wait', messageId: event.id, summary: copy,
+        })));
+      }
     }
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
@@ -1128,7 +1109,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     moveScroll();
     return;
   }
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+  if (!changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
     data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
@@ -1193,9 +1174,12 @@ function setNotice(context, text, isError = false) {
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
+  !context.data.waits.some((task) => task.wait.messageId === reply.messageId);
+let composition = null;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(bot) || [...pendingWaits.values()].includes(bot)) return;
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || [...pendingWaits.values()].includes(bot)) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
     if (notices.get(bot) !== notice || !showingComposer(bot)) return;
@@ -1216,27 +1200,35 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = context?.data && !context.dm;
+  const available = context?.composer && !context.dm;
   elements['composer-container'].hidden = !available;
-  if (!available) return;
-  const reply = replies.get(context.id);
+  if (!available) {
+    composition = null;
+    elements.message.value = '';
+    return;
+  }
+  const { composer } = context;
+  const reply = composer.reply;
+  if (composition && (composition.composer !== composer || composition.anchor !== reply?.messageId)) composition = null;
   const notice = notices.get(context.id);
-  const body = reply ? reply.text : drafts.get(context.id) ?? '';
-  const busy = sendingMessages.has(context.id);
-  const closedReply = reply?.closed === true;
+  const body = composer.text;
+  const busy = sendingMessages.has(composer);
+  const closedReply = closedQuestion(context, reply);
+  const source = reply && context.events.get(reply.messageId)?.data;
+  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply?.summary ?? '';
+  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
-  if (elements.message.value !== body) {
+  if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || !!composition || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
@@ -1666,14 +1658,10 @@ function mergeLatest(context, latest) {
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
-  const reply = replies.get(context.id);
-  if (!reply || sendingMessages.has(context.id)) return;
-  if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    if (reply.text.trim()) reply.closed = true;
-    else {
-      replies.delete(context.id);
-      setNotice(context, 'That question is no longer open, so your reply was not sent.');
-    }
+  const composer = context.composer = composerDrafts(context.id, latest.composerPerson);
+  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text) {
+    composer.closeReply();
+    setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
 }
 async function conversationPage(timeline, before) {
@@ -1714,6 +1702,10 @@ async function refreshView(context, scroll) {
     setConnection('ready');
   } catch (error) {
     if (!isCurrent()) return;
+    if ([401, 403, 404].includes(error.status)) {
+      context.composer = null;
+      renderComposer();
+    }
     if (error.status === 404) void refreshBots();
     else {
       setConnection('offline');
@@ -1822,32 +1814,23 @@ async function submitOperation(context, key, payload) {
 async function submit(event) {
   event.preventDefault();
   const context = view;
-  if (!context?.data || context.dm || elements.send.disabled) return;
-  const reply = replies.get(context.id);
-  const text = reply ? reply.text : drafts.get(context.id);
-  const replyToMessageId = reply?.messageId;
-  const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
-    ? previous.clientMessageId : crypto.randomUUID();
-  const payload = { botId: context.id, clientMessageId, text };
-  if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  rememberMessage(context.id, { payload, reply });
-  sendingMessages.add(context.id);
+  if (!context?.composer || context.dm || elements.send.disabled) return;
+  const { composer } = context;
+  const payload = composer.prepareSend();
+  sendingMessages.add(composer);
   setNotice(context, 'Sending message…');
   try {
     await api('messages', payload);
-    rememberMessage(context.id, null);
-    if (reply) replies.delete(context.id);
-    else drafts.delete(context.id);
+    composer.settleSend(payload, true);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
+    if (error.status >= 400 && error.status < 500) composer.settleSend(payload, false);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
-    sendingMessages.delete(context.id);
+    sendingMessages.delete(composer);
     if (showingComposer(context.id)) renderComposer();
   }
 }
@@ -1881,24 +1864,37 @@ elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
-  replies.delete(view.id);
+  view.composer.closeReply();
   renderComposer();
   elements.message.focus();
 });
-elements.message.addEventListener('input', () => {
-  if (!view || view.dm) return;
-  const reply = replies.get(view.id);
-  if (reply) reply.text = elements.message.value;
-  else drafts.set(view.id, elements.message.value);
+function updateDraft() {
+  if (!view?.composer || view.dm || elements.message.readOnly) return;
+  view.composer.edit(elements.message.value);
   fitMessage();
   notices.delete(view.id);
-  const limit = composerLimit(reply);
+  const limit = composerLimit(view.composer.reply);
   if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
+}
+elements.message.addEventListener('compositionstart', () => {
+  if (!view?.composer || view.dm || elements.message.readOnly) return;
+  composition = { composer: view.composer, anchor: view.composer.reply?.messageId };
+  renderComposer();
+});
+elements.message.addEventListener('compositionend', () => {
+  if (!composition) return;
+  composition = null;
+  if (elements.message.readOnly) renderComposer();
+  else updateDraft();
+});
+elements.message.addEventListener('input', (event) => {
+  if (composition || event.isComposing) fitMessage();
+  else updateDraft();
 });
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
-  if (event.isComposing || event.keyCode === 229) return;
+  if (composition || event.isComposing || event.keyCode === 229) return;
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
     event.preventDefault();
     elements.send.click();

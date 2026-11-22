@@ -49,7 +49,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/flock.svg",
+    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/composer-drafts.mjs","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
@@ -69,6 +69,7 @@ void boundary(Browser& browser) {
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
+    check(browser.get("/api/view?bot=release").at("composerPerson").is_null(),"local composer was given an authenticated identity");
     for (const std::string path : {"/api/compactions","/api/workflows"}) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
@@ -826,6 +827,7 @@ void accessEndpoints(const std::filesystem::path& path) {
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/access?bot=release"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
     Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
@@ -843,6 +845,7 @@ void accessEndpoints(const std::filesystem::path& path) {
     browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
                                           {"resourceId","github.com/org/private"},{"operation","read"}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
