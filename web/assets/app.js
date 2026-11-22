@@ -14,7 +14,7 @@ const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
-  'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
+  'profile-name', 'profile-status', 'profile-heading', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
@@ -564,8 +564,7 @@ function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
   const profile = elements.profile;
-  profile.hidden = !bot || !!dm;
-  elements['settings-button'].hidden = !bot || !!dm;
+  elements['profile-heading'].hidden = !bot || !!dm;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
@@ -610,8 +609,8 @@ function renderHeader() {
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
   profile.dataset.state = offline ? 'offline' : presence;
-  profile.title = `${bot.name} · ${status}`;
-  profile.setAttribute('aria-label', `${bot.name} settings`);
+  profile.title = `${bot.name} settings`;
+  profile.setAttribute('aria-label', profile.title);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
   elements['profile-status'].hidden = !offline && presence === 'idle';
@@ -1679,7 +1678,7 @@ function openNewBot(origin = elements['new-bot-button']) {
 function openEditAppearance(bot) {
   reopenSettingsOnClose = true;
   closeDetail();
-  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+  botEditor.openEdit(bot, { bots, origin: elements.profile });
 }
 
 function generalContent(bot) {
@@ -2163,7 +2162,7 @@ elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
-for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
+elements.profile.addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
 elements['peer-back'].addEventListener('click', () => {
   selectBot(view.id);
