@@ -530,11 +530,12 @@ function createSidebarEntry(botId) {
         popover?.setAttribute('aria-label', `${bot.name} menu`);
       }
       if (!previousBot || previousBot.preview !== bot.preview) {
-        previewText.data = bot.preview || 'No conversation yet';
+        previewText.data = bot.preview || '';
       }
       const hasPresence = activePresence.has(bot.presence);
       presenceDot.hidden = bot.presence !== 'waiting';
       dots.hidden = !busyPresence.has(bot.presence);
+      preview.hidden = !bot.preview && dots.hidden;
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
       const unread = hasUnread(bot);
@@ -591,7 +592,7 @@ function draftRow(draft) {
   const name = node('span', 'bot-name');
   name.append(node('span', 'bot-name-text', draft.name));
   const text = node('span', 'bot-text');
-  text.append(name, node('span', 'bot-preview', 'No conversation yet'));
+  text.append(name);
   select.append(avatar(draft, 'bot-avatar'), text);
   row.append(select);
   return row;
