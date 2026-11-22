@@ -41,6 +41,9 @@ export function questionChoiceForm({ key, prompt, choices, answer, busy, dialog,
   form.addEventListener('change', (event) => {
     if (!options.disabled && event.target.checked) select(event.target.value);
   });
+  form.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && event.target.matches('input[type=radio]')) event.preventDefault();
+  });
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     const selected = options.querySelector('input:checked');

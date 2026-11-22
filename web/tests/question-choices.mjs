@@ -31,6 +31,10 @@ function exercise(questionChoiceForm, updateQuestionChoiceForm) {
   check(release.checked && !main.checked && !send.disabled && !submitted.length,
     'Selecting an option submitted or left the wrong answer selected');
 
+  check(!release.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })),
+    'Enter on a radio did not suppress implicit submission');
+  check(!submitted.length, 'Enter on a radio submitted the answer');
+
   const dialog = questionChoiceForm({ ...options, dialog: true, answer, busy: true });
   document.body.append(dialog);
   const dialogSend = dialog.querySelector('button');
