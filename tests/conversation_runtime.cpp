@@ -1828,6 +1828,33 @@ void oversizedAuthoritativeHandoffBlocksDelivery() {
           "a new Session silently received an incomplete authoritative handoff");
 }
 
+void legacyIntakeChangeScopesTheFirstSessionAnswers() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Measure frontend startup"));
+    f.model.questions[id] = {{"question","Which browser?"}};
+    f.reach(id,"waiting");
+    auto task = f.task(id);
+    f.store->operate(localOwner,TaskTarget::from(task,task["wait"]["id"]),"answer",{{"text","Use Firefox Nightly"}});
+    f.script("Measure worker startup instead",{change(id,{{"intent","Measure worker startup"}})});
+    f.receive("replace-intake-intent","Measure worker startup instead");
+    f.model.questions[id] = {{"question","Which worker?"}};
+    f.reach(id,"waiting");
+    task = f.task(id);
+    f.store->operate(localOwner,TaskTarget::from(task,task["wait"]["id"]),"answer",{{"text","Use worker Green-32"}});
+    // Keep the accepted conversation step and waits that existed before intake changes had a journal marker.
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> legacy(raw,sqlite3_close);
+    check(opened == SQLITE_OK && sqlite3_exec(legacy.get(),"DELETE FROM journal WHERE kind='task_contract_changed'",
+          nullptr,nullptr,nullptr) == SQLITE_OK,"could not prepare the legacy intake fixture");
+    f.restart();
+    f.reach(id,"running");
+    const auto& prompt = f.t3.sent.front().instruction;
+    check(prompt.find("Measure worker startup") != prompt.npos && prompt.find("Use worker Green-32") != prompt.npos &&
+          prompt.find("Use Firefox Nightly") == prompt.npos,
+          "the first Session lost the current intake answer or replayed one from the previous intent");
+}
+
 void interruptLeavesTheTaskOpen() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1916,6 +1943,7 @@ int main() {
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
         oversizedAuthoritativeHandoffBlocksDelivery();
+        legacyIntakeChangeScopesTheFirstSessionAnswers();
         interruptLeavesTheTaskOpen();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";
     } catch (const std::exception& e) {

@@ -901,11 +901,35 @@ SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
          ((r.number=1 AND j.kind='task_contract_changed') OR
           (r.number>1 AND j.kind='task_revision' AND json_extract(j.data,'$.revisionId')=r.id))),
-         r.source_message_id,0)
+         r.source_message_id,0),
+       r.number=1 AND NOT EXISTS (
+         SELECT 1 FROM journal j WHERE j.task_id=r.task_id AND j.kind='task_contract_changed')
 FROM task_revisions r WHERE r.id=? AND r.task_id=?
 )SQL",{revision(task),task.at("id")});
         if (!row.next()) throw Conflict("The new Session needs an established task revision");
-        return {row.string(0),row.string(1),row.number(2)};
+        SessionContract contract{row.string(0),row.string(1),row.number(2)};
+        if (row.number(3)) {
+            // Before intake changes had a journal marker, the accepted conversation step held the intent.
+            auto original = field(task,"request");
+            if (task.contains("restartContext"))
+                original = taskIntent(db.load(task.at("restartContext").at("taskId")));
+            auto priorChange = db.query(R"SQL(
+WITH intake_intents AS (
+  SELECT j.id,json_extract(s.decision,'$[0].args.intent') AS intent
+  FROM journal j JOIN conversation_steps s ON s.message_id=json_extract(j.data,'$.messageId')
+       AND s.step=json_extract(j.data,'$.step')
+  WHERE j.task_id=?1 AND j.kind='instruction_accepted'
+    AND json_extract(j.data,'$.revisionId')=0 AND json_extract(s.decision,'$[0].tool')='change_task'
+    AND length(json_extract(s.decision,'$[0].args.intent'))>0
+), changes AS (
+  SELECT id,intent,lag(intent,1,?2) OVER (ORDER BY id) AS previous FROM intake_intents
+)
+SELECT coalesce(max(id),0) FROM changes WHERE intent<>previous
+)SQL",{task.at("id"),original});
+            priorChange.next();
+            contract.answersAfter = std::max(contract.answersAfter,priorChange.number(0));
+        }
+        return contract;
     }
 
     Json appendSessionDirections(std::string& instruction, const Json& task, const Json& pending, Id answersAfter) {
