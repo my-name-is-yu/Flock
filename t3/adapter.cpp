@@ -291,13 +291,6 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     return true;
 }
 
-bool questionGone(const Failure& error) {
-    return error.code == "invalid_request" &&
-        (error.serverMessage == "The pending user-input request was not found." ||
-         error.serverMessage == "The user-input request was already answered." ||
-         error.serverMessage.starts_with("The user-input request is no longer pending ("));
-}
-
 std::set<std::string> pending(Client& client, const std::string& threadId) {
     const auto data = client.call(PendingRequest, {{"action", "list"}, {"threadId", threadId}});
     std::set<std::string> requests;
@@ -356,7 +349,7 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
     Json questions;
     try { questions = readQuestion(client, run.threadId, requestId); }
     catch (const Failure& error) {
-        if (questionGone(error)) return {Attribution::Kind::Resolved, {}, {}};
+        if (error.reason == Failure::Reason::QuestionGone) return {Attribution::Kind::Resolved, {}, {}};
         throw;
     }
     auto fields = questionFields(questions);
@@ -378,7 +371,7 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
             return matching < 2;
         });
     } catch (const Failure& failure) {
-        if (failure.kind == Failure::Kind::Auth) throw;
+        if (failure.kind == Failure::Kind::Auth || failure.kind == Failure::Kind::Settings) throw;
         return {Attribution::Kind::Ambiguous, {}, {}};
     }
     if (unverified || matching != 1 || !exactOwner) return {Attribution::Kind::Ambiguous, {}, {}};
@@ -393,16 +386,16 @@ std::optional<Json> wireAnswers(const Json& fields, const Json& answers) {
         const auto id = str(field, "id");
         const auto answer = answers.find(id);
         const auto& options = field["options"];
-        if (answer == answers.end()) {
+        if (answer != answers.end()) ++consumed;
+        if (answer == answers.end() || (answer->is_array() && answer->empty())) {
             if (field["required"].get<bool>()) return std::nullopt;
             if (options.empty()) result[id] = "";
             continue;
         }
-        ++consumed;
         auto selected = answer->is_array() ? *answer : Json::array({*answer});
         if (selected.empty() || (!field["multiple"].get<bool>() && selected.size() != 1)) return std::nullopt;
         std::set<std::string> seen;
-        bool custom = false;
+        bool singleCustom = false;
         for (const auto& value : selected) {
             if (!value.is_string()) return std::nullopt;
             const auto& text = value.get_ref<const std::string&>();
@@ -411,18 +404,20 @@ std::optional<Json> wireAnswers(const Json& fields, const Json& answers) {
                 return option["value"] == value;
             });
             if (!offered) {
-                if (!field["freeform"].get<bool>() || selected.size() != 1) return std::nullopt;
-                custom = true;
+                if (!field["freeform"].get<bool>()) return std::nullopt;
+                singleCustom = selected.size() == 1;
             }
         }
-        result[id] = field["multiple"].get<bool>() && !custom ? selected : selected.front();
+        result[id] = field["multiple"].get<bool>() && !singleCustom ? selected : selected.front();
     }
     if (consumed != answers.size()) return std::nullopt;
     return result;
 }
 
 std::string actionPrompt(const Command& command) {
-    return "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
+    const auto marker = "\n\n[Flock action ID: " + command.actionId + "]";
+    if (command.instruction.ends_with(marker)) return command.instruction;
+    return command.instruction + marker;
 }
 
 void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_view origin) {
@@ -486,17 +481,9 @@ Delivery failureDelivery(const Failure& failure) {
 }
 
 Delivery workReply(const Failure& failure) {
-    if (failure.kind == Failure::Kind::Auth) {
-        auto refused = failureDelivery(failure);
-        refused.definitelyUnsent = true;
-        return refused;
-    }
-    if (failure.code == "model_unavailable" || failure.code == "provider_unavailable" ||
-        (failure.code == "invalid_request" && (failure.serverMessage.starts_with("Pass modelSelection:") ||
-          failure.serverMessage == "The project was not found." ||
-          failure.serverMessage.find("No thread was created.") != std::string::npos)))
-        return {Outcome::Settings, {}, "T3 rejected the project, model, or workspace settings before starting a Run", true};
-    return failureDelivery(failure);
+    auto reply = failureDelivery(failure);
+    reply.definitelyUnsent = failure.kind == Failure::Kind::Auth || failure.reason == Failure::Reason::WorkSettings;
+    return reply;
 }
 
 std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::string& projectId) {
@@ -538,6 +525,8 @@ Delivery reconcileWork(Client& client, const Command& command) {
     const auto& hint = command.candidate.threadId;
     if (!hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
     const auto expected = actionPrompt(command);
+    // Older clients persisted the same command but sent an additional wrapper.
+    const auto legacy = "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
     std::map<std::pair<std::string, std::string>, RunRef> matches;
     bool incomplete = false;
     for (const auto& threadId : threads) {
@@ -549,13 +538,15 @@ Delivery reconcileWork(Client& client, const Command& command) {
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
             if (str(item, "type") != "user_message" || !local(item, threadId)) return true;
             const auto text = itemText(item);
-            const bool possible = text.more ? expected.starts_with(text.text) : expected == text.text;
+            const bool possible = text.more ? (expected.starts_with(text.text) || legacy.starts_with(text.text))
+                                            : (expected == text.text || legacy == text.text);
             if (possible && str(item, "createdBy") == "agent" && str(item, "creationSource") == "mcp" &&
                 str(item, "senderThreadId").empty()) {
-                const auto full = readCompleteItemText(client, scan, item, threadId, "messages", expected.size());
+                const auto full = readCompleteItemText(client, scan, item, threadId, "messages", std::max(expected.size(), legacy.size()));
                 const auto runId = str(item, "runId");
-                if (!full || (runId.empty() && *full == expected)) incomplete = true;
-                if (full && *full == expected && !runId.empty() && (launch || runId != command.target.runId))
+                const bool exact = full && (*full == expected || *full == legacy);
+                if (!full || (runId.empty() && exact)) incomplete = true;
+                if (exact && !runId.empty() && (launch || runId != command.target.runId))
                     matches[{threadId, runId}] = {threadId, runId, str(thread, "link")};
             }
             // This is a launch, so only its initial local user message could have created the Thread.
@@ -626,7 +617,7 @@ bool followUpReady(Client& client, const Command& command) {
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
 
-// Delivers a note into the assigned Run while it is still running. It never starts another Run.
+// Steer can only target the currently active Run in the thread.
 Delivery steer(Client& client, const Command& command, bool& invoked) {
     // Like interrupt, an explicit wait resolves T3's own restart continuation of the assigned Run.
     const auto current = wait(client, command.target, false, 1);
@@ -640,11 +631,13 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
         {"message", command.instruction}, {"clientRequestId", command.actionId}});
     // T3 v0.1.11 cannot require the expected Run on send. If another Run of the task's Thread took over in
-    // between, report the Run that actually received the note.
+    // between, surface the mismatch without confirming the assigned Run.
     if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
     RunRef received = command.target;
-    received.runId = effective;
-    if (const auto runId = str(reply, "runId"); !runId.empty()) received.runId = runId;
+    received.runId = str(reply, "runId");
+    if (received.runId != effective)
+        return result(Outcome::Unknown, "T3 did not confirm steer delivery to " + effective +
+                      (received.runId.empty() ? " (no Run ID returned)" : " (returned " + received.runId + ")"));
     return result(Outcome::Accepted, {}, std::move(received));
 }
 
@@ -671,7 +664,7 @@ Delivery answer(Client& client, const Command& command) {
         position(member(responded, "sequence"));
         return result(Outcome::Accepted, {}, command.target);
     } catch (const Failure& error) {
-        if (questionGone(error)) return result(Outcome::QuestionGone);
+        if (error.reason == Failure::Reason::QuestionGone) return result(Outcome::QuestionGone);
         throw;
     }
 }
@@ -698,8 +691,6 @@ public:
             }
             return std::nullopt;
         } catch (const Failure& failure) {
-            if (failure.code == "invalid_request" && failure.serverMessage == "The project was not found.")
-                return result(Outcome::Settings,"The configured T3 project was not found");
             return failureDelivery(failure);
         }
     }
@@ -746,12 +737,13 @@ public:
     }
 
     Delivery reconcile(const Command& command) override {
+        if (command.tool == "steer") return result(Outcome::Unknown, "T3 cannot look up a steered note by action ID");
         try {
             verifyCommand(command);
             auto connection = credential(command.environmentId, command.config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            if (command.tool != "answer_session_question") {
+            if (command.tool == "delegate" || command.tool == "follow_up") {
                 auto recovered = reconcileWork(client, command);
                 useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
@@ -775,7 +767,8 @@ public:
             const auto reply = wait(client, run, true);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
-            if (terminal(status) && !boolean(reply, "timedOut")) {
+            if (terminal(status)) {
+                if (boolean(reply, "timedOut")) return state(Observed::Finished, status);
                 auto source = RunRef{run.threadId, effective, run.link};
                 auto observed = state(Observed::Finished, status, true);
                 const auto later = reply.value("resultRun", Json::object());
@@ -802,13 +795,13 @@ public:
                 observed.resultRunId = source.runId;
                 return observed;
             }
-            if (!active(status) && !terminal(status)) invalidResponse();
+            if (!active(status)) invalidResponse();
             const auto head = threadHead(client, run.threadId);
             const auto& thread = detail(head, run.threadId);
             const auto count = position(member(thread, "pendingRequestCount"));
             if (count != 0) {
                 const auto requests = pending(client, run.threadId);
-                if (count == 1 && requests.size() == 1 && active(status)) {
+                if (count == 1 && requests.size() == 1) {
                     const auto& id = *requests.begin();
                     auto match = attribute(client, {run.threadId, effective, run.link}, id);
                     if (match.kind == Attribution::Kind::Owned) {
@@ -820,8 +813,9 @@ public:
                 }
                 return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
             }
-            return terminal(status) ? state(Observed::Finished, status) : state(Observed::Running, status);
+            return state(Observed::Running, status);
         } catch (const Failure& failure) {
+            if (failure.kind == Failure::Kind::Settings) return state(Observed::Unavailable, "settings");
             return state(Observed::Unavailable, failure.kind == Failure::Kind::Auth ? "auth" : failure.what());
         }
     }
