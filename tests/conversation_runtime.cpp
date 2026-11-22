@@ -720,7 +720,8 @@ void questionReplyKeepsItsTargetAndOfferedAnswer() {
     Fixture f;
     const auto offered = f.store->submit(f.routing("Release notes"));
     const auto other = f.store->submit(f.routing("Build audit","alpha","cloud"));
-    f.model.questions[offered] = {{"question","Which label should I use?"},{"choices",{"Cancel this task","Status"}}};
+    f.model.questions[offered] = {{"question","Which label should I use?"},
+                                  {"choices",{"Could you cancel the current task please","Status"}}};
     f.reach(offered,"waiting");
     f.reach(other,"running");
     const auto wait = f.task(offered).at("wait");
@@ -731,8 +732,9 @@ void questionReplyKeepsItsTargetAndOfferedAnswer() {
           f.event(offered,"user_answer").is_null() && f.task(other) == otherBefore,
           "a stop targeting another task answered the question or changed work");
 
-    const auto answer = f.response(f.receive("offered-stop-label","Cancel this task",wait.at("messageId")));
-    check(answer["route"] == "answer_wait" && f.event(offered,"user_answer")["text"] == "Cancel this task" &&
+    constexpr auto reply = "Could you CANCEL the current task please?";
+    const auto answer = f.response(f.receive("offered-stop-label",reply,wait.at("messageId")));
+    check(answer["route"] == "answer_wait" && f.event(offered,"user_answer")["text"] == reply &&
           f.event(offered,"cancel_requested").is_null(),"an offered answer was treated as a cancellation");
     const auto afterAnswer = f.task(offered);
     const auto stale = f.response(f.receive("stale-question-stop","Cancel Release notes",wait.at("messageId")));

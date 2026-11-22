@@ -658,6 +658,13 @@ bool destinationMatches(const Context& context, std::string_view chosen, const s
         (mentioned.empty() || (mentioned.size() == 1 && mentioned.contains(allowed->get<std::string>())));
 }
 
+bool offersAnswer(const Task& task, std::string_view normalizedText) {
+    const auto answer = sentence(normalizedText);
+    return std::ranges::any_of(task.waitChoices, [&](const auto& choice) {
+        return answer == normalize(trim(choice));
+    });
+}
+
 bool groundedWait(const Task& task, const Context& context, const Reply& anchor, std::string_view segment) {
     if (anchor.kind == Reply::Kind::wait)
         return anchor.taskId == task.id && anchor.waitId == task.waitId;
@@ -672,11 +679,8 @@ bool groundedWait(const Task& task, const Context& context, const Reply& anchor,
         return matches(candidate) && namesTask(normal, candidate);
     };
     if (identifies(task) && std::ranges::count_if(context.tasks, identifies) == 1) return true;
-    const auto answer = sentence(normal);
     const auto offers = [&](const Task& candidate) {
-        return matches(candidate) && std::ranges::any_of(candidate.waitChoices, [&](const auto& choice) {
-            return answer == normalize(trim(choice));
-        });
+        return matches(candidate) && offersAnswer(candidate, normal);
     };
     return offers(task) && std::ranges::count_if(context.tasks, offers) == 1;
 }
@@ -1069,11 +1073,7 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
     const bool ja = japanese(text);
     if (reply.kind == Reply::Kind::wait) {
         if (task && currentReplyTask(reply,*task)) {
-            const auto answer = sentence(normalize(text));
-            const bool offered = std::ranges::any_of(task->waitChoices,[&](const auto& choice) {
-                return answer == normalize(trim(choice));
-            });
-            if (!offered) {
+            if (!offersAnswer(*task, normalize(text))) {
                 if (auto stop = replyCancellation(text,context,*task)) return stop;
             }
             if (task->waitReason == "user_question" && text.size() <= 8000)
