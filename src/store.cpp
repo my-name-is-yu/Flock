@@ -508,10 +508,15 @@ ORDER BY 1,2
     return changes;
 }
 
-Id Store::submit(const Intake& item) {
+Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
+    if (requester && !policy().allows(*requester,Action::bot_talk,item.botId)) throw DecisionDenied{};
     const auto id = p_->submit(item);
+    if (requester) {
+        p_->sharedRedactor().requirePublic(requester->id);
+        p_->exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{requester->id,id});
+    }
     transaction.commit();
     return id;
 }

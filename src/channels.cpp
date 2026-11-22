@@ -189,7 +189,7 @@ bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& orig
     auto access = Policy(const_cast<Impl&>(*this));
     return access.allows(Person{std::string(person),false},Action::bot_talk,bot) &&
            access.allows(bot,Action::channel_use,channelPolicyTarget(origin)) &&
-           (operation == "use" || access.allows(bot,operation == "read" ? Action::channel_read : Action::channel_post,
+           (operation == "use" || !access.forbidden(bot,operation == "read" ? Action::channel_read : Action::channel_post,
                                                 channelPolicyTarget(origin)));
 }
 
@@ -405,6 +405,15 @@ void Store::Impl::channelLimitation(Id source, std::string_view bot, std::string
     const Json data{{"messageId",reply},{"replyToMessageId",source},{"text",notice},{"status","done"}};
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     if (supportsReplies) queueChannelReply(source,reply,data);
+}
+
+std::optional<Resource> Store::Impl::channelToolPolicy(Id message, std::string_view tool) {
+    if (tool != "reply" && tool != "read_channel_attachment" && tool != "channel_edit_message" &&
+        tool != "channel_react" && tool != "channel_send_attachment" && tool != "publish_artifact") return {};
+    auto source = query("SELECT origin FROM channel_messages WHERE message_id=?",{message});
+    if (!source.next()) return {};
+    return Resource{tool == "read_channel_attachment" ? Action::channel_read : Action::channel_post,
+                    channelPolicyTarget(originFrom(source.json(0))),tool == "reply"};
 }
 
 Json Store::Impl::channelTool(Id message, std::string_view bot, const Decision& decision) {

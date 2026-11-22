@@ -1,4 +1,5 @@
 #include "flock/session_handoff.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/skill_export.hpp"
 #include <fstream>
 
@@ -258,6 +259,29 @@ void coordinate(const std::filesystem::path& path) {
     const auto halted = handoff.step(owner,stopped,bot,intake,soul);
     check(halted.state == "stopped" && sessions.sent.size() == 3,"stop admitted a new effect");
 }
+void supervisedCoordination(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve);
+    const auto connection = connect(store);
+    store.policy().setMode(owner,"supervised");
+    const auto channel = invoke(handoff,connection,first,"supervised","Begin.","Coordinate checks").channel;
+    Bot bot;
+    bot.decision = {"root_guidance"};
+    handoff.step(owner,channel,bot,intake,soul);
+    const auto items = store.inbox(owner);
+    check(sessions.sent.empty() && items.size()==1,"connector work dispatched before approval");
+    const auto& card = items.at(0);
+    check(card.at("itemKind")=="policy_approval" && card.at("expiresAt").get<Seconds>() ==
+          card.at("createdAt").get<Seconds>() + 1800,"coordination did not create a background card");
+    const InboxTarget target{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),0,0,0,0};
+    denied([&] { store.decideInbox(visitor,target,"allow_once"); });
+    store.decideInbox(owner,target,"allow_once");
+    handoff.step(owner,channel,bot,intake,soul);
+    handoff.step(owner,channel,bot,intake,soul);
+    check(sessions.sent.size()==1 && store.inbox(owner).empty(),"coordination did not resume exactly once");
+}
+
 void concurrentHumanAndBudget(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
@@ -470,6 +494,7 @@ int main() {
         multiEnvironment(path / "environments.sqlite3");
         invocationAndRecovery(path / "invocation.sqlite3");
         coordinate(path / "coordination.sqlite3");
+        supervisedCoordination(path / "supervised-coordination.sqlite3");
         concurrentHumanAndBudget(path / "human-policy.sqlite3");
         dispatchHistoryCoverage(path);
         lateRedactionProjection(path);

@@ -7,8 +7,9 @@
 <p id="status" role="status"></p>
 <section id="local-connections" hidden><h2>Local machine connections</h2><div id="machines"></div></section>
 <div id="administration" hidden>
-<section><h2>Installation policy</h2><p id="mode"></p></section>
-<section><h2>Never rules</h2><div id="rules"></div></section>
+<section><h2>Installation policy</h2><p id="mode"></p>
+<label id="mode-control" hidden><span>Supervised</span><input type="checkbox" id="supervised" role="switch"></label></section>
+<section><h2>Rules</h2><div id="rules"></div></section>
 <section id="secrets" hidden><h2>Protected input</h2><div id="inputs"></div></section>
 <section id="sharing" hidden><h2>Shared members</h2><div id="people"></div>
 <form id="members"><label>Person ID <input required name="person"></label><button class="button">Add member</button></form></section>

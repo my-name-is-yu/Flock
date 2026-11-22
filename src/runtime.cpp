@@ -174,6 +174,13 @@ struct Runtime::Impl {
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
+    void settleApprovals() {
+        std::lock_guard lock(db.mutex);
+        Transaction tx(db.db);
+        db.settlePolicyApprovals(options.clock());
+        tx.commit();
+    }
+
     void fireDueAutomations() {
         try { db.fireDueAutomations(options.clock()); }
         catch (const StorageError&) { throw; }
@@ -208,6 +215,10 @@ struct Runtime::Impl {
         }
         try { db.recoverWorkspace(); }
         catch (...) { close(lockFd); throw; }
+        {
+            std::lock_guard lock(db.mutex);
+            db.policyClock = options.clock;
+        }
     }
     ~Impl() {
         shutdown.request_stop();
@@ -217,6 +228,10 @@ struct Runtime::Impl {
         try { db.stopWorkspace(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
+        }
+        {
+            std::lock_guard lock(db.mutex);
+            db.policyClock = unixTime;
         }
         close(lockFd);
     }
@@ -284,7 +299,7 @@ WHERE d.recipient_task=?1 OR d.id=(
 
     bool specialistAdmission(const SpecialistOrigin& origin, const Command& command, const Json& task) {
         if (!activeSpecialistCoordination(origin.channel,origin.generation) ||
-            !access.allows(command.ownerBotId,Action::environment_launch,command.environmentId) ||
+            access.forbidden(command.ownerBotId,Action::environment_launch,command.environmentId) ||
             !task.at("activeRun").is_null() || !task.at("lastRun").is_null() || hasPending(task) ||
             taskIntent(task) != origin.purpose || field(task,"doneWhen") != origin.doneWhen ||
             field(task,"inputArtifactVersion") != origin.commit) return false;
@@ -378,7 +393,11 @@ ORDER BY id)SQL");
     std::vector<Id> nextProjects(std::size_t slots) {
         if (slots == 0) return {};
         auto ids = eligible();
-        std::erase_if(ids,[&](Id id) { return workers.contains(id); });
+        std::erase_if(ids,[&](Id id) {
+            if (workers.contains(id)) return true;
+            std::lock_guard lock(db.mutex);
+            return db.query("SELECT 1 FROM policy_approvals WHERE task=? AND turn=0 AND status='pending'",{id}).next();
+        });
         if (ids.size() > slots) {
             std::rotate(ids.begin(),std::upper_bound(ids.begin(),ids.end(),lastScheduled),ids.end());
             ids.resize(slots);
@@ -1130,14 +1149,50 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         Delivery outcome;
         // A scoped launch must pass the live coordination check when reserving its slot.
         const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
-        const auto launchAllowed = [&] {
-            return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
-                   access.allows(cmd.ownerBotId,Action::environment_launch,cmd.environmentId);
+        std::optional<Resource> resource;
+        if (cmd.tool == "delegate") resource = Resource{Action::environment_launch,cmd.environmentId};
+        else if (cmd.tool == "follow_up" || cmd.tool == "answer_session_question") {
+            resource = Resource{Action::t3_send,Resource::sessionRead(cmd.environmentId,cmd.target.threadId).target,
+                                cmd.tool == "answer_session_question"};
+        }
+        const auto operation = "outbox/" + cmd.actionId;
+        const auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
+                                  {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
+                                  {"config",cmd.config}};
+        const auto refused = [&](ApprovalGate gate) {
+            change(task,[&](Json& current) {
+                if (current["actionId"] != action["id"]) return false;
+                if (specialistLaunch) {
+                    failSpecialistLaunch(current,action,approvalError(gate));
+                    return true;
+                }
+                db.exec("UPDATE outbox SET phase='closed' WHERE id=? AND phase='ready'",{action["id"]});
+                if (!sqlite3_changes(db.db)) return false;
+                refundUnsentWork(current,action);
+                current["actionId"] = "";
+                current["state"] = current["activeRun"].is_null() ? "deciding" : "running";
+                current["feedback"] = approvalError(gate);
+                if (current.at("state") == "deciding")
+                    db.event(current,"policy/" + cmd.actionId,{{"kind","policy_outcome"},{"text",approvalError(gate)}});
+                db.journal(id,"policy_action_closed",{{"actionId",cmd.actionId},{"text",approvalError(gate)}});
+                return true;
+            });
         };
-        const Delivery denied{Delivery::Kind::Settings,{},"Environment launch denied by installation policy.",true};
         const bool firstSend = action["phase"] == "ready";
         if (firstSend) {
-            if (!launchAllowed()) return applyDelivery(id,action,denied);
+            if (resource && access.mode() == "full" && access.forbidden(cmd.ownerBotId,resource->action,resource->target))
+                return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
+            if (resource) {
+                ApprovalGate gate;
+                {
+                    std::lock_guard lock(db.mutex);
+                    Transaction tx(db.db);
+                    gate = db.approveAction(db.taskPolicyOrigin(task),*resource,operation,payload,options.clock(),false);
+                    tx.commit();
+                }
+                if (gate == ApprovalGate::waiting) return;
+                if (gate != ApprovalGate::allow) return refused(gate);
+            }
             if (cmd.tool == "delegate") {
                 try {
                     std::lock_guard lock(db.mutex);
@@ -1177,8 +1232,13 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             const bool pinned = origin && observeSpecialistInput(origin->person,origin->channel)==origin->commit;
             bool specialistBlocked = false;
+            auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
+                if (resource) {
+                    policyGate = db.approveAction(db.taskPolicyOrigin(current),*resource,operation,payload,options.clock());
+                    if (policyGate != ApprovalGate::allow) return false;
+                }
                 if (specialistLaunch && (!origin || !reserveSpecialistLaunch(*origin,cmd,current,pinned))) {
                     failSpecialistLaunch(current,action,
                         "The specialist launch could not verify active coordination, remaining allowance, or the pinned input");
@@ -1195,10 +1255,15 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     current["deadline"] = options.clock() + db.environmentTimeout(cmd.ownerBotId,cmd.environmentId,current.at("config"));
                 db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
                 return true;
-            }) || specialistBlocked) return;
+            }) || specialistBlocked) {
+                if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
+                return;
+            }
         } else if (action["phase"] != "started") return;
         try {
-            if (firstSend) outcome = launchAllowed() ? t3.send(cmd) : denied;
+            if (firstSend) outcome = resource && access.forbidden(cmd.ownerBotId,resource->action,resource->target)
+                ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}
+                : t3.send(cmd);
             else {
                 outcome = t3.reconcile(cmd);
                 if (outcome.kind == Delivery::Kind::Unknown) {
@@ -2364,19 +2429,24 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         saveTask(current);
     }
 
-    void accept(const Json& snapshot, const Json& event, const TaskDecision& decision) {
+    void accept(const Json& snapshot, const Json& event, const TaskDecision& decision,
+                std::string_view approvedInvocation = {}) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
         if (tool == "start_peer_workflow") return startSpecialistWorkflow(snapshot,event,decision);
         if (tool == "delegate_nested_specialist") return startNestedSpecialist(snapshot,event,decision);
         if (isGitTool(tool)) {
             Json result;
+            const auto invocation = approvedInvocation.empty() ? gitInvocation(decision,event) : std::string(approvedInvocation);
             try {
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
-                                    gitInvocation(decision,event),snapshot.at("generation").get<Id>());
+                                    invocation,snapshot.at("generation").get<Id>());
             } catch (const StorageError&) { throw; }
             catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
+            if (result.value("policyWaiting",false)) return;
             change(snapshot,[&](Json& current) {
+                db.exec("UPDATE policy_approvals SET resume=NULL WHERE operation=?",
+                        {"git/" + current.at("id").dump() + "/" + invocation});
                 auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
                 if (!row.next()) return false;
                 auto data = row.json(0);
@@ -2737,6 +2807,23 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         });
     }
 
+    bool resumeGitApproval(const Json& task) {
+        Json saved, event;
+        {
+            std::lock_guard lock(db.mutex);
+            auto row = db.query("SELECT resume FROM policy_approvals WHERE task=? AND generation=?"
+                                " AND turn=0 AND resume IS NOT NULL AND status<>'pending' ORDER BY id LIMIT 1",
+                                {task.at("id"),task.at("generation")});
+            if (!row.next()) return false;
+            saved = row.json(0);
+            event = db.currentEvent(task);
+        }
+        if (!options.gitHost || event.is_null()) return false;
+        const TaskDecision decision{{field(saved,"tool"),saved.at("args"),field(saved,"reason")}};
+        accept(task,event,decision,field(saved,"invocation"));
+        return true;
+    }
+
     void step(Id id) {
         if (shutdown.stop_requested()) return;
         const auto task = snapshot(id);
@@ -2749,7 +2836,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         else if (state == "workflow_waiting") settleSpecialistWorkflow(task);
         else if (state == "deciding") {
             if (field(task,"specialistRole")=="requester") settleSpecialistRequester(task);
-            else if (!continueStage(task)) decide(task);
+            else if (!resumeGitApproval(task) && !continueStage(task)) decide(task);
         } else {
             if (!task["activeRun"].is_null() && (state == "running" || state == "waiting") &&
                 ingest(task,observe(task))) return;
@@ -2788,6 +2875,7 @@ void Runtime::freezeSpecialistWork(const Person& person, Id channel, Id generati
 void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {
     if (p_->shutdown.stop_requested()) return;
+    p_->settleApprovals();
     p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
     p_->db.deliverChannels(p_->shutdown.get_token());
@@ -2801,6 +2889,7 @@ void Runtime::runConversations() {
 }
 void Runtime::tick() {
     if (p_->shutdown.stop_requested()) return;
+    p_->settleApprovals();
     p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
@@ -2812,6 +2901,7 @@ void Runtime::tick() {
 }
 void Runtime::tickConcurrent() {
     if (p_->shutdown.stop_requested()) return;
+    p_->deferContendedWork("policy approvals",[&] { p_->settleApprovals(); });
     const auto collect = [this](auto& workers, std::string_view operation) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {

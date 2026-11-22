@@ -40,7 +40,7 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/policy.cpp src/access_tools.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
+                       src/runtime.cpp src/policy.cpp src/policy_approval.cpp src/access_tools.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
                        src/session_handoff.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
@@ -79,6 +79,9 @@ if(BUILD_TESTING)
   add_executable(flock_access_secrets tests/access_secrets.cpp)
   target_link_libraries(flock_access_secrets PRIVATE flock_core)
   add_test(NAME flock_access_secrets COMMAND flock_access_secrets)
+  add_executable(flock_supervised_policy tests/supervised_policy.cpp)
+  target_link_libraries(flock_supervised_policy PRIVATE flock_core)
+  add_test(NAME flock_supervised_policy COMMAND flock_supervised_policy)
   add_executable(flock_participation tests/participation.cpp)
   target_link_libraries(flock_participation PRIVATE flock_core)
   target_compile_options(flock_participation PRIVATE -Wall -Wextra -Wpedantic)

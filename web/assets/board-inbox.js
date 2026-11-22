@@ -9,6 +9,8 @@ const labels = {
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Reconciliation requested', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Operation rejected',
+  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Always allowed',
+  allow_next_time: 'Allow rule saved',
 };
 const actions = {
   extra_run: [['approve', 'Approve one run']],
@@ -18,6 +20,7 @@ const actions = {
   unknown_delivery: [['reconcile', 'Reconcile delivery']],
   protected_input: [['supply', 'Save protected value']],
   pr_reconciliation: [['reject_pr', 'Reject operation']],
+  policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Always allow'], ['deny', 'Deny']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
@@ -32,7 +35,7 @@ const svgIcons = {
 };
 
 const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
-const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
+const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices, item.status]);
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -163,9 +166,10 @@ function decisionCard(item, submit, source, question, saving) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     parts.push(link);
-  } else if (labels[item.itemKind]) {
+  } else if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
+  if (item.status === 'expired') parts.push(element('span', 'Expired'));
   const rel = relativeTime(item.createdAt);
   if (rel) parts.push(element('span', rel));
   if (source) parts.push(source);
@@ -198,7 +202,7 @@ function decisionCard(item, submit, source, question, saving) {
   for (const pr of item.candidates || []) article.append(prPreviewCard(pr.url, `Pull request #${pr.prNumber}`));
 
   if (!item.canDecide) {
-    article.append(element('p', 'View only', 'board-inbox-meta'));
+    if (item.itemKind !== 'policy_approval') article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
   }
   if (item.itemKind === 'user_question') {
@@ -227,7 +231,10 @@ function decisionCard(item, submit, source, question, saving) {
     btn.dataset.prNumber = pr.prNumber;
     buttons.append(btn);
   }
-  for (const [decision, title] of actions[item.itemKind]) {
+  const choices = item.itemKind === 'policy_approval' && item.status === 'expired'
+    ? [['allow_next_time', 'Always allow next time']]
+    : actions[item.itemKind];
+  for (const [decision, title] of choices) {
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
       : (decision === 'deny' || decision === 'reject_pr' ? 'secondary' : 'primary');
     const btn = element('button', title, style);
@@ -286,7 +293,7 @@ export function mountBoardInbox({
   let composerSuppressed = false;
   let morphCleanup = null;
 
-  const scoped = (botId = bot) => items.filter((item) => item.botId === botId);
+  const scoped = (botId = bot) => items.filter((item) => item.botId === botId || item.conversationBotId === botId);
   const current = () => mode === 'pending' ? scoped().find((item) => itemKey(item) === selected) : undefined;
   const isOpen = () => !!mode;
   const count = (botId) => scoped(botId).length;
@@ -733,9 +740,10 @@ export function mountBoardInbox({
     invalid_input: 'Check the decision and its input.',
   };
 
-  async function submit(item, decision, data, answer) {
+  async function submit(item, decision, data, answer, inline = false) {
     const save = saveKey(item);
-    if (!item.canDecide || saving.has(save) || !current() || decisionTarget(current()) !== decisionTarget(item)) return;
+    const active = inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
+    if (!item.canDecide || saving.has(save) || !active || decisionTarget(active) !== decisionTarget(item)) return;
     const owner = viewer;
     const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
     const fingerprint = decisionTarget(item);
@@ -769,6 +777,7 @@ export function mountBoardInbox({
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
         remember(answer, { target: fingerprint, text: data.text, stale: true });
       }
+      if (inline) onAccepted(item, errors[error.message] ?? 'Could not confirm the decision.');
       if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm the decision. Check before trying again.';
       if (owner === viewer) await refresh();
     } finally {
@@ -827,6 +836,12 @@ export function mountBoardInbox({
 
   return {
     setContext, refresh, count, itemsFor: (botId) => scoped(botId), open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    inlinePolicyCard(item) {
+      const card = decisionCard(item, (entry, decision, data) => submit(entry, decision, data, undefined, true),
+        null, null, saving.get(saveKey(item)));
+      card.classList.add('policy-inline-card');
+      return card;
+    },
     edit(text) {
       const draft = composer();
       if (!draft || draft.busy || draft.text === text) return;

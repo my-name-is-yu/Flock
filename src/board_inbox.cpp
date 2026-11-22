@@ -10,7 +10,7 @@ constexpr std::pair<InboxKind,std::string_view> kinds[] = {
     {model_budget,"model_budget"}, {conversation_model_budget,"conversation_model_budget"},
     {unknown_delivery,"unknown_delivery"},
     {protected_input,"protected_input"}, {pr_review,"pr_review"},
-    {pr_reconciliation,"pr_reconciliation"}
+    {pr_reconciliation,"pr_reconciliation"}, {policy_approval,"policy_approval"}
 };
 
 Json key(const InboxTarget& item) {
@@ -47,6 +47,8 @@ bool validDecision(InboxKind kind, std::string_view decision) {
     case unknown_delivery: return decision == "reconcile";
     case protected_input: return decision == "supply";
     case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
+    case policy_approval: return decision == "allow_once" || decision == "always_allow" ||
+                                 decision == "deny" || decision == "allow_next_time";
     case pr_review: return decision == "approve" || decision == "request_changes";
     }
     return false;
@@ -127,10 +129,19 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
 
 Json Store::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
+    p_->settlePolicyApprovals(p_->policyClock());
     Transaction snapshot(p_->db,Transaction::Mode::read);
     const Policy access(*p_);
     auto result = Json::array();
-    for (const auto& id : p_->visibleBoardBots(actor,bot)) {
+    const auto visible = p_->visibleBoardBots(actor,bot);
+    auto approvalBots = p_->query("SELECT DISTINCT bot FROM policy_approvals WHERE status IN ('pending','expired')"
+                                  " AND (?='' OR bot=?) AND (requester=? OR ?)",{bot,bot,actor.id,actor.adminRoot});
+    auto withCards = visible;
+    while (approvalBots.next())
+        if (std::ranges::find(withCards,approvalBots.string(0)) == withCards.end()) withCards.push_back(approvalBots.string(0));
+    for (const auto& id : withCards)
+        for (auto& card : p_->policyApprovalCards(actor,id)) result.push_back(std::move(card));
+    for (const auto& id : visible) {
         const auto scrub = p_->redactor(id);
         const bool canDecide = access.allows(actor,Action::bot_decide,id);
         const auto anchorTime = [&](Id anchor) -> Id {
@@ -256,6 +267,7 @@ FROM inbox_decisions WHERE bot_id=? ORDER BY id DESC LIMIT 100
 void Store::decideInbox(const Person& actor, const InboxTarget& item, std::string_view decision,
                         const Json& data) {
     std::lock_guard lock(p_->mutex);
+    p_->settlePolicyApprovals(p_->policyClock());
     Transaction transaction(p_->db);
     auto access = this->policy();
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind,decision))
@@ -268,7 +280,9 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
     };
 
     const auto kind = item.itemKind;
-    if (kind == protected_input) {
+    if (kind == policy_approval) {
+        p_->decidePolicyApproval(actor,item,decision);
+    } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
         access.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
     } else if (kind == conversation_model_budget) {

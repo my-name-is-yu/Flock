@@ -963,6 +963,7 @@ const decisionKindLabels = {
   conversation_model_budget: 'Extra model call',
   unknown_delivery: 'Delivery confirmation',
   protected_input: 'Protected input',
+  policy_approval: 'Approval',
 };
 let activityBotId = null;
 let activitySeen = false;
@@ -1352,7 +1353,7 @@ function cardSourceAction(item, close) {
   if (!Number.isSafeInteger(id) || id <= 0 || id >= Number.MAX_SAFE_INTEGER) return null;
   return button('Show in conversation', 'text-button board-inbox-source', () => {
     close();
-    void showConversationMessage(view, id, { bot: participant(item.botId), preferLoaded: true });
+    void showConversationMessage(view, id, { bot: participant(item.conversationBotId ?? item.botId), preferLoaded: true });
   });
 }
 function runIcon(run) {
@@ -1781,7 +1782,8 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     return;
   }
   if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()),
+    decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval')])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
     foldLongMessages();
@@ -1878,6 +1880,7 @@ function conversationRows(data, events, keep, source) {
   };
   const bot = timeline.bot;
   const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
+  const approvals = source ? [] : decisions.itemsFor(view?.id).filter(item => item.itemKind === 'policy_approval');
   const shown = timelineMessages(events, dayLabel);
   const rows = [];
   let peerMessages = [];
@@ -1919,6 +1922,10 @@ function conversationRows(data, events, keep, source) {
     row.classList.toggle('group-continues', !place.groupEnd);
     row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
+    for (const item of approvals) {
+      if (item.conversationEventId === event.id)
+        rows.push(keep(`policy-${item.itemId}`, item, () => decisions.inlinePolicyCard(item)));
+    }
     previous = event;
   });
   appendPeerMessages();
@@ -2847,6 +2854,7 @@ const decisions = mountBoardInbox({
     renderHeader();
     renderActivity();
     renderComposer();
+    renderTimeline();
     scheduleReadCheck();
   },
   onAccepted(item, message) {

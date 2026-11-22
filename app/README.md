@@ -125,13 +125,23 @@ In a second terminal using the same Flock home, submit a task.
 build/app/flock submit release "Check the upcoming release"
 ```
 
-Full mode is the default. Manage installation-wide Never rules with
-`flock rules list`, `flock rules add never ACTION TARGET` and
-`flock rules remove never ACTION TARGET`. For example, target `demo-*` with
-`environment.launch` to block launches into matching environments.
-The local owner manages Bots created from the CLI or configuration. A person
-who creates a Bot in Web owns it and can add shared members for conversation
-and decisions.
+Full mode is the default. Use `flock mode` to show the current mode and
+`flock mode supervised` or `flock mode full` to change it. A direct
+`flock submit` uses the local owner's identity. Confirm actions in Web.
+
+Use `flock rules list` and `flock rules add|remove allow|ask|never ACTION TARGET`
+to manage installation rules. Quote glob targets, such as `'demo-*'` for
+`environment.launch`. Never wins in both modes. Supervised checks Ask first
+before Allow and caps each of those rule kinds at 20. A rule saved from a
+card replaces the oldest Allow at capacity.
+
+See the [installation policy table](../README.md#installation-policy) for
+which actions ask. The requester and installation roots can decide cards.
+Background cards go to the schedule's Bot owner or T3 connector person
+and expire after 30 minutes. An expired card can save an Allow rule for
+future work. Direct requests stay open. The local owner manages Bots
+created through the CLI or configuration. Web Bot creators manage shared
+members.
 
 A request
 starting with `ask:` produces a demo Bot question. Answering it lets the

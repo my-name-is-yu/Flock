@@ -217,7 +217,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (!Policy(*this).allows(message.bot,reading ? Action::shared_memory_read : Action::shared_memory_write,field(args,"docId"))) {
+                if (Policy(*this).forbidden(message.bot,reading ? Action::shared_memory_read : Action::shared_memory_write,field(args,"docId"))) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -981,8 +981,10 @@ LIMIT 1
         }
         if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
+            if (result.value("policyWaiting",false)) return;
         } else if (readSession) {
-            result = sessionReadTool(message.bot,message.channelScope,message.routing,decision,t3);
+            result = sessionReadTool(message,step,decision,t3);
+            if (result.value("policyWaiting",false)) return;
         } else if (checkEnvironment) {
             try {
                 result = readiness(message.bot,message.routing,decision.args,t3);
@@ -1008,6 +1010,16 @@ LIMIT 1
                         suggestions.push_back(item);
                     }
                 }
+                if (const auto resource = channelToolPolicy(id,"reply")) {
+                    const auto gate = approveAction(policyOrigin(message),*resource,
+                        "turn/" + std::to_string(id) + "/" + std::to_string(step),
+                        Json{{"text",reply},{"suggestions",suggestions}},clock());
+                    if (gate == ApprovalGate::waiting) {
+                        transaction.commit();
+                        return;
+                    }
+                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+                }
                 saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
                 finishTurn(message,std::move(reply),suggestions,"reply");
                 transaction.commit();
@@ -1019,6 +1031,41 @@ LIMIT 1
             }
         } else if (result.is_null()) {
             if (shutdown.stop_requested()) return;
+            std::optional<Resource> resource;
+            if (decision.tool == "request_bot_change") {
+                const auto operation = field(decision.args,"operation");
+                if (operation == "create_bot" || (operation == "rename_bot" &&
+                    Policy(*this).allows(turnActor(message),Action::bot_settings,field(decision.args,"targetBotId"))))
+                    resource = Resource{operation == "create_bot" ? Action::bot_create : Action::bot_rename,
+                                        field(decision.args,"targetBotId")};
+            } else if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
+                       decision.tool == "create_trigger" || decision.tool == "remove_schedule") {
+                resource = Resource{Action::automation_change,message.bot};
+            } else if (decision.tool == "update_bot_settings") {
+                const auto environment = field(decision.args,"environmentId");
+                if (!Policy(*this).forbidden(message.bot,Action::environment_configure,environment))
+                    resource = Resource{Action::environment_configure,environment};
+            } else if (decision.args.contains("docId")) {
+                const auto tool = decision.tool;
+                if (tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
+                    tool == "apply_memory_edit" || tool == "revert_memory_edit")
+                    resource = Resource{tool == "read_memory" || tool == "memory_history" ?
+                                        Action::shared_memory_read : Action::shared_memory_write,field(decision.args,"docId")};
+            } else {
+                resource = channelToolPolicy(message.id,decision.tool);
+            }
+            if (resource) {
+                const auto gate = approveAction(policyOrigin(message),*resource,
+                    "turn/" + std::to_string(id) + "/" + std::to_string(step),
+                    Json::array({decision.tool,decision.args}),clock());
+                if (gate != ApprovalGate::allow) {
+                    if (gate != ApprovalGate::waiting)
+                        saveTurnResults(id,step,Json::array({toolFailure(approvalError(gate))}));
+                    transaction.commit();
+                    if (gate == ApprovalGate::waiting) return;
+                    continue;
+                }
+            }
             exec("SAVEPOINT turn_tool");
             try {
                 result = applyTurnTool(message,step,decision,clock(),applyBotChange);

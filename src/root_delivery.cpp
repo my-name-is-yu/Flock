@@ -103,9 +103,19 @@ WHERE d.channel_id=? AND d.command_id=?
         Transaction tx(db.db);
         const auto participation = db.authorizeParticipation(person,channel);
         const auto& origin = channelOf(participation).origin.invitation;
-        const bool denied = !Policy(db).allows(origin.botId,Action::t3_send,
-                                               Resource::sessionRead(target.environmentId,target.threadId).target);
-        const bool reject = stale || denied;
+        auto gate = ApprovalGate::stale;
+        if (!stale) {
+            const auto resource = Resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target,
+                                           !coordination};
+            const PolicyOrigin requester{origin.botId,"t3/" + std::to_string(channel),person.id,0,0,0,0,0,true};
+            gate = db.approveAction(requester,resource,"root/" + std::string(commandId),Json{{"text",text}},
+                                    db.policyClock());
+        }
+        if (gate == ApprovalGate::waiting) {
+            tx.commit();
+            return {std::string(commandId),State::Prepared,{},{}};
+        }
+        const bool reject = gate != ApprovalGate::allow;
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,claimed_at=CASE WHEN ? THEN NULL ELSE ? END
 WHERE channel_id=? AND command_id=? AND state=? AND EXISTS(

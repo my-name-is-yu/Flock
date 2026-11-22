@@ -205,13 +205,13 @@ void exercise(const std::filesystem::path& dir) {
     check(!stat((dir/"secrets").c_str(),&st) && (st.st_mode&0777)==0700,"directory permissions");
     check(!stat(vaultFile.c_str(),&st) && (st.st_mode&0777)==0600,"secret permissions");
     check(turn("list_secrets",Json::object(),credential).find("repo-token")!=std::string::npos,"names unavailable");
-    access.useSecret(child,{"repo-token"},true,[](auto v){check(v==credential,"resolution");});
-    access.useSecret(peerChild,{"repo-token"},true,[](auto v){check(v==credential,"shared resolution");});
+    access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"resolution");});
+    access.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"shared resolution");});
     access.changeNeverRule(owner,Action::secret_use,"repo-*",true);
-    denied([&]{access.useSecret(peerChild,{"repo-token"},true,[](auto){});});
+    denied([&]{access.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     access.changeNeverRule(owner,Action::secret_use,"repo-*",false);
     try {
-        access.useSecret(child,{"repo-token"},true,[](auto v){throw Conflict(std::string(v));});
+        access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){throw Conflict(std::string(v));});
         throw std::runtime_error("adapter exception disappeared");
     }
     catch(const Conflict& e){check(std::string(e.what()).find(credential)==std::string::npos,"adapter error leaked");}
@@ -241,17 +241,17 @@ void exercise(const std::filesystem::path& dir) {
     check(store.conversation("Ernest").dump().find(credential)==std::string::npos &&
           access.administration(owner,"Ernest").dump().find(credential)==std::string::npos,"value in conversation or audit");
     check(chmod(vaultFile.c_str(),0644)==0,"fixture mode");
-    denied([&]{access.useSecret(child,{"repo-token"},true,[](auto){});});
+    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     check(chmod(vaultFile.c_str(),0600)==0,"restore fixture mode");
     auto linkTarget = dir/"outside";
     std::filesystem::rename(vaultFile,linkTarget);
     std::filesystem::create_symlink(linkTarget,vaultFile);
-    denied([&]{access.useSecret(child,{"repo-token"},true,[](auto){});});
+    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     std::filesystem::remove(vaultFile);
     std::filesystem::rename(linkTarget,vaultFile);
     std::filesystem::rename(dir/"secrets",dir/"original-vault");
     std::filesystem::create_directory_symlink(dir/"original-vault",dir/"secrets");
-    denied([&]{access.useSecret(child,{"repo-token"},true,[](auto){});});
+    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     std::filesystem::remove(dir/"secrets");
     std::filesystem::rename(dir/"original-vault",dir/"secrets");
     model.next={"list_secrets",Json::object(),"list"};

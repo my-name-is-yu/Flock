@@ -32,7 +32,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     auto settings = "/settings/"+std::string(bot)+"/environment";
     auto failure = [&](std::string reason) -> Json {return {{"ready",false},{"reason",reason},{"settingsLink",settings}};};
     if (!environments(routing).contains(id) || field(routing,"projectId").empty()) return failure("Configure the environment and project");
-    if (!access.allows(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
+    if (access.forbidden(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
@@ -56,7 +56,7 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
         auto rows = query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
         auto names = Json::array();
         while (rows.next())
-            if (access.allows(bot,Action::secret_use,rows.string(0))) names.push_back(rows.string(0));
+            if (!access.forbidden(bot,Action::secret_use,rows.string(0))) names.push_back(rows.string(0));
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
@@ -76,7 +76,7 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
     }
     if (tool == "update_bot_settings") {
         const auto id = argument(args,"environmentId");
-        if (!environments(routing).contains(id) || !access.allows(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
+        if (!environments(routing).contains(id) || access.forbidden(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");
         const auto timeout = args.at("runTimeoutSeconds").get<Id>();
         if (timeout<1 || timeout>2147483647) throw Conflict("Invalid timeout");

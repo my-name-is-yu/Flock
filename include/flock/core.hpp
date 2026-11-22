@@ -258,7 +258,7 @@ public:
                        std::string_view title, std::string_view prompt);
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
-    Id submit(const Intake&);
+    Id submit(const Intake&, const Person* requester = nullptr);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());

@@ -170,7 +170,7 @@ Json toolFailure(std::string_view error) {
 std::optional<Resource> Store::Impl::authorizedBotToolScope(std::string_view bot, const Decision& call) {
     const Policy access(*this);
     auto resource = scope(bot,call);
-    if (!access.allows(bot,resource)) return std::nullopt;
+    if (access.forbidden(bot,resource.action,resource.target)) return std::nullopt;
     if ((call.tool == "workspace_run_command" || call.tool == "workspace_command_status") &&
         !access.allows(bot,Action::workspace_read,std::string(bot))) return std::nullopt;
     return resource;

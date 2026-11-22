@@ -17,8 +17,18 @@ async function submit(path, data) {
     if (!response.ok) throw Error();
     await load();
     $('status').textContent = 'Saved.';
-  } catch { $('status').textContent = 'Could not save this change. Check your access and refresh.'; }
+    return true;
+  } catch {
+    $('status').textContent = 'Could not save this change. Check your access and refresh.';
+    return false;
+  }
 }
+$('supervised').onchange = async (event) => {
+  const control = event.target;
+  control.disabled = true;
+  if (!await submit('mode', {mode: control.checked ? 'supervised' : 'full'})) control.checked = !control.checked;
+  control.disabled = false;
+};
 $('members').onsubmit = (event) => {
   event.preventDefault();
   void submit('members', {add:true, ...Object.fromEntries(new FormData(event.target))});
@@ -41,10 +51,17 @@ async function load() {
   if (!response.ok) throw Error();
   const data = await response.json();
   $('administration').hidden = false;
-  $('mode').textContent = data.mode === 'full' ? 'Full' : data.mode;
+  $('mode').textContent = data.mode === 'supervised' ? 'Supervised' : 'Full';
+  $('mode').hidden = Boolean(data.canManagePolicy);
+  $('mode-control').hidden = !data.canManagePolicy;
+  $('supervised').checked = data.mode === 'supervised';
   for (const id of ['inputs','rules','people']) $(id).replaceChildren();
   if (data.rules.length === 0) row('rules', 'None');
-  for (const rule of data.rules) row('rules', rule.action + ' · ' + rule.target);
+  const ruleLabels = {never:'Never', ask:'Ask first', allow:'Allow'};
+  for (const {kind, action, target} of data.rules) {
+    const item = row('rules', [ruleLabels[kind], action, target].join(' · '));
+    if (data.canManagePolicy) button(item, 'Remove', () => void submit('rule', {kind, action, target}));
+  }
   for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
     const item = row('inputs',request.name);
     const input = document.createElement('input');

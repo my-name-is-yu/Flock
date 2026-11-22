@@ -1,4 +1,5 @@
 #include "access_routes.hpp"
+#include "flock/board_inbox.hpp"
 
 namespace flockv0::web {
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
@@ -23,6 +24,25 @@ void accessRoutes(httplib::Server& server, Store& store, const WebCallbacks& cal
             view["canManageMembers"] = view.at("canManage").get<bool>() && bool(callbacks.authenticate);
             reply(res,200,view);
         } catch (const Conflict&) { reply(res,403,{{"error","access_denied"}}); }
+    });
+    server.Post(R"(/api/access/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto args = Json::parse(req.body);
+            const auto actor = person(callbacks,req);
+            auto policy = store.policy();
+            if (!policy.allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
+            if (req.matches[1] == "mode") policy.setMode(actor,args.at("mode").get<std::string>());
+            else {
+                const auto action = parseAction(args.at("action").get<std::string>());
+                const auto kind = parseRuleKind(args.at("kind").get<std::string>());
+                if (!action || !kind) return reply(res,400,{{"error","invalid_input"}});
+                policy.changeRule(actor,*kind,*action,args.at("target").get<std::string>(),false);
+            }
+            reply(res,200,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const Conflict&) { reply(res,400,{{"error","invalid_input"}}); }
     });
     server.Post(R"(/api/access/(members|secret))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 128 * 1024) return reply(res,413,{{"error","payload_too_large"}});
