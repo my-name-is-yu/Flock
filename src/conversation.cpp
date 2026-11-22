@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw std::runtime_error(sqlite3_errmsg(db));
-    // Older versions created the turn after intake. Import their unstarted messages once.
     if (query("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='journal_pending_turn'").next()) {
         exec(R"SQL(
 INSERT OR IGNORE INTO conversation_turns(message_id,status)
