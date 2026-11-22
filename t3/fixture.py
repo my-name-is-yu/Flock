@@ -267,9 +267,6 @@ class Fixture(BaseHTTPRequestHandler):
             end = min(start + 2 * limit_chars, len(text))
             if end < len(text) and 0xD800 <= int.from_bytes(text[end - 2:end], "little") <= 0xDBFF:
                 end -= 2
-                if row["itemId"] == "unicode":
-                    state.setdefault("effects", {}).setdefault("unicode_split_avoided", []).append({
-                        "offset": offset, "limit": limit_chars, "nextOffset": end // 2})
             row["textTruncated"] = end < len(text)
             row["nextTextOffset"] = end // 2 if row["textTruncated"] else None
             row["text"] = text[start:end].decode("utf-16-le")
