@@ -13,24 +13,24 @@
 .conversation-header:has(.header-identity:not([hidden])) { height: auto; }
 .header-inner:has(> .header-identity:not([hidden])) { position: relative; padding-block: var(--profile-header-padding); }
 .header-menu { position: absolute; left: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
-.main:has(#profile-identity:not([hidden])) {
+.main:has(:is(#profile-identity, #peer-identity):not([hidden])) {
   --chat-avatar-size: 3.125rem;
   --chat-header-inset: .7rem;
   --chat-avatar-gap: .12rem;
   --chat-caption-space: 3.6rem;
   --chat-caption-top: calc(var(--chat-header-inset) + var(--chat-avatar-size) + var(--chat-avatar-gap));
 }
-.main:has(#profile-identity:not([hidden])) > .conversation-header {
+.main:has(:is(#profile-identity, #peer-identity):not([hidden])) > .conversation-header {
   grid-area: 2 / 1; align-self: start; box-shadow: none; pointer-events: none;
 }
-.main:has(#profile-identity:not([hidden])) > .composer-container { grid-area: 3 / 1; }
-.main:has(#profile-identity:not([hidden])) > .conversation-frame {
+.main:has(:is(#profile-identity, #peer-identity):not([hidden])) > .composer-container { grid-area: 3 / 1; }
+.main:has(:is(#profile-identity, #peer-identity):not([hidden])) > .conversation-frame {
   --conversation-top: calc(var(--chat-caption-top) + var(--chat-caption-space));
 }
-.header-inner:has(> #profile-identity:not([hidden])) {
+.header-inner:has(> :is(#profile-identity, #peer-identity):not([hidden])) {
   align-items: start; padding-block: var(--chat-header-inset) 0;
 }
-.header-inner:has(> #profile-identity:not([hidden])) .header-menu {
+.header-inner:has(> :is(#profile-identity, #peer-identity):not([hidden])) .header-menu {
   pointer-events: auto;
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
@@ -64,39 +64,38 @@
 }
 .conversation-action:hover, .conversation-action[aria-expanded="true"] { background: var(--hover); color: var(--text); }
 .conversation-action svg { width: 1rem; height: 1rem; flex: none; }
-@media (width > 700px) {
-  .workspace.sidebar-collapsed:has(#profile-identity:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
-  .workspace.sidebar-collapsed:has(#profile-identity:not([hidden])) > .sidebar { display: none; }
-}
-.header-text-button {
-  position: absolute; top: .75rem; display: flex; align-items: center; gap: .4rem;
-  min-height: 2.15rem; border: 0; border-radius: var(--radius-md); padding: .35rem .6rem;
-  background: transparent; color: var(--text-2); font-size: var(--text-sm); font-weight: 600;
-}
-.header-text-button:hover { color: var(--text); background: var(--hover); }
-.header-text-button svg { width: 1.18rem; height: 1.18rem; }
 .peer-back {
-  left: clamp(.75rem, 2vw, 1.25rem);
-  max-width: 20%;
+  position: absolute; inset-block-start: .7rem; inset-inline-start: clamp(.75rem, 2vw, 1.25rem);
+  width: 2.15rem; height: 2.15rem; pointer-events: auto;
+  border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
+  border-radius: 10px;
+  background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
+  backdrop-filter: blur(14px);
+  color: var(--text-2);
+  box-shadow: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
+  transition: background-color .14s ease, color .14s ease, opacity .16s ease, transform .16s ease;
 }
-.peer-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.peer-back svg { flex: none; }
+.peer-back:hover { background: var(--hover); color: var(--text); }
+.peer-back svg { width: 1.05rem; height: 1.05rem; }
 .header-identity {
   /* Reserve space for presence so live updates do not move the history viewport. */
   display: grid; grid-template: auto minmax(1rem, auto) / minmax(0, 1fr); justify-items: center;
-  gap: .125rem; min-width: 0; max-width: min(22rem, 60%);
+  gap: .125rem; min-width: 0; max-width: min(24rem, 64%);
 }
 .profile-heading, .peer-title { min-width: 0; max-width: 100%; font: inherit; }
-.header-identity-content {
-  display: flex; flex-direction: column; align-items: center; gap: .1875rem; max-width: 100%;
-  padding: .125rem .25rem; border-radius: var(--radius-md);
-}
-.profile-identity {
+.profile-identity, .peer-identity {
   position: relative;
   grid-template: auto auto / minmax(0, 1fr); gap: var(--chat-avatar-gap); width: max-content;
 }
-.profile-identity .avatar-profile { width: var(--chat-avatar-size); height: var(--chat-avatar-size); }
-.profile-caption {
+.profile-identity .avatar-profile, .peer-identity .avatar-profile { width: var(--chat-avatar-size); height: var(--chat-avatar-size); }
+.profile-face-button {
+  padding: 0; border: 0; border-radius: 14px; background: transparent;
+  pointer-events: auto; cursor: pointer;
+  transition: transform .16s cubic-bezier(.2, .9, .25, 1);
+}
+.profile-face-button:hover { transform: scale(1.045); }
+.profile-face-button:active { transform: scale(.96); }
+.profile-caption, .peer-breadcrumb {
   position: relative; display: grid; justify-items: center; gap: .12rem;
   padding: .34rem .9rem .4rem;
   border: 1px solid light-dark(rgb(0 0 0 / .07), rgb(255 255 255 / .05));
@@ -106,6 +105,24 @@
   box-shadow: 0 2px 12px light-dark(rgb(0 0 0 / .06), rgb(0 0 0 / .28));
   transition: background-color .15s ease, border-color .15s ease, opacity .14s ease, transform .15s ease;
 }
+.profile-caption:not(:has(.needs-you:not([hidden]), .profile-status:not([hidden]))) {
+  padding: .24rem .82rem .28rem;
+  border-radius: var(--radius-full);
+}
+.peer-breadcrumb {
+  padding: .24rem .82rem .28rem;
+  border-radius: var(--radius-full);
+  pointer-events: auto;
+}
+.peer-parent-link {
+  border: 0; padding: 0; background: transparent;
+  color: var(--text-2); font-size: var(--text-sm); font-weight: 500; line-height: 1.25;
+  cursor: pointer; transition: color .12s ease;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.peer-parent-link:hover { color: var(--text); }
+.peer-sep { color: var(--text-3); font-size: .85rem; line-height: 1; opacity: .75; }
+.peer-thread-label { color: var(--text); font-size: var(--text-sm); font-weight: 600; line-height: 1.25; }
 .profile-caption:has(.needs-you:not([hidden])) { cursor: pointer; }
 .profile-caption:has(.needs-you:not([hidden])):hover {
   background: light-dark(rgb(255 255 255 / .95), rgb(40 40 43 / .88));
@@ -143,10 +160,9 @@
 .main.decision-morphing .profile-caption,
 .main.decision-morphing .needs-you-tooltip { opacity: 0; transition: none; }
 .main:has(.decision-layer:not([hidden])) .profile-caption .needs-you { visibility: hidden; }
-.peer-title:focus-visible { outline: none; }
-.peer-title:focus-visible .peer-names { outline: 2px solid var(--focus); outline-offset: 2px; }
-.peer-faces { display: flex; flex: none; }
-.peer-faces .avatar + .avatar { margin-left: calc(var(--profile-avatar-size) * -.4); }
+.peer-title:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.peer-faces { display: flex; flex: none; justify-content: center; }
+.peer-faces .avatar + .avatar { margin-left: calc(var(--chat-avatar-size, var(--profile-avatar-size)) * -.35); }
 .profile-face { position: relative; display: block; flex: none; }
 .avatar-profile { width: var(--profile-avatar-size); height: var(--profile-avatar-size); }
 .status-indicator {
@@ -162,7 +178,7 @@
   font-size: var(--text-sm); font-weight: 600; line-height: 1.25;
 }
 .profile-name { max-width: 100%; font-size: var(--text-sm); font-weight: 650; line-height: 1.25; }
-.peer-names { display: grid; grid-template-columns: minmax(0, max-content) auto minmax(0, max-content); gap: .3em; }
+.peer-names { display: inline-flex; align-items: center; gap: .38rem; max-width: 100%; min-width: 0; }
 .profile-status { max-width: 100%; font-size: var(--text-xs); line-height: 1.3; color: var(--text-2); }
 .profile-identity[data-state="waiting"] .profile-status { color: var(--warning); }
 .profile-identity[data-state="offline"] .profile-status { color: var(--danger); }
@@ -181,7 +197,7 @@
 .conversation-frame::before { top: 0; background: linear-gradient(var(--canvas), transparent); }
 .conversation-frame::after { bottom: 0; background: linear-gradient(transparent, var(--canvas)); }
 .conversation-frame[data-history-above]::before, .conversation-frame[data-history-below]::after { opacity: 1; }
-.main:has(#profile-identity:not([hidden])) > .conversation-frame::before {
+.main:has(:is(#profile-identity, #peer-identity):not([hidden])) > .conversation-frame::before {
   height: 7.5rem;
   opacity: 1;
   background: linear-gradient(
@@ -367,22 +383,18 @@
 
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
-  .main:has(#profile-identity:not([hidden])) { --chat-avatar-size: 2.625rem; }
+  .main:has(:is(#profile-identity, #peer-identity):not([hidden])) { --chat-avatar-size: 2.625rem; }
   .profile-toolbar .toggle-chat-sidebar { display: none; }
   .conversation { scrollbar-gutter: auto; }
   .timeline { --avatar-size: 1.5rem; --avatar-gap: .45rem; }
   .bubble { max-width: calc(100% - 2.2rem); }
   .msg.user .bubble { max-width: 88%; }
-  .header-inner:has(#peer-identity:not([hidden])) :is(.header-menu, .peer-back) { top: .625rem; }
-  .header-inner:has(#peer-identity:not([hidden])) .header-menu { width: 2.75rem; height: 2.75rem; }
-  .peer-back {
-    left: calc(clamp(.75rem, 2vw, 1.25rem) + 3rem); justify-content: center;
-    width: 2.75rem; min-height: 2.75rem; padding: 0;
+  .header-inner:has(#peer-identity:not([hidden])) .peer-back {
+    inset-inline-start: calc(clamp(.75rem, 2vw, 1.25rem) + 2.65rem);
   }
-  .peer-back span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 }
 @container conversation-layout (max-height: 400px) {
-  .main:has(#profile-identity:not([hidden])) {
+  .main:has(:is(#profile-identity, #peer-identity):not([hidden])) {
     --chat-avatar-size: 2rem;
     --chat-header-inset: .35rem;
     --chat-avatar-gap: .15rem;
@@ -391,20 +403,11 @@
     --profile-avatar-size: 2rem;
     --profile-header-padding: .25rem;
   }
-  @media (max-width: 700px) {
-    #peer-identity { margin-inline-start: 2.5rem; max-width: min(22rem, calc(100% - 9.5rem)); }
-  }
 }
 @container conversation-layout (max-height: 220px) {
-  .main:has(#profile-identity:not([hidden])) { --chat-caption-space: 2.75rem; }
+  .main:has(:is(#profile-identity, #peer-identity):not([hidden])) { --chat-caption-space: 2.75rem; }
   .profile-caption { padding-block: .15rem; }
   .conversation-header { --profile-header-padding: .125rem; }
-  .header-identity-content { flex-direction: row; }
-  .header-name { min-width: 0; }
-  #peer-identity { max-width: min(22rem, 55%); }
-  @media (max-width: 700px) {
-    #peer-identity { margin-inline-start: 6rem; max-width: min(22rem, calc(100% - 6rem)); }
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .typing span { animation: none; opacity: .55; }

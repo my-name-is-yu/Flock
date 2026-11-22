@@ -15,15 +15,15 @@ import { mountConversationFind } from '/conversation-find.mjs';
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
-  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
+  'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar', 'profile-avatar-button',
   'profile-name', 'profile-status', 'profile-identity', 'profile-toolbar', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'decision-reply-context', 'decision-reply-label', 'decision-reply-target', 'decision-cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-identity', 'peer-heading', 'peer-faces', 'peer-name-first', 'peer-name-second',
-  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-parent-link', 'peer-name-first', 'peer-name-second',
+  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status', 'sidebar-resizer',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -229,6 +229,43 @@ function conversationUrl(botId, peerId, anchor) {
   else url.searchParams.delete('anchor');
   return url;
 }
+function animateViewTransition(kind) {
+  if (reducedMotion.matches) return;
+  const inner = elements.conversation.querySelector('.conversation-inner');
+  const ease = 'cubic-bezier(.2, .9, .25, 1)';
+  if (kind === 'dm-enter') {
+    inner?.animate?.([
+      { opacity: 0, transform: 'scale(.985) translateY(8px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 210, easing: ease });
+    elements['peer-heading']?.animate?.([
+      { opacity: 0, transform: 'scale(.94)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 185, easing: ease });
+    elements['peer-back']?.animate?.([
+      { opacity: 0, transform: 'translateX(-6px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 185, easing: ease });
+  } else if (kind === 'dm-exit') {
+    inner?.animate?.([
+      { opacity: 0, transform: 'scale(1.015)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 190, easing: ease });
+    byId('profile-heading')?.animate?.([
+      { opacity: 0, transform: 'scale(.96)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 170, easing: ease });
+  } else if (kind === 'bot-switch') {
+    elements.timeline?.animate?.([
+      { opacity: .2, transform: 'translateY(6px)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 175, easing: ease });
+    elements['profile-avatar-button']?.animate?.([
+      { opacity: .65, transform: 'scale(.92)' },
+      { opacity: 1, transform: 'none' },
+    ], { duration: 180, easing: ease });
+  }
+}
 function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fromPeerLink = false } = {}) {
   menu = null;
   closeConversationActions();
@@ -238,6 +275,9 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
     else renderBots();
     return;
   }
+  const prevBotId = view?.id ?? null;
+  const wasDm = !!view?.dm;
+  const isDm = !!peerId;
   resetConversationJump(view);
   rememberReadingPosition(fromPeerLink && !view?.dm && view?.id === botId);
   closeDetail();
@@ -252,6 +292,9 @@ function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fro
   }
   save('flock-selected-bot', botId);
   render('bottom');
+  if (!wasDm && isDm) animateViewTransition('dm-enter');
+  else if (wasDm && !isDm) animateViewTransition('dm-exit');
+  else if (prevBotId && prevBotId !== botId && !isDm) animateViewTransition('bot-switch');
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
@@ -444,6 +487,10 @@ function createSidebarEntry(botId) {
   decisionCount.dataset.focus = `decisions:${botId}`;
   decisionCount.setAttribute('aria-controls', 'decision-panel');
   row.append(select, tooltip, decisionCount, toggle);
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    setMenu(botId, 'first');
+  });
 
   let previousBot;
   let avatarHandle;
@@ -550,10 +597,23 @@ function draftRow(draft) {
   return row;
 }
 
+let previousPinsKey = null;
 function renderBots() {
   const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds,
     bots.map(({ id }) => decisions.count(id)))) return;
+  const pinsKey = JSON.stringify([...pins]);
+  const animateFlip = previousPinsKey !== null && previousPinsKey !== pinsKey && !reducedMotion.matches;
+  previousPinsKey = pinsKey;
+  const beforeRects = new Map();
+  if (animateFlip) {
+    for (const entry of sidebarEntries.values()) {
+      if (entry.row.isConnected) beforeRects.set(entry.row, entry.row.getBoundingClientRect());
+    }
+    if (!elements['bot-activity'].hidden) {
+      beforeRects.set(elements['bot-activity'], elements['bot-activity'].getBoundingClientRect());
+    }
+  }
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const source = sidebarBots();
   const pinned = pinnedBotsInShortcutOrder(source);
@@ -580,6 +640,21 @@ function renderBots() {
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (animateFlip) {
+    for (const [el, before] of beforeRects) {
+      if (!el.isConnected || el.hidden) continue;
+      const after = el.getBoundingClientRect();
+      if (!after.width || !after.height) continue;
+      const dx = before.left - after.left;
+      const dy = before.top - after.top;
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        el.animate?.([
+          { transform: `translate(${dx}px, ${dy}px)` },
+          { transform: 'none' },
+        ], { duration: 230, easing: 'cubic-bezier(.2, .9, .25, 1)' });
+      }
+    }
+  }
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
@@ -619,20 +694,24 @@ function renderHeader() {
   const profile = elements.profile;
   const identity = elements['profile-identity'];
   identity.hidden = !bot || !!dm;
-  elements['profile-toolbar'].hidden = identity.hidden;
+  elements['profile-toolbar'].hidden = !bot;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
   elements['peer-identity'].hidden = !dm;
   if (dm) {
-    elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
-    const pair = [dm.id, dm.peerId].sort().map(participant);
-    if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot, 'avatar-profile')));
-      elements['peer-name-first'].textContent = pair[0].name;
-      elements['peer-name-second'].textContent = pair[1].name;
-      elements['peer-heading'].title = pair.map(({ name }) => name).join(' & ');
+    const owner = participant(dm.id);
+    const peer = participant(dm.peerId);
+    const backLabel = `Back to ${owner.name}`;
+    elements['peer-back-label'].textContent = backLabel;
+    elements['peer-back'].setAttribute('aria-label', backLabel);
+    elements['peer-back'].title = `${backLabel} (Esc)`;
+    if (changed('peer-heading', [owner.id, owner.name, owner.avatar, peer.id, peer.name])) {
+      elements['peer-faces'].replaceChildren(avatar(owner, 'avatar-profile'));
+      elements['peer-name-first'].textContent = owner.name;
+      elements['peer-name-second'].textContent = peer.name;
+      elements['peer-heading'].title = `${owner.name} › ${peer.name}`;
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -669,6 +748,7 @@ function renderHeader() {
   const name = elements['profile-name'];
   identity.dataset.state = offline ? 'offline' : presence;
   profile.setAttribute('aria-label', settingsLabel);
+  elements['profile-avatar-button']?.setAttribute('aria-label', settingsLabel);
   name.textContent = bot.name;
   name.title = settingsLabel;
   elements['profile-status'].textContent = showStatus ? status : '';
@@ -1972,20 +2052,84 @@ function openEditAppearance(bot) {
   botEditor.openEdit(bot, { bots, origin: elements.profile });
 }
 
+const pencilIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>';
 function generalContent(bot) {
   const hero = node('div', 'settings-hero');
+  const avatarButton = button(null, 'settings-avatar-button', () => openEditAppearance(bot));
+  avatarButton.setAttribute('aria-label', 'Change avatar');
   const face = node('span', 'settings-avatar');
+  const avatarTip = node('span', 'settings-avatar-tooltip', 'Change avatar');
+  avatarTip.setAttribute('aria-hidden', 'true');
+  avatarButton.append(face, avatarTip);
   detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
-  hero.append(
-    face,
-    node('p', 'settings-name', bot.name),
-    button('Edit appearance', 'dialog-button quiet settings-edit-button', () => openEditAppearance(bot)),
-  );
-  if (detail?.status) {
-    const note = node('p', 'settings-status', detail.status);
-    note.setAttribute('role', 'status');
-    hero.append(note);
+
+  const nameWrap = node('div', 'settings-name-wrap');
+  const statusNote = node('p', 'settings-status', detail?.status ?? '');
+  statusNote.setAttribute('role', 'status');
+  statusNote.hidden = !detail?.status;
+
+  function renderNameDisplay() {
+    const nameBtn = button(null, 'settings-name-button', beginInlineRename);
+    nameBtn.title = 'Rename Bot';
+    nameBtn.append(node('span', 'settings-name', bot.name));
+    nameBtn.insertAdjacentHTML('beforeend', pencilIcon);
+    nameWrap.replaceChildren(nameBtn);
   }
+  function beginInlineRename() {
+    const input = node('input', 'settings-name-input');
+    input.type = 'text';
+    input.maxLength = 32;
+    input.value = bot.name;
+    input.setAttribute('aria-label', 'Bot name');
+    let settled = false;
+    async function commit() {
+      if (settled) return;
+      settled = true;
+      const trimmed = input.value.trim();
+      if (!trimmed || trimmed === bot.name) {
+        renderNameDisplay();
+        return;
+      }
+      input.disabled = true;
+      statusNote.classList.remove('error');
+      statusNote.textContent = 'Saving name…';
+      statusNote.hidden = false;
+      try {
+        await api('bots/profile', { botId: bot.id, name: trimmed });
+        await Promise.all([refreshBots(), view?.id === bot.id && view.refresh()]);
+        if (detail?.kind === 'settings') {
+          detail = { ...detail, status: 'Name updated' };
+          signatures.delete('detail');
+          renderDetail();
+        }
+      } catch (error) {
+        statusNote.classList.add('error');
+        statusNote.textContent = error.message === 'invalid_name'
+          ? 'Enter a name between 1 and 32 characters.'
+          : 'Could not rename this Bot.';
+        statusNote.hidden = false;
+        renderNameDisplay();
+      }
+    }
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        void commit();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        settled = true;
+        renderNameDisplay();
+        nameWrap.querySelector('button')?.focus();
+      }
+    });
+    input.addEventListener('blur', () => { void commit(); });
+    nameWrap.replaceChildren(input);
+    input.focus();
+    input.select();
+  }
+  renderNameDisplay();
+  hero.append(avatarButton, nameWrap, statusNote);
   const rows = node('div', 'settings-card settings-rows');
   if (!bot.soul) rows.append(settingsRow('Role', 'None'));
   rows.append(bot.cron.length
@@ -2503,17 +2647,72 @@ elements['open-navigation'].addEventListener('click', () => openNavigation(true)
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
-sidebarToggle.addEventListener('click', () => {
-  const collapsed = workspace.classList.toggle('sidebar-collapsed');
+const sidebarResizer = elements['sidebar-resizer'];
+const sidebarMinWidth = 216;
+const sidebarMaxWidth = 416;
+const sidebarCollapseThreshold = 160;
+function setSidebarWidth(px, persist = false) {
+  const clamped = Math.round(Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, px)));
+  workspace.style.setProperty('--sidebar-width', `${clamped}px`);
+  if (persist) save('flock-sidebar-width', clamped);
+}
+function setSidebarCollapsed(collapsed) {
+  workspace.classList.toggle('sidebar-collapsed', collapsed);
   const label = collapsed ? 'Show Bot sidebar' : 'Hide Bot sidebar';
   sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
   sidebarToggle.setAttribute('aria-label', label);
   sidebarToggle.title = label;
+}
+const storedSidebarWidth = saved('flock-sidebar-width', null);
+if (Number.isFinite(storedSidebarWidth) && storedSidebarWidth >= sidebarMinWidth && storedSidebarWidth <= sidebarMaxWidth) {
+  setSidebarWidth(storedSidebarWidth, false);
+}
+sidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!workspace.classList.contains('sidebar-collapsed'));
 });
-elements.profile.addEventListener('click', () => {
+if (sidebarResizer) {
+  let dragPointer = null;
+  let lastWidth = storedSidebarWidth ?? 296;
+  sidebarResizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || narrow.matches) return;
+    event.preventDefault();
+    dragPointer = event.pointerId;
+    sidebarResizer.setPointerCapture(dragPointer);
+    workspace.classList.add('sidebar-resizing');
+  });
+  sidebarResizer.addEventListener('pointermove', (event) => {
+    if (event.pointerId !== dragPointer) return;
+    const width = event.clientX - workspace.getBoundingClientRect().left;
+    if (width < sidebarCollapseThreshold) {
+      workspace.classList.remove('sidebar-resizing');
+      setSidebarCollapsed(true);
+      dragPointer = null;
+      return;
+    }
+    if (workspace.classList.contains('sidebar-collapsed')) setSidebarCollapsed(false);
+    lastWidth = Math.max(sidebarMinWidth, Math.min(sidebarMaxWidth, width));
+    setSidebarWidth(lastWidth, false);
+  });
+  const endResize = (event) => {
+    if (event.pointerId !== dragPointer) return;
+    dragPointer = null;
+    workspace.classList.remove('sidebar-resizing');
+    if (!workspace.classList.contains('sidebar-collapsed')) setSidebarWidth(lastWidth, true);
+  };
+  sidebarResizer.addEventListener('pointerup', endResize);
+  sidebarResizer.addEventListener('pointercancel', endResize);
+  sidebarResizer.addEventListener('dblclick', () => {
+    workspace.style.removeProperty('--sidebar-width');
+    save('flock-sidebar-width', null);
+    setSidebarCollapsed(false);
+  });
+}
+function openCurrentBotSettings() {
   closeConversationActions();
   openDetail({ kind: 'settings' });
-});
+}
+elements.profile.addEventListener('click', openCurrentBotSettings);
+elements['profile-avatar-button']?.addEventListener('click', openCurrentBotSettings);
 elements['peer-picker'].addEventListener('click', () => {
   closeConversationActions(true);
   openDetail({ kind: 'peers' });
@@ -2523,7 +2722,21 @@ byId('conversation-recent-decisions').addEventListener('click', () => {
   void decisions.openHistory(conversationActionsTrigger);
 });
 elements['peer-back'].addEventListener('click', () => leavePeerConversation());
+elements['peer-parent-link']?.addEventListener('click', () => leavePeerConversation());
+elements.conversation.addEventListener('click', (event) => {
+  if (!view?.dm || window.getSelection?.()?.toString()) return;
+  if (!event.target.closest('.bubble, button, a, input, textarea, summary, .msg-actions, .msg-meta, .peer-exchange-link, .older, .empty-state')) {
+    leavePeerConversation();
+  }
+});
 elements['close-detail'].addEventListener('click', closeDetail);
+elements.detail.addEventListener('click', (event) => {
+  if (event.target !== elements.detail) return;
+  const rect = elements.detail.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+    closeDetail();
+  }
+});
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open || !settingsReturnFocus) return;
@@ -2698,6 +2911,10 @@ document.addEventListener('keydown', (event) => {
   if (conversationActions.open) closeConversationActions(true);
   else if (menu) closeMenu();
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
+  else if (view?.dm && !elements.detail.open && !elements['bot-editor'].open && !decisions.isOpen()) {
+    event.preventDefault();
+    leavePeerConversation();
+  }
 });
 
 let syncRetry;

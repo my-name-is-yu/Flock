@@ -62,6 +62,7 @@
         </div>
       </div>
     </aside>
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize Bot sidebar" tabindex="0"></div>
     <main id="main" class="main">
       <header class="conversation-header">
         <div class="header-inner">
@@ -69,7 +70,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
           <div id="profile-identity" class="profile-identity header-identity" hidden>
-            <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+            <button id="profile-avatar-button" class="profile-face profile-face-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" title="Bot settings">
+              <span id="profile-avatar" class="avatar avatar-profile" aria-hidden="true"></span>
+              <span class="status-indicator" aria-hidden="true"></span>
+            </button>
             <h1 id="profile-heading" class="profile-heading profile-caption" aria-labelledby="profile-name">
               <span id="profile-name" class="profile-name" dir="auto"></span>
               <button id="needs-you" type="button" class="needs-you" aria-labelledby="profile-name needs-you-text" aria-controls="decision-panel" aria-expanded="false" aria-keyshortcuts="Alt+Alt" hidden>
@@ -80,20 +84,20 @@
             <span id="needs-you-tooltip" class="needs-you-tooltip" aria-hidden="true"><span>Open</span><kbd>⌥</kbd><kbd>⌥</kbd></span>
           </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <div id="peer-identity" class="header-identity" hidden>
-            <h1 id="peer-heading" class="peer-title header-identity-content" aria-describedby="peer-description" tabindex="-1">
-              <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
-              <span class="peer-names header-name">
-                <bdi id="peer-name-first"></bdi>
-                <span>&amp;</span>
-                <bdi id="peer-name-second"></bdi>
+          <div id="peer-identity" class="peer-identity header-identity" hidden>
+            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
+            <h1 id="peer-heading" class="peer-title peer-breadcrumb" aria-describedby="peer-description" tabindex="-1">
+              <span class="peer-names">
+                <button id="peer-parent-link" class="peer-parent-link" type="button"><bdi id="peer-name-first"></bdi></button>
+                <span class="peer-sep" aria-hidden="true">›</span>
+                <bdi id="peer-name-second" class="peer-thread-label"></bdi>
               </span>
             </h1>
             <span id="peer-description" hidden>Read-only Bot DM</span>
           </div>
-          <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
-            <span id="peer-back-label"></span>
+          <button id="peer-back" class="icon-button peer-back" type="button" title="Back to conversation (Esc)" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+            <span id="peer-back-label" class="sr-only"></span>
           </button>
           <div id="profile-toolbar" class="profile-toolbar" role="group" aria-label="Conversation controls" hidden>
             <button id="profile" class="icon-button" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" title="Bot settings">
