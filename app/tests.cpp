@@ -538,9 +538,9 @@ public:
     Decision decide(const ModelInput& input) override {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
-            return {"follow_up",{{"instruction","Add the missing regression test"}},"A regression test is missing."};
+            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
         }
-        return {"complete",{{"report","Existing tests passed"}},"The required existing tests passed."};
+        return {"complete",{{"report","All existing checks succeeded"}},"The required existing tests passed."};
     }
 };
 

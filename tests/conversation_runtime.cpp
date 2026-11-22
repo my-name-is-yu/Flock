@@ -667,8 +667,8 @@ void unknownSendThenScopeChange() {
     f.t3.loseNextSend = true;
     f.reach(id,"waiting");
     const auto before = f.task(id);
-    f.script("完了条件は p95 レイテンシを報告",{change(id,{{"doneWhen","p95 レイテンシを報告"}})});
-    const auto change = f.receive("revision","完了条件は p95 レイテンシを報告");
+    f.script("Use the updated specification",{change(id,{{"intent","Measure startup latency"},{"doneWhen","p95 レイテンシを報告"}})});
+    const auto change = f.receive("revision","Use the updated specification");
     check(f.task(id)["revisions"].size() == 2 && f.task(id)["doneWhen"] == "p95 レイテンシを報告",
           "explicit criteria did not create a revision");
     f.restart();
@@ -706,7 +706,9 @@ void unknownSendThenScopeChange() {
     f.store->operate(id,f.task(id)["wait"]["id"],"reconcile");
     f.reach(id,"running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
-          f.t3.sent.back().instruction.find("p95 レイテンシ") != std::string::npos &&
+          f.t3.sent.back().tool == "follow_up" &&
+          f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
+          f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
           f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
           "the replacement did not reconcile as one delivery for the new revision");
     const auto runs = f.task(id)["runs"];

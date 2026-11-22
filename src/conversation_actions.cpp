@@ -17,7 +17,6 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
     task["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;
-    task["intent"] = request;
     if (resume) {
         const auto priorId = source.at("taskId").get<Id>();
         const auto prior = load(priorId);
@@ -35,7 +34,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
             instructions.push_back({{"messageId",item.at("messageId")},{"step",item.at("step")},{"text",text}});
         }
         std::reverse(instructions.begin(),instructions.end());
-        task["restartContext"] = {{"intent",prior.value("intent",prior.at("request"))},{"taskId",priorId},
+        task["restartContext"] = {{"intent",prior.at("intent")},{"taskId",priorId},
                                   {"pendingInstructions",std::move(instructions)}};
     }
     save(task);
@@ -47,7 +46,7 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
     auto task = load(taskId);
     bool conflicting = task.value("replanning",false);
     if (change) {
-        const auto oldIntent = task.value("intent",field(task,"request"));
+        const auto oldIntent = field(task,"intent");
         const auto oldDone = task.value("requestedDoneWhen",field(task,"doneWhen"));
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;

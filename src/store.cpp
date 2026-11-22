@@ -114,7 +114,8 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
 CREATE TABLE IF NOT EXISTS peer_exchanges(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
   sender_task INTEGER NOT NULL REFERENCES tasks(id),
-  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
+  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+  sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
@@ -303,7 +304,7 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
     modelCallLimit(item.config);
-    Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
+    Json data = {{"botId", item.botId}, {"request", item.request}, {"intent", item.request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},

@@ -17,11 +17,6 @@ bool present(std::string_view value, std::size_t limit = 8000) {
 }
 bool hasRun(const RunRef& r) { return !r.threadId.empty() && !r.runId.empty(); }
 
-// Direct intakes acquire their effective intent on entering the decision loop.
-void initializeIntent(Json& task) {
-    if (!task.contains("intent")) task["intent"] = task.at("request");
-}
-
 Json revision(const Json& task) { return task.value("currentRevision",Json(nullptr)); }
 
 bool hasPending(const Json& task) {
@@ -191,7 +186,6 @@ ORDER BY id)SQL");
                                  " UNION ALL SELECT 1 FROM peer_exchanges WHERE recipient_task=? AND kind='consult'",
                                  {current["id"],current["id"]});
             if (!turn.next()) return false;
-            initializeIntent(current);
             if (current["eventId"] == 0) db.event(current,"intake",{{"kind","intake"}});
             current["state"] = "deciding";
             return true;
@@ -454,7 +448,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
 
     void finishReplan(const Json& task) {
         change(task,[&](Json& current) {
-            initializeIntent(current);
             const auto old = field(current,"environmentId");
             auto target = field(current,"pendingEnvironmentId");
             if (target.empty()) target = old;
@@ -686,15 +679,21 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     bool canComplete(const Json& task, const Json& event) const {
-        if (task.value("replanning",false) || task.value("newSessionRequired",false)) return false;
-        if (hasSettledRun(task) && task.at("lastRun").at("revisionId") == revision(task)) return true;
+        if (task.value("replanning",false)) return false;
+        if (!task.value("newSessionRequired",false) && hasSettledRun(task) &&
+            task.at("lastRun").at("revisionId") == revision(task)) return true;
         // A peer result is actionable only for the sender and the closing message of that exchange.
         if (!event.contains("exchangeId") || !event.contains("status")) return false;
-        auto exchange = db.query("SELECT kind FROM peer_exchanges WHERE id=? AND sender_task=?"
-                                 " AND phase='closed' AND last_message=?",
-                                 {event.at("exchangeId"),task.at("id"),event.at("messageId")});
-        return exchange.next() && (task.contains("currentRevision") ||
-                                  (exchange.string(0) == "consult" && event.at("status") == "completed"));
+        auto exchange = db.query(R"SQL(
+SELECT p.kind, recipient.environment_id
+FROM peer_exchanges p JOIN tasks recipient ON recipient.id=p.recipient_task
+WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
+  AND p.sender_environment=? AND p.sender_revision IS ?
+)SQL",{event.at("exchangeId"),task.at("id"),event.at("messageId"),task.at("environmentId"),revision(task)});
+        if (!exchange.next()) return false;
+        if (task.value("newSessionRequired",false))
+            return exchange.string(1) == field(task,"environmentId") && event.at("status") == "completed";
+        return task.contains("currentRevision") || (exchange.string(0) == "consult" && event.at("status") == "completed");
     }
 
     std::vector<std::string> available(const Json& task, const Json& event,
@@ -821,9 +820,13 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 contextIds["answerEventId"] = event.at("id");
                 instruction += "\n\nUser answer:\n" + field(event,"userAnswer");
             }
-            if (tool == "delegate" && task.value("newSessionRequired",false)) {
+            const bool moved = task.value("newSessionRequired",false);
+            if (moved || task["lastRun"].is_null() || task["lastRun"].at("revisionId") != revision(task)) {
                 instruction += "\n\nTask intent:\n" + field(task,"intent") +
-                    "\n\nCompletion criteria:\n" + field(task,"doneWhen") + priorInstructions(task);
+                    "\n\nCompletion criteria:\n" + field(task,"doneWhen");
+            }
+            if (moved) {
+                instruction += priorInstructions(task);
                 if (event["kind"] == "bot_answer") {
                     contextIds["peerMessageId"] = event.at("messageId");
                     instruction += "\n\nAnswer from the requesting Bot:\n" + field(event,"text");
@@ -838,8 +841,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             }
             includeInstructions(instruction,pending);
             if (const auto restart = task.find("restartContext"); restart != task.end() && task["lastRun"].is_null()) {
-                instruction += "\n\nOriginal task being resumed:\n" + field(*restart,"intent") +
-                    "\n\nCompletion criteria:\n" + field(task,"doneWhen");
+                instruction += "\n\nOriginal task being resumed:\n" + field(*restart,"intent");
                 includeInstructions(instruction,restart->value("pendingInstructions",Json::array()));
             }
             std::size_t excerptBudget = 8192;
@@ -1013,8 +1015,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         const auto id = db.submit(peer.intake,0,nullptr,true);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
-        db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task)"
-                " VALUES(?,?,'working',?,?,?)",{action,kind,action,sender["id"],id});
+        db.exec("INSERT INTO peer_exchanges(id,kind,phase,last_message,sender_task,recipient_task,sender_environment,sender_revision)"
+                " VALUES(?,?,'working',?,?,?,?,?)",{action,kind,action,sender["id"],id,sender["environmentId"],revision(sender)});
         auto message = peerMessage(exchange,sender,recipient,"request",note,action);
         message["chargesBudget"] = charge;
         if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
@@ -1170,13 +1172,13 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (requiresAcknowledgment != decision.args.contains("acknowledgedInstructions") ||
             decision.args.value("acknowledgedInstructions",Json::array()) != ids)
             throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
-        if (deferUntilTurnsFinish(current,eventId,decision)) {
-        } else {
+        if (!deferUntilTurnsFinish(current,eventId,decision)) {
             clearDeferredCompletionMarker(id,eventId);
             db.consumeEvent(current);
             recordDecision(current,event,decision,actionId());
             current.erase("feedback");
             current.erase("pendingInstructions");
+            current.erase("newSessionRequired");
             current["state"] = "completed";
             db.journal(id,"completed",{{"text",field(decision.args,"report")},{"reason",decision.reason},
                 {"doneWhen",current["doneWhen"]},{"revisionId",revision(current)},

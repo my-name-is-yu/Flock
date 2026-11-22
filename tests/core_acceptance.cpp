@@ -875,6 +875,50 @@ void revisionWaitsForPeerClarification() {
           "The task did not finish the Bot exchange before launching once in the new environment");
 }
 
+void peerCompletionAfterEnvironmentMove() {
+    for (const auto [kind,environment] : {std::pair{"work","cloud"},{"consult","cloud"},{"work","e"}}) {
+        Fixture f;
+        f.allowBeta();
+        const Intake routing{"alpha","Release check","e","p",{{"conversationEnvironments",{{"cloud","cloud"}}}}};
+        const auto sender = f.store->submit(routing);
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            const auto& event = input.event;
+            if (event.at("kind") == "conversation_turn")
+                return converse(input,"change_task",sender,{{"environment","cloud"}});
+            if (input.task.at("botId") == "beta")
+                return {"reply_to_bot",{{"kind","result"},{"text",event.at("text")}},"Return the requested result"};
+            if (event.at("kind") == "intake") {
+                if (!input.task.contains("userInstructions")) return botRequest("beta","work","Original result");
+                check(f.task(sender).at("environmentId") == "cloud" && !hasTool(input,"complete"),
+                      "the pre-move result unlocked completion after the move");
+                return {"send_bot_message",{{"botId","beta"},{"kind",kind},{"text","Cloud result"}},"Verify the moved task"};
+            }
+            if (std::string_view(environment) != "cloud") {
+                check(!hasTool(input,"complete"),"a peer on the old route unlocked completion");
+                return ask();
+            }
+            check(event.at("kind") == "bot_result" && event.at("text") == "Cloud result" && hasTool(input,"complete"),
+                  "the current peer result did not unlock completion");
+            const auto& move = input.task.at("userInstructions").at(0);
+            return {"complete",{{"report","Cloud result"},{"acknowledgedInstructions",Json::array({
+                {{"messageId",move.at("messageId")},{"step",move.at("step")}}})}},"Verified after the move"};
+        };
+        f.reach(sender,"peer_waiting");
+        f.peers.at("alpha").front().intake.environmentId = environment;
+        f.store->receive(routing,"move-release-check","Move Release check to cloud");
+        f.runtime->runConversations();
+        if (std::string_view(environment) != "cloud") {
+            f.wait(sender,"user_question");
+            continue;
+        }
+        f.reach(sender,"completed");
+        const auto task = f.task(sender);
+        check(task.at("revisions").size() == 1 && !task.contains("newSessionRequired") &&
+              !task.contains("pendingInstructions") && f.t3.launches == 0 && f.logs(sender,"completed") == 1,
+              "peer completion left the moved task unfinished");
+    }
+}
+
 void recipientRevisionContinuesTheOpenWorkExchange() {
     Fixture f;
     f.allowBeta();
@@ -1676,6 +1720,7 @@ int main() {
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
+            {"peer completion after environment move",peerCompletionAfterEnvironmentMove},
             {"recipient revision continues its work exchange",recipientRevisionContinuesTheOpenWorkExchange},
             {"recipient revision during peer question preserves answer",recipientRevisionDuringPeerQuestionPreservesTheAnswer},
             {"recipient move during peer question starts a fresh Session",recipientMoveDuringPeerQuestionStartsAFreshSession},

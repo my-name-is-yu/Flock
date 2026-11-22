@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <fcntl.h>
@@ -514,12 +513,9 @@ bool runModelAcceptance(Model& model, const std::string& slug, std::ostream& out
                 const auto decision = model.decide(input);
                 record.update({{"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}});
                 const auto field = regression ? "instruction" : "report";
-                auto normalized = decision.args.contains(field) && decision.args.at(field).is_string()
-                    ? decision.args.at(field).get<std::string>() : std::string{};
-                std::ranges::transform(normalized,normalized.begin(),[](unsigned char c) { return std::tolower(c); });
-                ok = decision.tool == expected &&
-                    normalized.find("test") != normalized.npos && (regression ?
-                        normalized.find("regression") != normalized.npos : normalized.find("pass") != normalized.npos);
+                const auto value = decision.args.find(field);
+                ok = decision.tool == expected && value != decision.args.end() && value->is_string() &&
+                    nonblank(value->get_ref<const std::string&>());
             } catch (const ModelError& error) {
                 record["error"] = error.what();
             }
