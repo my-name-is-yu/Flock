@@ -85,11 +85,13 @@ function render(view) {
     ['Flock work admission', view.frozen ? 'Frozen' : 'Freeze unconfirmed'],
     ...(coordination ? [['T3 knows of freeze', view.releaseAcknowledged ? 'Confirmed' : 'Unconfirmed']] : []),
   ]);
-  $('residual').hidden = view.residualCommandIds.length === 0;
-  $('residual-count').textContent = `${view.residualCommandIds.length} root commands admitted before the seal`;
+  const commandCount = view.residualCommandIds.length;
+  $('residual').hidden = commandCount === 0;
+  $('residual-count').textContent = `${commandCount} root ${commandCount === 1 ? 'command' : 'commands'} admitted before the seal`;
   list('residual-commands', view.residualCommandIds);
-  $('residual-work').hidden = !view.frozen || view.admittedChildIds.length === 0;
-  $('residual-work-count').textContent = `${view.admittedChildIds.length} child launches admitted before the freeze`;
+  const childCount = view.admittedChildIds.length;
+  $('residual-work').hidden = !view.frozen || childCount === 0;
+  $('residual-work-count').textContent = `${childCount} child ${childCount === 1 ? 'launch' : 'launches'} admitted before the freeze`;
   list('residual-children', view.admittedChildIds);
   $('delegated').hidden = view.work.length === 0;
   const expanded = new Set(Array.from($('work-list').querySelectorAll('details[open]'), (item) => item.dataset.delegation));

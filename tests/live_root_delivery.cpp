@@ -52,12 +52,12 @@ bool sameReceipt(const RootReceipt& left, const RootReceipt& right) {
            left.nativeTurnId == right.nativeTurnId && left.nativeItemId == right.nativeItemId;
 }
 
-Json appliedResult(const RootDeliveryView& result, const InvitationRef& invitation) {
+Json appliedResult(const RootDeliveryView& result, const InvitationRef& invitation, std::string_view grantId) {
     check(result.state == RootDeliveryState::Applied && result.receipt.has_value(),
           "The exact root input has no authoritative Applied receipt");
     const auto& receipt = *result.receipt;
     check(receipt.ref == result.ref && receipt.ref.grant.target == invitation.target &&
-          receipt.ref.grant.grantId == invitation.requestId && receipt.botId == invitation.botId &&
+          receipt.ref.grant.grantId == grantId && receipt.botId == invitation.botId &&
           receipt.observation == RootDeliveryState::Applied && !receipt.nativeTurnId.empty() &&
           !receipt.nativeItemId.empty(), "The receipt does not identify exact provider input");
     return {{"state", rootDeliveryStateName(result.state)}, {"commandId", result.ref.commandId},
@@ -95,6 +95,8 @@ int main() {
         ParticipationStore participation(store);
         RootDelivery delivery(store, *gate);
         const auto personRef = input.value("personRef", "");
+        const auto coordinate = input.value("coordinate", false);
+        const auto planned = input.value("plannedCommandId", "");
         SessionHandoff handoff(store, *gate, [&](std::string_view environment, std::string_view t3Person,
                                                 const Person& person) {
             return environment == invitation.target.environmentId && t3Person == personRef &&
@@ -106,7 +108,8 @@ int main() {
             auto access = store.access();
             access.personGrant(localOwner, invitation.botId, fixturePerson.id, Role::decide, GrantChange::grant);
             access.personScope(localOwner, fixturePerson.id, Scope::sessionRead(environment, thread), GrantChange::grant);
-            access.resourceGrant(localOwner, invitation.botId, Scope::consultReply(environment, thread), GrantChange::grant);
+            access.resourceGrant(localOwner, invitation.botId, coordinate ? Scope::sessionCoordinate(environment, thread)
+                                                                          : Scope::consultReply(environment, thread), GrantChange::grant);
             Id channel;
             if (personRef.empty()) {
                 FixtureAuthority authority(*gate, credential);
@@ -123,21 +126,29 @@ int main() {
                       "Invitation replay changed the channel or returned to Opening");
                 channel = accepted.channel;
             }
-            const auto permit = participation.consult(fixturePerson, invitation.botId, channel);
-            const auto prepared = delivery.prepare(fixturePerson, invitation.botId, permit.channel.id,
-                                                   permit.commandId, text, evidence);
+            const auto command = coordinate ? planned : participation.consult(fixturePerson,invitation.botId,channel).commandId;
+            const auto prepared = delivery.prepare(fixturePerson, invitation.botId, channel, command, text, evidence);
             check(prepared.state == RootDeliveryState::Prepared, "Root preparation did not leave an unsent envelope");
-            std::cout << Json{{"state", rootDeliveryStateName(prepared.state)}, {"channelId", permit.channel.id},
-                              {"commandId", permit.commandId}, {"serverVersion", prepared.serverVersion}}.dump() << '\n';
+            std::cout << Json{{"state", rootDeliveryStateName(prepared.state)}, {"channelId", channel},
+                              {"commandId", command}, {"grantId",prepared.ref.grant.grantId}, {"epoch",prepared.ref.grant.epoch},
+                              {"serverVersion", prepared.serverVersion}}.dump() << '\n';
             return 0;
         }
 
         const auto channel = input.at("channelId").get<Id>();
         const auto command = input.at("commandId").get<std::string>();
         step = "restoring the same local permit";
-        const auto permit = participation.consult(fixturePerson, invitation.botId, channel);
-        check(permit.channel.origin.invitation == invitation && permit.commandId == command,
-              "Flock restart changed the consultation origin or command ID");
+        auto grantId = invitation.requestId;
+        if (coordinate) {
+            const auto activation = participation.coordination(fixturePerson,channel);
+            check(activation.channel.origin.invitation == invitation && activation.acknowledgment && planned == command,
+                  "Flock restart changed the coordination activation or command ID");
+            grantId = activation.binding.activationId;
+        } else {
+            const auto permit = participation.consult(fixturePerson, invitation.botId, channel);
+            check(permit.channel.origin.invitation == invitation && permit.commandId == command,
+                  "Flock restart changed the consultation origin or command ID");
+        }
         if (operation == "deliver") {
             step = "reconciling the unsent envelope";
             const auto initial = delivery.reconcile(fixturePerson, invitation.botId, channel, command);
@@ -147,7 +158,7 @@ int main() {
             auto applied = delivery.deliver(fixturePerson, invitation.botId, channel, command);
             if (applied.state == RootDeliveryState::ProviderPending || applied.state == RootDeliveryState::Unknown)
                 applied = delivery.reconcile(fixturePerson, invitation.botId, channel, command);
-            const auto result = appliedResult(applied, invitation);
+            const auto result = appliedResult(applied, invitation, grantId);
             const auto replay = delivery.deliver(fixturePerson, invitation.botId, channel, command);
             check(replay.receipt && sameReceipt(*applied.receipt, *replay.receipt),
                   "Flock duplicate delivery changed the receipt");
@@ -160,12 +171,12 @@ int main() {
                 delivery.bind(fixturePerson, channel, credential);
             } else {
                 const auto resumed = handoff.resume(fixturePerson, channel);
-                check(resumed.sealed && resumed.frozen &&
+                check(resumed.sealed && resumed.frozen && (!coordinate || resumed.releaseAcknowledged) &&
                       resumed.residualCommandIds == std::vector<std::string>{command},
                       "The handoff did not record both barriers and their residual input");
             }
             const auto recovered = delivery.reconcile(fixturePerson, invitation.botId, channel, command);
-            const auto result = appliedResult(recovered, invitation);
+            const auto result = appliedResult(recovered, invitation, grantId);
             check(recovered.sealed, "Flock failed to observe the T3 seal");
             const auto remote = gate->readReceipt(recovered.ref, credential);
             check(remote.kind == RootGateReply::Kind::Found && remote.receipt &&

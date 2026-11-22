@@ -17,7 +17,8 @@ const artifact = resolve(executable ?? entry);
 const flockExecutable = resolve(
   process.env.FLOCK_LIVE_ROOT_DELIVERY ?? join(import.meta.dirname, "..", "build", "flock_live_root_delivery"),
 );
-const withInvitation = process.argv.includes("--invitation");
+const coordinate = process.argv.includes("--coordinate");
+const withInvitation = coordinate || process.argv.includes("--invitation");
 const modelSelection = { instanceId: "codex", model: "gpt-6-luna" };
 const host = "127.0.0.1";
 const listener = createServer();
@@ -174,7 +175,7 @@ try {
     return row?.status === "running" && row.native_turn_id ? row : undefined;
   }, 60_000);
   const target = { environmentId: descriptor.environmentId, projectId, threadId, runId: run.run_id };
-  const grantId = randomUUID();
+  const requestId = randomUUID();
   const botId = "verification-bot";
 
   async function humanPost(path, body) {
@@ -192,27 +193,37 @@ try {
     target,
     sourceMessageId,
     botId,
-    permission: { kind: "consult" },
+    permission: coordinate
+      ? { kind: "coordinate", expectedEpoch: 0, goal: "Check and report the exact root delivery", allowDelegation: false }
+      : { kind: "consult" },
     credentialDigest: createHash("sha256").update(credential).digest("hex"),
   };
   let personRef;
   if (withInvitation) {
     const created = await humanPost("invitations/create", {
-      ...permission, requestId: grantId, contextItemIds: [sourceMessageId],
+      ...permission, requestId, contextItemIds: [sourceMessageId],
     });
     assert.ok(created.personRef);
     personRef = created.personRef;
   } else {
-    const grant = await humanPost("grants/open", { ...permission, grantId });
+    const grant = await humanPost("grants/open", { ...permission, grantId: requestId });
     assert.equal(grant.epoch, 0);
     assert.deepEqual(grant.target, target);
   }
-  const fixture = { fixtureStoreDir, t3Origin: origin, target, grantId, sourceMessageId, botId, credential, personRef };
+  const fixture = { fixtureStoreDir, t3Origin: origin, target, grantId: requestId, sourceMessageId, botId, credential,
+    personRef, coordinate, plannedCommandId: coordinate ? randomUUID() : undefined };
+  const prepared = runFlock("prepare", fixture);
+  assert.equal(prepared.state, "prepared");
+  const { grantId, epoch } = prepared;
+  assert.equal(epoch, coordinate ? 1 : 0);
+  if (withInvitation) {
+    const status = await humanPost("invitations/status", { target, requestId });
+    assert.equal(status.seal.grant.grantId, grantId);
+    assert.deepEqual(status.receipts, []);
+  }
   const acceptedCount = () => db.prepare(
     "SELECT count(*) AS count FROM exact_run_receipts WHERE grant_id = ?",
   ).get(grantId).count;
-  const prepared = runFlock("prepare", fixture);
-  assert.equal(prepared.state, "prepared");
   assert.equal(acceptedCount(), 0, "Preparation admitted external input");
   const ref = { channelId: prepared.channelId, commandId: prepared.commandId };
   const applied = runFlock("deliver", fixture, ref);
@@ -224,11 +235,19 @@ try {
   assert.ok(applied.nativeItemId);
   assert.equal(acceptedCount(), 1);
 
-  const seal = await humanPost("grants/seal", { target, grantId, epoch: 0 });
+  const seal = await humanPost("grants/seal", { target, grantId, epoch });
   assert.ok(seal.grant.sealed);
   assert.deepEqual(seal.residualCommandIds, [ref.commandId]);
+  if (coordinate) assert.equal(seal.releaseAcknowledged, false, "Flock had exited before the T3 seal");
   const recovered = runFlock("recover", fixture, ref);
   assert.deepEqual(recovered, { ...applied, sealed: true });
+  if (coordinate) {
+    const status = await humanPost("invitations/status", { target, requestId });
+    assert.equal(status.seal.releaseAcknowledged, true);
+    assert.equal(status.freezeGeneration, 2);
+    assert.equal(status.receipts[0].botId, botId);
+    assert.equal(status.receipts[0].observation.nativeItemId, applied.nativeItemId);
+  }
 
   const rootState = await until("normal root completion", () => {
     const row = db.prepare("SELECT status FROM orchestration_v2_projection_runs WHERE run_id = ?").get(run.run_id);
@@ -266,9 +285,10 @@ try {
     flockExecutableSha256: await sha256(flockExecutable),
     codexVersion: codexVersion.stdout.trim(),
     model: modelSelection.model,
-    target, grantId, commandId: ref.commandId, botId,
+    target, requestId, grantId, grantEpoch: epoch, commandId: ref.commandId, botId,
     providerEvidence: JSON.parse(providerObservation.observation_json),
     finalGrantSeal: recovered.sealed,
+    ...(coordinate ? { releasedAfterOfflineSeal: true, flockFreezeGeneration: 2 } : {}),
     sameReceiptAfterSeal: true,
     acceptedReceipts: acceptedCount(),
     localSendAttempts: local.attempts,

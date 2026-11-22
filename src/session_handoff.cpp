@@ -1,4 +1,5 @@
 #include "flock/session_handoff.hpp"
+#include "flock/bot_profile.hpp"
 #include "storage.hpp"
 
 #include <algorithm>
@@ -401,7 +402,7 @@ SELECT d.command_id,d.event_id,d.text,d.kind,s.specialist,s.done_when,s.commit_s
 FROM handoff_decisions d LEFT JOIN handoff_specialist_intents s ON s.command_id=d.command_id
 LEFT JOIN handoff_reviewed_results r ON r.command_id=d.command_id
 WHERE d.channel_id=? AND d.generation=? AND d.kind IN ('root_guidance','delegate_specialist')
- AND NOT d.settled ORDER BY d.rowid LIMIT 1
+ AND NOT d.settled ORDER BY d.kind,d.rowid LIMIT 1
 )SQL", {channel, grant.generation});
             if (!row.next()) return false;
             command = row.string(0);
@@ -451,9 +452,9 @@ WHERE d.channel_id=? AND d.generation=? AND d.kind IN ('root_guidance','delegate
             db.exec("UPDATE handoff_decisions SET settled=1 WHERE channel_id=? AND command_id=?",
                     {channel, command});
         }
-        return true;
+        return !settled;
     };
-    if (deliverPending()) return view(person, channel);
+    const bool unresolvedEffect = deliverPending();
 
     const RootGrantRef ref{invitation.target, activation.binding.activationId, activation.acknowledgment->epoch};
     const auto credential = db.secrets.read(participationCredential(channel));
@@ -509,7 +510,8 @@ ORDER BY j.id LIMIT 1
         auto context = Json::array();
         for (const auto& item : activation.channel.context)
             context.push_back({{"text",clean(item.text)},{"truncated",item.truncated}});
-        std::vector<std::string> tools{"root_guidance","handoff_question","wait_for_root"};
+        std::vector<std::string> tools{"handoff_question","wait_for_root"};
+        if (!unresolvedEffect) tools.push_back("root_guidance");
         auto peers = Json::array();
         auto resultEvidence = Json(nullptr);
         const auto peerScope = Scope::workDelegate(ref.target.environmentId, ref.target.threadId);
@@ -517,20 +519,20 @@ ORDER BY j.id LIMIT 1
             store_.access().permits(bot,peerScope,true)) {
             for (const auto& peer : peers_(bot)) {
                 const auto& request = peer.intake;
-                if (!peer.role.empty() && request.environmentId == ref.target.environmentId &&
+                if (validBotRole(peer.role) && request.environmentId == ref.target.environmentId &&
                     request.projectId == ref.target.projectId &&
                     store_.access().permits(request.botId,{"environment",request.environmentId,"launch"},true))
                     peers.push_back({{"botId",clean(request.botId)},{"role",clean(peer.role)}});
             }
             if (!peers.empty()) pin = delivery.inputCommit(person, channel);
-            if (pin) tools.push_back("delegate_specialist");
+            if (pin && !unresolvedEffect) tools.push_back("delegate_specialist");
             else peers = Json::array();
         }
         if (workResult) {
             const auto& result = workResult->second;
             if (!pin) pin = delivery.inputCommit(person,channel);
             const bool sameInput = pin && *pin == field(result,"artifactVersion");
-            if (!sameInput) tools.erase(std::ranges::find(tools,"root_guidance"));
+            if (!sameInput) std::erase(tools,"root_guidance");
             resultEvidence = {{"status",sameInput ? clean(result.value("workflowStatus",field(result,"status"))) : "stale"},
                               {"commit",clean(field(result,"artifactVersion"))},
                               {"report",sameInput ? clean(field(result,"report")) : "The previous input is no longer current."}};
