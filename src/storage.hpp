@@ -208,6 +208,7 @@ struct Store::Impl {
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
+    Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);

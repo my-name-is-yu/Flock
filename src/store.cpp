@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS journal(
   time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
   CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
 CREATE INDEX IF NOT EXISTS journal_task ON journal(task_id,id);
+CREATE INDEX IF NOT EXISTS journal_wait_anchor ON journal(task_id,json_extract(data,'$.id'),id)
+  WHERE kind='waiting' AND conversation_bot_id IS NULL;
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   dedupe TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
@@ -211,19 +213,54 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
 void Store::Impl::exec(const char* sql, const Json& args) const { query(sql, args).next(); }
+namespace {
+Json waitQuestionTarget(const Json& wait) {
+    return {{"waitId",wait.at("id")},{"eventId",wait.at("eventId")},
+            {"run",wait.at("run")},{"requestId",field(wait,"questionId")}};
+}
+
+void attachWait(Json& task, Json wait, Id anchor) {
+    if (anchor) wait["messageId"] = anchor;
+    if (field(wait,"reason") == "user_question" && !task.at("question").is_object())
+        wait["target"] = waitQuestionTarget(wait);
+    task["wait"] = std::move(wait);
+}
+
+Json taskRow(const auto& store, const Statement& row, int col = 0) {
+    auto task = row.json(col);
+    const auto id = row.number(col+1);
+    task["id"] = id;
+    task["state"] = row.string(col+2);
+    task["wait"] = nullptr;
+    if (const auto waitId = row.number(col+3)) {
+        auto wait = row.json(col+4);
+        wait["id"] = waitId;
+        attachWait(task,std::move(wait),store.waitAnchor(id,waitId));
+    }
+    return task;
+}
+}
+
+Id Store::Impl::waitAnchor(Id task, Id wait) const {
+    auto row = query("SELECT id FROM journal WHERE task_id=? AND kind='waiting' AND conversation_bot_id IS NULL"
+                     " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1",{task,wait});
+    return row.next() ? row.number(0) : 0;
+}
+
 Json Store::Impl::load(Id id) const {
-    auto row = query("SELECT data,state,generation FROM tasks WHERE id=?", {id});
+    auto row = query("SELECT t.data,t.id,t.state,w.id,w.data,t.generation FROM tasks t"
+                     " LEFT JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL WHERE t.id=?",{id});
     if (!row.next()) throw Conflict("Task does not exist");
-    auto result = row.json(0);
-    result["id"] = id;
-    result["state"] = row.string(1);
-    result["generation"] = row.number(2);
-    return result;
+    auto task = taskRow(*this,row);
+    task["generation"] = row.number(5);
+    return task;
 }
 void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
+    auto data = task;
+    data.erase("wait");
     exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
-         {task["state"], task["generation"], task, task["environmentId"], task["id"]});
+         {task["state"], task["generation"], std::move(data), task["environmentId"], task["id"]});
     exec(R"SQL(
 UPDATE pr_review_items SET target_generation=?1,target_revision=?2 WHERE task_id=?3 AND status='pending'
  AND (operation_id IS NOT NULL OR (git_key IS NOT NULL AND target_revision=?2))
@@ -246,9 +283,10 @@ std::string taskPageSql(const char* filter) {
     return std::string("WITH page AS (SELECT id,state FROM tasks WHERE ") + filter +
         "), requested AS (SELECT id FROM page WHERE state='queued'), " + queueBlockers + R"SQL(
 SELECT blockers.owner_id,blockers.bot_id,blockers.request,blockers.state,
-       task.id,task.state,task.data,task.generation
+       task.data,task.id,task.state,w.id,w.data,task.generation
 FROM page JOIN tasks task ON task.id=page.id
 LEFT JOIN blockers ON blockers.id=page.id
+LEFT JOIN waits w ON w.task_id=task.id AND w.resolution IS NULL
 ORDER BY task.id DESC)SQL";
 }
 
@@ -257,10 +295,8 @@ Json blockerJson(const Statement& row) {
     return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
 }
 
-Json pageTask(const Statement& row) {
-    auto task = row.json(6);
-    task["id"] = row.number(4);
-    task["state"] = row.string(5);
+Json pageTask(const auto& store, const Statement& row) {
+    auto task = taskRow(store,row,4);
     task["blockedBy"] = blockerJson(row);
     return task;
 }
@@ -359,15 +395,16 @@ void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     if (task.contains("actionId")) data["actionId"] = task["actionId"];
     exec("INSERT INTO waits(task_id,data) VALUES(?,?)", {task["id"], data});
     data["id"] = last();
-    data["messageId"] = journal(task["id"], "waiting", data);
-    task["wait"] = data;
+    const auto anchor = journal(task["id"], "waiting", data);
+    attachWait(task,std::move(data),anchor);
     task["state"] = "waiting";
 }
 void Store::Impl::clearWait(Json& task, std::string_view resolution) {
     const auto wait = task.find("wait");
     if (wait == task.end() || wait->is_null()) return;
     const Json data = {{"waitId", (*wait)["id"]}, {"resolution", resolution}};
-    exec("UPDATE waits SET resolution=? WHERE id=? AND resolution IS NULL", {resolution, (*wait)["id"]});
+    exec("UPDATE waits SET resolution=? WHERE id=? AND task_id=? AND resolution IS NULL",
+         {resolution,(*wait)["id"],task["id"]});
     if (task.value("blockerWaitId",Id{0}) == wait->at("id")) {
         task.erase("blockerWaitId");
         task.erase("blockerReason");
@@ -445,7 +482,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         {"projectId", item.projectId}, {"config", item.config},
         {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
-        {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
+        {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}};
     if (sourceMessageId) data["sourceMessageId"] = sourceMessageId;
     if (!source.is_null()) {
         data["sourceTaskId"] = source.at("taskId");
@@ -509,12 +546,12 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         return;
     }
     if (!waitIsActionable(task)) throw RequestChanged{};
-    auto pending = query("SELECT coalesce(resolution,'') FROM waits WHERE id=? AND task_id=?",{waitId,id});
-    if (!pending.next()) throw RequestChanged{};
-    const auto resolution = pending.string(0);
-    if (resolution == "request_changed") throw RequestChanged{};
-    if (!resolution.empty() || task.at("state") != "waiting" || wait.is_null() || wait.at("id") != waitId)
+    if (wait.is_null() || wait.at("id") != waitId) {
+        auto prior = query("SELECT resolution FROM waits WHERE id=? AND task_id=?",{waitId,id});
+        if (!prior.next() || prior.string(0) == "request_changed") throw RequestChanged{};
         throw DecisionUnavailable{};
+    }
+    if (task.at("state") != "waiting") throw DecisionUnavailable{};
     if (task.at("generation") != generation) throw RequestChanged{};
     const auto reason = field(wait,"reason");
     const auto kind = inboxWaitKind(reason);
@@ -522,9 +559,7 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     std::string next = "deciding";
     if (operation == "answer" && reason == "user_question") {
         const auto& owner = task["question"].is_object() ? task["question"] : wait;
-        const Json savedTarget = {{"waitId",wait.at("id")},{"eventId",wait.at("eventId")},
-            {"run",wait.at("run")},{"requestId",field(wait,"questionId")}};
-        if (owner.value("target",savedTarget) != questionTarget(task))
+        if (owner.value("target",waitQuestionTarget(wait)) != questionTarget(task))
             throw RequestChanged{};
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
@@ -602,15 +637,6 @@ bool Store::hasTask(Id id) const {
     return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
 }
 
-template<class StoreImpl>
-static void restoreWaitAnchor(const StoreImpl& store, Json& task) {
-    auto& wait = task["wait"];
-    if (wait.is_null() || wait.contains("messageId")) return;
-    auto row = store.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
-                           " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {task["id"],wait["id"]});
-    if (row.next()) wait["messageId"] = row.number(0);
-}
-
 Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     auto task = load(id);
     task["blockedBy"] = includeBlocker && task["state"] == "queued" ? queueBlocker(id) : Json(nullptr);
@@ -642,7 +668,6 @@ FROM journal WHERE task_id=? AND kind='report' ORDER BY id
 
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
-    restoreWaitAnchor(*this,result);
     auto pending = outbox(result);
     if (pending.is_object()) pending.erase("authGeneration");
     result["pendingAction"] = pending;
@@ -670,8 +695,8 @@ Json Store::tasks(std::string_view bot, Id before, unsigned limit) const {
     auto rows = p_->query(sql.c_str(), {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) {
-        auto task = pageTask(rows);
-        task["generation"] = rows.number(7);
+        auto task = pageTask(*p_,rows);
+        task["generation"] = rows.number(9);
         p_->addTaskDetails(task);
         result.push_back(std::move(task));
     }
@@ -683,11 +708,7 @@ Json Store::activeTasks(std::string_view bot) const {
     static const auto sql = taskPageSql("bot_id=? AND state NOT IN ('completed','cancelled')");
     auto rows = p_->query(sql.c_str(), {bot});
     Json result = Json::array();
-    while (rows.next()) {
-        auto task = pageTask(rows);
-        restoreWaitAnchor(*p_,task);
-        result.push_back(std::move(task));
-    }
+    while (rows.next()) result.push_back(pageTask(*p_,rows));
     return result;
 }
 

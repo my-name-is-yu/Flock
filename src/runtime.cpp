@@ -1353,8 +1353,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             if (tool == "ask_user") {
                 db.wait(current,"user_question",{{"text",field(args,"question")},{"decisionReason",decision.reason},
                     {"questionId",field(current["question"],"requestId")},{"choices",args.value("choices",Json::array())}});
-                auto& owner = current["question"].is_object() ? current["question"] : current["wait"];
-                owner["target"] = questionTarget(current);
+                if (current["question"].is_object()) current["question"]["target"] = questionTarget(current);
             } else {
                 queueAction(current,action,tool,instruction,args,event,charge);
             }
