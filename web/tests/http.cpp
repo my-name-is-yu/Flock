@@ -670,6 +670,7 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto web = callbacks();
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
