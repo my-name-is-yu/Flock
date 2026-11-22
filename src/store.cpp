@@ -257,10 +257,8 @@ Json Store::Impl::load(Id id) const {
 }
 void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
-    auto data = task;
-    data.erase("wait");
-    exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
-         {task["state"], task["generation"], std::move(data), task["environmentId"], task["id"]});
+    exec("UPDATE tasks SET state=?,generation=?,data=json_remove(?,'$.wait'),environment_id=? WHERE id=?",
+         {task["state"], task["generation"], task, task["environmentId"], task["id"]});
     exec(R"SQL(
 UPDATE pr_review_items SET target_generation=?1,target_revision=?2 WHERE task_id=?3 AND status='pending'
  AND (operation_id IS NOT NULL OR (git_key IS NOT NULL AND target_revision=?2))
