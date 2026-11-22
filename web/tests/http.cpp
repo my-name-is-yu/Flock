@@ -978,15 +978,27 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(uploaded.at("name") == "Scout Photo" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" && !uploaded.at("avatar").contains("file"),
           "POST /api/bots/profile leaked internal filename or missed upload metadata");
-    const auto imageUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
-    check(imageUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
+    const auto originalUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
+    check(originalUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
 
-    const auto fetchedImage = browser.client.Get(imageUrl);
+    const auto fetchedImage = browser.client.Get(originalUrl);
     check(fetchedImage && fetchedImage->status == 200 &&
           fetchedImage->get_header_value("Content-Type") == "image/png" &&
           fetchedImage->get_header_value("X-Content-Type-Options") == "nosniff" &&
           fetchedImage->body.starts_with("\x89PNG"),
           "GET /api/bot-avatar did not serve verified PNG");
+
+    auto paddedPng = validPngBase64;
+    paddedPng[paddedPng.size()-2] = 'J';
+    const auto padded = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout Photo"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",paddedPng}}},
+    },200);
+    const auto imageUrl = padded.at("avatar").at("imageUrl").get<std::string>();
+    const auto paddedImage = browser.client.Get(imageUrl);
+    check(paddedImage && paddedImage->status == 200 && paddedImage->body == fetchedImage->body,
+          "Unused Base64 bits changed the accepted avatar bytes");
 
     // Rename without re-uploading keeps imageUrl intact.
     const auto renamed = browser.post("/api/bots/profile",{

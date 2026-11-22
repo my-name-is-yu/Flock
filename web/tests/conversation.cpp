@@ -294,6 +294,10 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     const auto single = submit("a",Json::array({image,audio}));
     const auto multiple = submit("b",Json::array({image,image}));
     const auto textOnly = submit("c",Json::array());
+    auto noncanonicalAudio = audio;
+    noncanonicalAudio["dataBase64"] = "SUQzAB==";
+    browser.post("/api/messages",{{"botId","release"},{"clientMessageId","invalid-padding"},
+        {"text","Look at this"},{"attachments",Json::array({noncanonicalAudio})}},409);
     const auto assertCounts = [](const Json& events, const std::map<Id,int>& expected) {
         auto remaining = expected;
         for (const auto& event : events) {
