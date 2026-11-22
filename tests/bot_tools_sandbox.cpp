@@ -1,10 +1,13 @@
 #include "flock/access.hpp"
 #include "flock/workspace_tools.hpp"
+#include "bot_tools.hpp"
 #include "model.hpp"
+#include "../src/workspace_internal.hpp"
 
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -46,6 +49,7 @@ struct Provider : Model {
     Json seen;
     Json content;
     std::function<void(const ModelInput&)> beforeTurn;
+    std::function<std::vector<Decision>(const Json&)> followStep;
     ModelTurn decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
         auto output = Json::array();
@@ -68,7 +72,9 @@ struct Provider : Model {
             } else {
                 seen = steps;
                 content = request.at("input").at(0).at("content");
-                emit(call("reply",{{"text","Checked."}}));
+                auto follow = followStep ? followStep(steps) : std::vector<Decision>{};
+                if (follow.empty()) emit(call("reply",{{"text","Checked."}}));
+                else for (const auto& action : follow) emit(action);
             }
         }
         return app::responseDecision(output,request);
@@ -113,19 +119,23 @@ struct FakeWeb : WebTools {
             searchQueries.emplace_back(query);
         }
         rendezvous();
+        if (query == "complete links")
+            return {{"results",Json::array({{{"title",std::string(250,'x') + std::string(secretMarker)},
+                              {"url","https://example.com/vault-"},{"description","Evidence"}}})}};
         return {{"query",query},{"text","Untrusted search evidence"}};
     }
     Json fetch(std::string_view url) override {
         ++fetches;
         rendezvous();
-        return {{"url",url},{"text","Untrusted page evidence"}};
+        return {{"url",url},{"text",url.ends_with("/vault-") ? "Partial value: vault-" : "Untrusted page evidence"},
+                {"truncated",url.ends_with("/vault-")}};
     }
 };
 
 struct FakeMcp : McpTools {
     std::atomic<int> discoveries{0}, calls{0}, reads{0};
     bool hasServer(std::string_view server) const override { return server == "fixture" || server == "private"; }
-    Json discover(std::string_view, McpCollection collection, std::string_view cursor) override {
+    Json discover(std::string_view, std::string_view, McpCollection collection, std::string_view cursor) override {
         ++discoveries;
         if (collection == McpCollection::resources) return {{"resources",{"fixture://data"}}};
         if (cursor == "tools-page-2") return {{"tools",{"second"}}};
@@ -247,6 +257,14 @@ void workspaceAndLifecycle(Fixture& f) {
     const auto finished = [](const Json& state) { return state.at("state") == "exited"; };
     auto allowed = f.until(f.command(Json::array({"cat","allowed.txt"})),finished);
     check(allowed.at("stdout") == "workspace-only-marker" && allowed.at("exitCode") == 0,allowed.dump());
+#ifdef __APPLE__
+    const auto pipeline = f.until(f.command(Json::array({"sh","-c","/bin/echo x | /usr/bin/tee spawned.txt"})),finished);
+    check(pipeline.at("exitCode") != 0 && !fs::exists(root/"spawned.txt"),
+          "The macOS single-process sandbox allowed a pipeline to spawn children");
+#elif defined(__linux__)
+    const auto absolute = f.until(f.command(Json::array({"/bin/cat","allowed.txt"})),finished);
+    check(absolute.at("stdout") == "workspace-only-marker" && absolute.at("exitCode") == 0,absolute.dump());
+#endif
 
     const auto secret = f.store->access().requestSecret("beta",{"fixture-key"});
     f.store->access().submitSecret(owner,"beta",secret,secretMarker);
@@ -334,6 +352,27 @@ void workspaceAndLifecycle(Fixture& f) {
     check(read(root/"mutation") == "x","An unknown-state mutating command ran again");
 }
 
+void mountedWorkspaceDirectoryIdentity() {
+#if defined(__linux__) || defined(__APPLE__)
+#ifdef __linux__
+    const auto* mount = "proc";
+#else
+    const auto* mount = "dev";
+#endif
+    const auto root = open("/",O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    check(root >= 0,"Could not open the root directory");
+    int child;
+    try { child = openExactChildDirectory(root,mount); }
+    catch (...) { close(root); throw; }
+    struct stat rootInfo{}, childInfo{};
+    const bool distinct = fstat(root,&rootInfo) == 0 && fstat(child,&childInfo) == 0 &&
+                          rootInfo.st_dev != childInfo.st_dev;
+    close(child);
+    close(root);
+    check(distinct,"The test directory is not a separate mount");
+#endif
+}
+
 void externalTools(Fixture& f) {
     const auto search = call("web_search",{{"query","public fixture"}});
     const auto fetch = call("web_fetch",{{"url","https://example.com/evidence"}});
@@ -352,6 +391,13 @@ void externalTools(Fixture& f) {
           "Web fetch bypassed its host grant");
     check(f.run(call("web_fetch",{{"url","https://example.com@127.0.0.1/"}})).at("ok") == false,
           "An invalid or internal fetch target was accepted");
+    const auto redacted = f.run(call("web_fetch",{{"url","https://example.com/vault-"}})).at("data");
+    check(redacted.at("url") == "https://example.com/vault-" &&
+          redacted.at("text") == "Partial value: [redacted]",
+          "A complete URL and a truncated body did not receive different redaction");
+    const auto link = f.run(call("web_search",{{"query","complete links"}})).at("data").at("results").at(0);
+    check(link.at("url") == "https://example.com/vault-" && link.at("title") == std::string(250,'x') + "[redac",
+          "Search did not preserve complete URLs and redact titles before bounding them");
 
     for (const auto* op : {"discover","invoke","read_resource"}) f.grant({"mcp_server","fixture",op});
     const auto discovery = call("mcp_discover",{{"server","fixture"},{"collection","tools"}});
@@ -391,8 +437,10 @@ void externalTools(Fixture& f) {
     check(f.run(call("skill_read",{{"skill","fixture"},{"path","../state.db"}})).at("ok") == false,"Skill read traversed its root");
 
     const auto media = Json::array({
-        {{"name","pixel.png"},{"mimeType","image/png"},{"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/q1sAAAAASUVORK5CYII="}},
-        {{"name","tone.wav"},{"mimeType","audio/wav"},{"dataBase64","UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQIAAACAgA=="}}
+        {{"name","pixel.png"},{"mimeType","image/png"},{"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
+        {{"name","tone.wav"},{"mimeType","audio/wav"},{"dataBase64","UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQIAAACAgA=="}},
+        {{"name","corrupt.png"},{"mimeType","image/png"},{"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"}},
+        {{"name",secretMarker},{"mimeType","audio/mpeg"},{"dataBase64","SUQzdmF1bHQtb25seS1tYXJrZXI="}}
     });
     f.model.next = {call("reply",{{"text","Message received."}})};
     const auto message = f.store->receive(f.intake(),"media","Please inspect these photos and audio",0,media).at("messageId");
@@ -414,8 +462,30 @@ void externalTools(Fixture& f) {
           f.model.content[2].at("image_url") == "data:image/png;base64," + media[0].at("dataBase64").get<std::string>(),
           "An authorized attachment did not reach the production image input schema");
     check(f.run(image,"beta").at("ok") == false,"Another Bot could inspect the attachment");
+    const auto corrupt = f.run(call("inspect_attachment",{{"messageId",message},{"attachmentId","3"}}));
+    check(corrupt.at("ok") == false && f.model.content.size() == 1,
+          "A corrupt image reached the model or interrupted the turn");
+    const auto opaque = f.run(call("inspect_attachment",{{"messageId",message},{"attachmentId","4"}}));
+    check(opaque.at("ok") == true && opaque.at("data").at("name") == secretMarker,
+          "Attachment upload or inspection revealed a match against another Bot's vault");
     check(f.store->receipt("alpha","media","Please inspect these photos and audio",0,media).has_value(),
           "Attachment receipt was not idempotent");
+    const auto jpeg = Json::array({
+        {{"name","pixel.jpg"},{"mimeType","image/jpeg"},
+         {"dataBase64","/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIx"
+                       "wcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAA"
+                       "AAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z"}},
+        {{"name","corrupt.jpg"},{"mimeType","image/jpeg"},{"dataBase64","/9j/4AAQSkZJRgABAQAAAQABAAA="}}
+    });
+    f.model.next = {call("reply",{{"text","Message received."}})};
+    const auto pictures = f.store->receive(f.intake(),"jpeg","Please inspect these JPEGs",0,jpeg).at("messageId");
+    f.runtime->runConversations();
+    const auto jpegViews = f.batch({call("inspect_attachment",{{"messageId",pictures},{"attachmentId","1"}}),
+                                    call("inspect_attachment",{{"messageId",pictures},{"attachmentId","2"}})});
+    check(jpegViews[0].at("result").at("data").at("width") == 1 &&
+          jpegViews[1].at("result").at("ok") == false && f.model.content.size() == 3 &&
+          f.model.content.at(2).at("image_url") == "data:image/jpeg;base64," + jpeg[0].at("dataBase64").get<std::string>(),
+          "JPEG decoding did not distinguish valid pixels from a truncated file");
 
     const auto searches = f.web->searches.load();
     const auto fetches = f.web->fetches.load();
@@ -437,6 +507,65 @@ void externalTools(Fixture& f) {
           f.model.seen[1].at("result").at("ok") == true,"Revoked result reached the resumed model");
 }
 
+void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
+    f.grant({"web","example.com","fetch"});
+    f.grant({"workspace","alpha","write"});
+    f.grant({"workspace","alpha","read"});
+    const auto fetch = call("web_fetch",{{"url","https://example.com/evidence"}});
+    const auto write = call("workspace_write_file",{{"path","unapproved.txt"},{"text","blocked"}});
+    const auto read = call("workspace_read_file",{{"path","allowed.txt"}});
+    const auto start = call("start_task",{{"request","Run a task"},{"doneWhen","Done"}});
+    const auto path = f.home/"workspaces"/"alpha"/"unapproved.txt";
+    const auto taskCount = f.store->tasks("alpha").size();
+    f.model.followStep = [&](const Json& steps) {
+        if (steps.size() == 1) return std::vector{write,read};
+        if (steps.size() == 3) return std::vector{start};
+        return std::vector<Decision>{};
+    };
+    const auto steps = f.batch({fetch});
+    f.model.followStep = {};
+    check(steps.size() == 4 && steps[1].at("result").at("ok") == false && steps[2].at("result").at("ok") == true &&
+          steps[3].at("result").at("ok") == false && !fs::exists(path) && f.store->tasks("alpha").size() == taskCount,
+          "A web evidence turn reached a privileged action or lost an independent read");
+    check(f.run(write).at("ok") == true && fs::is_regular_file(path),"A new user message could not request an action");
+}
+
+void freshConversationStepArrays(Fixture& f) {
+    const auto message = std::to_string(f.lastMessage);
+    check(f.sql("SELECT json_type(decision) || ':' || json_type(result) FROM conversation_steps WHERE message_id=" +
+                message + " AND step=1") == "array:array","The fresh database did not persist decisions and results as arrays");
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open_v2((f.home/"state.db").c_str(),&connection,SQLITE_OPEN_READWRITE,nullptr);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fresh database");
+    for (const auto* column : {"decision","result"}) {
+        const auto sql = "UPDATE conversation_steps SET " + std::string(column) + "='{}' WHERE message_id=" + message;
+        check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_CONSTRAINT,
+              "The fresh database accepted an object in an array column");
+    }
+}
+
+void mcpSessionPagination(Fixture& f, std::string_view url) {
+    write(f.home/"bot-tools.json",Json{{"mcpServers",{{"one",{{"url",url}}},{"two",{{"url",url}}}}}}.dump());
+    const auto adapter = app::loadBotTools(f.home)->mcp;
+    const auto first = adapter->discover("alpha","one",McpCollection::tools,{});
+    const auto cursor = first.at("nextCursor").get<std::string>();
+    check(first.at("tools") == Json::array({"first"}) && cursor != "session-bound",
+          "The first page did not return an opaque continuation");
+    const auto expectDenied = [&](std::string_view bot, std::string_view server, McpCollection collection) {
+        try { adapter->discover(bot,server,collection,cursor); }
+        catch (const Conflict&) { return; }
+        throw std::runtime_error("A discovery cursor was accepted outside its original scope or after use");
+    };
+    expectDenied("beta","one",McpCollection::tools);
+    expectDenied("alpha","two",McpCollection::tools);
+    expectDenied("alpha","one",McpCollection::resources);
+    const auto next = adapter->discover("alpha","one",McpCollection::tools,cursor);
+    check(next.at("tools") == Json::array({"second"}) && !next.contains("nextCursor"),
+          "MCP continuation did not reach the original session");
+    expectDenied("alpha","one",McpCollection::tools);
+}
+
 void approvalWhileAnotherTurnIsInferring(Fixture& f) {
     f.grant({"web","public","search"});
     const auto search = [](std::string query) { return call("web_search",{{"query",query}}); };
@@ -455,12 +584,19 @@ void approvalWhileAnotherTurnIsInferring(Fixture& f) {
 }
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         Fixture fixture;
+        if (argc == 2) {
+            mcpSessionPagination(fixture,argv[1]);
+            return 0;
+        }
         workspaceAndLifecycle(fixture);
+        mountedWorkspaceDirectoryIdentity();
         externalTools(fixture);
         approvalWhileAnotherTurnIsInferring(fixture);
+        webEvidenceCannotAuthorizeAnAction(fixture);
+        freshConversationStepArrays(fixture);
         std::cout << "Bot workspace and tool acceptance passed\n";
         return 0;
     } catch (const std::exception& error) {

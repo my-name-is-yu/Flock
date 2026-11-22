@@ -32,6 +32,21 @@ bool conflict(const Decision& a, const Decision& b) {
 }
 }
 
+bool allowedAfterWebEvidence(std::string_view tool) {
+    constexpr std::string_view readOnly[]{
+        "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
+        "list_grants","list_secrets","list_connections","check_environment_readiness","workspace_read_file",
+        "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
+        "skill_list","skill_read","inspect_attachment"
+    };
+    return std::ranges::find(readOnly,tool) != std::end(readOnly);
+}
+
+Json webEvidenceActionDenied() {
+    return toolFailure("After reading web evidence, this turn can only read and reply. "
+                       "Ask the user to request the action in a new message.");
+}
+
 void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
     exec("UPDATE conversation_steps SET result=?,effect=NULL WHERE message_id=? AND step=? AND result IS NULL",
          {results,message,step});
@@ -58,6 +73,10 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                           {"error","Flock restarted during this tool call. Its outcome is unknown."}};
             }
             if (!result.is_null()) continue;
+            if (ctx.hasWebEvidence && !allowedAfterWebEvidence(calls[i].tool)) {
+                result = webEvidenceActionDenied();
+                continue;
+            }
             try {
                 validateBotTool(ctx,calls[i]);
                 for (const auto index : reserved)
@@ -81,7 +100,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
 
     const auto persist = [&](std::size_t i, Json result) {
         std::lock_guard lock(mutex);
-        const auto scrub = sessionRedactor();
+        const auto scrub = calls[i].tool == "inspect_attachment" ? redactor(ctx.bot) : sessionRedactor();
         auto safe = scrub.record(std::move(result));
         const auto encoded = safe.dump(-1,' ',false,Json::error_handler_t::replace);
         exec("UPDATE conversation_steps SET effect=json_set(effect,?,json(?)) WHERE message_id=? AND step=?",

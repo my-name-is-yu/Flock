@@ -20,6 +20,7 @@ using Seconds = std::int64_t;
 
 Seconds unixTime();
 std::string bounded(std::string_view text, std::size_t bytes);
+std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
 
@@ -68,7 +69,6 @@ struct ModelError : std::runtime_error {
 class Model {
 public:
     virtual ~Model() = default;
-    // Throw ModelError for transport or format failures.
     virtual ModelTurn decide(const ModelInput&) = 0;
 };
 

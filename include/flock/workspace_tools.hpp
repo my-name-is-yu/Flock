@@ -13,7 +13,6 @@ const std::vector<std::string>& botToolNames();
 bool isBotTool(std::string_view);
 Json botToolSchema(std::string_view);
 
-// Adapters can be called concurrently and must enforce their transport deadlines.
 class WebTools {
 public:
     virtual ~WebTools() = default;
@@ -29,7 +28,7 @@ class McpTools {
 public:
     virtual ~McpTools() = default;
     virtual bool hasServer(std::string_view server) const = 0;
-    virtual Json discover(std::string_view server, McpCollection, std::string_view cursor) = 0;
+    virtual Json discover(std::string_view bot, std::string_view server, McpCollection, std::string_view cursor) = 0;
     virtual Json invoke(std::string_view server, std::string_view tool, const Json& args) = 0;
     virtual Json readResource(std::string_view server, std::string_view uri) = 0;
 };

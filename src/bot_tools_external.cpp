@@ -262,7 +262,7 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     else if (call.tool == "web_fetch") content = ctx.settings.web->fetch(toolText(args,"url",2048));
     else if (call.tool == "mcp_discover") {
         const auto collection = args.at("collection") == "tools" ? McpCollection::tools : McpCollection::resources;
-        content = ctx.settings.mcp->discover(grant->resource,collection,field(args,"cursor"));
+        content = ctx.settings.mcp->discover(ctx.bot,grant->resource,collection,field(args,"cursor"));
     } else if (call.tool == "mcp_call_tool")
         content = ctx.settings.mcp->invoke(grant->resource,toolText(args,"name",128),args.at("arguments"));
     else if (call.tool == "mcp_read_resource")
@@ -276,14 +276,18 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     } else if (call.tool == "skill_read") {
         const auto [root,relative] = skillFile(ctx,*grant,args,path);
         content = readToolFile(root,relative,sessionRedactor());
-    } else {
-        std::lock_guard lock(mutex);
-        auto row = scopedAttachment(ctx.bot,ctx.messageId,args);
-        if (!row.next()) throw Conflict("Attachment is unavailable in this conversation");
-        content = row.json(0);
-    }
+    } else content = inspectAttachment(ctx.bot,ctx.messageId,args);
     const bool failed = call.tool == "mcp_call_tool" && content.is_object() && content.value("isError",false);
-    auto data = sessionRedactor().payload(content,call.tool.starts_with("web_"));
+    const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sessionRedactor();
+    if (call.tool == "web_fetch" && content.value("truncated",false))
+        content["text"] = scrub.text(field(content,"text"),true);
+    auto data = scrub.payload(content);
+    if (call.tool == "web_search" && data.contains("results")) {
+        for (auto& item : data.at("results")) {
+            item["title"] = bounded(field(item,"title"),256);
+            item["description"] = bounded(field(item,"description"),1000);
+        }
+    }
     if (call.tool != "skill_list") data = boundedExternal(std::move(data));
     return {{"ok",!failed},{"data",std::move(data)},{"untrustedData",true}};
 }

@@ -22,7 +22,6 @@ private:
 };
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
-std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 
@@ -71,6 +70,7 @@ struct Store::Impl {
     void migrateWorkspace();
     void migrateAttachments();
     void saveAttachments(Id, const Json&);
+    Json inspectAttachment(std::string_view bot, Id throughMessage, const Json&);
     Json attachmentViews(Id) const;
     Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);

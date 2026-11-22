@@ -11,11 +11,11 @@ struct SearchModel final : Model {
     Decision next;
     Json result;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override {
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return next;
+        if (steps.empty()) return {{next}};
         result = steps.back().at("result");
-        return {"reply",{{"text","Checked."}},"Respond with the evidence"};
+        return {{{"reply",{{"text","Checked."}},"Respond with the evidence"}}};
     }
 };
 }

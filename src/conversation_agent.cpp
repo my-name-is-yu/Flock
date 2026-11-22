@@ -616,6 +616,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
         std::vector<Decision> calls;
+        bool hasWebEvidence = false;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db,Transaction::Mode::read);
@@ -628,6 +629,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                         calls.push_back({call.at("tool"),call.at("args"),call.at("reason")});
                 }
             }
+            hasWebEvidence = query(R"SQL(
+SELECT 1 FROM conversation_steps s, json_each(s.decision) call
+WHERE s.message_id=? AND s.step<?
+  AND json_extract(call.value,'$.tool') IN ('web_search','web_fetch')
+  AND json_extract(s.result,'$[' || call.key || '].untrustedData') = 1
+LIMIT 1
+)SQL",{id,step}).next();
             transaction.commit();
         }
         if (calls.empty()) {
@@ -677,7 +685,13 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
 
         const auto& decision = calls.front();
         if (isBotTool(decision.tool)) {
-            if (!runBotTools({message->bot,id,settings},step,calls)) return true;
+            if (!runBotTools({message->bot,id,settings,hasWebEvidence},step,calls)) return true;
+            continue;
+        }
+        if (hasWebEvidence && !allowedAfterWebEvidence(decision.tool)) {
+            std::lock_guard lock(mutex);
+            if (!turnMessage(id)) return true;
+            saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
             continue;
         }
 

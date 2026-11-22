@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
+#include <mutex>
 #include <sys/socket.h>
 
 namespace flockv0::app {
@@ -166,10 +168,10 @@ public:
         auto results = Json::array();
         if (!matches.is_array()) throw Conflict("Search returned an invalid results list");
         for (const auto& item : matches) {
-            if (!item.is_object() || !item.contains("url") || !item["url"].is_string()) continue;
-            results.push_back({{"title",bounded(item.value("title",""),256)},
-                               {"url",bounded(item.value("url",""),2048)},
-                               {"description",bounded(item.value("description",""),1000)}});
+            if (!item.is_object() || !item.contains("url") || !item["url"].is_string() ||
+                item["url"].get_ref<const std::string&>().size() > 2048) continue;
+            results.push_back({{"title",item.value("title","")},{"url",item["url"]},
+                               {"description",item.value("description","")}});
             if (results.size() == 6) break;
         }
         return {{"results",results}};
@@ -262,27 +264,77 @@ struct McpSession {
         catch (const std::exception&) {}
     }
 
-    Json call(std::string_view method, Json params = Json::object()) {
+    Json callRaw(std::string_view method, Json params) {
         const auto response = post({{"jsonrpc","2.0"},{"id",++id},{"method",method},{"params",std::move(params)}});
-        auto result = rpcResult(response,id);
+        return rpcResult(response,id);
+    }
+
+    Json scrub(Json result) const {
         if (server.token.empty()) return result;
         return SecretRedactor({server.token}).payload(result);
+    }
+
+    Json call(std::string_view method, Json params) {
+        return scrub(callRaw(method,std::move(params)));
     }
 };
 
 class ConfiguredMcp final : public McpTools {
+    using Clock = std::chrono::steady_clock;
+    struct Page {
+        std::string bot, server, cursor;
+        McpCollection collection;
+        Clock::time_point expires;
+        std::unique_ptr<McpSession> session;
+    };
     const std::map<std::string,Server,std::less<>> servers_;
+    std::mutex mutex_;
+    std::map<std::string,Page,std::less<>> pages_;
+
+    Page takePage(std::string_view bot, std::string_view server, McpCollection collection, std::string_view cursor) {
+        std::vector<std::unique_ptr<McpSession>> expired;
+        std::lock_guard lock(mutex_);
+        const auto now = Clock::now();
+        for (auto page = pages_.begin(); page != pages_.end();) {
+            if (page->second.expires > now) ++page;
+            else {
+                expired.push_back(std::move(page->second.session));
+                page = pages_.erase(page);
+            }
+        }
+        if (cursor.empty()) return {std::string(bot),std::string(server),{},collection,{},{}};
+        const auto found = pages_.find(cursor);
+        if (found == pages_.end() || found->second.bot != bot || found->second.server != server ||
+            found->second.collection != collection) throw Conflict("MCP discovery cursor is unavailable");
+        return std::move(pages_.extract(found).mapped());
+    }
+
 public:
     explicit ConfiguredMcp(std::map<std::string,Server,std::less<>> servers) : servers_(std::move(servers)) {}
     bool hasServer(std::string_view server) const override { return servers_.contains(server); }
-    Json discover(std::string_view server, McpCollection collection, std::string_view cursor) override {
-        McpSession session(servers_.at(std::string(server)));
+    Json discover(std::string_view bot, std::string_view server, McpCollection collection, std::string_view cursor) override {
+        auto page = takePage(bot,server,collection,cursor);
+        if (!page.session) page.session = std::make_unique<McpSession>(servers_.at(page.server));
         const bool tools = collection == McpCollection::tools;
         const auto key = tools ? "tools" : "resources";
-        if (!(tools ? session.tools : session.resources)) return {{key,Json::array()}};
+        if (!(tools ? page.session->tools : page.session->resources)) return {{key,Json::array()}};
         auto params = Json::object();
-        if (!cursor.empty()) params["cursor"] = cursor;
-        return session.call(tools ? "tools/list" : "resources/list",std::move(params));
+        if (!page.cursor.empty()) params["cursor"] = page.cursor;
+        auto result = page.session->callRaw(tools ? "tools/list" : "resources/list",std::move(params));
+        page.cursor = result.value("nextCursor","");
+        result.erase("nextCursor");
+        result = page.session->scrub(std::move(result));
+        if (page.cursor.empty()) return result;
+
+        const auto next = actionId();
+        page.expires = Clock::now() + std::chrono::minutes(2);
+        {
+            std::lock_guard lock(mutex_);
+            if (pages_.size() >= 16) throw Conflict("Too many MCP discovery pages are open");
+            pages_.emplace(next,std::move(page));
+        }
+        result["nextCursor"] = next;
+        return result;
     }
     Json invoke(std::string_view server, std::string_view name, const Json& args) override {
         McpSession session(servers_.at(std::string(server)));

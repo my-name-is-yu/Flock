@@ -4,7 +4,7 @@ Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it 
 
 ## Build
 
-You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, and OpenSSL. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
+You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, OpenSSL, libpng 1.6 or later, and libjpeg. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
 
 ```sh
 cmake -S . -B build

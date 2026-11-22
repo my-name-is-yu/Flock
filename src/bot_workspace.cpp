@@ -70,19 +70,8 @@ bool visitDirectory(int parent, const Visit& visit) {
             return true;
         }
         const std::string_view name(entry->d_name);
-        if (name != "." && name != ".." && !visit(name,entry->d_ino)) return false;
+        if (name != "." && name != ".." && !visit(name)) return false;
     }
-}
-
-Fd exactChildDirectory(int parent, const fs::path& name) {
-    auto child = directoryAt(parent,name);
-    struct stat info{};
-    if (fstat(child.get(),&info) != 0) throw Conflict("Cannot identify Bot workspace");
-    const bool missing = visitDirectory(parent,[&](std::string_view entry, auto inode) {
-        return entry != name.native() || inode != info.st_ino;
-    });
-    if (missing) throw Conflict("Bot workspace does not have the exact directory name");
-    return child;
 }
 
 Fd regularFile(int parent, const fs::path& filename) {
@@ -138,7 +127,7 @@ void writeFile(int root, const fs::path& relative, std::string_view data) {
 
 template<class Visit>
 bool walk(int parent, const fs::path& prefix, const Visit& visit) {
-    return visitDirectory(parent,[&](std::string_view name, auto) {
+    return visitDirectory(parent,[&](std::string_view name) {
         const auto relative = prefix / name;
         const auto filename = relative.filename();
         struct stat info{};
@@ -198,10 +187,10 @@ Workspace openWorkspace(const fs::path& database, const ToolContext& ctx) {
     const auto stateFd = directory(state);
     if (mkdirat(stateFd.get(),"workspaces",0700) != 0 && errno != EEXIST)
         throw Conflict("Cannot create workspace storage");
-    const auto base = exactChildDirectory(stateFd.get(),"workspaces");
+    const Fd base(openExactChildDirectory(stateFd.get(),"workspaces"));
     if (mkdirat(base.get(),ctx.bot.c_str(),0700) != 0 && errno != EEXIST)
         throw Conflict("Cannot create Bot workspace");
-    return {basePath / ctx.bot,exactChildDirectory(base.get(),ctx.bot)};
+    return {basePath / ctx.bot,Fd(openExactChildDirectory(base.get(),ctx.bot))};
 }
 
 std::vector<std::string> commandArguments(const Json& args) {
@@ -223,10 +212,8 @@ fs::path systemExecutable(const fs::path& path) {
     const auto resolved = fs::canonical(path);
     if (resolved.parent_path() != fs::canonical("/bin") && resolved.parent_path() != fs::canonical("/usr/bin"))
         throw Conflict("Executable resolves outside system bin");
-    return resolved;
-#else
-    return path;
 #endif
+    return path;
 }
 
 fs::path executable(const fs::path& root, const std::string& name) {
@@ -404,6 +391,20 @@ void verifyTree(int root) {
     });
 }
 
+}
+
+int openExactChildDirectory(int parent, const fs::path& name) {
+    auto child = directoryAt(parent,name);
+    struct stat info{};
+    if (fstat(child.get(),&info) != 0) throw Conflict("Cannot identify Bot workspace");
+    const bool missing = visitDirectory(parent,[&](std::string_view entry) {
+        if (entry != name.native()) return true;
+        struct stat named{};
+        return fstatat(parent,name.c_str(),&named,AT_SYMLINK_NOFOLLOW) != 0 ||
+               named.st_dev != info.st_dev || named.st_ino != info.st_ino;
+    });
+    if (missing) throw Conflict("Bot workspace does not have the exact directory name");
+    return child.release();
 }
 
 fs::path relativeToolPath(std::string_view value) {

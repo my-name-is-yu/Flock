@@ -1,6 +1,9 @@
 #include "storage.hpp"
 
 #include <array>
+#include <csetjmp>
+#include <jpeglib.h>
+#include <png.h>
 #include <set>
 
 namespace flockv0 {
@@ -32,10 +35,69 @@ std::string decodeAttachment(std::string_view base64) {
     return bytes;
 }
 
-std::uint32_t bigEndian(std::string_view data, std::size_t offset) {
-    std::uint32_t value = 0;
-    for (std::size_t i = offset; i < offset+4; ++i) value = (value << 8) | static_cast<unsigned char>(data[i]);
-    return value;
+using ImageSize = std::pair<unsigned,unsigned>;
+
+bool supportedImageSize(unsigned width, unsigned height) {
+    constexpr unsigned maxEdge = 8192, maxPixels = 4 * 1024 * 1024;
+    return width && height && width <= maxEdge && height <= maxEdge && width <= maxPixels / height;
+}
+
+struct PngImage {
+    png_image image{};
+    PngImage() { image.version = PNG_IMAGE_VERSION; }
+    ~PngImage() { png_image_free(&image); }
+};
+
+ImageSize pngSize(std::string_view bytes) {
+    PngImage reader;
+    auto& image = reader.image;
+    if (!png_image_begin_read_from_memory(&image,bytes.data(),bytes.size()) ||
+        !supportedImageSize(image.width,image.height)) return {};
+    image.format = PNG_FORMAT_RGBA;
+    std::vector<unsigned char> pixels(PNG_IMAGE_SIZE(image));
+    if (!png_image_finish_read(&image,nullptr,pixels.data(),0,nullptr) || image.warning_or_error) return {};
+    return {image.width,image.height};
+}
+
+struct JpegErrors {
+    jpeg_error_mgr manager{};
+    std::jmp_buf jump;
+};
+
+void failJpeg(j_common_ptr codec) {
+    std::longjmp(reinterpret_cast<JpegErrors*>(codec->err)->jump,1);
+}
+
+void checkJpegMessage(j_common_ptr codec, int level) {
+    if (level < 0) failJpeg(codec);
+}
+
+struct JpegImage {
+    jpeg_decompress_struct codec{};
+    JpegErrors errors;
+    JpegImage() {
+        codec.err = jpeg_std_error(&errors.manager);
+        errors.manager.error_exit = failJpeg;
+        errors.manager.emit_message = checkJpegMessage;
+    }
+    ~JpegImage() { jpeg_destroy_decompress(&codec); }
+};
+
+ImageSize jpegSize(std::string_view bytes) {
+    const auto reader = std::make_unique<JpegImage>();
+    auto& codec = reader->codec;
+    if (setjmp(reader->errors.jump)) return {};
+    jpeg_create_decompress(&codec);
+    jpeg_mem_src(&codec,reinterpret_cast<const unsigned char*>(bytes.data()),bytes.size());
+    if (jpeg_read_header(&codec,TRUE) != JPEG_HEADER_OK ||
+        !supportedImageSize(codec.image_width,codec.image_height) ||
+        !jpeg_start_decompress(&codec)) return {};
+    const auto row = codec.mem->alloc_sarray(reinterpret_cast<j_common_ptr>(&codec),JPOOL_IMAGE,
+                                             codec.output_width * codec.output_components,1);
+    while (codec.output_scanline < codec.output_height)
+        if (jpeg_read_scanlines(&codec,row,1) != 1) return {};
+    if (!jpeg_finish_decompress(&codec)) return {};
+    return {codec.image_width,codec.image_height};
 }
 
 std::uint32_t littleEndian(std::string_view data, std::size_t offset, unsigned size) {
@@ -63,30 +125,22 @@ void describeWav(std::string_view data, Json& result) {
     if (bytesPerSecond) result["durationMs"] = 1000ull*samples/bytesPerSecond;
 }
 
-Json metadata(const Json& value, const SecretRedactor& scrub) {
+Json metadata(const Json& value) {
     if (!value.is_object() || value.size() != 3) throw Conflict("Invalid attachment");
     const auto name = toolText(value,"name",128);
     const auto mime = toolText(value,"mimeType",64);
     const auto bytes = decodeAttachment(toolText(value,"dataBase64",88000));
-    if (scrub.text(bytes) != bytes) throw Conflict("Protected secret values cannot be stored in attachments");
     const std::string_view data(bytes);
     Json result{{"name",name},{"mimeType",mime},{"sizeBytes",data.size()}};
-    if (mime == "image/png" && data.size() >= 33 && data.starts_with("\x89PNG\r\n\x1a\n") &&
-        data.substr(12,4) == "IHDR" && bigEndian(data,8) == 13) {
-        const auto width = bigEndian(data,16);
-        const auto height = bigEndian(data,20);
-        if (!width || !height || width > 32768 || height > 32768) throw Conflict("Invalid PNG dimensions");
-        result.update({{"width",width},{"height",height}});
-    } else {
-        const bool jpeg = mime == "image/jpeg" && data.size() >= 4 && data.starts_with("\xff\xd8\xff");
-        const bool wav = mime == "audio/wav" && data.size() >= 44 && data.starts_with("RIFF") && data.substr(8,4) == "WAVE";
-        const bool mp3 = mime == "audio/mpeg" && data.size() >= 4 &&
-            (data.starts_with("ID3") || (static_cast<unsigned char>(data[0]) == 0xff && (data[1] & 0xe0) == 0xe0));
-        if (!jpeg && !wav && !mp3)
-            throw Conflict("Attachment must contain PNG, JPEG, WAV, or MP3 data matching its MIME type");
-        if (wav) describeWav(data,result);
-    }
-    result["kind"] = mime.starts_with("image/") ? "image" : "audio";
+    const bool png = mime == "image/png" && data.starts_with("\x89PNG\r\n\x1a\n");
+    const bool jpeg = mime == "image/jpeg" && data.starts_with("\xff\xd8\xff");
+    const bool wav = mime == "audio/wav" && data.size() >= 44 && data.starts_with("RIFF") && data.substr(8,4) == "WAVE";
+    const bool mp3 = mime == "audio/mpeg" && data.size() >= 4 &&
+        (data.starts_with("ID3") || (static_cast<unsigned char>(data[0]) == 0xff && (data[1] & 0xe0) == 0xe0));
+    if (!png && !jpeg && !wav && !mp3)
+        throw Conflict("Attachment must contain PNG, JPEG, WAV, or MP3 data matching its MIME type");
+    if (wav) describeWav(data,result);
+    result["kind"] = png || jpeg ? "image" : "audio";
     return result;
 }
 }
@@ -103,12 +157,10 @@ void Store::Impl::saveAttachments(Id message, const Json& attachments) {
     if (!attachments.is_array() || attachments.size() > 4 || attachments.dump().size() > 98000)
         throw Conflict("Attachments exceed the message limit");
     if (attachments.empty()) return;
-    const auto scrub = sessionRedactor();
     for (std::size_t i = 0; i < attachments.size(); ++i) {
         const auto& attachment = attachments[i];
         const auto id = std::to_string(i+1);
-        scrub.requirePublic(attachment);
-        auto view = metadata(attachment,scrub);
+        auto view = metadata(attachment);
         view["attachmentId"] = id;
         exec("INSERT INTO message_attachments VALUES(?,?,?,?)",{message,id,view,attachment});
     }
@@ -127,6 +179,23 @@ Statement Store::Impl::scopedAttachment(std::string_view bot, Id throughMessage,
                  {bot,throughMessage,toolId(args,"messageId"),toolText(args,"attachmentId",128)});
 }
 
+Json Store::Impl::inspectAttachment(std::string_view bot, Id throughMessage, const Json& args) {
+    Json view, attachment;
+    {
+        std::lock_guard lock(mutex);
+        auto row = scopedAttachment(bot,throughMessage,args);
+        if (!row.next()) throw Conflict("Attachment is unavailable in this conversation");
+        view = row.json(0);
+        if (view.at("kind") != "image") return view;
+        attachment = row.json(1);
+    }
+    const auto bytes = decodeAttachment(field(attachment,"dataBase64"));
+    const auto [width,height] = view.at("mimeType") == "image/png" ? pngSize(bytes) : jpegSize(bytes);
+    if (width == 0 || height == 0) throw Conflict("Attachment image is corrupt or exceeds the pixel limit");
+    view.update({{"width",width},{"height",height}});
+    return view;
+}
+
 std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
     std::vector<ModelImage> images;
     std::set<std::pair<Id,std::string>> seen;
@@ -142,9 +211,7 @@ std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id me
         if (!row.next()) continue;
         const auto attachment = row.json(1);
         const auto& base64 = attachment.at("dataBase64").get_ref<const std::string&>();
-        const auto bytes = decodeAttachment(base64);
-        if (sessionRedactor().text(bytes) == bytes)
-            images.push_back({id,attachmentId,attachment.at("mimeType"),base64});
+        images.push_back({id,attachmentId,attachment.at("mimeType"),base64});
     }
     return images;
 }

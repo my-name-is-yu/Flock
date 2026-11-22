@@ -164,7 +164,8 @@ A running command whose outcome is unknown after a restart is recorded as
 
 Web fetch requires `web/<hostname>/fetch` and accepts public HTTPS text
 responses. Web search requires `web/public/search` and the host environment
-variable `FLOCK_WEB_SEARCH_KEY` for Brave Search.
+variable `FLOCK_WEB_SEARCH_KEY` for Brave Search. After reading web evidence,
+the Bot can keep reading and reply. Actions require a new user message.
 
 Set optional skill and MCP targets in `<home>/bot-tools.json`.
 Relative paths are resolved against the Flock home.
