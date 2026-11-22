@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -249,7 +250,7 @@ Json readBotConfig(const std::filesystem::path& file) {
     return config;
 }
 
-Bot configuredBot(std::string_view id, const Json& config) {
+Bot configuredBot(std::string_view id, const Json& config, std::vector<std::string>* scheduleErrors = nullptr) {
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
@@ -283,14 +284,12 @@ Bot configuredBot(std::string_view id, const Json& config) {
         throw Conflict("runTimeoutSeconds must be a positive integer");
     bot.settings["runTimeoutSeconds"] = timeout.get<int>();
     if (config.contains("session")) {
-        const auto& session = config["session"];
-        if (!session.is_object()) throw Conflict("session must be an object");
-        auto& stored = bot.settings["session"] = Json::object();
-        for (const auto* key : {"model","providerInstanceId","runtimeMode"})
-            if (session.contains(key)) stored[key] = validatedString(session,key);
-        if (session.contains("workspaceStrategy")) {
-            if (!session["workspaceStrategy"].is_object()) throw Conflict("session.workspaceStrategy must be an object");
-            stored["workspaceStrategy"] = session["workspaceStrategy"];
+        try { bot.settings["session"] = normalizeSessionSettings(config["session"]); }
+        catch (const Conflict& error) {
+            if (!scheduleErrors) throw;
+            scheduleErrors->push_back(error.what());
+            // Preserve the cron due time. This snapshot must stop at Session launch validation.
+            bot.settings["session"] = nullptr;
         }
     }
     const auto allowedBots = config.value("allowedBots",Json::array());
@@ -508,7 +507,7 @@ void Bots::syncSchedules(Store& store, Seconds now,
             const auto cron = config.value("cron",Json::array());
             if (!cron.is_array()) throw Conflict("cron must be an array");
             if (!cron.empty()) {
-                const auto bot = configuredBot(id,config);
+                const auto bot = configuredBot(id,config,&errors);
                 std::map<std::string_view,std::size_t> counts;
                 for (const auto& entry : cron) {
                     const auto key = entry.find("id");

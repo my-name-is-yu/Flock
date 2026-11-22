@@ -13,6 +13,15 @@
 
 namespace flockv0 {
 namespace conversation { struct Message; }
+
+class StorageError : public std::runtime_error {
+public:
+    explicit StorageError(sqlite3* db);
+    bool contended() const { return code_ == SQLITE_BUSY || code_ == SQLITE_LOCKED; }
+private:
+    int code_;
+};
+
 class Statement {
 public:
     Statement(sqlite3*, const char*, const Json& values);
@@ -44,6 +53,17 @@ struct PeerExchange {
 
 struct TaskChange { std::string intent, doneWhen, environment; };
 
+struct ConversationModelFailure {
+    std::optional<Seconds> retryFrom;
+};
+
+struct ConversationModelCheckpoint {
+    Id attempt;
+    int step;
+    Json usage;
+    std::variant<std::vector<Decision>,ConversationModelFailure> outcome;
+};
+
 class SecretStore {
 public:
     explicit SecretStore(const std::filesystem::path& stateDirectory);
@@ -67,6 +87,7 @@ struct Store::Impl {
     std::map<ChannelKind,ChannelConnector> channels;
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
     std::vector<std::string> rootPeople;
+    WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     void initializeChannelSchema();
@@ -84,7 +105,7 @@ struct Store::Impl {
     void queueChannelReply(Id source, Id reply, const Json&);
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
     bool channelDeliveryDue() const;
-    void deliverChannels();
+    void deliverChannels(std::stop_token = {});
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<ModelImage>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
@@ -109,6 +130,8 @@ struct Store::Impl {
     void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {});
+    void projectTaskGitReads(GitHost&, const Json& task, Json& event);
+    Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
@@ -163,6 +186,7 @@ struct Store::Impl {
     void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
     std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     void recoverWorkspace();
+    void persistWorkspaceResults();
     void stopWorkspace();
     std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
     void validateWorkspace(const ToolContext&, const Decision&);
@@ -171,7 +195,7 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
+    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&, std::stop_token);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -180,11 +204,16 @@ struct Store::Impl {
     void releaseModelCall(std::string_view budget, Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
-    std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
+    std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
+    void deferConversation(Id, Seconds now);
+    // Retain model outcomes through write contention without spending another attempt.
+    std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
+    void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
+                 const BotTools&, GitHost*, std::stop_token);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
+    Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;
@@ -209,6 +238,7 @@ struct Store::Impl {
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
     std::optional<PeerExchange> peerExchange(Id) const;
+    bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);

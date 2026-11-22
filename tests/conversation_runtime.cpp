@@ -1257,6 +1257,7 @@ void unfinishedTurnHoldsCompletion() {
     check(f.event(id,"completed").is_null() && f.response(receipt).is_null() && completionCalls == 1,
           "a task completed while a conversation turn was unfinished");
     failing = false;
+    ++f.now;
     f.tick();
     check(f.response(receipt)["text"] == "It shows the baseline." && f.lastTurn().size() == 1 &&
           f.lastTurn()[0]["result"]["ok"] == true,"the retried turn repeated or lost its finished step");
@@ -1369,6 +1370,10 @@ void pendingTurnDoesNotBlockIndependentProject() {
     const bool started = projectProgress.wait_for(5s) == std::future_status::ready;
     allowTurn.set_value();
     dispatch.get();
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline &&
+           (f.task(project)["state"] != "sending" || f.store->tasks("alpha").size() != 2))
+        std::this_thread::sleep_for(5ms);
     f.runtime.reset();
     check(started && f.task(project)["state"] == "sending" && f.store->tasks("alpha").size() == 2,
           "a pending conversation turn blocked an independent project's model decision");
