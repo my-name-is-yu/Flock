@@ -1260,6 +1260,7 @@ function eventCard(event, context, place, report) {
     }
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
+    text.classList.add('foldable-text');
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
     if (paused && context.canDecide) extras.push(pausedActions(paused));
@@ -1284,6 +1285,7 @@ function eventCard(event, context, place, report) {
     copy = data.evidenceStatus === 'report_unavailable' ? 'The Run ended and its report is unavailable.'
       : data.report || 'The session submitted a report.';
     text.textContent = copy;
+    text.classList.add('foldable-text');
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
@@ -1311,6 +1313,7 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
+    text.classList.add('foldable-text');
     if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
       const count = data.imageAttachmentCount;
       bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
@@ -1601,6 +1604,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
     scroller.setAttribute('aria-label', 'Conversation history');
     updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
+    foldLongMessages();
     moveScroll();
   }
   const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
@@ -1608,6 +1612,35 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   if (canAnimate) {
     const id = replyArrivalId(events, liveAfterId);
     if (id != null) animateLiveReply(id);
+  }
+}
+
+// Like ChatGPT, fold any very long message to its first lines behind Show more.
+const foldLines = 12;
+const unfoldedMessages = new Set();
+function foldLongMessages() {
+  for (const text of elements.timeline.querySelectorAll('.foldable-text:not([data-fold-checked])')) {
+    text.dataset.foldChecked = '';
+    const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+    if (!(text.scrollHeight > lineHeight * (foldLines + 2))) continue;
+    const bubble = text.closest('.bubble');
+    const id = text.closest('.event-message')?.id;
+    const toggle = button(null, 'fold-toggle', () => {
+      const folded = bubble.dataset.fold === 'folded';
+      setFold(!folded);
+      if (folded) unfoldedMessages.add(id);
+      else {
+        unfoldedMessages.delete(id);
+        bubble.scrollIntoView({ block: 'nearest' });
+      }
+    });
+    const setFold = (folded) => {
+      bubble.dataset.fold = folded ? 'folded' : 'unfolded';
+      toggle.textContent = folded ? 'Show more' : 'Show less';
+      toggle.setAttribute('aria-expanded', String(!folded));
+    };
+    text.after(toggle);
+    setFold(!unfoldedMessages.has(id));
   }
 }
 
