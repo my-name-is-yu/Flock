@@ -69,7 +69,7 @@ Decision botRequest(std::string bot, const char* kind, const char* message) {
     if (std::string_view(kind) == "work") args["doneWhen"] = Evidence;
     return {"send_bot_message",std::move(args),"Ask the specialist"};
 }
-Decision botReply(const char* kind, const char* message) {
+Decision botReply(const char* kind, std::string_view message) {
     return {"reply_to_bot",{{"kind",kind},{"text",message}},"Respond to the current exchange"};
 }
 bool hasTool(const ModelInput& input, std::string_view tool) {
@@ -861,7 +861,12 @@ void revisionWaitsForPeerClarification() {
     bool answeredPeer = false;
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& kind = input.event.at("kind");
-        if (kind == "conversation_turn") return converse(input,"change_task",root,{{"environment","cloud"}});
+        if (kind == "conversation_turn") {
+            if (input.event.at("text") == "Use main")
+                return converse(input,"answer_task_question",root,{{"waitId",input.event.at("replyTo").at("waitId")},
+                                {"text",input.event.at("text")}});
+            return converse(input,"change_task",root,{{"environment","cloud"}});
+        }
         if (input.task.at("botId") == "beta") {
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && input.event.at("text") == "Use main",
@@ -869,20 +874,25 @@ void revisionWaitsForPeerClarification() {
             return botReply("result","Verified main");
         }
         if (kind == "bot_question") {
+            if (!input.event.contains("userAnswer")) return ask();
             check(f.task(root).at("environmentId") == "e" && f.t3.launches == 0,
                   "Replanning ran before the Bot exchange finished");
             answeredPeer = true;
-            return botReply("answer","Use main");
+            return botReply("answer",input.event.at("userAnswer").get_ref<const std::string&>());
         }
         check(kind == "intake","Unexpected event for the sender");
         return answeredPeer ? work() : botRequest("beta","consult","Check the release");
     };
 
-    f.reach(root,"peer_waiting");
+    f.wait(root,"user_question");
+    const auto question = f.task(root).at("wait").at("messageId").get<Id>();
     f.store->receive(routing,"move-release-check","Run Release check on cloud");
     f.runtime->runConversations();
     check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
           "The requested destination change did not reach the task");
+    f.store->receive(routing,"branch-answer","Use main",question);
+    f.runtime->runConversations();
+    check(f.logs(root,"user_answer") == 1,"The conversation rejected the answer the peer is waiting for");
     f.reach(root,"running");
     const auto messages = f.botMessages("alpha");
     check(answeredPeer && messages.size() == 4 && messages.back().at("messageType") == "result" &&
