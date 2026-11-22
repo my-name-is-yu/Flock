@@ -1,4 +1,4 @@
-.main { --conversation-top: 1rem; }
+.main { --conversation-top: 1rem; --jump-to-latest-space: 4rem; }
 
 .conversation-header {
   --profile-avatar-size: 3.125rem;
@@ -90,6 +90,10 @@
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
   position: relative;
+  scroll-padding-block-start: calc(var(--conversation-top) + .5rem + var(--find-overlap, 0px));
+}
+.conversation.viewing-source, .main:has(.conversation-find:not([hidden])) .conversation {
+  scroll-padding-block-end: var(--jump-to-latest-space);
 }
 .conversation { scroll-padding-block-start: calc(var(--conversation-top) + .5rem); }
 .conversation.follow-newest { overflow-anchor: none; }
@@ -103,7 +107,10 @@
 .jump-to-latest:hover { background: var(--hover); }
 .jump-to-latest svg { width: 1rem; height: 1rem; }
 .msg :focus-visible { scroll-margin-block: .5rem; }
-.conversation-inner { max-width: var(--content-width); margin-inline: auto; padding: calc(var(--conversation-top) + .2rem) clamp(1rem, 4vw, 2rem) 1.4rem; }
+.conversation-inner {
+  max-width: var(--content-width); margin-inline: auto;
+  padding: calc(var(--conversation-top) + .2rem + var(--find-overlap, 0px)) clamp(1rem, 4vw, 2rem) 1.4rem;
+}
 .main:has(> .composer-container:not([hidden])) .conversation-inner:not(:has(> .timeline > .empty-state)) {
   min-height: 100%;
   display: flex; flex-direction: column; justify-content: safe flex-end;
@@ -114,26 +121,35 @@
   background: var(--raised); color: var(--text-2); font-weight: 500;
 }
 .older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
+.conversation-source-error:not(:empty) {
+  position: sticky; top: calc(.5rem + var(--find-overlap, 0px)); z-index: 2;
+  width: fit-content; max-width: calc(100% - 2rem); margin: .5rem auto; padding: .4rem .85rem;
+  border: 1px solid var(--hairline); border-radius: var(--radius-md);
+  background: var(--raised); color: var(--danger); font-size: var(--text-sm);
+}
 /* Keep the last opened message clear of the floating Jump to latest control. */
-.viewing-source .timeline { padding-block-end: 4rem; }
+.viewing-source .timeline { padding-block-end: var(--jump-to-latest-space); }
 .conversation-source-target .bubble { outline: 2px solid transparent; outline-offset: 3px; animation: source-highlight 2.4s ease-out; }
 @keyframes source-highlight { 0%, 40% { outline-color: var(--accent); } }
 
 .timeline { --avatar-size: 1.75rem; --avatar-gap: .6rem; --avatar-col: calc(var(--avatar-size) + var(--avatar-gap)); display: flex; flex-direction: column; }
 .day { text-align: center; color: var(--text-3); font-size: var(--text-xs); font-weight: 500; margin: 1.6rem 0 .3rem; }
 .timeline > .day:first-child { margin-top: .2rem; }
+.day.chat-time-break { margin: 1.35rem 0 .15rem; }
 .system-note { text-align: center; color: var(--text-3); font-size: var(--text-xs); margin: 1.1rem 0 .2rem; }
 
 .msg { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: .28rem; min-width: 0; margin-top: .3rem; }
 .msg.task-start { margin-top: .85rem; }
 .msg.group-start { margin-top: 1.15rem; }
 .day + .msg { margin-top: .6rem; }
+.event-message:not(.group-start) { margin-top: .16rem; }
 .msg.user { justify-items: end; }
 .msg-meta { display: flex; align-items: baseline; gap: .45rem; min-height: 1rem; padding-left: var(--avatar-col); font-size: var(--text-xs); color: var(--text-3); }
 .msg.user .msg-meta { padding-left: 0; padding-right: .2rem; }
 .msg-name { color: var(--text-2); font-weight: 500; }
 .msg-time { opacity: 0; transition: opacity .15s ease; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .msg:hover .msg-time, .msg:focus-within .msg-time { opacity: 1; }
+.chat-time-break .msg-time { opacity: 1; }
 .msg-line { display: flex; align-items: flex-end; gap: var(--avatar-gap); min-width: 0; max-width: 100%; }
 .msg.user .msg-line { flex-direction: row-reverse; }
 .msg-avatar, .msg-avatar-space { width: var(--avatar-size); height: var(--avatar-size); flex: none; }
@@ -143,6 +159,10 @@
 .msg.external .msg-note { margin-inline-start: var(--avatar-col); }
 .bubble { min-width: 0; max-width: min(100%, 36rem); padding: .6rem .95rem; border-radius: var(--radius-xl); background: var(--raised); }
 .msg.user .bubble { background: var(--user-bubble); color: #fff; }
+.event-message.bot:not(.group-start) .bubble { border-start-start-radius: var(--radius-sm); }
+.event-message.bot.group-continues .bubble { border-end-start-radius: var(--radius-sm); }
+.event-message.user:not(.group-start) .bubble { border-start-end-radius: var(--radius-sm); }
+.event-message.user.group-continues .bubble { border-end-end-radius: var(--radius-sm); }
 .msg.external .bubble { background: var(--sidebar); box-shadow: inset 0 0 0 1px var(--hairline); }
 @supports (color: light-dark(red, blue)) and (color: oklch(from red .5 min(c, .15) h)) {
   .conversation { --user-bubble: light-dark(oklch(from var(--bot-accent) .5 min(c, .15) h), oklch(from var(--bot-accent) .42 min(c, .12) h)); }
@@ -167,7 +187,10 @@
 .msg-actions { display: flex; align-items: center; gap: .05rem; align-self: center; opacity: 0; transition: opacity .15s ease; }
 .msg.user .msg-actions { flex-direction: row-reverse; }
 .msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; }
-.msg-actions .msg-time { opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem; }
+.msg-actions .msg-time, .event-message > .msg-time {
+  opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem;
+}
+.event-message.bot > .msg-time { margin-inline-start: var(--avatar-col); }
 .msg-action { width: 1.85rem; height: 1.85rem; color: var(--text-3); }
 .msg-action svg { width: 1rem; height: 1rem; }
 
@@ -259,6 +282,9 @@
 
 @media (hover: none), (pointer: coarse) {
   .msg-actions { opacity: 1; pointer-events: auto; }
+}
+@media (hover: none) {
+  .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { opacity: 0; }
 }
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
