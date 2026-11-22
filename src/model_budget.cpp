@@ -18,10 +18,10 @@ bool sharedMemoryTool(std::string_view tool) {
 }
 
 bool argumentsMayHaveBeenRedacted(const Decision& call) {
-    if (!call.args.is_object()) return SecretRedactor::hasRedactionPlaceholder(call.args);
+    if (!call.args.is_object()) return SecretRedactor::mayContainLegacyRedaction(call.args);
     for (const auto& [key,value] : call.args.items()) {
-        if (SecretRedactor::hasRedactionPlaceholder(key) ||
-            (!(value.is_string() && redactsProse(call.tool,key)) && SecretRedactor::hasRedactionPlaceholder(value)))
+        if (SecretRedactor::mayContainLegacyRedaction(key) ||
+            (!(value.is_string() && redactsProse(call.tool,key)) && SecretRedactor::mayContainLegacyRedaction(value)))
             return true;
     }
     return false;
@@ -146,7 +146,6 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
         rejection = "Memory access denied";
     } else {
         const auto scrub = modelCallRedactor(bot,call.tool,call.args,gitNotification);
-        // These prose fields already have an explicit redaction contract in reply and memory handlers.
         if (call.args.is_object()) {
             for (auto& [key,value] : call.args.items())
                 if (value.is_string() && redactsProse(call.tool,key))

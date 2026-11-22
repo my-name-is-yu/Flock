@@ -166,8 +166,7 @@ bool SecretRedactor::containsProtected(const Json& value) const {
     });
 }
 
-bool SecretRedactor::hasRedactionPlaceholder(const Json& value) {
-    // Older decisions wrote the redacted argument, including an empty string if the replacement was unsafe.
+bool SecretRedactor::mayContainLegacyRedaction(const Json& value) {
     return anyJsonText(value,[](std::string_view text) { return text.empty() || text.find(redactionPlaceholder) != text.npos; });
 }
 
