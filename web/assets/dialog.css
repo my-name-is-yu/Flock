@@ -45,6 +45,7 @@
 .detail-tab {
   display: flex; align-items: center; gap: .6rem; width: 100%; border: 0; border-radius: var(--radius-md);
   padding: .5rem .65rem; background: none; color: var(--text-2); font-size: var(--text-md); text-align: left;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 .detail-tab:hover { background: var(--hover); color: var(--text); }
 .detail-tab[aria-selected="true"] { background: var(--selected); color: var(--text); font-weight: 600; }
@@ -59,6 +60,13 @@
   padding: .4rem var(--detail-pad) var(--detail-pad);
 }
 .dialog-body > * { flex-shrink: 0; min-width: 0; }
+@keyframes detail-section-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.dialog-body.section-switching > * {
+  animation: detail-section-enter 190ms ease-out both;
+}
 
 .settings-hero {
   position: relative; display: grid; justify-items: center; gap: .7rem;
@@ -195,6 +203,8 @@ a.settings-row svg { margin-left: auto; }
   .detail, .detail::backdrop { transition: opacity .12s, overlay .12s allow-discrete, display .12s allow-discrete; }
   .detail:not([open]) { transform: none; }
   @starting-style { .detail[open] { transform: none; } }
+  .detail-tab { transition: none; }
+  .dialog-body.section-switching > * { animation: none; }
 }
 .peer-picker-list { display: grid; gap: .15rem; padding: 0; margin: 0; list-style: none; }
 .peer-choice {

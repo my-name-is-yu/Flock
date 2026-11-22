@@ -61,6 +61,14 @@
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
+:root.theme-switching,
+:root.theme-switching *,
+:root.theme-switching *:not(.theme-switch, .studio-tabs)::before,
+:root.theme-switching *::after {
+  transition-property: background-color, color, border-color, box-shadow;
+  transition-duration: 220ms;
+  transition-timing-function: cubic-bezier(.2, .8, .2, 1);
+}
 ::backdrop { --backdrop: rgb(10 10 14 / .5); }
 
 * { box-sizing: border-box; }
@@ -129,5 +137,9 @@ svg { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace { transition: none; }
+  :root.theme-switching,
+  :root.theme-switching *,
+  :root.theme-switching *::before,
+  :root.theme-switching *::after { transition: none; }
   *, *::before, *::after { scroll-behavior: auto !important; }
 }

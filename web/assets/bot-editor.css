@@ -127,19 +127,72 @@
 .studio-close { margin-right: -.35rem; color: var(--text-3); }
 
 .studio-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
-.studio-tabs { display: flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
+.studio-tabs {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--raised);
+}
+.studio-tabs::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  z-index: 0;
+  width: var(--seg-w, 0px);
+  transform: translateX(var(--seg-x, 0px));
+  border-radius: var(--radius-sm);
+  background: var(--overlay);
+  box-shadow: 0 1px 3px var(--shadow-color);
+  opacity: 0;
+  pointer-events: none;
+}
+.studio-tabs.seg-ready::before { opacity: 1; }
+.studio-tabs.seg-animated::before {
+  transition: transform 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
+              width 240ms cubic-bezier(0.22, 1.15, 0.36, 1),
+              background-color 220ms cubic-bezier(.2, .8, .2, 1),
+              box-shadow 220ms cubic-bezier(.2, .8, .2, 1);
+}
 .studio-tabs button {
+  position: relative;
+  z-index: 1;
+  display: inline-grid;
+  place-items: center;
   border: 0;
   border-radius: var(--radius-sm);
   padding: .3rem .75rem;
   background: none;
   color: var(--text-2);
   font-size: var(--text-sm);
+  transition: color 180ms ease;
+}
+.studio-tabs button::after {
+  content: attr(data-label);
+  font-weight: 600;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  user-select: none;
+  pointer-events: none;
 }
 .studio-tabs button:hover { color: var(--text); }
-.studio-tabs button[aria-pressed="true"] { background: var(--overlay); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px var(--shadow-color); }
+.studio-tabs button[aria-pressed="true"] { color: var(--text); font-weight: 600; }
+.studio-tabs:not(.seg-ready) button[aria-pressed="true"] { background: var(--overlay); box-shadow: 0 1px 3px var(--shadow-color); }
 .studio-shuffle:disabled { opacity: .35; cursor: default; }
 .studio-shuffle:disabled:hover { background: none; color: var(--text-2); }
+
+@keyframes studio-panel-enter {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+.studio-panel-entering {
+  animation: studio-panel-enter 190ms ease-out both;
+}
 
 .studio-gallery {
   display: grid;
@@ -237,4 +290,6 @@
   }
   .bot-editor-dialog:not([open]) { transform: none; }
   @starting-style { .bot-editor-dialog[open] { transform: none; } }
+  .studio-tabs.seg-animated::before, .studio-tabs button { transition: none; }
+  .studio-panel-entering { animation: none; }
 }
