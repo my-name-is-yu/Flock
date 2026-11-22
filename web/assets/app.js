@@ -4,6 +4,7 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
 import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
@@ -16,6 +17,7 @@ const elements = Object.fromEntries([
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -80,6 +82,7 @@ function save(key, value) {
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const composerDrafts = createComposerDraftStore();
+const screenshotDrafts = new WeakMap();
 const sendingMessages = new Set();
 const pendingWaits = new Map();
 const notices = new Map();
@@ -1002,6 +1005,10 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
+    if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
+      const count = data.imageAttachmentCount;
+      bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
+    }
     if (event.kind === 'user_answer') {
       const question = data.question;
       if (question && !place.afterQuestion) {
@@ -1326,6 +1333,73 @@ function setNotice(context, text, isError = false) {
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const screenshotAnchor = (reply) => reply?.messageId ?? 0;
+const screenshotsFor = (composer) => screenshotDrafts.get(composer);
+let pickerTarget = null;
+let renderedScreenshots = null;
+
+function clearScreenshots(composer, reply) {
+  const drafts = screenshotsFor(composer);
+  const anchor = screenshotAnchor(reply);
+  const draft = drafts?.get(anchor);
+  drafts?.delete(anchor);
+  for (const image of draft?.images ?? []) URL.revokeObjectURL(image.preview);
+}
+
+async function addScreenshots(context, composer, reply, files) {
+  const anchor = screenshotAnchor(reply);
+  const isCurrent = () => view === context && context.composer === composer && context.data.canDecide === true && !context.dm &&
+    screenshotAnchor(composer.reply) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
+  if (!files.length || !composer || !isCurrent()) return;
+  let drafts = screenshotsFor(composer);
+  if (!drafts) screenshotDrafts.set(composer, drafts = new Map());
+  const draft = drafts.get(anchor) ?? { images: [] };
+  if (draft.loading) return;
+  drafts.set(anchor, draft);
+  draft.loading = true;
+  draft.error = '';
+  notices.delete(context.id);
+  renderComposer();
+  try { await stageScreenshots(draft, files, isCurrent); }
+  finally {
+    draft.loading = false;
+    if (showingComposer(context.id)) renderComposer();
+  }
+}
+
+function renderScreenshots(draft, disabled) {
+  const list = elements['screenshot-previews'];
+  const images = draft?.images ?? null;
+  if (renderedScreenshots !== images) {
+    renderedScreenshots = images;
+    list.replaceChildren(...(images ?? []).map((image, index) => {
+      const item = node('li', 'screenshot-preview');
+      const preview = node('img');
+      preview.alt = image.attachment.name;
+      preview.title = image.attachment.name;
+      preview.src = image.preview;
+      const remove = button('×', 'icon-button remove-screenshot', () => {
+        const hadFocus = document.activeElement === remove;
+        URL.revokeObjectURL(image.preview);
+        draft.images = draft.images.filter((entry) => entry !== image);
+        draft.error = '';
+        renderComposer();
+        if (hadFocus) {
+          const buttons = list.querySelectorAll('button');
+          const next = buttons[Math.min(index, buttons.length - 1)] ?? elements['attach-screenshots'];
+          (next.disabled ? elements.message : next).focus();
+        }
+      });
+      remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
+      remove.title = `Remove ${image.attachment.name}`;
+      item.append(preview, remove);
+      return item;
+    }));
+  }
+  list.hidden = !images?.length;
+  for (const button of list.querySelectorAll('button')) button.disabled = disabled;
+}
+
 const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
   !context.data.waits.some((task) => task.wait.messageId === reply.messageId);
 let composition = null;
@@ -1352,19 +1426,21 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = !!context?.composer && !context.dm;
-  const canDecide = available && context.data?.canDecide === true;
+  const readOnly = context?.data?.canDecide === false;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly);
+  const canDecide = available && context.data.canDecide === true;
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
   elements['view-only-notice'].hidden = !available || canDecide;
-  if (!canDecide) {
+  if (!canDecide || !context.composer) {
     composition = null;
     elements.message.value = '';
-    return;
+    return renderScreenshots(null, true);
   }
   const { composer } = context;
   const reply = composer.reply;
   if (composition && (composition.composer !== composer || composition.anchor !== reply?.messageId)) composition = null;
+  const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
   const notice = notices.get(context.id);
   const body = composer.text;
   const busy = sendingMessages.has(composer);
@@ -1382,15 +1458,19 @@ function renderComposer() {
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
+  elements['attach-screenshots'].disabled = busy || closedReply;
+  elements['attach-screenshots'].setAttribute('aria-disabled', String(!!screenshots?.loading));
+  renderScreenshots(screenshots, busy || !!screenshots?.loading);
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !!composition || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || !!composition || closedReply || !!screenshots?.loading || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = reply ? 'Reply' : 'Send';
+  const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
-  elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
+    (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
+  elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
+  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1840,8 +1920,10 @@ function mergeLatest(context, latest) {
     const current = new Set(latest.waits.map(questionKey));
     for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
   }
-  const composer = context.composer = composerDrafts(context.id, latest.composerPerson);
-  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text) {
+  const composer = context.composer = latest.canDecide === true ? composerDrafts(context.id, latest.composerPerson) : null;
+  if (!composer) return;
+  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
+      !screenshotsFor(composer)?.get(screenshotAnchor(composer.reply))?.images.length) {
     composer.closeReply();
     setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
@@ -2017,18 +2099,35 @@ async function submit(event) {
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
   const { composer } = context;
-  const payload = composer.prepareSend();
+  const reply = composer.reply;
+  const fields = { botId: context.id, text: composer.text };
+  if (reply) fields.replyToMessageId = reply.messageId;
+  const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
+  const attachments = screenshots?.images.map((image) => image.attachment) ?? [];
+  let payload;
   sendingMessages.add(composer);
   setNotice(context, 'Sending message…');
   try {
+    if (attachments.length) {
+      const prepared = await screenshotMessage(fields, attachments, screenshots.pending);
+      payload = prepared.payload;
+      screenshots.pending = prepared.pending;
+    } else payload = composer.prepareSend();
     await api('messages', payload);
-    composer.settleSend(payload, true);
+    if (attachments.length) {
+      composer.settleScreenshotSend(payload);
+      clearScreenshots(composer, reply);
+    } else composer.settleSend(payload, true);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) composer.settleSend(payload, false);
-    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    if (payload && error.status >= 400 && error.status < 500) {
+      if (attachments.length) delete screenshots.pending;
+      else composer.settleSend(payload, false);
+    }
+    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
+    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);
@@ -2078,6 +2177,25 @@ elements['cancel-reply'].addEventListener('click', () => {
   view.composer.closeReply();
   renderComposer();
   elements.message.focus();
+});
+elements['attach-screenshots'].addEventListener('click', () => {
+  if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
+  pickerTarget = { context: view, composer: view.composer, reply: view.composer.reply };
+  elements['screenshot-input'].click();
+});
+elements['screenshot-input'].addEventListener('change', (event) => {
+  const files = Array.from(event.target.files);
+  event.target.value = '';
+  const target = pickerTarget;
+  pickerTarget = null;
+  if (target) void addScreenshots(target.context, target.composer, target.reply, files);
+});
+elements['screenshot-input'].addEventListener('cancel', () => { pickerTarget = null; });
+elements.message.addEventListener('paste', (event) => {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (!files.length || elements.message.readOnly) return;
+  event.preventDefault();
+  void addScreenshots(view, view.composer, view.composer.reply, files);
 });
 function updateDraft() {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
