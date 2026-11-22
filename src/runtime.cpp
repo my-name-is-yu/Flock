@@ -240,11 +240,6 @@ ORDER BY id)SQL");
             return true;
         });
     }
-    Json questionTarget(const Json& task) const {
-        const auto& wait = task.at("wait");
-        return {{"waitId",field(wait,"reason") == "user_question" ? wait.at("id") : Json(nullptr)},
-            {"eventId",task.at("eventId")},{"run",task.at("activeRun")},{"requestId",field(task.at("question"),"requestId")}};
-    }
 
     void closeQuestion(Json& task, std::string_view reason, std::string_view resolution = {}) {
         db.clearWait(task,reason);
@@ -376,13 +371,14 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             return stopNote(task,"Cannot locate or observe the assigned Run");
         const auto now = options.clock();
         if (now < stop.value("retryAt",Seconds{0})) return;
+        Json requested;
         if (!change(task,[&](Json& current) {
             current["runStop"]["retryAt"] = now + 5;
             db.journal(current["id"],"interrupt_requested",stop);
             return true;
-        })) return;
+        },&requested)) return;
         try { t3.interrupt(field(task,"environmentId"),task["config"],runRef(stop.at("run"))); }
-        catch (const std::exception&) { stopNote(snapshot(task["id"]),"T3 did not confirm the interrupt request"); }
+        catch (const std::exception&) { stopNote(requested,"T3 did not confirm the interrupt request"); }
     }
 
     void finishReplan(const Json& task) {
@@ -1075,9 +1071,10 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         const auto otherId = answering ? peer->recipient : peer->sender;
         auto other = db.load(otherId);
         if (terminal(other) || other["state"] != "peer_waiting") throw Conflict("The other Bot is no longer waiting");
-        if ((type == "result" || type == "failed") && deferUntilTurnsFinish(task,event["id"],decision)) return false;
+        const bool closing = type == "result" || type == "failed";
+        if (closing && deferUntilTurnsFinish(task,event["id"],decision)) return false;
         recordDecision(task,event,decision,action);
-        if (type == "result" || type == "failed") {
+        if (closing) {
             const auto status = type == "result" ? "completed" : "failed";
             task["state"] = "completed";
             task["peerOutcome"] = status;
@@ -1154,22 +1151,21 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (requiresAcknowledgment != decision.args.contains("acknowledgedInstructions") ||
             decision.args.value("acknowledgedInstructions",Json::array()) != ids)
             throw Conflict("Completion must acknowledge each pending instruction by messageId and step, oldest first");
-        if (!deferUntilTurnsFinish(current,event.at("id"),decision)) {
-            current.erase("deferredTerminal");
-            db.consumeEvent(current);
-            recordDecision(current,event,decision,actionId());
-            current.erase("feedback");
-            current.erase("pendingInstructions");
-            current.erase("newSessionRequired");
-            current["state"] = "completed";
-            db.journal(current["id"],"completed",{{"text",field(decision.args,"report")},{"reason",decision.reason},
-                {"doneWhen",current["doneWhen"]},{"revisionId",revision(current)},
-                {"source",{{"environmentId",field(event,"environmentId")},
-                    {"threadId",field(event.value("run",Json(nullptr)),"threadId")},
-                    {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")},
-                    {"link",field(event.value("run",Json(nullptr)),"link")}}}});
-            db.save(current);
-        }
+        if (deferUntilTurnsFinish(current,event.at("id"),decision)) return;
+        current.erase("deferredTerminal");
+        db.consumeEvent(current);
+        recordDecision(current,event,decision,actionId());
+        current.erase("feedback");
+        current.erase("pendingInstructions");
+        current.erase("newSessionRequired");
+        current["state"] = "completed";
+        db.journal(current["id"],"completed",{{"text",field(decision.args,"report")},{"reason",decision.reason},
+            {"doneWhen",current["doneWhen"]},{"revisionId",revision(current)},
+            {"source",{{"environmentId",field(event,"environmentId")},
+                {"threadId",field(event.value("run",Json(nullptr)),"threadId")},
+                {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")},
+                {"link",field(event.value("run",Json(nullptr)),"link")}}}});
+        db.save(current);
     }
 
     void accept(const Json& snapshot, const Json& event, const Decision& decision) {
@@ -1263,18 +1259,12 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         const auto observed = observe(task);
         if (ingest(task,observed) || observed.kind != Observation::Kind::Question) return false;
         const auto target = questionTarget(task);
-        return task["question"].is_object() && task["question"].at("target") == target &&
+        const auto& question = task["question"];
+        return question.is_object() && question.value("target",target) == target &&
             target["requestId"] == observed.question.requestId;
     }
 
-    void decide(Json task) {
-        // A user answer closes the wait and creates a successor event in the store.
-        if (task["question"].is_object() && task["question"].value("target",Json(nullptr)) != questionTarget(task)) {
-            if (!change(task,[&](Json& current) {
-                current["question"]["target"] = questionTarget(current);
-                return true;
-            },&task)) return;
-        }
+    void decide(const Json& task) {
         if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
         Json event, history = Json::array();
         std::optional<PeerExchange> peer;

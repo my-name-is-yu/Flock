@@ -32,7 +32,7 @@ Decision converse(const ModelInput& input, const std::string& tool, Id taskId, J
     return {tool,std::move(args),"Scripted turn"};
 }
 void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
-void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool active) {
+void executeSql(const std::filesystem::path& databaseFile, const char* sql) {
     sqlite3* database = nullptr;
     const auto opened = sqlite3_open(databaseFile.c_str(),&database);
     if (opened != SQLITE_OK) {
@@ -41,15 +41,17 @@ void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, boo
         throw std::runtime_error(message);
     }
     char* error = nullptr;
-    const auto result = sqlite3_exec(database,active ?
-        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
-        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END" :
-        "DROP TRIGGER fail_session_read_journal",
-        nullptr,nullptr,&error);
+    const auto result = sqlite3_exec(database,sql,nullptr,nullptr,&error);
     const std::string message = error ? error : sqlite3_errmsg(database);
     sqlite3_free(error);
     sqlite3_close(database);
     if (result != SQLITE_OK) throw std::runtime_error(message);
+}
+void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool active) {
+    executeSql(databaseFile,active ?
+        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
+        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END" :
+        "DROP TRIGGER fail_session_read_journal");
 }
 constexpr auto Evidence = "report and independent verification";
 
@@ -406,8 +408,17 @@ void sessionQuestions() {
             const auto task = f.task(id);
             check(task["question"]["target"] == Json{{"waitId",wait},{"eventId",task["eventId"]},
                 {"run",task["activeRun"]},{"requestId","branch-question"}},"user wait lost its Session target");
+            executeSql(f.store->path(),"UPDATE tasks SET data=json_set(data,'$.question.target.eventId',0) WHERE state='waiting'");
+            f.rejects(id,wait,"answer",{{"text","main"}});
+            check(f.logs(id,"user_answer") == 0,"answer for a stale question target was recorded");
+            executeSql(f.store->path(),"UPDATE tasks SET data=json_set(data,'$.question.target.eventId',"
+                                       "json_extract(data,'$.eventId')) WHERE state='waiting'");
             f.restart();
             f.store->operate(id,wait,"answer",{{"text","main"}});
+            const auto answered = f.task(id);
+            check(answered["question"]["target"]["waitId"].is_null() &&
+                  answered["question"]["target"]["eventId"] == answered["eventId"] &&
+                  answered["eventId"] != task["eventId"],"answer did not advance the question target");
         }
         f.reach(id,"running");
         check(f.t3.replies==1 && f.t3.launches==1 && f.t3.follows==0 &&
@@ -881,6 +892,9 @@ void revisionWaitsForPeerClarification() {
 void peerCompletionAfterEnvironmentMove() {
     for (const auto [kind,environment] : {std::pair{"work","cloud"},{"consult","cloud"},{"work","e"}}) {
         Fixture f;
+        executeSql(f.store->path(),"ALTER TABLE peer_exchanges DROP COLUMN sender_environment;"
+                                   "ALTER TABLE peer_exchanges DROP COLUMN sender_revision;");
+        f.restart();
         f.allowBeta();
         const Intake routing{"alpha","Release check","e","p",{{"conversationEnvironments",{{"cloud","cloud"}}}}};
         const auto sender = f.store->submit(routing);

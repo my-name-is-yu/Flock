@@ -20,6 +20,7 @@ private:
 };
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
+Json questionTarget(const Json&);
 std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);

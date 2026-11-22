@@ -68,6 +68,12 @@ RunRef runRef(const Json& data) {
     return {field(data,"threadId"), field(data,"runId"), field(data,"link")};
 }
 
+Json questionTarget(const Json& task) {
+    const auto& wait = task.at("wait");
+    return {{"waitId",field(wait,"reason") == "user_question" ? wait.at("id") : Json(nullptr)},
+        {"eventId",task.at("eventId")},{"run",task.at("activeRun")},{"requestId",field(task.at("question"),"requestId")}};
+}
+
 Store::Impl::Impl(std::filesystem::path file) : path(std::move(file)) {
     if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
@@ -155,6 +161,15 @@ LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=t
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        {
+            Transaction transaction(db);
+            if (!query("SELECT 1 FROM pragma_table_info('peer_exchanges') WHERE name='sender_environment'").next()) {
+                // Older exchanges have no recorded sender route and cannot attest to the current one.
+                exec("ALTER TABLE peer_exchanges ADD COLUMN sender_environment TEXT NOT NULL DEFAULT ''");
+                exec("ALTER TABLE peer_exchanges ADD COLUMN sender_revision INTEGER");
+            }
+            transaction.commit();
+        }
         migrateConversation();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
@@ -362,6 +377,11 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     const auto reason = field(wait,"reason");
     std::string next = "deciding";
     if (operation == "answer" && reason == "user_question") {
+        const auto& owner = task["question"].is_object() ? task["question"] : wait;
+        const Json savedTarget = {{"waitId",wait.at("id")},{"eventId",wait.at("eventId")},
+            {"run",wait.at("run")},{"requestId",field(wait,"questionId")}};
+        if (owner.value("target",savedTarget) != questionTarget(task))
+            throw Conflict("The question is no longer current");
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
             throw Conflict("A nonempty answer (up to 8,000 bytes) is required");
@@ -420,6 +440,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
         throw Conflict("Operation is unavailable for this waiting item");
     }
     clearWait(task,operation);
+    if (operation == "answer" && task["question"].is_object()) task["question"]["target"] = questionTarget(task);
     task["state"] = next;
     save(task);
 }
