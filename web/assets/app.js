@@ -598,6 +598,7 @@ function renderHeader() {
   profile.setAttribute('aria-label', `${bot.name} settings`);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
+  elements['profile-status'].hidden = !offline && presence === 'idle';
 }
 
 function activityRow(tag, className, title, status, statusClass) {
@@ -1174,8 +1175,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     if (data?.bot) empty.append(avatar(data.bot));
     const loaded = !!data || (!view && listLoaded);
     empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
-    if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
-    else if (loaded && !bots.length) {
+    if (!data && loaded && !bots.length) {
       empty.append(node('p', null, 'Create a Bot to get started.'));
       empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
     }
