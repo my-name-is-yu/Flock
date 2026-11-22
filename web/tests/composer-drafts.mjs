@@ -92,18 +92,6 @@ test('keeps pending IDs per target and clears only the draft whose delivery succ
   assert.equal(storage.size, 0);
 });
 
-test('recovers legacy uncertain sends for the local owner and ignores them for shared identities', () => {
-  const payload = { botId: 'ops', replyToMessageId: question.messageId, text: '7 days', clientMessageId: 'original-key' };
-  const key = 'flock-pending-message:ops';
-  const storage = new SessionStorage([[key, JSON.stringify({ payload, reply: question })]]);
-  const drafts = createComposerDraftStore(() => storage);
-  assert.equal(drafts('ops', 'alice').text, '');
-  assert.equal(drafts('ops', undefined).text, '');
-  assert.equal(drafts('ops', null).text, payload.text);
-  assert.equal(storage.has(key), false);
-  assert.deepEqual(createComposerDraftStore(() => storage)('ops', null).prepareSend(), payload);
-});
-
 test('keeps drafts and exact retries usable while the browser blocks storage', () => {
   const drafts = createComposerDraftStore(() => { throw new Error('Storage blocked'); });
   const composer = drafts('ops', null);

@@ -10,7 +10,7 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
 
   return (botId, person) => {
     const key = `flock-composer:${JSON.stringify([person, botId])}`;
-    // An absent identity (for example, after a server downgrade) never reads persisted drafts.
+    // Without an identity, drafts stay in memory and never read persisted ones.
     const cacheKey = person === undefined ? `volatile:${botId}` : key;
     if (conversations.has(cacheKey)) return conversations.get(cacheKey);
 
@@ -30,25 +30,6 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
         else storage().removeItem(key);
         return true;
       } catch { return false; }
-    }
-
-    // Earlier versions kept one unscoped pending send per Bot. It can only be
-    // attributed to a person on installations using the built-in local owner.
-    if (person === null && !saved) {
-      const legacyKey = `flock-pending-message:${botId}`;
-      const legacy = read(legacyKey);
-      const payload = legacy?.payload;
-      const anchor = payload?.replyToMessageId;
-      if (payload?.botId === botId && typeof payload.text === 'string' && typeof payload.clientMessageId === 'string' &&
-          (anchor === undefined || (replyTarget(legacy.reply) && legacy.reply.messageId === anchor))) {
-        reply = anchor ? legacy.reply : null;
-        texts.set(slot(), payload.text);
-        pending.set(slot(), { text: payload.text, clientMessageId: payload.clientMessageId });
-        if (persist()) {
-          try { storage().removeItem(legacyKey); }
-          catch {}
-        }
-      }
     }
 
     const textAt = (anchor) => {
