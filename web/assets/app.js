@@ -598,6 +598,7 @@ function renderHeader() {
   profile.setAttribute('aria-label', `${bot.name} settings`);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
+  elements['profile-status'].hidden = !offline && presence === 'idle';
 }
 
 function activityRow(tag, className, title, status, statusClass) {
