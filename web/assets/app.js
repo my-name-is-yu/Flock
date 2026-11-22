@@ -9,7 +9,7 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
-  'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
@@ -73,6 +73,7 @@ const pendingMessages = new Map();
 const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
+const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
@@ -163,6 +164,7 @@ const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? 
 const peerQuery = ({ id: bot, peerId: peer }, before) =>
   `peer-conversation?${new URLSearchParams(before ? { bot, peer, before } : { bot, peer })}`;
 const timelineContext = () => view?.dm ?? view;
+const timelineKey = (botId, peerId = null) => JSON.stringify([botId, peerId]);
 const showingComposer = (bot) => view?.id === bot && !view?.dm;
 const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
 
@@ -220,6 +222,7 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) { renderBots(); return; }
+  rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
@@ -234,13 +237,12 @@ function selectBot(botId, peerId = null, updateHistory = true) {
     else history.replaceState(null, '', url);
   }
   save('flock-selected-bot', botId);
-  elements.conversation.scrollTop = 0;
   render('bottom');
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
     context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
-    void context.refresh('bottom');
+    void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
       void context.dm.refresh('bottom');
@@ -1065,6 +1067,7 @@ function peerThread(events, dm) {
     const { fromBotId, text, forwardedMessage } = event.data;
     const from = participant(fromBotId);
     const row = node('article', 'msg group-start peer-dm-message');
+    row.id = `event-${event.id}`;
     if (forwardedMessage) {
       const content = node('div', 'peer-forward-content');
       const label = node('div', 'peer-forward-meta');
@@ -1095,6 +1098,48 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
+function rememberReadingPosition() {
+  const context = timelineContext();
+  if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
+  const { top, atBottom } = timelineScrollPosition();
+  if (atBottom) return;
+  const viewportTop = elements.conversation.getBoundingClientRect().top;
+  const anchors = elements.timeline.querySelectorAll(':scope > [id], :scope > [data-peer-focus]');
+  const anchor = [...anchors].find((row) => row.getBoundingClientRect().bottom > viewportTop);
+  const { events, olderBefore, newestEvent } = context;
+  readingPositions.set(timelineKey(context.id, context.peerId), {
+    // Retain loaded pages so an older message is available when its conversation reopens.
+    history: { events, olderBefore, newestEvent },
+    top,
+    anchorId: anchor?.id,
+    peerFocus: anchor?.dataset.peerFocus,
+    offset: anchor ? anchor.getBoundingClientRect().top - viewportTop : 0,
+  });
+}
+
+function restoreReadingPosition(position) {
+  const scroller = elements.conversation;
+  const anchor = position.anchorId ? byId(position.anchorId) :
+    [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((row) => row.dataset.peerFocus === position.peerFocus);
+  scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
+    scroller.getBoundingClientRect().top - position.offset : position.top;
+}
+
+function eventHistoryForRefresh(context) {
+  // Reopen saved pages only after a successful read of the current conversation.
+  if (context.newestEvent != null) return context;
+  const cached = readingPositions.get(timelineKey(context.id, context.peerId));
+  return cached ? { ...cached.history } : context;
+}
+
+function updateJumpToLatest() {
+  const control = elements['jump-to-latest'];
+  const hidden = timelineScrollPosition().atBottom;
+  if (control.hidden === hidden) return;
+  if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
+  control.hidden = hidden;
+}
+
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
   const data = view?.data;
@@ -1110,14 +1155,20 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const scroller = elements.conversation;
   const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
   const focusedLink = focused?.dataset.peerFocus;
+  const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
+  const position = key && readingPositions.get(key);
   const moveScroll = () => {
     if (focusedLink) {
       const link = [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((item) => item.dataset.peerFocus === focusedLink);
       link?.focus({ preventScroll: true });
     }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
-    else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+    else if (position) {
+      restoreReadingPosition(position);
+      readingPositions.delete(key);
+    } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
+    updateJumpToLatest();
   };
   if (view?.dm) {
     const dm = view.dm;
@@ -1688,8 +1739,11 @@ async function refreshPeerConversation(context, scroll) {
   const readPage = before => conversationPage(dm, before);
   try {
     const latest = await readPage();
-    await refreshEventHistory(dm, latest, readPage, isCurrent);
     if (!isCurrent()) return;
+    const eventHistory = eventHistoryForRefresh(dm);
+    await refreshEventHistory(eventHistory, latest, readPage, isCurrent);
+    if (!isCurrent()) return;
+    if (eventHistory !== dm) Object.assign(dm, eventHistory);
     dm.error = null;
   } catch (error) {
     if (!isCurrent()) return;
@@ -1708,8 +1762,11 @@ async function refreshView(context, scroll) {
       params.set('sessionsAfter', context.data.sessionCursor);
     }
     const latest = await api(`view?${params}`);
-    await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
     if (!isCurrent()) return;
+    const eventHistory = eventHistoryForRefresh(context);
+    await refreshEventHistory(eventHistory, latest, before => conversationPage(context, before), isCurrent);
+    if (!isCurrent()) return;
+    if (eventHistory !== context) Object.assign(context, eventHistory);
     mergeLatest(context, latest);
     setConnection('ready');
   } catch (error) {
@@ -1878,6 +1935,16 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
+elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
+new ResizeObserver(updateJumpToLatest).observe(elements.conversation);
+elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
+  if (event.button === 0) event.preventDefault();
+});
+elements['jump-to-latest'].addEventListener('click', () => {
+  const scroller = elements.conversation;
+  scroller.scrollTop = scroller.scrollHeight;
+  updateJumpToLatest();
+});
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
