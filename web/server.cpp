@@ -43,6 +43,11 @@ void setViewer(Response& res, const WebCallbacks& callbacks, const Person& perso
     res.set_header("X-Flock-Viewer",viewer.dump(-1,' ',true,Json::error_handler_t::replace));
 }
 
+std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& person) {
+    // Local access shares one principal, so it cannot identify a human author.
+    return callbacks.authenticate && person.id != localOwner.id ? std::string_view{person.id} : std::string_view{};
+}
+
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
 
 Id queryId(const Request& req, const char* key, bool optional) {
@@ -271,7 +276,7 @@ public:
                         return json(res,200,store_.access().redactSecrets(id,web::taskDetail(task,store_.latestTaskResult(taskId))));
                     }
                     const auto before = queryId(req,"before",true);
-                    if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,actor,id,before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {
                         const auto items = req.path == "/api/compactions" ? store_.compactions(id,before) : store_.workflows(id,before);
                         return json(res,200,store_.access().redactSecrets(id,items));
@@ -283,7 +288,7 @@ public:
                             ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
                         const auto changes = store_.conversationChangesSince(changesAfter,id);
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
-                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr));
+                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
                         view["bot"]["id"] = id;
                         view["composerPerson"] = callbacks_.authenticate ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
@@ -293,7 +298,7 @@ public:
                         view["sessionCursor"] = sessionThrough;
                         setViewer(res,callbacks_,actor);
                         json(res,200,withConversationAccess(actor,id,std::move(view)));
-                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
+                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before,actor.id)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
@@ -499,7 +504,7 @@ private:
         if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
         const auto bot = findBot(view.bot);
         if (bot.is_null()) return nullptr;
-        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot)));
+        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
@@ -544,17 +549,24 @@ private:
         return list;
     }
 
-    void readPeerConversation(const Request& req, Response& res, const Json& known,
+    void readPeerConversation(const Request& req, Response& res, const Json& known, const Person& actor,
                               std::string_view bot, Id before) {
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
-        if (!store_.access().permitsPerson(web::person(callbacks_,req),peer,Role::view))
+        if (!store_.access().permitsPerson(actor,peer,Role::view))
             return error(res,403,"access_denied");
         const bool configured = botById(known,peer) != nullptr;
         if (!canReadPeer(bot,peer,configured))
             return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before));
+        Id anchor = 0;
+        if (req.has_param("anchor")) {
+            if (req.has_param("before")) return error(res,400,"invalid_cursor");
+            anchor = store_.peerMessageAnchor(bot,peer,queryId(req,"anchor",false));
+            if (!anchor) return error(res,404,"peer_message_not_found");
+        }
+        const auto history = store_.access().redactSecrets(bot,
+            web::peerConversation(store_,bot,peer,before,anchor,verifiedViewer(callbacks_,actor)));
         json(res,200,store_.access().redactSecrets(peer,history));
     }
 

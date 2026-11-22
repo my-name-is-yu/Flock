@@ -149,16 +149,20 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
     check(foundResults.size() == expectedResults.size(),"conversation pagination skipped a report or completion");
 }
 
-void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
+void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, Id triage) {
     const auto original = browser.get("/api/view?bot=triage");
     const auto viewPath = [](const Json& page) {
         return "/api/view?bot=triage&changesAfter=" + page.at("historyCursor").dump() +
             "&sessionsAfter=" + page.at("sessionCursor").dump();
     };
     std::set<Id> expectedTasks = {triage};
+    Id failed = 0, historical = 0;
     for (int i = 0; i < 8; ++i) {
         const auto id = std::to_string(i);
-        expectedTasks.insert(cli.submit({"triage","Session " + id,"linked env","separate-" + id}));
+        const auto task = cli.submit({"triage","Session " + id,"linked env","separate-" + id});
+        expectedTasks.insert(task);
+        if (i == 0) failed = task;
+        if (i == 1) historical = task;
     }
     const auto allRunsStarted = [&] {
         return std::ranges::all_of(expectedTasks,[&](Id id) { return cli.task(id).at("runs").size() == 1; });
@@ -177,6 +181,20 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
     check(browser.get(viewPath(updates)).at("sessionTasks").empty(),
           "refresh returned unchanged Session history");
 
+    t3.observations["thread-separate-0"] = {.kind=Observation::Kind::Finished,.status="failed",
+        .report="The health check failed",.resultRunId="distinct-result-run",.settled=true};
+    t3.observations["thread-separate-1"] = {.kind=Observation::Kind::Finished,
+        .report="Historical report without a status",.settled=true};
+    tick(runtime,3);
+    const auto settled = browser.get(viewPath(updates));
+    const auto& settledTasks = settled.at("sessionTasks");
+    const std::map<Id,std::string_view> states = {{failed,"failed"},{historical,"ended"}};
+    check(settled.at("sessionCursor") > updates.at("sessionCursor") && settledTasks.size() == states.size(),
+          "settled Runs did not advance the Session cursor");
+    for (const auto& task : settledTasks)
+        check(task.at("runCount") == 1 && task.at("sessions").at(0).at("state") == states.at(task.at("id").get<Id>()),
+              "a settled Run did not refresh its Session status with the same run count");
+
     auto page = browser.get("/api/view?bot=triage");
     check(page.at("sessionsBefore").get<Id>() > 0,"session list did not offer older history");
     std::set<Id> cursors;
@@ -187,6 +205,10 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
             const auto id = task.at("id").get<Id>();
             check(expectedTasks.erase(id) == 1,"session page returned an unexpected or repeated task");
             check(!task.at("sessions").empty(),"session task contained no links to work");
+            if (id == triage || id == failed || id == historical) {
+                const auto expected = id == triage ? "completed" : id == failed ? "failed" : "ended";
+                check(task.at("sessions").at(0).at("state") == expected,"Session history lost its terminal state");
+            }
         }
         const auto before = page.at("sessionsBefore").get<Id>();
         if (before == 0) break;
@@ -194,6 +216,23 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, Id triage) {
         page = browser.get("/api/sessions?bot=triage&before=" + std::to_string(before));
     } while (true);
     check(expectedTasks.empty(),"session pagination skipped tasks");
+}
+
+void failedCompletion(const std::filesystem::path& path) {
+    Store store(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
+        .report="The health check failed",.resultRunId="failed-result",.itemId="failed-report",.settled=true};
+    store.submit({"release","Verify staging","local-env","release"});
+    tick(runtime,8);
+
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const auto events = browser.get("/api/conversation?bot=release").at("events");
+    check(hasEvent(events,"completed","runStatus","failed"),"the final Bot message lost its failed Session outcome");
 }
 
 struct PeerModel final : Model {
@@ -385,6 +424,74 @@ void peerConversation(const std::filesystem::path& path) {
     }
 }
 
+void peerConversationAnchor(const std::filesystem::path& path) {
+    Store store(path);
+    PeerModel model;
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = fixturePeers;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    for (int i = 0; i < 36; ++i) {
+        store.submit({"release","Check release criteria","local-env","release"});
+        tick(runtime,8);
+    }
+
+    auto web = callbacks();
+    web.peers = [](std::string_view bot) {
+        auto peers = fixturePeers(bot);
+        if (bot == "release") peers.push_back({"Settings",{"settings","","local-env","settings"}});
+        return peers;
+    };
+    web.authenticate = [](std::string_view credential) {
+        return credential == "Bearer reader" ? Person{"reader"} : Person{};
+    };
+    const Person owner{"fixture",true};
+    auto access = store.access();
+    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
+    access.personGrant(owner,"settings","reader",Role::view,GrantChange::grant);
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+
+    const auto recipient = store.conversation("triage",0,200);
+    const auto sender = store.peerConversation("release","triage",0,200);
+    check(sender.size() == 72,"historical DM fixture did not span multiple pages");
+    const auto& target = sender.at(24);
+    const auto targetId = target.at("id").get<Id>();
+    const auto copy = std::ranges::find_if(recipient,[&](const Json& event) {
+        return event.at("kind") == "bot_message" &&
+            event.at("data").at("messageId") == target.at("data").at("messageId");
+    });
+    check(copy != recipient.end() && copy->at("id") != targetId,"fixture has no recipient copy of the anchor");
+
+    const std::string primary = "/api/peer-conversation?bot=release&peer=triage";
+    const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
+    const auto anchor = "&anchor=" + std::to_string(targetId);
+    Browser::checked(browser.client.Get(primary + anchor),403);
+    access.personGrant(owner,"triage","reader",Role::view,GrantChange::grant);
+
+    const auto latest = browser.get(primary);
+    check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
+    const auto page = browser.get(primary + anchor);
+    const auto& messages = page.at("messages");
+    check(page.at("anchorId") == targetId && page.at("hasOlder") == true && messages.size() == 36 &&
+        messages.at(18).at("id") == targetId &&
+        messages.at(19).at("data").at("replyTo") == messages.at(18).at("data").at("messageId"),
+        "the bounded historical page missed the precise message or its reply");
+    for (std::size_t i = 0; i < messages.size(); ++i)
+        check(messages.at(i).at("id") == sender.at(i + 6).at("id"),"historical pages skipped or reordered messages");
+    const auto reverseAnchor = "&anchor=" + std::to_string(copy->at("id").get<Id>());
+    check(browser.get(reverse + reverseAnchor) == page,"the recipient anchor did not resolve to the same shared DM page");
+    const auto before = "&before=" + std::to_string(messages.front().at("id").get<Id>());
+    const auto older = browser.get(primary + before);
+    check(older.at("messages").size() == 6 && older.at("hasOlder") == false,
+        "earlier pagination repeated or skipped messages around the anchor");
+    Browser::checked(browser.client.Get(primary + anchor + before),400);
+    Browser::checked(browser.client.Get(primary + "&anchor=-1"),400);
+    check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor),404)
+        == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
+}
+
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
@@ -504,7 +611,8 @@ void exercise(const std::filesystem::path& path) {
           "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
-          hasEvent(page["events"],"completed","text","Draft complete"),
+          hasEvent(page["events"],"completed","text","Draft complete") &&
+          hasEvent(page["events"],"completed","runStatus","completed"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
     check(external["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
@@ -548,7 +656,7 @@ void exercise(const std::filesystem::path& path) {
           "completed source lost its saved local T3 link");
 
     conversationPages(reopened,cli,release,next,triage,earlierRequests);
-    sessionPages(reopened,cli,*runtime,triage);
+    sessionPages(reopened,cli,*runtime,t3,triage);
 }
 
 void sidebarReplies(const std::filesystem::path& path) {
@@ -969,12 +1077,14 @@ int main() {
         TestDirectory directory;
         exercise(directory.path / "state.db");
         sidebarReplies(directory.path / "sidebar.db");
+        failedCompletion(directory.path / "failed-completion.db");
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
+        peerConversationAnchor(directory.path / "peer-conversation-anchor.db");
         accessEndpoints(directory.path / "access.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");

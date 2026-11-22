@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#ffffff">
   <title>Flock</title>
@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/sidebar.css">
   <link rel="stylesheet" href="/conversation.css">
+  <link rel="stylesheet" href="/conversation-find.css">
   <link rel="stylesheet" href="/composer.css">
   <link rel="stylesheet" href="/dialog.css">
   <link rel="stylesheet" href="/bot-editor.css">
@@ -74,14 +75,26 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status" hidden>
-            <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
-            <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
-          </button>
+          <div id="profile-identity" class="profile-identity header-identity" hidden>
+            <h1 id="profile-heading" class="profile-heading" aria-labelledby="profile-name">
+              <button id="profile" class="profile header-identity-content" type="button" aria-haspopup="dialog" aria-label="Open Bot settings">
+                <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+                <span id="profile-name" class="profile-name header-name" dir="auto"></span>
+              </button>
+            </h1>
+            <p id="profile-status" class="profile-status" hidden></p>
+          </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <div id="peer-identity" class="peer-identity" hidden>
-            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
-            <h1 id="peer-heading" class="peer-title" tabindex="-1"></h1>
+          <div id="peer-identity" class="header-identity" hidden>
+            <h1 id="peer-heading" class="peer-title header-identity-content" aria-describedby="peer-description" tabindex="-1">
+              <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
+              <span class="peer-names header-name">
+                <bdi id="peer-name-first"></bdi>
+                <span>&amp;</span>
+                <bdi id="peer-name-second"></bdi>
+              </span>
+            </h1>
+            <span id="peer-description" hidden>Read-only Bot DM</span>
           </div>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
@@ -91,18 +104,38 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
             <span>Bot DMs</span>
           </button>
-          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+          <button id="find-conversation" class="icon-button conversation-find-toggle" type="button" aria-label="Find in conversation" title="Find in conversation" aria-keyshortcuts="Control+F Meta+F" aria-controls="conversation-find" aria-expanded="false" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.6"/><path d="m15 15 4 4"/></svg>
           </button>
         </div>
       </header>
-      <section id="conversation" class="conversation" aria-label="Conversation history" tabindex="0">
-        <div class="conversation-inner">
-          <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
-          <p id="peer-status" class="peer-status" role="status" hidden></p>
-          <div id="timeline" class="timeline"></div>
+      <div id="conversation-find" class="conversation-find" role="search" aria-label="Conversation" hidden>
+        <div class="find-bar">
+          <input type="text" role="searchbox" aria-label="Find in conversation" placeholder="Find in conversation" enterkeyhint="search" maxlength="200" autocomplete="off" spellcheck="false">
+          <button type="button" class="icon-button find-previous" aria-label="Previous match" title="Previous match" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+          </button>
+          <button type="button" class="icon-button find-next" aria-label="Next match" title="Next match" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <button type="button" class="icon-button find-close" aria-label="Close find" title="Close find">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+          </button>
         </div>
-      </section>
+        <p class="find-status" role="status"></p>
+        <ul class="find-results" aria-label="Matches" hidden></ul>
+        <button type="button" class="text-button find-more" hidden>Search earlier messages</button>
+      </div>
+      <div class="conversation-frame">
+        <section id="conversation" class="conversation" aria-label="Conversation history" tabindex="0">
+          <p id="conversation-source-error" class="conversation-source-error" role="alert"></p>
+          <div class="conversation-inner">
+            <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
+            <p id="peer-status" class="peer-status" role="status" hidden></p>
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </section>
+      </div>
       <button id="jump-to-latest" class="jump-to-latest" type="button" aria-controls="conversation" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-5-5 5 5 5-5"/></svg>
         Jump to latest
@@ -118,11 +151,15 @@
             </button>
           </div>
           <label class="sr-only" id="compose-label" for="message">Message</label>
-          <textarea rows="1" id="message" required aria-describedby="notice"></textarea>
+          <textarea rows="1" id="message" required enterkeyhint="enter" aria-describedby="notice"></textarea>
+          <ul id="screenshot-previews" class="screenshot-previews" aria-label="Attached screenshots" hidden></ul>
           <div class="composer-toolbar">
+            <input id="screenshot-input" type="file" accept="image/png,image/jpeg" multiple hidden>
+            <button id="attach-screenshots" class="icon-button attach-screenshots" type="button" aria-label="Attach screenshots" title="Attach screenshots">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
             <span id="notice" class="notice" role="status"></span>
-            <kbd id="send-hint" class="send-hint" aria-hidden="true"></kbd>
-            <button id="send" class="send" type="submit" aria-label="Send message">
+            <button id="send" class="send" type="submit" aria-label="Send message" aria-keyshortcuts="Enter Control+Enter Meta+Enter">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
             </button>
           </div>

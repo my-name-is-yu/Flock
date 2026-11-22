@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 #include <system_error>
+#include <tuple>
 
 namespace flockv0 {
 namespace {
@@ -225,7 +226,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         initializeAutomationSchema();
         initializeGitSchema();
         initializeBoardInboxSchema();
-        exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
+        exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
+             " WHERE kind IN ('run_started','report')");
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -657,6 +659,28 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     return task;
 }
 
+Json Store::Impl::sessionTask(Id id) const {
+    auto task = taskDetails(id,false);
+    // A settled report identifies the assigned Run even when its result came from a later Run.
+    auto reports = query(R"SQL(
+SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
+       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
+FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+)SQL",{id});
+    using RunKey = std::tuple<std::string,std::string,std::string>;
+    std::map<RunKey,std::string> statuses;
+    while (reports.next()) {
+        auto status = reports.string(3);
+        if (!status.empty())
+            statuses.insert_or_assign(RunKey{reports.string(0),reports.string(1),reports.string(2)},std::move(status));
+    }
+    for (auto& run : task.at("runs")) {
+        const auto status = statuses.find({field(run,"environmentId"),field(run,"threadId"),field(run,"runId")});
+        if (status != statuses.end()) run["status"] = status->second;
+    }
+    return task;
+}
+
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
     restoreWaitAnchor(*this,result);
@@ -725,22 +749,22 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
                           " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
                           " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
+    while (rows.next()) result.push_back(p_->sessionTask(rows.number(0)));
     return result;
 }
 
 std::pair<Id,Json> Store::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
     std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind='run_started'");
+    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
     newest.next();
     const auto through = newest.number(0);
     auto tasks = Json::array();
     if (after && *after < through) {
         auto rows = p_->query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
-WHERE j.kind='run_started' AND j.id>? AND j.id<=? AND t.bot_id=?
+WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",{*after,through,bot});
-        while (rows.next()) tasks.push_back(p_->taskDetails(rows.number(0),false));
+        while (rows.next()) tasks.push_back(p_->sessionTask(rows.number(0)));
     }
     return {through,std::move(tasks)};
 }
@@ -771,16 +795,30 @@ ORDER BY j.id DESC LIMIT 1
     return row.next() ? journalRow(row) : Json(nullptr);
 }
 
-Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events) const {
+Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
+                         std::string_view viewer) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
+  WHEN page.kind='completed' AND json_extract(page.data,'$.source.status') IS NULL
+       AND length(json_extract(page.data,'$.source.runId'))>0
+       THEN json_set(page.data,'$.source.status',(
+         SELECT json_extract(r.data,'$.status') FROM journal r
+         WHERE r.task_id=page.task_id AND r.kind='report' AND r.id<page.id
+           AND json_extract(r.data,'$.environmentId')=json_extract(page.data,'$.source.environmentId')
+           AND json_extract(r.data,'$.run.threadId')=json_extract(page.data,'$.source.threadId')
+           AND json_extract(r.data,'$.resultRunId')=json_extract(page.data,'$.source.runId')
+           AND coalesce(json_extract(r.data,'$.itemId'),'')=coalesce(json_extract(page.data,'$.source.itemId'),'')
+           AND coalesce(json_extract(r.data,'$.revisionId'),0)=coalesce(json_extract(page.data,'$.revisionId'),0)
+         ORDER BY r.id DESC LIMIT 1))
   WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',
             coalesce(json_extract(page.data,'$.status'),'received'),
+            'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
+              WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,coalesce(json_extract(data,'$.step'),0) AS step
@@ -817,29 +855,61 @@ ORDER BY page.id DESC LIMIT ?)SQL",
     while (rows.next()) {
         auto event = journalRow(rows);
         if (event["kind"] == "conversation_message")
-            event["data"].update(p_->channelContext(rows.number(0),bot));
+            event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(),result.end());
     return result;
 }
 
-Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
+Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
+                             std::string_view viewer) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data
+    // The sending task keeps its original source message even as its revisions change.
+    // Match the saved quote as well, so missing or unverified provenance falls back to a generic label.
+    const auto sql = std::string(R"SQL(
+SELECT j.id,j.task_id,j.time,j.kind,j.data,
+  CASE WHEN ?5<>'' AND json_type(j.data,'$.forwardedMessage')='object' THEN EXISTS(
+    SELECT 1 FROM messages m JOIN journal original ON original.id=m.id
+    WHERE m.id=json_extract(sender.data,'$.sourceMessageId') AND m.bot_id=sender.bot_id
+      AND original.kind='conversation_message' AND m.person_id=?5
+      AND m.text=json_extract(j.data,'$.forwardedMessage.text')
+      AND original.time=json_extract(j.data,'$.forwardedMessage.time')
+  ) ELSE 0 END
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
   -- Unary + removes TEXT affinity so SQLite can use the exchange ID in the JSON expression index.
   AND json_extract(j.data,'$.exchangeId') = +p.id
 WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
-  AND (?3=0 OR j.id<?3)
-ORDER BY j.id DESC LIMIT ?4
-)SQL",{bot,peer,before,std::clamp(limit,1u,200u)});
+)SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4"
+               : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
+    auto rows = p_->query(sql.c_str(),{bot,peer,from ? from : before,std::clamp(limit,1u,200u),viewer});
     Json result = Json::array();
-    while (rows.next()) result.push_back(journalRow(rows));
-    std::reverse(result.begin(),result.end());
+    while (rows.next()) {
+        auto event = journalRow(rows);
+        if (rows.number(5)) event["forwardedFromViewer"] = true;
+        result.push_back(std::move(event));
+    }
+    if (!from) std::reverse(result.begin(),result.end());
     return result;
+}
+
+Id Store::peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const {
+    std::lock_guard lock(p_->mutex);
+    // Each participant has a journal row. The shared DM displays the sender task's copy.
+    auto row = p_->query(R"SQL(
+SELECT j.id
+FROM journal source
+JOIN peer_exchanges p ON p.id=json_extract(source.data,'$.exchangeId')
+JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
+  AND json_extract(j.data,'$.exchangeId')=+p.id
+  AND json_extract(j.data,'$.messageId')=json_extract(source.data,'$.messageId')
+WHERE source.id=?3 AND source.kind='bot_message' AND source.task_id IN (p.sender_task,p.recipient_task)
+  AND ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
+LIMIT 1
+)SQL",{bot,peer,event});
+    return row.next() ? row.number(0) : 0;
 }
 
 std::vector<std::pair<std::string,std::string>> Store::peerExchangePairs() const {

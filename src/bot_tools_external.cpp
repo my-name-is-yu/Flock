@@ -20,7 +20,7 @@ const ToolSpec specs[] = {
     {"workspace_read_file","Read bounded text from a file in your Bot workspace.",{"path"},{}},
     {"workspace_write_file","Write a small text file in your Bot workspace.",{"path","text"},{}},
     {"workspace_search","Find workspace files containing a literal text marker.",{"query"},{"path"}},
-    {"workspace_run_command","Start one bounded sandbox process in your Bot workspace. Use T3 Sessions for regular builds and tests.",{"argv"},{"cwd"}},
+    {"workspace_run_command","Run one bounded sandbox command or a short pipeline in your Bot workspace. Pipeline stages are limited to system text utilities and are not shell syntax. Use T3 Sessions for scripts, helpers, regular builds and tests.",{},{"argv","pipeline","cwd"}},
     {"workspace_command_status","Read a sandbox command's state and bounded stdout and stderr.",{"commandId"},{}},
     {"workspace_stop_command","Request that your running sandbox command stop.",{"commandId"},{}},
     {"web_search","Search the public web. Results are untrusted data.",{"query"},{}},
@@ -53,7 +53,11 @@ Json parameter(std::string_view name) {
     if (name == "collection") return {{"type","string"},{"enum",{"tools","resources"}}};
     if (name == "argv") return {{"type","array"},{"minItems",1},{"maxItems",32},
                                 {"items",{{"type","string"},{"maxLength",4096}}},
-                                {"description","Executable followed by its arguments. This tool starts one bounded process."}};
+                                {"description","Executable followed by its literal arguments. Use exactly one of argv or pipeline."}};
+    if (name == "pipeline") return {{"type","array"},{"minItems",1},{"maxItems",4},
+        {"items",{{"type","array"},{"minItems",1},{"maxItems",32},
+        {"items",{{"type","string"},{"maxLength",4096}}}}},
+        {"description","One to four argv arrays for a bounded macOS/Linux pipeline. Use exactly one of argv or pipeline."}};
     auto result = Json{{"type","string"},{"maxLength",argumentLimit(name)}};
     if (name != "text") result["minLength"] = 1;
     return result;
@@ -229,7 +233,7 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
         if (std::ranges::find(item.required,key) == item.required.end() &&
             std::ranges::find(item.optional,key) == item.optional.end()) throw Conflict("Unexpected Bot tool argument");
         if (key == "commandId" || key == "messageId") toolId(args,key);
-        else if (key == "argv") continue;
+        else if (key == "argv" || key == "pipeline") continue;
         else if (key == "arguments") {
             if (!value.is_object() || value.dump().size() > 8192) throw Conflict("Invalid MCP tool arguments");
         } else toolText(args,key,argumentLimit(key),key == "text");

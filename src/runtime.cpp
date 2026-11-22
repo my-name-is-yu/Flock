@@ -1781,7 +1781,7 @@ SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.work
             {"source",{{"environmentId",field(event,"environmentId")},
                 {"threadId",field(event.value("run",Json(nullptr)),"threadId")},
                 {"runId",field(event,"resultRunId")},{"itemId",field(event,"itemId")},
-                {"link",field(event.value("run",Json(nullptr)),"link")}}}});
+                {"status",field(event,"status")},{"link",field(event.value("run",Json(nullptr)),"link")}}}});
         saveTask(current);
     }
 

@@ -272,6 +272,51 @@ void inspectors(const std::filesystem::path& path) {
     check(linked,"workflow start was missing from the conversation reply");
 }
 
+void imageAttachmentCountInConversation(const std::filesystem::path& path) {
+    Store store(path);
+    auto config = callbacks();
+    config.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer owner") return Person{"owner",true};
+        if (credential == "Bearer reader") return Person{"reader",false};
+        return Person{};
+    };
+    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
+    const auto server = startWeb(store,0,std::move(config));
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    const Json image = {{"name","private-screenshot.png"},{"mimeType","image/png"},
+        {"dataBase64","iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}};
+    const Json audio = {{"name","private-audio.mp3"},{"mimeType","audio/mpeg"},{"dataBase64","SUQzAA=="}};
+    const auto submit = [&](std::string_view key, const Json& attachments) {
+        return browser.post("/api/messages",{{"botId","release"},{"clientMessageId",key},
+            {"text","Look at this"},{"attachments",attachments}},201).at("messageId").get<Id>();
+    };
+    const auto single = submit("a",Json::array({image,audio}));
+    const auto multiple = submit("b",Json::array({image,image}));
+    const auto textOnly = submit("c",Json::array());
+    const auto assertCounts = [](const Json& events, const std::map<Id,int>& expected) {
+        auto remaining = expected;
+        for (const auto& event : events) {
+            const auto match = remaining.find(event.at("id").get<Id>());
+            if (match == remaining.end()) continue;
+            const auto& data = event.at("data");
+            check(data.at("imageAttachmentCount") == match->second,"wrong saved image count in the conversation");
+            check(!data.contains("attachments") && !data.contains("dataBase64") &&
+                  data.dump().find("private-screenshot") == std::string::npos,
+                  "Web conversation exposed private attachment details");
+            remaining.erase(match);
+        }
+        check(remaining.empty(),"messages were missing from the conversation");
+    };
+    constexpr auto conversation = "/api/conversation?bot=release";
+    browser.client.set_default_headers({});
+    Browser::checked(browser.client.Get(conversation),401);
+    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    assertCounts(browser.get("/api/view?bot=release").at("events"),{{single,1},{multiple,2},{textOnly,0}});
+    assertCounts(browser.get(std::string(conversation) + "&before=" + std::to_string(multiple)).at("events"),{{single,1}});
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
+}
+
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
     for (auto env : {"local-env","backup-env"})
@@ -458,7 +503,7 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
-void botMediatedConversation(const std::filesystem::path& path, std::string_view note) {
+void botMediatedConversation(const std::filesystem::path& path, std::string_view note, bool authenticated = false) {
     constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
     constexpr auto greeting = "こんにちは。";
     constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
@@ -508,9 +553,20 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
     web.peers = peers;
+    if (authenticated) {
+        const Person author{"fixture-message-author",true};
+        web.authenticate = [author](std::string_view credential) {
+            if (credential == "Bearer author") return author;
+            if (credential == "Bearer reader") return Person{"fixture-shared-reader"};
+            return Person{};
+        };
+        for (const auto* bot : {"ernest","reviewer"})
+            store.access().personGrant(author,bot,"fixture-shared-reader",Role::view,GrantChange::grant);
+    }
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
+    if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer author"}});
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
@@ -543,14 +599,28 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
           "the exchange was not the same two-message thread from both Bots");
     const auto& forwarded = messages.front().at("data");
     const auto& answered = messages.back().at("data");
+    auto expectedQuote = original;
+    if (authenticated) expectedQuote["fromViewer"] = true;
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
-          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
+          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == expectedQuote &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
           !answered.contains("forwardedMessage") && t3.launches == 0,
           "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");
+    if (authenticated) {
+        const auto anchored = std::string(dm) + "&anchor=" + std::to_string(messages.front().at("id").get<Id>());
+        check(browser.get(anchored).at("messages") == messages,"the author lost attribution in anchored history");
+        browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+        auto shared = messages;
+        shared.front()["data"]["forwardedMessage"] = original;
+        check(browser.get(anchored).at("messages") == shared &&
+              browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages") == shared,
+              "a shared viewer saw authorship that belonged to another person");
+        check(messages.dump().find("fixture-message-author") == std::string::npos &&
+              shared.dump().find("fixture-shared-reader") == std::string::npos,"the DM exposed a person ID");
+    }
 }
 #ifdef FLOCK_TEST_CHATGPT
 void approvedProfiles(const std::filesystem::path& directory) {
@@ -723,6 +793,13 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     auto access = store.access();
     access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
     const auto request = access.requestSecret("release",{"fixture-token"});
+    const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
+        return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
+            .at("messageId").get<Id>();
+    };
+    const auto oldMessage = send("staging-triage","old","Original handoff for staging");
+    const auto otherBotMessage = send("release","other","Unrelated handoff");
+    for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
@@ -737,7 +814,20 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
     check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
           "Bot view must preserve its ID and redact display text");
-    browser.get("/api/conversation?bot=staging-triage");
+    const std::string history = "/api/conversation?bot=staging-triage";
+    const auto latest = browser.get(history);
+    const auto older = browser.get(history + "&before=" + latest.at("olderBefore").dump());
+    const auto exact = browser.get(history + "&before=" + std::to_string(oldMessage + 1));
+    check(latest.at("events").front().at("id") > oldMessage && older.at("events").front().at("id") == oldMessage,
+          "An older match must be reachable through the same Bot conversation projection");
+    check(exact.at("events").size() == 1 && exact.at("events").back().at("id") == oldMessage &&
+          exact.at("events").back().at("data").at("text") == "Original handoff for [redacted]",
+          "The older conversation projection must redact its text and omit other Bots' messages");
+    const auto foreign = browser.get(history + "&before=" + std::to_string(otherBotMessage + 1));
+    check(foreign.at("events").back().at("id") != otherBotMessage,
+          "An exact source lookup must stay in the selected Bot");
+    Browser::checked(browser.client.Get("/api/conversation?bot=release&before=" +
+        std::to_string(otherBotMessage + 1)),403);
     Browser::checked(browser.client.Get("/api/view?bot=release"),403);
 }
 
@@ -896,9 +986,10 @@ int main(int argc,char** argv) {
         approvedProfiles(directory.path / "profile-approvals");
 #endif
         inspectors(directory.path / "inspectors.db");
+        imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
-        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
+        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。",true);
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
