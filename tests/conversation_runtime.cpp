@@ -808,6 +808,47 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
           "the live replan did not mark the current destination authoritative");
 }
 
+void environmentOnlyMoveKeepsWorkAcrossResume() {
+    Fixture f;
+    const auto original = f.store->submit(f.routing("Measure the reference dataset","alpha","cloud"));
+    f.reach(original,"running");
+
+    constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    constexpr auto direction = "Move this run to ローカルMac and include checksum "
+                               "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    f.script(direction,{change(original,{{"environment","ローカルMac"}})});
+    f.receive("move-with-checksum",direction);
+    const auto pending = f.task(original)["pendingInstructions"].back();
+    check(pending["replaceKey"] == "environment" && !pending.contains("intent") && !pending.contains("doneWhen"),
+          "the fixture did not create an environment-only instruction");
+
+    f.t3.finish("run-1","Cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the move was not delivered to its new Session");
+    const auto& moved = f.t3.sent.back();
+    check(moved.environmentId == "desktop" && moved.instruction.find(checksum) != moved.instruction.npos &&
+          moved.instruction.find(checksum) == moved.instruction.rfind(checksum),
+          "the move direction was not delivered to the new destination exactly once");
+    f.store->operate(original,0,"cancel");
+    f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(),"Desktop work settled");
+    f.reach(original,"cancelled");
+
+    const auto cancellation = f.store->latestTaskResult(original).at("id");
+    constexpr auto request = "Resume checksum validation on クラウドMac";
+    f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true},
+                            {"environment","クラウドMac"}})});
+    f.receive("resume-checksum",request,cancellation.get<Id>());
+    const auto resumed = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(resumed,"running");
+    const auto& command = f.t3.sent.back();
+    const auto& instruction = command.instruction;
+    check(command.environmentId == "cloud" && f.task(resumed)["environmentId"] == "cloud",
+          "the resumed task did not use its current destination");
+    check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum),
+          "the resumed Session dropped or duplicated the checksum direction");
+    check(instruction.find("The authoritative current execution destination is \"cloud\" and supersedes any destination in the quote.") != instruction.npos,
+          "the resumed Session did not make its current destination authoritative");
+}
+
 void appendWaitsForSafeBoundary() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1567,6 +1608,7 @@ int main() {
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
         liveMoveAndCriteriaCorrectionKeepCurrentContract();
+        environmentOnlyMoveKeepsWorkAcrossResume();
         appendWaitsForSafeBoundary();
         resumedBacklogFitsOneT3Command();
         repacksHistoryAfterDroppingOlderReference();

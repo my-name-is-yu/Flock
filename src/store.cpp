@@ -402,7 +402,10 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
 )SQL",{owner,count});
         while (bytes && rows.next()) {
             --count;
-            remember(rows.json(0),bytes);
+            auto item = rows.json(0);
+            if (item.contains("environmentId") && field(item,"replaceKey") == "environment" &&
+                !item.contains("intent") && !item.contains("doneWhen")) item.erase("replaceKey");
+            remember(std::move(item),bytes);
         }
     };
 
