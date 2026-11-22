@@ -78,7 +78,7 @@ build/app/flock answer <task-id> <wait-id> <revision-id> <generation> 'main'
 
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
 
-The Bot normally evaluates the Session's final report. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime saves up to three excerpts per event in SQLite, with a limit of 8 KiB per excerpt.
+The Bot normally evaluates the Session's final report. It can retry an unavailable final report once Flock has verified which Run produced it. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime allows up to three evidence reads per event and saves history excerpts of up to 8 KiB each in SQLite.
 
 ### Bot resource authorization
 

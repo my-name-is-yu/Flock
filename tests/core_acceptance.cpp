@@ -569,7 +569,6 @@ void connectionRecoveryRestoresSessionQuestion() {
             check(f.store->inbox(localOwner,"alpha").empty(),"question remained actionable during the outage");
             f.rejects(id,old,"answer",{{"text","dev"}});
             if (manual) f.store->operate(localOwner,TaskTarget::from(f.task(id),connection),"reconcile");
-            // A task already reconciled on main retained the closed wait only in its question target.
             if (manual && std::string_view(outage) == "settings")
                 executeSql(f.store->path(),"UPDATE tasks SET data=json_remove(data,'$.question.suspendedWaitId')");
             f.restart();
@@ -877,6 +876,126 @@ void settledReportCanRecoverAfterRestart() {
         check(attempts == (available ? 1 : 2) && f.t3.polls == polls && f.logs(id,"report") == 1 &&
               f.logs(id,"completed") == int(available),"evidence retry repeated Run observation or published an unsupported completion");
     }
+}
+
+void lateReportCanRestoreCompletion() {
+    Fixture f;
+    const auto id = f.submit();
+    int reportReads = 0;
+    bool reportAvailable = false;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view status) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result" && status == "completed",
+              "report recovery used a different Run");
+        ++reportReads;
+        if (reportAvailable)
+            return RunEvidence{RunEvidence::Availability::Available,"Late report","late-item","",false};
+        return RunEvidence{RunEvidence::Availability::ReportUnavailable,"","","Unavailable",false};
+    };
+    Id resumedEvent = 0;
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (event.at("kind") == "intake") return work();
+        check(event.at("resultRunId") == "run-1-result","lost the settled result Run");
+        if (event.value("report","") == "Late report") {
+            check(hasTool(input,"complete") && !hasTool(input,"session_read") &&
+                  !event.contains("evidenceStatus") && event.at("itemId") == "late-item" &&
+                  event.at("id") == resumedEvent && event.at("userAnswer") == "Try again",
+                  "late recovery changed the result event or failed to restore completion");
+            return complete();
+        }
+        check(!hasTool(input,"complete") && hasTool(input,"session_read") &&
+              event.at("sessionReadViews") == Json::array({"report"}),"missing report was not recoverable in default mode");
+        if (!input.evidence.empty()) {
+            check(input.evidence.at(0).at("reportAvailable") == false &&
+                  input.task.at("remainingEvidenceReads") == 2,"failed report read did not use the event allowance");
+            return ask();
+        }
+        auto run = "run-1-result";
+        if (event.contains("userAnswer")) {
+            resumedEvent = event.at("id");
+            if (event.at("decisionFeedback").empty()) run = "run-1";
+        }
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId",run}},
+                        "Retry the terminal report"};
+    };
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    check(reportReads == 2 && f.logs(id,"report") == 1,"scheduled retries did not exhaust before recovery");
+    const auto wait = f.wait(id,"user_question");
+    check(reportReads == 3,"initial on-demand retry was not attempted exactly once");
+    const auto polls = f.t3.polls;
+    reportAvailable = true;
+    f.restart();
+    f.runtime->tick();
+    check(reportReads == 3 && f.task(id).at("wait").at("id") == wait,"waiting repeated terminal report reads");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"answer",{{"text","Try again"}});
+    f.runtime->tick();
+    check(reportReads == 3 && f.logs(id,"tool_error") == 1,"the assigned Run was accepted as the result source");
+    setSessionReadJournalFailure(f.store->path(),true);
+    f.runtime->tick();
+    check(f.store->history(id).dump().find("Late report") == std::string::npos && f.logs(id,"session_read") == 1,
+          "a failed evidence transaction left a partially recovered report");
+    setSessionReadJournalFailure(f.store->path(),false);
+    f.runtime->tick();
+    f.restart();
+    f.reach(id,"completed");
+    const auto history = f.store->history(id);
+    const auto report = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "report"; });
+    const auto completed = std::ranges::find_if(history,[](const Json& entry) { return entry.at("kind") == "completed"; });
+    check(report != history.end() && report->at("data").at("report") == "Late report" &&
+          completed != history.end() && completed->at("data").at("source").at("itemId") == "late-item" &&
+          reportReads == 5 && f.t3.reads == 0 && f.t3.polls == polls && f.t3.launches == 1 && f.t3.follows == 0 &&
+          f.logs(id,"report") == 1,"late recovery did not persist the report and its source on the same task");
+}
+
+void lateReportCanRestorePeerResult() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit();
+    int reportReads = 0;
+    f.t3.recoverEvidence = [&](const RunRef& source,std::string_view) {
+        check(source.threadId == "thread-1" && source.runId == "run-1-result","peer recovery lost the result source");
+        if (++reportReads <= 2) return RunEvidence{RunEvidence::Availability::ReportUnavailable};
+        return RunEvidence{RunEvidence::Availability::Available,"Peer report","peer-item","",false};
+    };
+    f.model.script = [&](const ModelInput& input) {
+        const auto& event = input.event;
+        if (input.task.at("id") == sender) {
+            if (event.at("kind") == "intake") return botRequest("beta","work","Verify the release");
+            check(event.at("kind") == "bot_result" && event.at("references").at(0).at("itemId") == "peer-item",
+                  "the peer result referenced stale evidence");
+            return complete();
+        }
+        if (event.at("kind") == "bot_request") return work();
+        const auto& kinds = input.task.at("peer").at("replyKinds");
+        const bool hasResult = std::ranges::find(kinds,"result") != kinds.end();
+        if (event.at("report") == "Peer report") {
+            check(hasResult,"recovered evidence did not permit a peer result");
+            return botReply("result","Verified the release");
+        }
+        check(!hasResult && hasTool(input,"session_read"),"missing report did not gate the peer result");
+        return Decision{"session_read",{{"view","report"},{"threadId","thread-1"},{"runId","run-1-result"}},
+                        "Retry the peer's terminal report"};
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").evidence = RunEvidence::Availability::ReportUnavailable;
+    f.runtime->tick();
+    f.now += 5;
+    f.runtime->tick();
+    f.now += 10;
+    f.runtime->tick();
+    f.reach(sender,"completed");
+    check(f.task(recipient).at("state") == "completed" && reportReads == 3 && f.t3.launches == 1 && f.t3.follows == 0,
+          "a late report did not close the original peer exchange");
 }
 
 void missingReportDoesNotBlockCancellation() {
@@ -2208,6 +2327,8 @@ int main() {
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
+            {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},
+            {"late report recovery for a peer result",lateReportCanRestorePeerResult},
             {"cancellation with unavailable report",missingReportDoesNotBlockCancellation},
             {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
             {"redacted history pagination",redactedHistoryPagination},

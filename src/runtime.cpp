@@ -266,7 +266,6 @@ ORDER BY id)SQL");
     Json resumeQuestion(Json& task) {
         auto& question = task["question"];
         const auto& target = question.at("target");
-        // Older tasks retained the original user wait only in the question target.
         const auto waitId = question.value("suspendedWaitId",target.value("waitId",Json(nullptr)));
         db.clearWait(task,"connection_restored");
         task["state"] = "deciding";
@@ -315,11 +314,7 @@ ORDER BY id)SQL");
         if (evidence.availability == Availability::DiagnosticUnavailable) data["evidenceStatus"] = "diagnostic_unavailable";
     }
 
-    void recoverRunReport(const Json& task) {
-        const auto& pending = task.at("pendingRunReport");
-        const auto now = options.clock();
-        if (now < pending.at("retryAt").get<Seconds>()) return;
-        auto report = pending.at("report");
+    RunEvidence fetchRunEvidence(const Json& task, const Json& report) {
         auto source = runRef(report.at("run"));
         source.runId = field(report,"resultRunId");
         RunEvidence evidence;
@@ -333,6 +328,14 @@ ORDER BY id)SQL");
         evidence.report = scrub.text(evidence.report);
         evidence.detail = scrub.text(evidence.detail);
         if (scrub.text(evidence.itemId) != evidence.itemId) evidence.itemId.clear();
+        return evidence;
+    }
+
+    void recoverRunReport(const Json& task) {
+        const auto& pending = task.at("pendingRunReport");
+        if (options.clock() < pending.at("retryAt").get<Seconds>()) return;
+        auto report = pending.at("report");
+        const auto evidence = fetchRunEvidence(task,report);
         setReportEvidence(report,evidence);
         change(task,[&](Json& current) {
             if (evidence.availability == RunEvidence::Availability::ReportUnavailable && pending.at("attempts") == 0) {
@@ -809,6 +812,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         return task["activeRun"].is_null() && hasRun(runRef(task["lastRun"]));
     }
 
+    static constexpr std::size_t maxEvidenceReads = 3;
+
     bool canComplete(const Json& task, const Json& event) const {
         if (task.value("replanning",false)) return false;
         if (!task.value("newSessionRequired",false) && hasSettledRun(task) &&
@@ -839,13 +844,13 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         std::vector<std::string> tools{"delegate",receiving ? "reply_to_bot" : "ask_user"};
         if (hasSettledRun(task)) {
             if (!task.value("newSessionRequired",false)) tools.push_back("follow_up");
-            if (options.sessionRead == "on_demand" && event["evidence"].size() < 3) tools.push_back("session_read");
+            if (event.contains("sessionReadViews")) tools.push_back("session_read");
         }
         if (!receiving) {
             std::lock_guard lock(db.mutex);
             if (canComplete(task,event)) tools.push_back("complete");
         }
-        if (canRead && event["evidence"].size() < 3) tools.push_back("read_bot_evidence");
+        if (canRead && event["evidence"].size() < maxEvidenceReads) tools.push_back("read_bot_evidence");
         if (canSend) tools.push_back("send_bot_message");
         return tools;
     }
@@ -942,14 +947,18 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
 
     bool persistExcerpt(const Json& task, const Json& event, Json entry, std::string_view kind, const Json& usage) {
         return change(task,[&](Json& current) {
-            auto evidence = event.at("evidence");
-            if (evidence.size() >= 3) throw Conflict("History read allowance exhausted");
-            evidence.push_back(entry);
-            db.exec("UPDATE events SET evidence=? WHERE id=?", {evidence,event["id"]});
-            if (!usage.empty()) entry["usage"] = usage;
-            db.journal(current["id"],kind,entry);
+            recordEvidenceRead(current,event,std::move(entry),kind,usage);
             return true;
         });
+    }
+
+    void recordEvidenceRead(const Json& task, const Json& event, Json entry, std::string_view kind, const Json& usage) {
+        auto evidence = event.at("evidence");
+        if (evidence.size() >= maxEvidenceReads) throw Conflict("History read allowance exhausted");
+        evidence.push_back(entry);
+        db.exec("UPDATE events SET evidence=? WHERE id=? AND task_id=?", {evidence,event["id"],task["id"]});
+        if (!usage.empty()) entry["usage"] = usage;
+        db.journal(task["id"],kind,entry);
     }
 
     enum class PrefillResult { NotNeeded, Persisted, UnavailableWithSettledReport };
@@ -1230,16 +1239,85 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         recordDecision(sender,event,decision,action);
     }
 
-    Json settledSessionReport(const Json& task) const {
+    Json settledSessionReport(const Json& task, Id* id = nullptr) const {
         const auto run = runRef(task["lastRun"]);
         if (!hasRun(run)) return nullptr;
-        auto report = db.query("SELECT data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1",
+        auto report = db.query("SELECT id,data FROM journal WHERE task_id=? AND kind='report' ORDER BY id DESC LIMIT 1",
                                {task["id"]});
         if (!report.next()) return nullptr;
-        auto data = report.json(0);
+        auto data = report.json(1);
         const auto reported = runRef(data["run"]);
         if (reported.threadId != run.threadId || reported.runId != run.runId) return nullptr;
+        if (id) *id = report.number(0);
         return data;
+    }
+
+    struct ReportRetry {
+        Id journalId = 0;
+        Json report;
+    };
+
+    std::optional<ReportRetry> reportRetry(const Json& task, const Json& event) const {
+        if (!hasSettledRun(task) || task.value("replanning",false) || task.value("newSessionRequired",false) ||
+            task.at("lastRun").at("revisionId") != revision(task)) return std::nullopt;
+        ReportRetry retry;
+        retry.report = settledSessionReport(task,&retry.journalId);
+        const auto& report = retry.report;
+        if (field(report,"evidenceStatus") != "report_unavailable" || report.at("run") != task.at("lastRun") ||
+            report.at("environmentId") != task.at("environmentId") || field(report,"resultRunId").empty())
+            return std::nullopt;
+        if (event.at("kind") == "result") {
+            for (const auto* key : {"environmentId","run","resultRunId","status","revisionId"})
+                if (!event.contains(key) || event.at(key) != report.at(key)) return std::nullopt;
+        }
+        // Only a Run settled with a proven resultRunId enters the original report retry path.
+        if (!db.query(R"SQL(
+SELECT 1 FROM journal WHERE task_id=? AND kind='run_settled'
+AND json_extract(data,'$.environmentId')=? AND json_extract(data,'$.run')=json(?)
+AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
+)SQL",{task.at("id"),report.at("environmentId"),report.at("run"),report.at("resultRunId"),report.at("status")}).next())
+            return std::nullopt;
+        return retry;
+    }
+
+    void retryRunReport(const Json& task, const Json& event, const TaskDecision& decision) {
+        const auto retry = [&] {
+            std::lock_guard lock(db.mutex);
+            return reportRetry(task,event);
+        }();
+        const auto& args = decision.args;
+        if (!retry || args.contains("itemId") || args.contains("cursor") || args.contains("offset") ||
+            field(args,"threadId") != field(retry->report.at("run"),"threadId") ||
+            field(args,"runId") != field(retry->report,"resultRunId"))
+            throw Conflict("Choose the exact settled result Run to retry its terminal report");
+        const auto env = field(retry->report,"environmentId");
+        const auto thread = field(retry->report.at("run"),"threadId");
+        if (!access.permits(field(task,"botId"),Scope::sessionRead(env,thread),true))
+            throw Conflict("Session read access required");
+        const auto evidence = fetchRunEvidence(task,retry->report);
+        const bool available = evidence.availability != RunEvidence::Availability::ReportUnavailable;
+        change(task,[&](Json& current) {
+            const auto latest = db.currentEvent(current);
+            if (latest.is_null() || latest.at("consumed") == true || current.at("state") != "deciding") return false;
+            const auto target = reportRetry(current,latest);
+            if (!target || target->journalId != retry->journalId || target->report != retry->report) return false;
+            if (available) {
+                auto report = target->report;
+                setReportEvidence(report,evidence);
+                db.exec("UPDATE journal SET data=? WHERE id=?",{report,target->journalId});
+                if (latest.at("kind") == "result") {
+                    auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{latest.at("id"),current.at("id")});
+                    if (!row.next()) throw Conflict("The settled result event is no longer available");
+                    auto data = row.json(0);
+                    setReportEvidence(data,evidence);
+                    db.exec("UPDATE events SET data=? WHERE id=? AND task_id=?",{data,latest.at("id"),current.at("id")});
+                }
+            }
+            recordEvidenceRead(current,latest,{{"environmentId",env},{"threadId",thread},
+                {"runId",target->report.at("resultRunId")},{"view","report"},
+                {"reportAvailable",available},{"text",bounded(evidence.detail,2048)}},"session_read",decision.usage);
+            return true;
+        });
     }
 
     Json resultReference(const Json& task) const {
@@ -1415,6 +1493,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (requireCriteria != args.contains("doneWhen") || (requireCriteria && !present(field(args,"doneWhen"))))
             throw Conflict("Only first work without saved criteria requires doneWhen");
         if (tool == "session_read") {
+            if (field(args,"view") == "report") return retryRunReport(snapshot,event,decision);
+            if (options.sessionRead != "on_demand") throw Conflict("Only the terminal report can be read for this event");
             readEvidence(snapshot,event,args,decision.usage);
             return;
         }
@@ -1525,7 +1605,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         const auto evidence = event["evidence"];
         const bool canReadHistory = std::ranges::find(tools,"session_read") != tools.end() ||
                                     std::ranges::find(tools,"read_bot_evidence") != tools.end();
-        summary["remainingEvidenceReads"] = canReadHistory ? 3 - evidence.size() : 0;
+        summary["remainingEvidenceReads"] = canReadHistory ? maxEvidenceReads - evidence.size() : 0;
         event.erase("evidence");
         event.erase("consumed");
         Id attempt = 0;
@@ -1581,6 +1661,11 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             if (event["kind"] != "result" && !task["lastRun"].is_null()) {
                 auto report = settledSessionReport(task);
                 if (!report.is_null()) event["sessionResult"] = std::move(report);
+            }
+            if (hasSettledRun(task) && event.at("evidence").size() < maxEvidenceReads) {
+                auto views = options.sessionRead == "on_demand" ? Json::array({"messages","activity"}) : Json::array();
+                if (reportRetry(task,event)) views.push_back("report");
+                if (!views.empty()) event["sessionReadViews"] = std::move(views);
             }
             auto errors = db.query(R"SQL(
 SELECT data FROM journal WHERE task_id=? AND kind='tool_error' AND json_extract(data,'$.eventId')=?
