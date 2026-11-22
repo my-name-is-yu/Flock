@@ -422,7 +422,21 @@
   .msg-actions { opacity: 1; pointer-events: auto; }
 }
 @media (hover: none) {
-  .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { opacity: 0; }
+  .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { display: none; }
+}
+/* Narrow chats keep bubbles at full width: touch rows drop their actions below a long bubble, and hover rows float them over the row. */
+@container conversation-layout (max-width: 700px) {
+  .msg-line { flex-wrap: wrap; }
+  @media (hover: hover) and (pointer: fine) {
+    .msg-line { position: relative; flex-wrap: nowrap; justify-self: stretch; }
+    .msg-actions {
+      position: absolute; inset-block-start: -1.35rem; inset-inline-end: 0; z-index: 1;
+      padding: .1rem; border-radius: var(--radius-md); background: var(--canvas);
+      box-shadow: 0 0 0 1px var(--hairline), var(--shadow-sm); pointer-events: none;
+    }
+    .msg.user .msg-actions { inset-inline: 0 auto; }
+    .msg:hover .msg-actions, .msg:focus-within .msg-actions { pointer-events: auto; }
+  }
 }
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
