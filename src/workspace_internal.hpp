@@ -26,7 +26,7 @@ int openExactChildDirectory(int parent, const std::filesystem::path& name);
 std::string toolText(const Json&, std::string_view key, std::size_t limit, bool allowEmpty = false);
 Id toolId(const Json&, std::string_view key);
 Json toolFailure(std::string_view);
-bool allowedAfterWebEvidence(std::string_view);
+bool allowedAfterWebEvidence(const Decision&);
 Json webEvidenceActionDenied();
 bool pathContains(const std::filesystem::path& root, const std::filesystem::path& child);
 Json readToolFile(const std::filesystem::path& root, const std::filesystem::path& relative, const SecretRedactor&);

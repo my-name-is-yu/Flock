@@ -117,6 +117,11 @@ ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const Model
                 if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
                 decision.reason = shared.text(decision.reason);
             }
+            if (isGitTool(decision.tool) || input.event.contains("gitEvent")) {
+                const auto shared = sharedRedactor();
+                decision.args = shared.payload(decision.args);
+                decision.reason = shared.text(decision.reason);
+            }
             if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
                 decision.tool = scrub.text(decision.tool);
         }

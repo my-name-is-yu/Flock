@@ -3,6 +3,7 @@ const labels = {
   model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
   unknown_delivery: 'Delivery confirmation', grant_request: 'Access request',
   protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
+  pr_reconciliation: 'Pull request reconciliation',
   budget: 'Run allowance', model_failure: 'Model failure', t3_input: 'Action in T3',
   auth: 'T3 sign-in', settings: 'T3 settings',
   blocked: 'Blocked', waiting: 'Waiting', queued: 'Queued', deciding: 'Evaluating',
@@ -10,6 +11,7 @@ const labels = {
   cancelling: 'Cancelling', cancelled: 'Cancelled', completed: 'Complete',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Reconciliation requested', request_changes: 'Changes requested',
+  link_pr: 'Pull request linked', reject_pr: 'Operation rejected',
 };
 const actions = {
   user_question: [['answer', 'Send answer']],
@@ -21,6 +23,7 @@ const actions = {
   grant_request: [['approve', 'Approve access'], ['deny', 'Deny']],
   protected_input: [['supply', 'Save protected value']],
   bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
+  pr_reconciliation: [['reject_pr', 'Reject operation']],
   pr_review: [['approve', 'Approve review'], ['request_changes', 'Request changes']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
@@ -78,6 +81,7 @@ function decisionCard(item, submit) {
   if (item.request && item.request !== item.requestTitle) article.append(element('p', item.request));
   article.append(element('p', item.prompt));
   if (item.prUrl) article.append(prLink(item.prUrl, item.prTitle));
+  for (const pr of item.candidates || []) article.append(prLink(pr.url, `Pull request #${pr.prNumber}`));
   if (!item.canDecide) {
     article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
@@ -113,6 +117,13 @@ function decisionCard(item, submit) {
     form.append(labeled('Protected value', inputs.value));
   }
   const buttons = element('div', '', 'board-inbox-actions');
+  for (const pr of item.candidates || []) {
+    const button = element('button', `Link #${pr.prNumber}`);
+    button.type = 'submit';
+    button.value = 'link_pr';
+    button.dataset.prNumber = pr.prNumber;
+    buttons.append(button);
+  }
   for (const [decision, title] of actions[item.itemKind]) {
     const button = element('button', title);
     button.value = decision;
@@ -124,6 +135,7 @@ function decisionCard(item, submit) {
     event.preventDefault();
     if (!event.submitter) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
+    if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
     if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
     const fields = [...form.elements];
     for (const input of fields) input.disabled = true;

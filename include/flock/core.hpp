@@ -182,6 +182,8 @@ public:
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
+class GitHost;
+struct GitWebhook;
 class Access;
 struct Person;
 struct ConfiguredSchedule;
@@ -225,6 +227,8 @@ public:
                      const Json& data = Json::object(), const ApplyBotChange& = {});
     Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
                        std::string_view title, std::string_view prompt);
+    bool receiveGitWebhook(const GitWebhook&);
+    void protectGitCredential(std::string value);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
@@ -301,6 +305,7 @@ struct RuntimeOptions {
     std::function<std::vector<PeerBot>(std::string_view)> peers = {};
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
+    std::shared_ptr<GitHost> gitHost = {};
 };
 class Runtime {
 public:

@@ -1,5 +1,5 @@
 configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
-add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp)
+add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp)
 target_link_libraries(flock_app_support PUBLIC flock_core PRIVATE CURL::libcurl)
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)

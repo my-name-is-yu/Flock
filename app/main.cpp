@@ -2,6 +2,7 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "git_github.hpp"
 
 #ifdef FLOCK_WITH_T3
 #include "flock/t3_mcp.hpp"
@@ -171,6 +172,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
 #endif
     Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
+    if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) {
+        options.gitHost = makeGitHubHost(token);
+        store.protectGitCredential(token);
+    }
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
@@ -210,6 +215,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     std::unique_ptr<WebServer> server;
     if (web) {
+        if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
         server = startWeb(store,port,std::move(callbacks));
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

@@ -4,6 +4,7 @@
 #include "views.hpp"
 #include "access_routes.hpp"
 #include "board_inbox_routes.hpp"
+#include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
 #include "channel_routes.hpp"
 
@@ -188,6 +189,7 @@ public:
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         if (callbacks_.authenticate) store_.access().requireWebIdentity();
+        store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
             .set_payload_max_length(maxProfilePayload)
@@ -228,6 +230,7 @@ public:
         web::accessRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
+        web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
@@ -376,6 +379,7 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
+        if (!origins && !req.has_header("Sec-Fetch-Site") && req.method == "POST" && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
         if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
             else if (req.get_header_value_count("Content-Type") != 1 ||

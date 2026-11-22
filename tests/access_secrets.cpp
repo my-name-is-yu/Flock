@@ -40,7 +40,7 @@ struct Adapter : T3 {
     void interrupt(const std::string&,const Json&,const RunRef&) override {}
 };
 const Person owner{"local-owner",true}, admin{"alice"}, viewer{"bob"};
-const Scope readRepo{"repository","private","read"}, writeRepo{"repository","private","write"};
+const Scope readRepo{"repository","github.com/org/private","read"}, writeRepo{"repository","github.com/org/private","write"};
 struct WorkModel : Model {
     ModelTurn decide(const ModelInput& in) override { return {{choose(in)}}; }
     Decision choose(const ModelInput& in) {
@@ -131,7 +131,7 @@ void concurrentApproval(const std::filesystem::path& path) {
     access.resourceGrant(owner,"Ernest",readRepo,GrantChange::revoke);
     auto revocation = right.access().administration(owner,"Ernest").at("audit").back();
     check(revocation.at("action")=="revoke" && revocation.at("actor")==owner.id &&
-          revocation.at("scope").at("resourceId")=="private","revocation audit missing");
+          revocation.at("scope").at("resourceId")==readRepo.resource,"revocation audit missing");
 }
 
 void freshLaunch(const std::filesystem::path& path) {
@@ -193,9 +193,9 @@ void exercise(const std::filesystem::path& dir) {
         return model.result.dump();
     };
     turn("list_grants");
-    check(turn("request_access",{{"resourceKind","repository"},{"resourceId","other"},{"operation","write"}}).find("pending")!=std::string::npos,
+    check(turn("request_access",{{"resourceKind","repository"},{"resourceId","github.com/org/other"},{"operation","write"}}).find("pending")!=std::string::npos,
           "request tool missing");
-    check(!access.permits("Ernest",{"repository","other","write"},true),"request tool granted scope");
+    check(!access.permits("Ernest",{"repository","github.com/org/other","write"},true),"request tool granted scope");
     ernest.config["services"]={"github"};
     ernest.config["mcpServers"]={"docs"};
     auto connections=turn("list_connections");

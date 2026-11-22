@@ -108,10 +108,10 @@ std::string SecretRedactor::text(std::string_view source, bool truncated) const 
     return out;
 }
 
-Json SecretRedactor::payload(const Json& input, bool truncated) const {
-    if (values_.empty()) return input;
+Json SecretRedactor::payload(const Json& input, bool truncated, std::size_t textLimit) const {
+    if (values_.empty() && textLimit == std::string_view::npos) return input;
     auto scrub = [&](auto&& self, const Json& item) -> Json {
-        if (item.is_string()) return text(item.get_ref<const std::string&>(),truncated);
+        if (item.is_string()) return bounded(text(item.get_ref<const std::string&>(),truncated),textLimit);
         if (item.is_array()) {
             auto result = Json::array();
             for (auto& entry : item) result.push_back(self(self,entry));
@@ -149,10 +149,15 @@ void SecretRedactor::requirePublic(const Json& metadata) const {
     if (record(metadata,Fields::external) != metadata) throw Conflict("Secret values cannot be used as metadata");
 }
 
-static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets) {
-    std::vector<std::string> values;
+static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, std::vector<std::string> values) {
     while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
     return SecretRedactor(std::move(values));
+}
+
+void Store::protectGitCredential(std::string value) {
+    if (value.empty()) return;
+    std::lock_guard lock(p_->mutex);
+    p_->gitCredentials.push_back(std::move(value));
 }
 
 SecretRedactor Store::Impl::redactor(std::string_view bot) const {
@@ -161,12 +166,12 @@ SecretRedactor Store::Impl::redactor(std::string_view bot) const {
 SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
  AND (p.bot=? OR EXISTS (SELECT 1 FROM grant_audit_log a WHERE a.bot=? AND a.action IN ('approve','grant')
       AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
-)SQL",{bot,bot}),secrets);
+)SQL",{bot,bot}),secrets,gitCredentials);
 }
 
 SecretRedactor Store::Impl::sharedRedactor() const {
     std::lock_guard lock(mutex);
-    return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets);
+    return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets,gitCredentials);
 }
 
 Json Access::redactSecrets(std::string_view bot, const Json& data) const {

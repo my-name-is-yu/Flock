@@ -20,6 +20,7 @@ struct WebCallbacks {
     ApplyBotChange applyBotChange = {};
     std::function<Seconds()> clock = unixTime;
     std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};
+    std::string githubWebhookSecret = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

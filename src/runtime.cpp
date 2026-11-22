@@ -1261,6 +1261,25 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
     void accept(const Json& snapshot, const Json& event, const TaskDecision& decision) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
+        if (isGitTool(tool)) {
+            Json result;
+            try {
+                result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
+                                    "event/" + event.at("id").dump(),snapshot.at("generation").get<Id>());
+            } catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
+            change(snapshot,[&](Json& current) {
+                auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
+                if (!row.next()) return false;
+                auto data = row.json(0);
+                if (!data.contains("gitResults")) data["gitResults"] = Json::array();
+                data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
+                    Json{{"tool",tool},{"result",std::move(result)}}));
+                if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
+                db.exec("UPDATE events SET data=? WHERE id=?",{data,event.at("id")});
+                return true;
+            });
+            return;
+        }
         static const std::map<std::string_view,std::set<std::string_view>> arguments{
             {"delegate",{"instruction","doneWhen"}},
             {"answer_session_question",{"requestId","answers"}},
@@ -1488,6 +1507,8 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 pending = workPrompt(task,event,0).pending;
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
+            if (options.gitHost && task["activeRun"].is_null() && event["kind"] == "result")
+                tools.insert(tools.end(),gitTools().begin(),gitTools().end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
             if (!decision)
@@ -1571,18 +1592,20 @@ Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOpt
     : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
+    p_->db.deliverGitWebhooks();
     p_->db.deliverChannels();
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get())) break;
     }
     p_->db.deliverChannels();
 }
 void Runtime::tick() {
     p_->fireDueAutomations();
+    p_->db.deliverGitWebhooks();
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit))
-        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools);
+        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get());
     p_->db.advanceWorkflows(p_->options.clock());
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
     p_->db.deliverChannels();
@@ -1600,6 +1623,7 @@ void Runtime::tickConcurrent() {
     };
     collect(p_->conversationWorkers);
     collect(p_->workers);
+    p_->db.deliverGitWebhooks();
     if (p_->channelWorker.valid() &&
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         p_->channelWorker.get();
@@ -1611,7 +1635,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock,*p_->options.botTools,p_->options.gitHost.get());
                 }));
             }
         }

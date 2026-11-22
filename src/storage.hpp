@@ -3,6 +3,7 @@
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/git_host.hpp"
 #include "flock/channels.hpp"
 #include "flock/memory_automation.hpp"
 #include <map>
@@ -31,6 +32,7 @@ std::string actionId();
 std::string taskIntent(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
 enum class RequestJournal { record, skip };
 
@@ -104,6 +106,20 @@ struct Store::Impl {
     void fireAutomation(Id, const Statement&, Seconds now);
     SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
+    void initializeGitSchema();
+    Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
+                 std::string_view invocation, std::optional<Id> generation = {});
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
+    void deliverGitWebhooks();
+    bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
+    void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
+    std::vector<std::string> gitCredentials;
+    void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
+                      std::string_view title, std::string_view prompt);
+    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                      std::string_view gitKey = {}, std::string_view operationId = {},
+                      const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);
@@ -164,14 +180,16 @@ struct Store::Impl {
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;
+    Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<ModelImage>& images);
+    Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);

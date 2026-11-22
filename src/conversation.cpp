@@ -18,7 +18,7 @@ void Store::Impl::initializeConversationSchema() {
     if (sqlite3_exec(db,R"SQL(
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,id)
-WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
+WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
@@ -146,7 +146,7 @@ std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigne
     std::lock_guard lock(mutex);
     auto next = query(R"SQL(
 SELECT j.conversation_bot_id,min(j.id) FROM journal j
-WHERE j.kind='conversation_message' AND json_extract(j.data,'$.status') IS NULL
+WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
 GROUP BY j.conversation_bot_id ORDER BY min(j.id) LIMIT ?
 )SQL",{limit});
     std::vector<std::pair<std::string,Id>> result;
