@@ -92,7 +92,7 @@ svg { display: block; }
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  transition: grid-template-columns var(--dur-medium) var(--ease-out);
+  transition: grid-template-columns .26s cubic-bezier(0.32, 0.72, 0, 1);
 }
 .workspace.sidebar-resizing { transition: none; user-select: none; cursor: col-resize; }
 .workspace.keyboard-viewport {
