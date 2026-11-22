@@ -175,6 +175,16 @@ int main(int argc, char** argv) {
         checkResult("ambiguous-title-result", false);
         checkResult("reused-result", false);
 
+        fixture({{"scenario", "paged-report"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::Finished && observation.settled && !observation.truncated &&
+              observation.itemId == "item-1" && observation.report == std::string(7000, 'x') + "end of report",
+              "Report reads older pages for the assigned Run and joins text continuations");
+        fixture({{"changeReportDuringRead", true}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::Unavailable,"Report rejects changes during text continuation");
+        fixture({{"changeReportDuringRead", false}});
+
         Command follow = launch;
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";
