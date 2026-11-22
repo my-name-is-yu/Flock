@@ -547,21 +547,46 @@ void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
 void attachedChoiceRemainsAuthoritative() {
     Fixture f;
     const auto id = f.store->submit(f.routing("Check the error"));
-    f.model.questions.emplace(id,Json{{"question","Is the error present?"},{"choices",{"Yes","No"}}});
+    constexpr auto choice = "Cancel this task";
+    f.model.questions.emplace(id,Json{{"question","What should I do if the error is present?"},
+                                      {"choices",{choice,"Keep going"}}});
     f.reach(id,"waiting");
     const auto wait = f.task(id).at("wait");
-    bool sawAttachment = false;
-    f.script("Yes",{[&](const ModelInput& input) {
-        sawAttachment = input.event.at("attachments").size() == 1;
-        auto call = answer(id)(input);
-        call.args["text"] = "No";
-        return call;
-    }});
-    f.store->receive(localOwner,f.routing(),"attached-choice","Yes",wait.at("messageId"),
-        Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64","iVBORw0KGgo="}}}));
+    const auto other = f.store->submit(f.routing("Check the logs"));
+    f.store->access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
+    f.store->access().resourceGrant(localOwner,"alpha",{"attachment","alpha","inspect"},GrantChange::grant);
+    f.script(choice,{
+        [](const ModelInput&) {
+            return Decision{"workspace_write_file",{{"path","note.txt"},{"text","Unrelated note"}},"Scripted write"};
+        },
+        stop(other),
+        start({{"request","Unrelated work"}}),
+        [](const ModelInput& input) {
+            return Decision{"inspect_attachment",{{"messageId",input.event.at("messageId")},
+                {"attachmentId",input.event.at("attachments").at(0).at("attachmentId")}},"Inspect the attached screenshot"};
+        },
+        [id](const ModelInput& input) {
+            auto call = answer(id)(input);
+            call.args["text"] = "Keep going";
+            return call;
+        },
+        say("I recorded your answer.")
+    });
+    const auto receipt = f.store->receive(localOwner,f.routing(),"attached-choice",choice,wait.at("messageId"),
+        Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}}));
     f.runtime->runConversations();
-    check(sawAttachment && f.event(id,"user_answer").at("text") == "Yes",
-          "the conversation lost the attachment or changed the selected choice");
+    const auto steps = f.lastTurn();
+    check(steps.at(0).at("result").at("ok") == false && steps.at(1).at("result").at("ok") == false &&
+          steps.at(2).at("result").at("ok") == false && !std::filesystem::exists(f.dir/"workspaces"/"alpha"/"note.txt") &&
+          f.task(other).at("state") == "queued" && f.store->tasks("alpha").size() == 2,
+          "an attached choice allowed an unrelated write or task action");
+    check(steps.at(3).at("result").at("data").at("width") == 1,
+          "the conversation could not inspect the attachment");
+    const auto recorded = f.event(id,"user_answer");
+    check(recorded.at("text") == choice && recorded.at("messageId") == receipt.at("messageId") &&
+          recorded.at("waitId") == wait.at("id") && f.response(receipt).at("text") == "I recorded your answer.",
+          "the conversation changed the selected choice or lost its reply");
 }
 
 void directAnswersRemainInConversationHistory() {

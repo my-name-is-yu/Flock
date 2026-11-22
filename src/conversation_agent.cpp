@@ -37,6 +37,11 @@ const std::vector<std::string> webTools{"start_workflow","workflow_status","inst
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
 
+bool isOfferedAnswerTool(std::string_view tool) {
+    return tool == "answer_task_question" || tool == "reply" ||
+           tool == "inspect_attachment" || tool == "read_channel_attachment";
+}
+
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
         return byte == 0xe3 || (byte >= 0xe4 && byte <= 0xe9);
@@ -106,7 +111,6 @@ SELECT j.id,j.task_id,j.data FROM targets JOIN journal j ON j.id=targets.id JOIN
  )SQL",{message.replyTo,message.bot,message.channelScope,message.channelScope,
         message.bot,message.channelScope,message.channelScope});
     if (anchor.next()) {
-        // Classify the reply using the choices it answered, even if a newer wait has replaced them.
         const auto wait = anchor.json(2);
         const auto choices = wait.find("choices");
         const bool matchesChoice = field(wait,"reason") == "user_question" && choices != wait.end() &&
@@ -469,9 +473,13 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect",conflicting ? "replanning" : "accepted"},{"taskId",task.at("id")}};
     }
     if (tool == "answer_task_question") {
-        const auto task = ownTask(identifier(args,"taskId",true),message);
+        const auto taskId = identifier(args,"taskId",true);
         const auto waitId = identifier(args,"waitId",true);
-        const auto answer = message.question && message.question->matchesChoice ? message.text : text(args,"text",8000,true);
+        const bool offeredAnswer = message.question && message.question->matchesChoice;
+        if (offeredAnswer && (taskId != message.question->taskId || waitId != message.question->waitId))
+            throw ToolError("This choice can only answer the question it replies to");
+        const auto task = ownTask(taskId,message);
+        const auto answer = offeredAnswer ? message.text : text(args,"text",8000,true);
         if (integer(task.at("wait"),"id") != waitId)
             throw ToolError("That question is no longer open",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
         if (const auto error = questionAnswerError(task,message))
@@ -739,13 +747,15 @@ void Store::Impl::resolveOfferedAnswer(const Message& message) {
 bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
                           const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost) {
     Message message;
+    bool offeredAnswer = false;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!turnPending(id)) return true;
         message = loadTurnMessage(id);
         exec("INSERT OR IGNORE INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
-        if (message.question && message.question->matchesChoice &&
+        offeredAnswer = message.question && message.question->matchesChoice;
+        if (offeredAnswer &&
             !query("SELECT 1 FROM message_attachments WHERE message_id=? "
                    "UNION ALL SELECT 1 FROM channel_attachments WHERE message_id=? LIMIT 1",{id,id}).next()) {
             if (authorizeTurn(message)) resolveOfferedAnswer(message);
@@ -829,6 +839,8 @@ LIMIT 1
                 }
                 if (!notification && !input.task.at("localMachines").empty())
                     input.tools.push_back("request_local_machine_connection");
+                if (offeredAnswer)
+                    std::erase_if(input.tools,[](const auto& tool) { return !isOfferedAnswerTool(tool); });
                 attempt = takeReservedConversationCall(id);
                 if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
                 if (!attempt) pauseTurn(message);
@@ -864,11 +876,16 @@ LIMIT 1
         }
 
         const auto& decision = calls.front();
-        if (notification && std::ranges::find(tools,decision.tool) == tools.end()) {
+        const bool unavailableForAnswer = offeredAnswer && !std::ranges::all_of(calls,[](const auto& call) {
+            return isOfferedAnswerTool(call.tool);
+        });
+        if (unavailableForAnswer || (notification && std::ranges::find(tools,decision.tool) == tools.end())) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return true; }
-            saveTurnResults(id,step,Json::array({toolFailure("Tool unavailable for a Git notification")}));
+            const auto reason = unavailableForAnswer ? "Tool unavailable for a task question choice"
+                                                     : "Tool unavailable for a Git notification";
+            saveTurnResults(id,step,std::vector<Json>(calls.size(),toolFailure(reason)));
             transaction.commit();
             continue;
         }
