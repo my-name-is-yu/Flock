@@ -32,9 +32,11 @@
 }
 .header-inner:has(> :is(#profile-identity, #peer-identity):not([hidden])) .header-menu {
   pointer-events: auto;
+  border-radius: 12px;
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
   border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
+  box-shadow: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
 }
 .profile-toolbar {
   position: absolute; inset-block-start: .7rem; inset-inline-end: clamp(.75rem, 2vw, 1.25rem);
@@ -67,8 +69,10 @@
   display: flex; align-items: center; gap: .5rem; min-height: 2rem; padding: .3rem .6rem;
   border: 0; border-radius: var(--radius-sm); background: transparent;
   color: var(--text-2); font-size: var(--text-sm); text-align: start;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .conversation-action:hover, .conversation-action[aria-expanded="true"] { background: var(--hover); color: var(--text); }
+.conversation-action:active { transform: scale(.98); }
 .conversation-action svg { width: 1rem; height: 1rem; flex: none; }
 .peer-back {
   position: absolute; inset-block-start: .7rem; inset-inline-start: clamp(.75rem, 2vw, 1.25rem);
@@ -79,9 +83,10 @@
   backdrop-filter: blur(14px);
   color: var(--text-2);
   box-shadow: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
-  transition: background-color .14s ease, color .14s ease, opacity .16s ease, transform .16s ease;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, opacity var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .peer-back:hover { background: var(--hover); color: var(--text); }
+.peer-back:active { transform: scale(.92); }
 .peer-back svg { width: 1.05rem; height: 1.05rem; }
 .header-identity {
   /* Reserve space for presence so live updates do not move the history viewport. */
@@ -97,10 +102,12 @@
 .profile-face-button {
   padding: 0; border: 0; border-radius: 14px; background: transparent;
   pointer-events: auto; cursor: pointer;
-  transition: transform .16s cubic-bezier(.2, .9, .25, 1);
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.profile-face-button:hover { transform: scale(1.045); }
-.profile-face-button:active { transform: scale(.96); }
+@media (hover: hover) and (pointer: fine) {
+  .profile-face-button:hover { transform: scale(1.045); }
+}
+.profile-face-button:active { transform: scale(.95); }
 .profile-caption, .peer-breadcrumb {
   position: relative; display: grid; justify-items: center; gap: .12rem;
   padding: .34rem .9rem .4rem;
@@ -134,6 +141,7 @@
   background: light-dark(rgb(255 255 255 / .95), rgb(40 40 43 / .88));
   border-color: light-dark(rgb(0 0 0 / .11), rgb(255 255 255 / .1));
 }
+.profile-caption:has(.needs-you:not([hidden])):active { transform: scale(.97); }
 .profile-caption:has(.needs-you:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .needs-you-tooltip {
   position: absolute; top: calc(100% + .38rem); left: 50%; translate: -50% -2px;
@@ -244,6 +252,7 @@
   .jump-to-latest { opacity: 0; transform: translateY(12px) scale(.92); }
 }
 .jump-to-latest:hover { background: var(--hover); }
+.jump-to-latest:active { transform: scale(.96); }
 .jump-to-latest svg { width: 1rem; height: 1rem; transition: transform .18s cubic-bezier(0.23, 1, 0.32, 1); }
 @media (hover: hover) and (pointer: fine) {
   .jump-to-latest:hover svg { transform: translateY(2px); }
@@ -363,10 +372,12 @@
   min-height: 2rem; padding: .3rem .7rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-full);
   color: var(--text); font-size: var(--text-sm); cursor: pointer;
+  transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .question-option input { flex: none; width: 1rem; height: 1rem; margin: 0; accent-color: var(--accent-fill); }
 .question-option span { min-width: 0; overflow-wrap: anywhere; }
 .question-option:hover { background: var(--hover); }
+.question-option:active { transform: scale(.97); }
 .question-option:has(:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .question-options:disabled .question-option { opacity: .56; cursor: default; }
 .msg-resolution { display: flex; align-items: center; gap: .3rem; padding-left: var(--avatar-col); color: var(--text-3); font-size: var(--text-xs); }
@@ -401,8 +412,10 @@
 .fold-toggle {
   display: block; margin-top: .3rem; padding: 0; border: 0; background: none;
   color: inherit; font-size: var(--text-sm); font-weight: 600; opacity: .85;
+  transition: opacity var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .fold-toggle:hover { opacity: 1; text-decoration: underline; }
+.fold-toggle:active { transform: scale(.97); }
 .prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
@@ -444,6 +457,9 @@
   .conversation-actions-list { animation: none; }
   .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }
+  .conversation-action:active, .peer-back:active, .profile-face-button:hover, .profile-face-button:active,
+  .profile-caption:has(.needs-you:not([hidden])):active, .jump-to-latest:active, .question-option:active,
+  .peer-exchange-link:active, .fold-toggle:active { transform: none; }
 }
 
 @media (hover: none), (pointer: coarse) {
@@ -474,9 +490,11 @@
   margin-block-start: .55rem; margin-inline-start: calc(var(--avatar-col) + var(--bubble-inset) - .35rem);
   padding: .15rem .35rem; border-radius: var(--radius-sm); color: var(--text-3);
   font-size: var(--text-sm); line-height: 1.4; text-decoration: none; overflow-wrap: anywhere;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .peer-exchange-link + .peer-exchange-link { margin-block-start: 0; }
 .peer-exchange-link:is(:hover, :focus-visible) { color: var(--text); background: var(--hover); }
+.peer-exchange-link:active { transform: scale(.98); }
 .peer-exchange-avatar { width: 1.1rem; height: 1.1rem; }
 @media (pointer: coarse), (max-width: 700px) {
   .peer-exchange-link { min-height: 2rem; }

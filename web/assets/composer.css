@@ -105,8 +105,10 @@
   width: var(--composer-control-size); height: var(--composer-control-size); padding: 0;
   border: .3rem solid transparent; border-radius: var(--radius-full);
   background: transparent; background-clip: padding-box; color: var(--text-2);
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .reply-cancel:hover:not(:disabled) { background-color: var(--accent-soft-hover); color: var(--text); }
+.reply-cancel:active:not(:disabled) { transform: scale(.92); }
 .reply-cancel svg { width: .95rem; height: .95rem; }
 
 .composer textarea {
@@ -165,10 +167,10 @@
   width: var(--composer-control-size); height: var(--composer-control-size); margin: .15rem; padding: 0;
   border: .3rem solid transparent; border-radius: var(--radius-full);
   background: var(--accent-fill); background-clip: padding-box; color: var(--on-accent);
-  transition: background-color .15s ease, color .15s ease;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .send:hover:not(:disabled) { background-color: var(--accent-fill-hover); }
-.send:active:not(:disabled) { filter: brightness(.9); }
+.send:active:not(:disabled) { transform: scale(.91); }
 .send:disabled { opacity: 1; background-color: var(--selected); color: var(--text-3); }
 .send svg { width: 1.05rem; height: 1.05rem; }
 .composer[aria-busy="true"] .send svg { opacity: 0; }
@@ -209,8 +211,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer-container, .composer, .composer-box, .notice, .send, .reply-context, .decision-reply-context { transition: none; }
+  .composer-container, .composer, .composer-box, .notice, .send, .reply-context, .decision-reply-context, .reply-cancel { transition: none; }
   .screenshot-preview { animation: none; }
   @starting-style { .reply-context, .decision-reply-context { opacity: 1; transform: none; } }
+  .send:active:not(:disabled), .reply-cancel:active:not(:disabled) { transform: none; }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }

@@ -83,6 +83,7 @@
   border-radius: var(--radius-sm);
   background: transparent;
   text-align: start;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .find-match > * {
   animation: find-match-in .18s cubic-bezier(0.23, 1, 0.32, 1) both;
@@ -96,6 +97,7 @@
   to { opacity: 1; transform: none; }
 }
 .find-match:hover { background: var(--hover); }
+.find-match:active { transform: scale(.985); }
 .find-match[aria-current="true"] { background: var(--accent-soft); }
 .find-match-meta { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; font-size: var(--text-xs); }
 .find-match-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
@@ -111,5 +113,6 @@
 @media (prefers-reduced-motion: reduce) {
   .conversation-find { transition: none; }
   @starting-style { .conversation-find { opacity: 1; transform: none; } }
+  .find-match:active { transform: none; }
   .find-match > * { animation: none; }
 }
