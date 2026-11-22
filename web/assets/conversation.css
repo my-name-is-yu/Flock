@@ -48,6 +48,7 @@
   --jump-to-latest-space: 4rem;
   grid-area: 2 / 1;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
+  position: relative;
   scroll-padding-block-start: calc(var(--conversation-top) + .5rem + var(--find-overlap, 0px));
 }
 .conversation.viewing-source, .main:has(.conversation-find:not([hidden])) .conversation {
@@ -72,6 +73,12 @@
   background: var(--raised); color: var(--text-2); font-weight: 500;
 }
 .older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
+.conversation-source-error:not(:empty) {
+  position: sticky; top: calc(.5rem + var(--find-overlap, 0px)); z-index: 2;
+  width: fit-content; max-width: calc(100% - 2rem); margin: .5rem auto; padding: .4rem .85rem;
+  border: 1px solid var(--hairline); border-radius: var(--radius-md);
+  background: var(--raised); color: var(--danger); font-size: var(--text-sm);
+}
 /* Keep the last opened message clear of the floating Jump to latest control. */
 .viewing-source .timeline { padding-block-end: var(--jump-to-latest-space); }
 .conversation-source-target .bubble { outline: 2px solid transparent; outline-offset: 3px; animation: source-highlight 2.4s ease-out; }

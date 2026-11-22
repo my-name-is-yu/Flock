@@ -10,7 +10,7 @@ const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
-  'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
@@ -228,7 +228,7 @@ function selectBot(botId, peerId = null, updateHistory = true) {
     else renderBots();
     return;
   }
-  pendingSource = null;
+  resetConversationJump();
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
@@ -839,32 +839,16 @@ function eventTime(event, extra) {
   time.title = [event.taskId ? `#${event.taskId}` : null, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
-function sourceAction(source, label = 'Open source') {
-  return button(label, 'text-button', async () => {
-    const target = byId(`event-${source.messageId}`);
-    if (target) {
-      closeDetail();
-      target.focus();
-      target.scrollIntoView({ block: 'center' });
-      return;
-    }
-    const context = view;
-    const selection = { kind: 'source' };
-    openDetail(selection);
-    try {
-      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
-      if (detail !== selection) return;
-      selection.event = page.events.find((event) => event.id === source.messageId);
-      selection.failed = !selection.event;
-    } catch {
-      if (detail !== selection) return;
-      selection.failed = true;
-    }
-    renderDetail();
-  });
+function conversationMessageRow(id) {
+  // A collapsed Session report can be an anchor inside the completion row.
+  return byId(`event-${id}`)?.closest('article');
+}
+function resetConversationJump() {
+  pendingSource = null;
+  elements['conversation-source-error'].textContent = '';
 }
 function leaveConversationSource(context) {
-  pendingSource = null;
+  resetConversationJump();
   if (!context.source) return false;
   context.source = null;
   readingPositions.delete(timelineKey(context.id));
@@ -904,9 +888,13 @@ function focusConversationMessage(target) {
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
-  if (preferLoaded && context.events.has(id)) {
+  resetConversationJump();
+  const error = elements['conversation-source-error'];
+  let target = preferLoaded ? conversationMessageRow(id) : null;
+  if (!target && preferLoaded && context.events.has(id)) {
     if (leaveConversationSource(context)) renderTimeline();
-  } else {
+    target = conversationMessageRow(id);
+  } else if (!target) {
     const request = {};
     pendingSource = request;
     let page;
@@ -916,20 +904,27 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     if (pendingSource !== request || context !== view) return;
     pendingSource = null;
     if (signal?.aborted) return;
-    if (!page?.events.some((event) => event.id === id)) {
-      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+    if (!page) {
+      error.textContent = 'Could not load that message.';
+      return;
+    }
+    const event = page.events.find((item) => item.id === id);
+    if (!event || event.kind === 'wait_closed' || event.kind === 'bot_message') {
+      error.textContent = 'That message is no longer in this conversation.';
       return;
     }
     if (!context.source) rememberReadingPosition(true);
     context.source = { id, bot: bot ?? context.data.bot, events: page.events };
     renderTimeline();
+    target = conversationMessageRow(id);
   }
-  const target = byId(`event-${id}`);
-  if (target) {
-    elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
-    target.classList.add('conversation-source-target');
-    focusConversationMessage(target);
+  if (!target) {
+    error.textContent = 'That message is no longer in this conversation.';
+    return;
   }
+  elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  target.classList.add('conversation-source-target');
+  focusConversationMessage(target);
   updateJumpToLatest();
 }
 function cardSourceAction(bot, id, close) {
@@ -1053,8 +1048,11 @@ function eventCard(event, context, place) {
         row.insertBefore(quote, meta.nextSibling);
       }
     }
-    if (event.kind === 'conversation_message' && data.replyToMessageId)
-      extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (event.kind === 'conversation_message' && data.replyToMessageId) {
+      extras.push(button('Open original message', 'text-button open-original-message', () => {
+        void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
+      }));
+    }
     if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
@@ -1252,12 +1250,20 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const scroller = elements.conversation;
   const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
   const focusedLink = focused?.dataset.peerFocus;
+  const focusedOriginal = focused?.matches('.open-original-message');
+  const focusedMessage = (focusedOriginal || focused?.matches('.conversation-source-target')) && focused.closest('article').id;
   const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
   const position = !source && key && readingPositions.get(key);
   const moveScroll = () => {
     if (focusedLink) {
       const link = [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((item) => item.dataset.peerFocus === focusedLink);
       link?.focus({ preventScroll: true });
+    }
+    if (focusedMessage) {
+      const row = byId(focusedMessage);
+      const target = focusedOriginal ? row?.querySelector('.open-original-message') : row;
+      if (!focusedOriginal) target?.classList.add('conversation-source-target');
+      target?.focus({ preventScroll: true });
     }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
@@ -1758,24 +1764,6 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'source') {
-    if (changed('detail', detail)) {
-      elements['detail-title'].textContent = 'Original message';
-      const source = detail.event;
-      const text = source?.kind === 'waiting' ? waitText(source.data) :
-        source?.data.report ?? source?.data.text ??
-        (detail.failed ? 'The original message is no longer available in this conversation.' : 'Loading…');
-      const body = node('p', 'prose', text);
-      elements['detail-body'].replaceChildren(body);
-      const link = linkToRun(source?.data.run);
-      if (link) {
-        const actions = node('div', 'event-actions');
-        actions.append(link);
-        elements['detail-body'].append(actions);
-      }
-    }
-    return;
-  }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
     if (changed('detail', detail, turn, [...pendingWaits])) {
@@ -2055,11 +2043,11 @@ elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
-  pendingSource = null;
   if (view?.source) {
     backToLatest();
     return;
   }
+  resetConversationJump();
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
