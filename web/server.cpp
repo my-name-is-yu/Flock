@@ -88,20 +88,6 @@ bool inList(const std::array<std::string_view,N>& list, std::string_view value) 
     return std::find(list.begin(),list.end(),value) != list.end();
 }
 
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(first,last - first + 1));
-}
-
-std::size_t utf8Codepoints(std::string_view text) {
-    std::size_t count = 0;
-    for (const unsigned char ch : text)
-        if ((ch & 0xC0) != 0x80) ++count;
-    return count;
-}
-
 bool validHexColor(std::string_view color) {
     if ((color.size() != 4 && color.size() != 7) || color[0] != '#') return false;
     return std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) {
@@ -167,11 +153,9 @@ struct ParsedProfile {
 ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImageForUpload) {
     const auto rawName = body.find("name");
     if (rawName == body.end() || !rawName->is_string()) throw InputError("invalid_name");
-    const auto name = trim(rawName->get_ref<const std::string&>());
-    if (name.empty() || name.size() > 128 || utf8Codepoints(name) > 32 ||
-        std::any_of(name.begin(),name.end(),[](unsigned char ch) { return ch < 32 || ch == 127; }))
-        throw InputError("invalid_name");
-
+    std::string name;
+    try { name = botName(rawName->get_ref<const std::string&>()); }
+    catch (const Conflict&) { throw InputError("invalid_name"); }
     Json profile = {{"name",name}};
     if (allowRole && body.contains("role")) {
         if (!body["role"].is_string() || !inList(allowedRoles,body["role"].get_ref<const std::string&>()))
@@ -249,6 +233,7 @@ public:
         : store_(store), callbacks_(std::move(callbacks)) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
+        if (callbacks_.authenticate) store_.access().requireWebIdentity();
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
             .set_payload_max_length(maxProfilePayload)
@@ -313,14 +298,13 @@ public:
                         const auto taskId = queryId(req,"taskId",false);
                         const auto task = store_.task(taskId);
                         if (web::field(task,"botId") != id) return error(res,404,"task_not_found");
-                        return json(res,200,web::taskDetail(task,store_.latestTaskResult(taskId)));
+                        return json(res,200,store_.access().redactSecrets(id,web::taskDetail(task,store_.latestTaskResult(taskId))));
                     }
                     const auto before = queryId(req,"before",true);
-                    if (req.path == "/api/peer-conversation" && !store_.access().permitsPerson(web::person(callbacks_,req),req.get_param_value("peer"),Role::view)) return error(res,403,"access_denied");
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
-                    if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
-                    else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
-                    else json(res,200,web::sessions(store_,id,before));
+                    if (req.path == "/api/view") json(res,200,store_.access().redactSecrets(id,web::botView(store_,*bot)));
+                    else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
+                    else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
             });
@@ -411,13 +395,15 @@ private:
                 if (!store_.access().permitsPerson(web::person(callbacks_,req),botId,Role::admin)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false,false);
+                if (store_.access().redactSecrets(botId,parsed.profile) != parsed.profile)
+                    return error(res,400,"invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
-                return json(res,200,web::botSettings(saved));
+                return json(res,200,store_.access().redactSecrets(botId,web::botSettings(saved)));
             }
             if (!web::person(callbacks_,req).adminRoot) return error(res,403,"access_denied");
             auto parsed = parseBotProfile(body,true,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
-            return json(res,201,web::botSettings(created));
+            return json(res,201,store_.access().redactSecrets(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
@@ -425,6 +411,7 @@ private:
     Json bots() const {
         auto list = callbacks_.bots();
         if (!list.is_array()) throw std::runtime_error("Bot descriptors must be an array");
+        for (auto& bot : list) bot = store_.access().redactSecrets(web::field(bot,"id"),bot);
         return list;
     }
 
@@ -463,7 +450,9 @@ private:
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
-            for (const auto& id : connections[web::field(bot,"id")]) entries.push_back({{"id",id}});
+            const auto id = web::field(bot,"id");
+            for (const auto& peer : connections[id]) entries.push_back({{"id",peer}});
+            bot = store_.access().redactSecrets(id,bot);
         }
         return list;
     }
@@ -473,13 +462,16 @@ private:
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
+        if (!store_.access().permitsPerson(web::person(callbacks_,req),peer,Role::view))
+            return error(res,403,"access_denied");
         const bool configured = botById(known,peer) != nullptr;
         if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
             const auto partners = store_.peerPartners(bot);
             if (std::ranges::find(partners,peer) == partners.end())
                 return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         }
-        json(res,200,web::peerConversation(store_,bot,peer,before));
+        const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before));
+        json(res,200,store_.access().redactSecrets(peer,history));
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {

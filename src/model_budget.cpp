@@ -75,31 +75,33 @@ void Store::Impl::grantModelCall(std::string_view budget) {
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
 }
 
-Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemptId) {
+Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+    const auto scrub = redactor(bot);
     Decision decision;
     try {
         auto safe = input;
-        safe.task = secrets.redactSecrets(input.task);
-        safe.event = secrets.redactSecrets(input.event);
-        safe.history = secrets.redactSecrets(input.history);
-        safe.evidence = secrets.redactSecrets(input.evidence);
-        safe.config = secrets.redactSecrets(input.config);
-        safe.notes.soul = secrets.redactSecrets(input.notes.soul).get<std::string>();
-        safe.notes.memory = secrets.redactSecrets(input.notes.memory).get<std::string>();
-        safe.feedback = secrets.redactSecrets(input.feedback).get<std::string>();
+        safe.task = scrub.record(input.task);
+        safe.event = scrub.record(input.event);
+        safe.history = scrub.record(input.history);
+        safe.evidence = scrub.record(input.evidence);
+        safe.config = scrub.record(input.config,SecretRedactor::Fields::external);
+        safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
+        safe.feedback = scrub.text(input.feedback);
         decision = model.decide(safe);
-        decision.args = secrets.redactSecrets(decision.args);
-        decision.reason = secrets.redactSecrets(decision.reason).get<std::string>();
-        decision.tool = secrets.redactSecrets(decision.tool).get<std::string>();
-        decision.usage = secrets.redactSecrets(decision.usage);
+        for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
+        decision.reason = scrub.text(decision.reason);
+        if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
+            decision.tool = scrub.text(decision.tool);
+        decision.usage = scrub.payload(decision.usage);
     } catch (const ModelError& error) {
-        if (!error.usage.empty()) {
+        auto usage = scrub.payload(error.usage);
+        if (!usage.empty()) {
             std::lock_guard lock(mutex);
-            exec("UPDATE model_attempts SET usage=? WHERE id=?",{secrets.redactSecrets(error.usage),attemptId});
+            exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
-        throw ModelError(secrets.redactSecrets(std::string(error.what())).get<std::string>(),error.transient,secrets.redactSecrets(error.usage));
+        throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
     } catch (const std::exception& error) {
-        throw ModelError(secrets.redactSecrets(std::string(error.what())).get<std::string>(),false);
+        throw ModelError(scrub.text(error.what()),false);
     }
     if (!decision.usage.empty()) {
         std::lock_guard lock(mutex);

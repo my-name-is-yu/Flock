@@ -80,9 +80,11 @@ The Bot normally evaluates the Session's final report. To compare decisions base
 
 ### Bot resource authorization
 
-Set `enforceAccess` to `true` in a Bot's config to require grants from its
-first Session. Configuring a Bot's first person or resource grant also enables
-checks for its existing tasks. Set `services` and `mcpServers` to arrays of
+Grant the Bot the environment’s `launch` operation before starting its first
+Session. A Bot can read its own Sessions. To share another Session, grant
+`session:read` on the exact environment and thread. Use `Scope::sessionRead`
+in C++, or the compact JSON pair `["environment-id","thread-id"]` as the resource
+ID in settings. T3 must permit each read. Set `services` and `mcpServers` to arrays of
 connection names for the conversation tools. Manage grants and protected input
 from **Manage access and credentials** in Bot settings.
 
@@ -91,7 +93,8 @@ Adapters that perform resource operations should use the contracts in
 Session's environment and Run reference to `Access::executeSessionResource`,
 together with the exact scope, the upstream permission check and the action.
 Flock resolves the Run's owning task, checks current grants, and journals the
-completed action. The transport must establish the calling Run's identity.
+completed action. The execution callback receives the verified owning task ID for
+resolving additional scoped resources. The transport must establish the calling Run's identity.
 A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
 adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
 External adapters must call these checks for each protected operation.

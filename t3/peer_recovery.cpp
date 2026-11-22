@@ -1,3 +1,4 @@
+#include "flock/access.hpp"
 #include "internal.hpp"
 
 #include <iostream>
@@ -61,6 +62,7 @@ int main(int argc, char** argv) {
                 check(http(origin + "/fixture","POST",{{"Content-Type","application/json"}},body).status == 200,
                       "fixture rejected OAuth");
             });
+            store.access().resourceGrant({"fixture",true},"verifier",{"environment","env-1","launch"},GrantChange::grant);
             store.submit({"release","Check the fixture","env-1","project"});
         } else check(phase == "recover","unknown recovery phase");
 

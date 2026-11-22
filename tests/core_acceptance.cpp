@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -190,6 +190,11 @@ struct Fixture {
         if (!path) throw std::runtime_error("Cannot create test directory");
         directory = path;
         restart();
+        for (auto bot : {"alpha","beta"}) {
+            for (auto env : {"e","cloud"})
+                store->access().resourceGrant({"fixture",true},bot,{"environment",env,"launch"},GrantChange::grant);
+            store->access().resourceGrant({"fixture",true},bot,Scope::sessionRead("e","thread-1"),GrantChange::grant);
+        }
     }
     ~Fixture() {
         runtime.reset();
@@ -668,7 +673,7 @@ void peerWorkAndRestart() {
     check(f.t3.reads == 1 && f.logs(root,"completed") == 0,"reading evidence did not leave a result to evaluate");
     const auto& read = f.t3.readRequests.back();
     check(read.environmentId == "e" && read.threadId == "thread-1" && read.runId == "run-1-result" &&
-          read.config.at("model") == "beta-model","peer evidence did not read the recipient's result with its own settings");
+          read.config == f.task(root).at("config"),"peer evidence did not use the reading Bot's settings");
     f.restart();
     f.reach(root,"completed");
     f.wait(unrelated,"user_question");
@@ -1640,6 +1645,41 @@ void inferenceInvalidatedByCancel() {
     f.reach(id,"cancelled");
     check(f.t3.launches == 0 && f.logs(id,"decision") == 0,"cancelled inference committed");
 }
+void prefillWithoutGrant() {
+    Fixture f;
+    f.read = "prefill";
+    f.restart();
+    auto access = f.store->access();
+    access.resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    for (const auto& [name,token] : std::map<std::string,std::string>{{"first","result"},{"second","complete"}}) {
+        auto request = access.requestSecret("alpha",{name});
+        access.submitSecret({"fixture",true},"alpha",request,token);
+    }
+    const std::string hidden = "fixture-hidden-question";
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"question-token"}),hidden);
+    const auto id = f.submit();
+    f.model.script = [&](const ModelInput& in) {
+        if (in.event.at("kind")=="intake") return work();
+        if (in.event.at("kind")=="question") {
+            check(in.event.dump().find(hidden)==std::string::npos,"Session question reached the model with a secret");
+            return reply();
+        }
+        check(in.event.at("kind")=="result" && in.event.at("report")=="checked" && in.evidence.size()==1,
+              "prefill damaged the settled report or control fields");
+        return complete();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.t3.runs.at("run-1").question.fields.at(0)["prompt"] = hidden;
+    f.runtime->tick();
+    check(f.task(id).at("question").at("fields").at(0).at("prompt")=="[redacted]" &&
+          f.store->history(id).dump().find(hidden)==std::string::npos,"raw question persisted in Task or journal");
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.reads==1,"owner could not read its own Session without an explicit share");
+}
+
 }
 
 int main() {
@@ -1649,7 +1689,7 @@ int main() {
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
-            {"history reading restart",evidenceResume},
+            {"history reading restart",evidenceResume},{"prefill without a read grant",prefillWithoutGrant},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",revisionWaitsForPeerClarification},

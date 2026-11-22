@@ -194,6 +194,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
             [&](std::string_view botId) { return bots.avatarImage(botId); },
             options.peers,
             identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
+            [&](const BotChange& change) { bots.apply(change); },
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

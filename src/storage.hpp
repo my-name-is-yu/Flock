@@ -31,17 +31,39 @@ struct PeerExchange {
 
 struct TaskChange { std::string intent, doneWhen, environment; };
 
+class SecretStore {
+public:
+    explicit SecretStore(const std::filesystem::path& stateDirectory);
+    ~SecretStore();
+    SecretStore(const SecretStore&) = delete;
+    void insert(const SecretRef&, std::string_view value);
+    std::string read(const SecretRef&) const;
+private:
+    int stateDirectory_;
+};
+
+class SecretRedactor {
+public:
+    explicit SecretRedactor(std::vector<std::string> values);
+    std::string text(const std::string&) const;
+    Json payload(const Json&) const;
+    enum class Fields { protocol, external };
+    Json record(Json, Fields = Fields::protocol) const;
+    void requirePublic(const Json&) const;
+private:
+    std::vector<std::string> values_;
+};
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
-    SecretStore secrets{path.parent_path() / "secrets"};
+    SecretStore secrets{path.parent_path()};
     void migrateAccess();
-    bool managedAccess(const Json& task) const;
-    bool runtimePermits(const Json& task, const Scope&);
+    SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
-    Json environmentSettings(std::string_view bot, std::string_view environment, Json config) const;
+    Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
     explicit Impl(std::filesystem::path path);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
@@ -57,7 +79,7 @@ struct Store::Impl {
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     void grantModelCall(std::string_view budget);
-    Decision callModel(Model&, const ModelInput&, Id attemptId);
+    Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);

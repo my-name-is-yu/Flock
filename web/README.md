@@ -24,9 +24,14 @@ routes require the usual same-origin JSON mutation headers. Grant mutations use
 `botId`, `action` (grant or revoke) and either `person` and `role` or
 `resourceKind`, `resourceId` and `operation`. Decisions use a saved `requestId`
 and boolean `approve`. Protected input uses a saved `requestId` and `value`.
+Supplying a named secret requires Bot admin access and personal authority for
+that secret, or a root identity. The Bot needs its own `secret:use` grant to
+resolve the value.
 
 A root can assign a person's delegation authority with `POST /api/access/person-scope`
 using `botId`, `person`, `action` and the exact resource tuple. An ordinary
 administrator needs both admin access to the receiving Bot and personal authority
-for the resource operation to approve it. Bot change decisions record human
-approval for subsequent profile administration.
+for the resource operation to approve it. Approving a Bot change applies the
+saved name to the exact target ID. Creation requires a root identity. Rename
+requires admin access to the requesting and target Bots. If the profile write
+fails after approval, use **Apply approved change** to retry.

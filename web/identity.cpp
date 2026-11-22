@@ -9,7 +9,7 @@ std::function<Person(std::string_view)> webIdentities(const std::filesystem::pat
     struct Close {int fd; ~Close() {if (fd>=0) close(fd);} } closeFile{fd};
     struct stat info{};
     if (fd<0 || fstat(fd,&info) || !S_ISREG(info.st_mode) || info.st_uid!=geteuid() ||
-        (info.st_mode & 0077) || info.st_size<=0 || info.st_size>65536)
+        (info.st_mode & 07777)!=0600 || info.st_size<=0 || info.st_size>65536)
         throw Conflict("Web identities require an owner-only regular file");
     std::string data(info.st_size,'\0');
     size_t offset=0;
@@ -26,7 +26,9 @@ std::function<Person(std::string_view)> webIdentities(const std::filesystem::pat
         try {
             const auto credential=item.at("authorization").get<std::string>();
             Person principal{item.at("person").get<std::string>(),item.value("adminRoot",false)};
-            if (principal.id.empty() || credential.size()<16 || !people.emplace(credential,principal).second)
+            if (principal.id.empty() || credential.size()<16 ||
+                (!credential.starts_with("Basic ") && !credential.starts_with("Bearer ")) ||
+                credential.find_first_of("\r\n")!=credential.npos || !people.emplace(credential,principal).second)
                 throw Conflict("Invalid Web identity");
         } catch (const Json::exception&) { throw Conflict("Invalid Web identity"); }
     }

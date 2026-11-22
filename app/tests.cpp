@@ -176,6 +176,8 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db);
         Runtime runtime(store,model,t3,notes);
+        for (auto bot : {"first","second"})
+            store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
         runtime.tick();
@@ -281,6 +283,8 @@ void notesAcrossConversationAndWork() {
     createBot(folder / "second",botConfig("second-model"),second.soul,second.memory);
     const Bots bots(folder);
     Store store(temp.path / "tasks.db");
+    for (auto bot : {"first","second"})
+        store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
     NotesT3 t3;
     t3.finished = true;
     std::optional<std::string> noteReadError;
@@ -445,8 +449,9 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
-                   "message_session","interrupt_session","read_result","find_tasks","reply","list_grants","request_access","list_secrets","request_secret_input","list_connections",
-                                         "check_environment_readiness","update_bot_settings","request_bot_change"};
+                   "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
+                   "request_access","list_secrets","request_secret_input","list_connections",
+                   "check_environment_readiness","update_bot_settings","request_bot_change"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
@@ -465,6 +470,14 @@ void responseContract() {
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
+    for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
+        check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
+    check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
+          turnTool("update_bot_settings").at("properties").at("runTimeoutSeconds").at("maximum")==2147483647 &&
+          turnTool("request_bot_change").at("required")==Json::array({"reason","operation","targetBotId","name"}) &&
+          turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}) &&
+          turnTool("request_access").at("properties").at("resourceKind").at("enum").size()==resourceOperations().size(),
+          "access request and settings schemas do not match dispatch");
     const auto& turnPrompt = turn.at("instructions").get_ref<const std::string&>();
     check(turnPrompt.find("You are a Flock Bot talking with your user") != std::string::npos &&
           turnPrompt.find("SOUL (soul) and MEMORY (memory)") != std::string::npos &&
@@ -515,12 +528,14 @@ void responseContract() {
 
     const Json call = {{"type","function_call"},{"name","complete"},{"namespace","flock"},{"status","completed"},
         {"arguments",R"({"reason":"Evidence provided","report":"Done"})"}};
-    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),{"complete"});
+    input.tools = {"complete"};
+    const auto completeRequest = responseRequest(input);
+    const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
-    rejects<ModelError>([&] { responseDecision(Json::array({call,call}),{"complete"}); },"multiple tools accepted");
-    rejects<ModelError>([&] { responseDecision(Json::array({call}),{"follow_up"}); },"state-invalid tool accepted");
-    rejects<ModelError>([] { responseDecision(Json::array(),{"complete"}); },"missing tool accepted");
+    rejects<ModelError>([&] { responseDecision(Json::array({call,call}),completeRequest); },"multiple tools accepted");
+    rejects<ModelError>([&] { responseDecision(Json::array({call}),forwardRequest); },"state-invalid tool accepted");
+    rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
 }
 
 class AcceptanceModel final : public Model {
@@ -556,6 +571,7 @@ void acceptanceRunner() {
 void fixedDemoWithUserCriteriaAndContinuation() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
+    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     struct ChangeModel final : Model {
         std::string tool;
         Json args;
@@ -624,6 +640,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
 void fixedDemoFollowUpKeepsTheExplainedResult() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
+    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
@@ -649,6 +666,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
 void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
+    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });

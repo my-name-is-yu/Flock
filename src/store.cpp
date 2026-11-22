@@ -69,7 +69,6 @@ RunRef runRef(const Json& data) {
 }
 
 Store::Impl::Impl(std::filesystem::path file) : path(std::move(file)) {
-    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
     try {
         if (rc != SQLITE_OK) sqlError(db);
@@ -186,7 +185,7 @@ Json Store::Impl::queueBlocker(Id id) const {
     return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
-    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, secrets.redactSecrets(data)});
+    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
     return last();
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
@@ -223,7 +222,7 @@ void Store::Impl::requestCancellation(Json& task) {
 }
 
 Id Store::Impl::event(Json& task, std::string_view key, Json data) {
-    exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task["id"], key, secrets.redactSecrets(data)});
+    exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task["id"], key, data});
     if (!sqlite3_changes(db)) return 0;
     const auto id = last();
     task["eventId"] = id;
@@ -247,7 +246,6 @@ void Store::Impl::consumeEvent(const Json& task) {
 }
 void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
-    data = secrets.redactSecrets(data);
     data["reason"] = reason;
     data["eventId"] = task.value("eventId", Id{});
     data["run"] = task["activeRun"];
@@ -304,9 +302,11 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+    const auto scrub = redactor(item.botId);
+    scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.scheduleId,item.config});
     modelCallLimit(item.config);
-    Json data = {{"botId", item.botId}, {"request", secrets.redactSecrets(item.request)}, {"environmentId", item.environmentId},
-        {"projectId", item.projectId}, {"config", environmentSettings(item.botId,item.environmentId,item.config)}, {"scheduleId", item.scheduleId},
+    Json data = {{"botId", item.botId}, {"request", scrub.text(item.request)}, {"environmentId", item.environmentId},
+        {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
         {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
@@ -327,7 +327,7 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
     }
     const auto id = last();
     if (peerKind.empty())
-        journal(id, "request", {{"text",item.request},
+        journal(id, "request", {{"text",data.at("request")},
             {"source",sourceMessageId ? "conversation" : (item.scheduleId.empty() ? "manual" : "cron")},
             {"scheduleId",item.scheduleId},{"scheduledAt",item.scheduledAt},{"messageId",sourceMessageId}});
     return id;
@@ -344,7 +344,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    p_->operate(id,waitId,operation,p_->secrets.redactSecrets(data));
+    p_->operate(id,waitId,operation,p_->redactor(field(p_->load(id),"botId")).payload(data));
     transaction.commit();
 }
 

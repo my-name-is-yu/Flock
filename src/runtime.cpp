@@ -108,6 +108,7 @@ void validateAnswers(const Json& fields, const Json& answers) {
 
 struct Runtime::Impl {
     Store::Impl& db;
+    Access access;
     Model& model;
     T3& t3;
     NotesLoader notes;
@@ -117,8 +118,8 @@ struct Runtime::Impl {
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
-    Impl(Store::Impl& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
-        : db(store), model(m), t3(adapter),
+    Impl(Store& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
+        : db(*store.p_), access(store.access()), model(m), t3(adapter),
           notes([load = std::move(loader)](std::string_view botId) {
               constexpr auto limit = 8192;
               auto bot = load(botId);
@@ -344,7 +345,18 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
 
     Observation observe(const Json& task) {
         try {
-            return t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
+            auto observed = t3.observe(field(task,"environmentId"),task["config"],runRef(task["activeRun"]));
+            const auto scrub = db.redactor(field(task,"botId"));
+            scrub.requirePublic(observed.question.requestId);
+            if (scrub.text(observed.resultRunId)!=observed.resultRunId) observed.resultRunId.clear();
+            if (scrub.text(observed.itemId)!=observed.itemId) observed.itemId.clear();
+            observed.question.fields = scrub.payload(observed.question.fields);
+            observed.report = scrub.text(observed.report);
+            observed.detail = scrub.text(observed.detail);
+            if (observed.status!="auth" && observed.status!="completed" && observed.status!="failed" &&
+                observed.status!="cancelled" && observed.status!="interrupted" && observed.status!="rolled_back")
+                observed.status = scrub.text(observed.status);
+            return observed;
         } catch (const std::exception&) {
             Observation observation;
             observation.kind = Observation::Kind::Unavailable;
@@ -590,6 +602,10 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     void applyDelivery(Id id, const Json& action, Delivery outcome) {
         changeTask(id,[&](Json& task) {
             if (task["actionId"] != action["id"] || terminal(task)) return false;
+            const auto scrub = db.redactor(field(task,"botId"));
+            if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
+                outcome = {Delivery::Kind::Unknown,{},"T3 returned a protected Run identifier"};
+            outcome.detail = scrub.text(outcome.detail);
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
             if (outcome.kind == Delivery::Kind::Accepted && !reply && hasRun(outcome.run) &&
@@ -669,7 +685,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             } else {
                 const auto launchAllowed = [&] {
                     return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
-                           db.runtimePermits(task,{"environment",cmd.environmentId,"launch"});
+                           access.permits(cmd.ownerBotId,{"environment",cmd.environmentId,"launch"},true);
                 };
                 const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in /settings/"+cmd.ownerBotId+"/environment",true};
                 if (!launchAllowed()) {
@@ -684,7 +700,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (!change(task,[&](Json& current) {
                     db.exec("UPDATE outbox SET phase='started',auth_generation=? WHERE id=?", {cmd.authGeneration,action["id"]});
                     if (cmd.tool != "answer_session_question" && current["deadline"] == 0)
-                        current["deadline"] = options.clock() + current["config"].value("runTimeoutSeconds",1800);
+                        current["deadline"] = options.clock() + db.environmentTimeout(cmd.ownerBotId,cmd.environmentId,current.at("config"));
                     db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
                     return true;
                 })) return;
@@ -693,7 +709,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
-        outcome.detail = db.secrets.redactSecrets(outcome.detail).get<std::string>();
         applyDelivery(id,action,std::move(outcome));
     }
 
@@ -730,7 +745,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     void failure(const Json& task, const Json& event, std::string_view detail, bool transient) {
         change(task,[&](Json& current) {
             const auto attempts = event["failures"].get<int>() + 1;
-            const auto why = bounded(detail,2048);
+            const auto why = bounded(db.redactor(field(task,"botId")).text(std::string(detail)),2048);
             db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
                     {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
             db.journal(current["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
@@ -746,20 +761,22 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         return args.value("offset",std::size_t{0});
     }
 
-    Json readExcerpt(const ReadRequest& req) {
+    Json readExcerpt(std::string_view bot, const ReadRequest& req) {
+        const auto scrub = db.redactor(bot);
         const auto excerpt = [&] {
             try {
                 return t3.read(req);
             } catch (const ModelError& error) {
-                throw HistoryUnavailable(error.what(),error.transient);
+                throw HistoryUnavailable(scrub.text(error.what()),error.transient);
             } catch (const std::exception& error) {
-                throw HistoryUnavailable(error.what(),false);
+                throw HistoryUnavailable(scrub.text(error.what()),false);
             }
         }();
         if ((!excerpt.threadId.empty() && excerpt.threadId != req.threadId) ||
             (!excerpt.runId.empty() && excerpt.runId != req.runId))
             throw Conflict("History source does not match the requested Run");
-        const auto text = bounded(db.secrets.redactSecrets(excerpt.text).get<std::string>(),8192);
+        scrub.requirePublic({excerpt.itemId,excerpt.nextCursor});
+        const auto text = bounded(scrub.text(excerpt.text),8192);
         return {{"environmentId",req.environmentId},{"threadId",req.threadId},{"runId",req.runId},
                 {"itemId",excerpt.itemId},{"text",text},{"more",excerpt.more || text.size() < excerpt.text.size()},
                 {"itemTruncated",excerpt.nextOffset > req.offset || text.size() < excerpt.text.size()},
@@ -790,8 +807,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (row.next()) throw Conflict("History reference matches more than one Session");
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("History reference does not belong to this task");
-        if (!db.runtimePermits(task,{"session",req.threadId,"read"})) throw Conflict("Session read access required");
-        auto entry = readExcerpt(req);
+        if (!access.permits(field(task,"botId"),Scope::sessionRead(req.environmentId,req.threadId),true)) throw Conflict("Session read access required");
+        auto entry = readExcerpt(field(task,"botId"),req);
         return change(task,[&](Json& current) {
             auto evidence = event["evidence"];
             evidence.push_back(entry);
@@ -810,6 +827,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             return PrefillResult::NotNeeded;
         const auto& report = event.contains("sessionResult") ? event["sessionResult"] : event;
         const auto run = runRef(report["run"]);
+        if (!access.permits(field(task,"botId"),Scope::sessionRead(report.value("environmentId",field(task,"environmentId")),run.threadId),true))
+            return PrefillResult::NotNeeded;
         try {
             readEvidence(task,event,{{"threadId",run.threadId},{"runId",run.runId},{"view","activity"}});
             return PrefillResult::Persisted;
@@ -1029,7 +1048,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         peer.intake.scheduleId.clear();
         peer.intake.scheduledAt = 0;
-        if (db.managedAccess(sender)) peer.intake.config["enforceAccess"] = true;
         const auto id = db.submit(peer.intake,0,nullptr,true);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
@@ -1140,14 +1158,14 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         req.offset = readOffset(args);
         {
             std::lock_guard lock(db.mutex);
-            auto row = db.query("SELECT recipient_task FROM peer_exchanges WHERE id=? AND sender_task=? AND last_message=?",
+            auto row = db.query("SELECT 1 FROM peer_exchanges WHERE id=? AND sender_task=? AND last_message=?",
                                 {event["exchangeId"],task["id"],messageId});
             if (!row.next()) throw Conflict("The Bot result does not belong to this task");
-            req.config = db.managedAccess(task) ? task.at("config") : db.load(row.number(0))["config"];
+            req.config = task.at("config");
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("The Bot result has no readable Run");
-        if (!db.runtimePermits(task,{"session",req.threadId,"read"})) throw Conflict("Session read access required");
-        auto entry = readExcerpt(req);
+        if (!access.permits(field(task,"botId"),Scope::sessionRead(req.environmentId,req.threadId),true)) throw Conflict("Session read access required");
+        auto entry = readExcerpt(field(task,"botId"),req);
         entry["messageId"] = messageId;
         entry["exchangeId"] = event["exchangeId"];
         change(task,[&](Json& current) {
@@ -1432,7 +1450,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 transaction.commit();
             }
             if (!attempt) return;
-            const Decision decision = db.callModel(model,
+            const Decision decision = db.callModel(field(task,"botId"),model,
                 {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"]},attempt);
             event["evidence"] = evidence;
             if (!task["activeRun"].is_null()) {
@@ -1486,7 +1504,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
 };
 
 Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(*store.p_,model,t3,std::move(notes),std::move(options))) {}
+    : p_(std::make_unique<Impl>(store,model,t3,std::move(notes),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
