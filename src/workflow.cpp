@@ -272,8 +272,7 @@ void Store::Impl::advanceWorkflows(Seconds now) {
     }
     auto ready = query(R"SQL(WITH ready AS MATERIALIZED (
         SELECT s.workflow_id,s.spec,w.bot_id,w.routing,w.message_id,s.instruction,
-               coalesce(r.intent,json_extract(s.spec,'$.request')),
-               coalesce(r.done_when,json_extract(s.spec,'$.request')),
+               r.id,r.intent,r.done_when,
                coalesce(r.source_message_id,w.message_id)
         FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
         LEFT JOIN task_revisions r ON r.id=json_extract(s.instruction,'$.priorRevisionId')
@@ -307,13 +306,16 @@ void Store::Impl::advanceWorkflows(Seconds now) {
             exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?",{id,spec.at("stageId")});
             continue;
         }
-        const auto taskId = startConversationTask(ready.json(3),ready.string(2),field(spec,"request"),"",ready.number(4),nullptr,false);
+        const auto request = field(spec,"request");
+        const auto taskId = startConversationTask(ready.json(3),ready.string(2),request,"",ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");
         task["sourceResultRefs"] = std::move(sources);
         task["inputArtifactVersion"] = input;
-        addRevision(task,ready.string(6),ready.string(7),ready.number(8));
+        const bool hasPriorRevision = ready.number(6) != 0;
+        addRevision(task,hasPriorRevision ? ready.string(7) : request,
+                    hasPriorRevision ? ready.string(8) : request,ready.number(9));
         if (!ready.string(5).empty()) {
             const auto next = ready.json(5);
             acceptInstruction(task,next.at("messageId"),next.at("step"),
@@ -326,10 +328,10 @@ void Store::Impl::advanceWorkflows(Seconds now) {
 }
 
 void Store::Impl::appendStageRequirements(std::string& instruction, const Json& task) const {
-    auto stage = query("SELECT json_extract(s.spec,'$.role'),s.input,w.request FROM workflow_stages s"
+    auto stage = query("SELECT s.spec,s.input,w.request FROM workflow_stages s"
                        " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?", {task.at("id")});
     if (!stage.next()) throw Conflict("Missing workflow stage assignment");
-    const auto role = stage.string(0), pin = stage.string(1);
+    const auto role = field(stage.json(0),"role"), pin = stage.string(1);
     if (role=="verify") instruction += "\n\nRequested change: " + stage.string(2);
     if (!pin.empty()) instruction += "\n\nPinned input artifact version: " + pin;
     if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";

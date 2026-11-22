@@ -113,6 +113,21 @@ struct Fixture {
 
 const std::string shaA(40,'a'), shaB(40,'b');
 
+void stageRequestKeepsEmbeddedNul() {
+    Fixture f;
+    std::string request(1,'\0');
+    request += "Compare the bytes after the marker";
+    f.call("start_workflow",{{"request","Inspect the binary marker"},{"stages",Json::array({
+        {{"stageId","inspect"},{"role","collect"},{"request",request}}})}});
+    f.ticks(2);
+    const auto task = f.store->task(f.status()["stages"][0]["taskId"]);
+    require(task["request"]==request && task["intent"]==request && task["doneWhen"]==request,
+            "stage request changed before the first revision was saved");
+    require(f.t3.commands.size()==1 &&
+            f.t3.commands.front().instruction.find("Task intent:\n"+request+"\n\nCompletion criteria:\n"+request)!=std::string::npos,
+            "stage dispatch lost the request bytes after the marker");
+}
+
 void verifyAfterRestart(bool advance) {
     Fixture f;
     const Id id = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run tests"}}).at("workflowId");
@@ -557,6 +572,7 @@ int main() {
     try {
         verifyAfterRestart(false);
         verifyAfterRestart(true);
+        stageRequestKeepsEmbeddedNul();
         reviseQueuedVerifier();
         rerunRevisedDependentStage();
         rejectInvalidGraphAndArtifact();
