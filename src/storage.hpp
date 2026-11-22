@@ -64,7 +64,7 @@ struct Store::Impl {
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
-    void migrateAccess();
+    void initializeAccessSchema();
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);

@@ -168,7 +168,7 @@ LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=t
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-        migrateAccess();
+        initializeAccessSchema();
         migrateConversation();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");

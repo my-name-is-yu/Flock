@@ -11,7 +11,7 @@ enum class GrantChange { grant, revoke };
 enum class Role { view = 1, decide, admin };
 struct Person {
     std::string id;
-    bool adminRoot = false; // Assigned by the trusted host, never deserialized from a request.
+    bool adminRoot = false;
     auto operator<=>(const Person&) const = default;
 };
 struct Scope {
