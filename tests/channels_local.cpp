@@ -23,6 +23,14 @@ void rejects(const std::function<void()>& action) {
     throw std::runtime_error("Expected rejection");
 }
 
+void channelAttachmentEncoding() {
+    check(decodeAttachment("Zg==",1) == "f" && decodeAttachment("Zm8=",2) == "fo",
+          "Canonical channel attachments did not decode at the size limit");
+    for (auto encoded : {"Zh==","Zm9=","Zg=A","Zg==AAAA","Zg="})
+        rejects([&] { decodeAttachment(encoded,16); });
+    rejects([] { decodeAttachment("Zm8=",1); });
+}
+
 struct Temp {
     std::filesystem::path path = std::filesystem::temp_directory_path() / ("flock-channels-" + std::to_string(unixTime()) +
         "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -695,6 +703,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
 
 int main() {
     try {
+        channelAttachmentEncoding();
         Temp temp;
         const auto path = temp.path / "notes";
         std::ofstream(path) << "fixture text";

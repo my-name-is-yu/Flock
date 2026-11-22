@@ -1,6 +1,6 @@
 #include "storage.hpp"
+#include "flock/detail/base64.hpp"
 
-#include <array>
 #include <csetjmp>
 #include <jpeglib.h>
 #include <png.h>
@@ -8,31 +8,15 @@
 
 namespace flockv0 {
 namespace {
-constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+constexpr std::size_t maxEncodedSize = 88000;
 
-std::string decodeAttachment(std::string_view base64) {
-    if (base64.empty() || base64.size() > 88000 || base64.size() % 4 != 0)
+std::string decodeAttachment(std::string_view encoded) {
+    if (encoded.size() > maxEncodedSize || !base64::decodedSize(encoded))
         throw Conflict("Attachment exceeds the size limit or has invalid base64 data");
-    std::string bytes;
-    bytes.reserve(base64.size()/4*3);
-    for (std::size_t pos = 0; pos < base64.size(); pos += 4) {
-        const auto block = base64.substr(pos,4);
-        std::array<unsigned,4> sextets{};
-        unsigned padding = 0;
-        for (unsigned i = 0; i < block.size(); ++i) {
-            if (block[i] == '=' && i >= 2 && pos+4 == base64.size()) { ++padding; continue; }
-            const auto value = alphabet.find(block[i]);
-            if (value == alphabet.npos || padding) throw Conflict("Invalid attachment base64 data");
-            sextets[i] = static_cast<unsigned>(value);
-        }
-        if ((padding == 2 && (sextets[1] & 15)) || (padding == 1 && (sextets[2] & 3)))
-            throw Conflict("Invalid attachment base64 data");
-        bytes += static_cast<char>((sextets[0] << 2) | (sextets[1] >> 4));
-        if (padding < 2) bytes += static_cast<char>((sextets[1] << 4) | (sextets[2] >> 2));
-        if (padding == 0) bytes += static_cast<char>((sextets[2] << 6) | sextets[3]);
-    }
-    if (bytes.size() > 65536) throw Conflict("Attachment exceeds the size limit");
-    return bytes;
+    auto bytes = base64::decode(encoded,base64::TrailingBits::zero);
+    if (!bytes) throw Conflict("Invalid attachment base64 data");
+    if (bytes->size() > 65536) throw Conflict("Attachment exceeds the size limit");
+    return std::move(*bytes);
 }
 
 using ImageSize = std::pair<unsigned,unsigned>;
@@ -129,7 +113,7 @@ Json metadata(const Json& value) {
     if (!value.is_object() || value.size() != 3) throw Conflict("Invalid attachment");
     const auto name = toolText(value,"name",128);
     const auto mime = toolText(value,"mimeType",64);
-    const auto bytes = decodeAttachment(toolText(value,"dataBase64",88000));
+    const auto bytes = decodeAttachment(toolText(value,"dataBase64",maxEncodedSize));
     const std::string_view data(bytes);
     Json result{{"name",name},{"mimeType",mime},{"sizeBytes",data.size()}};
     const bool png = mime == "image/png" && data.starts_with("\x89PNG\r\n\x1a\n");

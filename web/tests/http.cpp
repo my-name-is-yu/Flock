@@ -988,6 +988,16 @@ void botProfileEndpoints(const std::filesystem::path& path) {
           fetchedImage->body.starts_with("\x89PNG"),
           "GET /api/bot-avatar did not serve verified PNG");
 
+    auto noncanonicalPng = validPngBase64;
+    noncanonicalPng[noncanonicalPng.size() - 2] = 'J';
+    const auto alternate = browser.post("/api/bots",{
+        {"name","Alternate Photo"},
+        {"avatar",{{"kind","upload"},{"imageData",noncanonicalPng}}},
+    },201);
+    const auto alternateImage = browser.client.Get(alternate.at("avatar").at("imageUrl").get<std::string>());
+    check(alternateImage && alternateImage->status == 200 && alternateImage->body == fetchedImage->body,
+          "Avatar upload did not preserve compatibility with nonzero trailing Base64 bits");
+
     // Rename without re-uploading keeps imageUrl intact.
     const auto renamed = browser.post("/api/bots/profile",{
         {"botId","bot-1"},

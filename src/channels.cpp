@@ -1,5 +1,6 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "flock/detail/base64.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -9,7 +10,6 @@ namespace {
 constexpr std::size_t attachmentLimit = 4 * 1024 * 1024;
 constexpr std::size_t attachmentCount = 4;
 constexpr std::size_t artifactLimit = 256 * 1024;
-constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 std::string required(const Json& data, std::string_view key, std::size_t max) {
     auto value = field(data,key);
@@ -75,12 +75,14 @@ bool canReadAttachment(const ChannelCapabilities& caps, std::string_view mime, s
 }
 
 std::size_t decodedSize(std::string_view input) {
-    if (input.empty() || input.size() % 4 != 0) throw Conflict("Invalid attachment encoding");
-    return input.size() / 4 * 3 - input.ends_with('=') - input.ends_with("==");
+    const auto size = base64::decodedSize(input);
+    if (!size) throw Conflict("Invalid attachment encoding");
+    return size;
 }
 }
 
 std::string encodeAttachment(std::string_view bytes) {
+    using base64::alphabet;
     std::string result;
     result.reserve((bytes.size() + 2) / 3 * 4);
     for (std::size_t i = 0; i < bytes.size(); i += 3) {
@@ -96,23 +98,10 @@ std::string encodeAttachment(std::string_view bytes) {
 }
 
 std::string decodeAttachment(std::string_view input, std::size_t maxBytes) {
-    const auto size = decodedSize(input);
-    if (!size || size > maxBytes) throw Conflict("Invalid attachment size");
-    std::string result;
-    result.reserve(size);
-    for (std::size_t i = 0; i < input.size(); i += 4) {
-        unsigned value = 0;
-        for (std::size_t j = 0; j < 4; ++j) {
-            const auto digit = alphabet.find(input[i+j]);
-            if (digit == alphabet.npos && !(input[i+j] == '=' && i+j >= input.size()-(input.size()/4*3-size)))
-                throw Conflict("Invalid attachment encoding");
-            value = (value << 6) | (digit == alphabet.npos ? 0u : static_cast<unsigned>(digit));
-        }
-        for (int shift : {16,8,0})
-            if (result.size() < size) result += static_cast<char>((value >> shift) & 255);
-    }
-    if (encodeAttachment(result) != input) throw Conflict("Invalid attachment encoding");
-    return result;
+    if (decodedSize(input) > maxBytes) throw Conflict("Invalid attachment size");
+    auto bytes = base64::decode(input,base64::TrailingBits::zero);
+    if (!bytes) throw Conflict("Invalid attachment encoding");
+    return std::move(*bytes);
 }
 
 std::string_view channelName(ChannelKind kind) {

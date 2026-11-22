@@ -294,6 +294,11 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
     const auto single = submit("a",Json::array({image,audio}));
     const auto multiple = submit("b",Json::array({image,image}));
     const auto textOnly = submit("c",Json::array());
+    auto noncanonical = audio;
+    noncanonical["dataBase64"] = "SUQzAB==";
+    const auto rejected = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","bad-padding"},
+        {"text","Look at this"},{"attachments",Json::array({noncanonical})}},409);
+    check(rejected.at("error") == "message_conflict","Message attachment accepted nonzero trailing Base64 bits");
     const auto assertCounts = [](const Json& events, const std::map<Id,int>& expected) {
         auto remaining = expected;
         for (const auto& event : events) {
