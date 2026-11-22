@@ -36,6 +36,23 @@ test('restores ordinary and anchored drafts after dismissal, switching targets, 
   assert.equal(load().text, '');
 });
 
+test('replaces untouched suggestions and keeps edited replies', () => {
+  const storage = new SessionStorage();
+  const load = () => createComposerDraftStore(() => storage)('ops', null);
+  const message = { kind: 'message', messageId: 28, summary: 'Choose a branch.' };
+  let composer = load();
+  composer.openReply(message, 'main');
+  composer.openReply(message, 'release');
+  assert.equal(composer.text, 'release');
+  composer = load();
+  composer.openReply(message, 'docs');
+  assert.equal(composer.text, 'docs');
+  composer.edit('Use the docs branch once the tests pass.');
+  composer = load();
+  composer.openReply(message, 'main');
+  assert.equal(composer.text, 'Use the docs branch once the tests pass.');
+});
+
 test('separates browser sessions, authenticated people and Bots', () => {
   const storage = new SessionStorage();
   const load = () => createComposerDraftStore(() => storage);
