@@ -289,6 +289,12 @@ Store::Store(std::filesystem::path db) : p_(std::make_unique<Impl>(std::move(db)
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
+std::pair<std::int64_t,std::int64_t> Store::changeStamp() const {
+    std::lock_guard lock(p_->mutex);
+    auto version = p_->query("PRAGMA data_version");
+    return {sqlite3_total_changes64(p_->db),version.next() ? version.number(0) : 0};
+}
+
 Id Store::submit(const Intake& item) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);

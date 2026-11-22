@@ -1,4 +1,6 @@
 import { accentColor, showAvatar } from '/avatars.js';
+import { collectEventPages, mergeEventPages } from '/event-history.mjs';
+import { createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
@@ -69,7 +71,6 @@ const notices = new Map();
 const signatures = new Map();
 let bots = [];
 let listLoaded = false;
-let listGeneration = 0;
 let view = null;
 let menu = null;
 let detail = null;
@@ -205,8 +206,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0,
-    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
+    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
   else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
@@ -218,7 +219,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   save('flock-selected-bot', botId);
   elements.conversation.scrollTop = 0;
   render('bottom');
-  if (view) void refreshView(view, 'bottom');
+  if (view) void requestSync({ bot: true, dm: !!view.dm, scroll: 'bottom' });
+  subscribeToView();
 }
 function selectLocation() {
   const params = new URLSearchParams(location.search);
@@ -1245,12 +1247,11 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await refreshBots();
+    await requestSync({ list: true, bot: view?.id === savedBot.id });
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
     }
-    if (view?.id === savedBot.id) await refreshView(view);
     if (returnToSettings && view?.id === savedBot.id && view.data) {
       openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
     }
@@ -1501,15 +1502,6 @@ function render(scroll) {
 }
 
 function mergeLatest(context, latest) {
-  const { events, olderBefore } = latest;
-  const first = events[0]?.id;
-  const missedPage = first && first > context.newestEvent;
-  if (!context.events.size || missedPage) {
-    context.events.clear();
-    context.olderBefore = olderBefore;
-  }
-  for (const event of events) context.events.set(event.id, event);
-  context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
   if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
   context.data = latest;
   const reply = replies.get(context.id);
@@ -1522,61 +1514,60 @@ function mergeLatest(context, latest) {
     }
   }
 }
-async function refreshPeerConversation(context, scroll) {
+async function conversationPage(timeline, before) {
+  if (!timeline.peerId) return api(botQuery('conversation', timeline.id, before));
+  const { messages, hasOlder } = await api(peerQuery(timeline, before));
+  return { events: messages, olderBefore: hasOlder ? messages[0].id : 0 };
+}
+async function refreshPeerConversation(context) {
   const dm = context.dm;
-  const generation = ++dm.generation;
+  const isCurrent = () => context === view;
+  const readPage = before => conversationPage(dm, before);
   try {
-    const page = await api(peerQuery(dm));
-    if (context !== view || generation !== dm.generation) return;
-    const first = page.messages[0]?.id;
-    if (!dm.events.size || first > dm.newestEvent) {
-      dm.events.clear();
-      dm.olderBefore = page.hasOlder ? first : 0;
-    }
-    for (const event of page.messages) dm.events.set(event.id, event);
-    dm.newestEvent = page.messages.at(-1)?.id ?? dm.newestEvent;
+    const latest = await readPage();
+    const pages = await collectEventPages(latest, dm.newestEvent, readPage, isCurrent);
+    if (!pages || !isCurrent()) return true;
+    mergeEventPages(dm, pages);
     dm.loaded = true;
     dm.error = null;
   } catch (error) {
-    if (context !== view || generation !== dm.generation) return;
+    if (!isCurrent()) return true;
     if (!dm.loaded) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    return [403, 404].includes(error.status);
   }
-  render(scroll);
+  return true;
 }
-async function refreshView(context, scroll) {
-  const generation = ++context.generation;
-  const peerRefresh = context.dm && refreshPeerConversation(context, scroll);
+async function refreshView(context) {
+  const isCurrent = () => context === view;
   try {
     const latest = await api(botQuery('view', context.id));
-    if (context !== view || generation !== context.generation) return;
+    const pages = await collectEventPages(latest, context.newestEvent, before => conversationPage(context, before), isCurrent);
+    if (!pages || !isCurrent()) return true;
+    mergeEventPages(context, pages);
     mergeLatest(context, latest);
     setConnection('ready');
-    render(scroll);
-    if (context.openSettingsOnLoad) {
-      const botId = context.openSettingsOnLoad;
-      context.openSettingsOnLoad = null;
-      openSettingsFromMenu(botId);
-    }
+    return true;
   } catch (error) {
-    if (context !== view || generation !== context.generation) return;
-    if (error.status === 404) void refreshBots();
-    else setConnection('offline');
-  } finally {
-    await peerRefresh;
+    if (!isCurrent()) return true;
+    if (error.status === 404) {
+      void requestSync({ list: true });
+      return true;
+    }
+    setConnection('offline');
+    return false;
   }
 }
 async function refreshBots() {
-  const generation = ++listGeneration;
   try {
     const latest = await api('bots');
-    if (generation !== listGeneration) return;
     bots = latest;
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
-    render();
+    return true;
   } catch {
-    if (generation === listGeneration) setConnection('offline');
+    setConnection('offline');
+    return false;
   }
 }
 async function loadOlder() {
@@ -1587,10 +1578,9 @@ async function loadOlder() {
   if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
-    const page = await api(context.peerId ? peerQuery(context, cursor) : botQuery('conversation', context.id, cursor));
+    const { events, olderBefore } = await conversationPage(context, cursor);
     if (context !== timelineContext() || context.olderBefore !== cursor) return;
-    const events = context.peerId ? page.messages : page.events;
-    context.olderBefore = context.peerId ? (page.hasOlder ? events[0]?.id : 0) : page.olderBefore;
+    context.olderBefore = olderBefore;
     for (const event of events) context.events.set(event.id, event);
     renderTimeline('older');
   } catch {
@@ -1633,6 +1623,7 @@ async function submitOperation(context, key, payload) {
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
+  let failed = false;
   try {
     await api('operations', { botId: context.id, ...payload });
     setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
@@ -1641,8 +1632,9 @@ async function submitOperation(context, key, payload) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
     if (isOpen()) showDetailError(message);
+    failed = true;
   } finally {
-    if (view?.id === context.id) await refreshView(view);
+    if ((failed || !liveUpdates.live) && view?.id === context.id) await requestSync({ bot: true, list: true });
     pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
@@ -1668,8 +1660,8 @@ async function submit(event) {
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
-    if (showingComposer(context.id)) await refreshView(view, 'bottom');
-    void refreshBots();
+    if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
+    if (!liveUpdates.live) await requestSync({ list: true, bot: showingComposer(context.id), scroll: 'bottom' });
   } catch (error) {
     if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
@@ -1767,14 +1759,84 @@ document.addEventListener('keydown', (event) => {
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
-function refresh() {
-  if (document.hidden) return;
-  void refreshBots();
-  if (view) void refreshView(view);
+let pendingSync;
+let syncInFlight;
+let syncRetry;
+
+function requestSync({ list = false, bot = false, dm = false, scroll } = {}) {
+  if (!pendingSync || pendingSync.context !== view) {
+    pendingSync = { list: pendingSync?.list, context: view };
+  }
+  pendingSync.list ||= list;
+  pendingSync.bot ||= bot;
+  pendingSync.dm ||= dm;
+  pendingSync.scroll ??= scroll;
+  syncInFlight ??= Promise.resolve().then(async () => {
+    try {
+      while (pendingSync) {
+        const next = pendingSync;
+        pendingSync = null;
+        await syncView(next);
+      }
+    } finally {
+      syncInFlight = null;
+    }
+  });
+  return syncInFlight;
 }
+
+async function syncView({ context, list, bot, dm, scroll }) {
+  const selected = context && context === view;
+  const results = await Promise.all([
+    !list || refreshBots(),
+    !bot || !selected || refreshView(context),
+    !dm || !selected || !context.dm || refreshPeerConversation(context),
+  ]);
+  render(view === context ? scroll : undefined);
+  if (bot && view === context && context?.data && context.openSettingsOnLoad) {
+    const botId = context.openSettingsOnLoad;
+    context.openSettingsOnLoad = null;
+    openSettingsFromMenu(botId);
+  }
+  if (results.includes(false) && !document.hidden) {
+    syncRetry ??= setTimeout(syncAll, 2500);
+  }
+}
+
+function syncAll() {
+  clearTimeout(syncRetry);
+  syncRetry = null;
+  if (!document.hidden) void requestSync({ list: true, bot: !!view, dm: !!view?.dm });
+}
+
+const liveUpdates = createLiveUpdates(syncAll, (change) => {
+  const dm = view?.dm;
+  void requestSync({
+    list: change.list === true,
+    bot: !!view && change.bot === view.id,
+    dm: !!dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId,
+  });
+});
+
+function subscribeToView() {
+  if (document.hidden) {
+    liveUpdates.use(null);
+    return;
+  }
+  const params = new URLSearchParams();
+  if (view) params.set('bot', view.id);
+  if (view?.dm) params.set('peer', view.dm.peerId);
+  liveUpdates.use(params.size ? `/api/events?${params}` : '/api/events');
+}
+
+function resumeUpdates() {
+  subscribeToView();
+  syncAll();
+}
+
 render();
-refresh();
-setInterval(refresh, 2500);
-document.addEventListener('visibilitychange', refresh);
-window.addEventListener('pageshow', (event) => { if (event.persisted) refresh(); });
+resumeUpdates();
+document.addEventListener('visibilitychange', resumeUpdates);
+window.addEventListener('pagehide', () => liveUpdates.use(null));
+window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });

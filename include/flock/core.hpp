@@ -155,6 +155,8 @@ public:
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
     std::vector<std::string> peerPartners(std::string_view bot) const;
+    // A change hint for readers, covering writes on this connection and other connections.
+    std::pair<std::int64_t,std::int64_t> changeStamp() const;
     const std::filesystem::path& path() const;
 
 private:
