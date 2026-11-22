@@ -1240,7 +1240,7 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Configured recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
@@ -1442,14 +1442,22 @@ function generalContent(bot) {
     note.setAttribute('role', 'status');
     hero.append(note);
   }
+  const rows = node('div', 'settings-card settings-rows');
+  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
+  rows.append(bot.cron.length
+    ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
+    : settingsRow('Recurring requests', 'None'));
+  const access = document.createElement('a');
+  access.className = 'settings-row';
+  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
+  access.append(node('span', 'settings-row-label', 'Access and credentials'));
+  access.insertAdjacentHTML('beforeend', chevron);
+  rows.append(access);
+  if (!bot.soul) return [hero, rows];
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
-  role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
-  const schedules = node('div', 'settings-card settings-rows');
-  schedules.append(bot.cron.length
-    ? settingsRow('Configured recurring requests', `${bot.cron.length} entries`, () => selectSection('cron', true))
-    : settingsRow('Configured recurring requests', 'None'));
-  return [hero, role, schedules];
+  role.append(node('p', 'settings-soul', bot.soul));
+  return [hero, role, rows];
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
@@ -1467,12 +1475,10 @@ function cronContent(bot) {
   return [list];
 }
 function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = settingsSections[section][0];
+  // Without recurring requests there are no section tabs, so "General" would name nothing.
+  elements['detail-title'].textContent = section === 'general' && !bot.cron.length ? 'Settings' : settingsSections[section][0];
   if (section === 'cron') return cronContent(bot);
-  const access = document.createElement('a');
-  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
-  access.textContent = 'Manage access and credentials';
-  return [...generalContent(bot), access];
+  return generalContent(bot);
 }
 function waitForm(label, fields, submit, id) {
   const form = node('form', 'wait-form');
