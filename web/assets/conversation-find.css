@@ -70,4 +70,5 @@
     right: calc(clamp(.75rem, 2vw, 1.25rem) + 2.3rem);
   }
   .header-inner:has(.conversation-find-toggle:not([hidden])) .profile { max-width: min(60vw, calc(100vw - 10.5rem)); }
+  .find-results { max-height: min(15rem, 26dvh); }
 }

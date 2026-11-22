@@ -78,6 +78,7 @@ const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
+let pendingSource = null;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
@@ -223,10 +224,11 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
-    if (view.source) backToLatest();
+    if (view.source || pendingSource) backToLatest();
     else renderBots();
     return;
   }
+  pendingSource = null;
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
@@ -861,38 +863,80 @@ function sourceAction(source, label = 'Open source') {
     renderDetail();
   });
 }
+function leaveConversationSource(context) {
+  pendingSource = null;
+  if (!context.source) return false;
+  context.source = null;
+  readingPositions.delete(timelineKey(context.id));
+  return true;
+}
 function backToLatest() {
-  view.source = null;
+  leaveConversationSource(view);
   render('bottom');
   elements.conversation.scrollTop = elements.conversation.scrollHeight;
   elements.conversation.focus({ preventScroll: true });
 }
-function cardSourceAction(bot, id, close) {
-  const botId = bot.id;
-  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
-  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', async () => {
-    close();
-    selectBot(botId);
-    if (!exact) {
-      backToLatest();
-      return;
-    }
-    const context = view;
+function updateFindOverlap() {
+  const scroller = elements.conversation;
+  const overlap = findPanel.hidden ? 0 : findPanel.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top;
+  const inset = `${overlap}px`;
+  if (scroller.style.getPropertyValue('--find-overlap') !== inset) {
+    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 4;
+    scroller.style.setProperty('--find-overlap', inset);
+    if (atBottom && !view?.source) scroller.scrollTop = scroller.scrollHeight;
+  }
+  return overlap;
+}
+function focusConversationMessage(target) {
+  const scroller = elements.conversation;
+  const overlap = updateFindOverlap();
+  const viewport = scroller.getBoundingClientRect();
+  const returnSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockEnd) || 0;
+  const message = (target.querySelector('.bubble') ?? target).getBoundingClientRect();
+  const top = viewport.top + overlap + 8;
+  const bottom = viewport.bottom - returnSpace;
+  const center = top + Math.max(0, (bottom - top - message.height) / 2);
+  target.focus({ preventScroll: true });
+  scroller.scrollTop += message.top - center;
+}
+async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
+  if (context !== view || context.dm || signal?.aborted) return;
+  if (preferLoaded && context.events.has(id)) {
+    if (leaveConversationSource(context)) renderTimeline();
+  } else {
+    const request = {};
+    pendingSource = request;
     let page;
     try {
-      page = await api(botQuery('conversation', botId, id + 1));
+      page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
     } catch {}
-    if (context !== view) return;
+    if (pendingSource !== request || context !== view) return;
+    pendingSource = null;
+    if (signal?.aborted) return;
     if (!page?.events.some((event) => event.id === id)) {
       setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
       return;
     }
-    context.source = { id, bot, events: page.events };
+    if (!context.source) rememberReadingPosition(true);
+    context.source = { id, bot: bot ?? context.data.bot, events: page.events };
     renderTimeline();
-    const target = byId(`event-${id}`);
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: 'center' });
-    updateJumpToLatest();
+  }
+  const target = byId(`event-${id}`);
+  if (target) {
+    elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+    target.classList.add('conversation-source-target');
+    focusConversationMessage(target);
+  }
+  updateJumpToLatest();
+}
+function cardSourceAction(bot, id, close) {
+  const botId = bot.id;
+  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
+  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', () => {
+    close();
+    selectBot(botId);
+    if (exact) void showConversationMessage(view, id, { bot });
+    else backToLatest();
   });
 }
 function runIcon(run) {
@@ -1140,12 +1184,12 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
-function rememberReadingPosition() {
+function rememberReadingPosition(keepAtBottom = false) {
   if (view?.source) return;
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
-  if (atBottom) return;
+  if (atBottom && !keepAtBottom) return;
   const viewportTop = elements.conversation.getBoundingClientRect().top;
   const anchors = elements.timeline.querySelectorAll(':scope > [id], :scope > [data-peer-focus]');
   const anchor = [...anchors].find((row) => row.getBoundingClientRect().bottom > viewportTop);
@@ -1153,7 +1197,7 @@ function rememberReadingPosition() {
   readingPositions.set(timelineKey(context.id, context.peerId), {
     // Retain loaded pages so an older message is available when its conversation reopens.
     history: { events, olderBefore, newestEvent, historyCursor: context.data?.historyCursor },
-    top,
+    top, atBottom,
     anchorId: anchor?.id,
     peerFocus: anchor?.dataset.peerFocus,
     offset: anchor ? anchor.getBoundingClientRect().top - viewportTop : 0,
@@ -1162,6 +1206,10 @@ function rememberReadingPosition() {
 
 function restoreReadingPosition(position) {
   const scroller = elements.conversation;
+  if (position.atBottom) {
+    scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
   const anchor = position.anchorId ? byId(position.anchorId) :
     [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((row) => row.dataset.peerFocus === position.peerFocus);
   scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
@@ -1177,7 +1225,7 @@ function eventHistoryForRefresh(context) {
 
 function updateJumpToLatest() {
   const control = elements['jump-to-latest'];
-  // An earlier page opened from a card is never the latest, even when scrolled to its end.
+  // Keep the return control visible throughout a historical page.
   const hidden = !view?.source && timelineScrollPosition().atBottom;
   if (control.hidden === hidden) return;
   if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
@@ -1198,10 +1246,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   peerStatus.hidden = !olderFailed;
   peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
+  scroller.classList.toggle('historical-page', !!source);
   const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
   const focusedLink = focused?.dataset.peerFocus;
   const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
-  const position = key && readingPositions.get(key);
+  const position = !source && key && readingPositions.get(key);
   const moveScroll = () => {
     if (focusedLink) {
       const link = [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((item) => item.dataset.peerFocus === focusedLink);
@@ -1264,9 +1313,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
       taskStart: previous?.taskId !== event.taskId,
       afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
     };
-    const message = eventCard(event, timeline, place);
-    if (event.id === source?.id) message.classList.add('conversation-source-target');
-    fragment.append(message);
+    fragment.append(eventCard(event, timeline, place));
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
   appendPeerMessages();
@@ -1929,8 +1976,7 @@ async function submit(event) {
   event.preventDefault();
   const context = view;
   if (!context?.data || context.dm || elements.send.disabled) return;
-  if (context.source) {
-    context.source = null;
+  if (leaveConversationSource(context)) {
     render('bottom');
   }
   const reply = replies.get(context.id);
@@ -1962,30 +2008,17 @@ async function submit(event) {
   }
 }
 
+const findPanel = byId('conversation-find');
 const conversationFind = mountConversationFind({
   toggle: byId('find-conversation'),
-  panel: byId('conversation-find'),
+  panel: findPanel,
   readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
   describeAuthor: (context, event) => messageSide(event) === 'user' ? 'You' : context.data.bot.name,
-  async openMatch(context, id) {
-    if (context !== view || view.dm) return;
-    const target = byId(`event-${id}`);
-    if (target) {
-      target.focus({ preventScroll: true });
-      target.scrollIntoView({ block: 'center' });
-      return;
-    }
-    const selection = { kind: 'source' };
-    openDetail(selection);
-    try {
-      const { events } = await api(botQuery('conversation', context.id, id + 1));
-      selection.event = events.find(event => event.id === id);
-    } catch {}
-    if (detail !== selection || context !== view) return;
-    selection.failed = !selection.event;
-    renderDetail();
+  openMatch(context, id, signal) {
+    return showConversationMessage(context, id, { signal, preferLoaded: true });
   },
 });
+new ResizeObserver(updateFindOverlap).observe(findPanel);
 
 const savedTheme = saved('flock-theme', 'system');
 renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');
@@ -2019,6 +2052,7 @@ elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
+  pendingSource = null;
   if (view?.source) {
     backToLatest();
     return;
@@ -2028,7 +2062,7 @@ elements['jump-to-latest'].addEventListener('click', () => {
   updateJumpToLatest();
 });
 elements.conversation.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && view?.source) {
+  if (event.key === 'Escape' && view?.source && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     event.stopPropagation();
     backToLatest();

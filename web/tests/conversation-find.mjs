@@ -33,14 +33,14 @@ async function exercise(mountConversationFind) {
       if (holdRequest) return new Promise(resolve => { pending = resolve; });
       if (scope === triage) return Promise.resolve({ events: [item(3, 'Triage update')], olderBefore: 0 });
       if (!before) return Promise.resolve({ events: [item(40, 'Handoff [draft] today'),
-        item(41, 'A [redacted] value'), item(42, 'Handoff [draft]', 'bot_message')], olderBefore: 40 });
+        item(41, 'Use the [redacted] marker in exported reports.'), item(42, 'Handoff [draft]', 'bot_message')], olderBefore: 40 });
       if (before === 40) return Promise.resolve({ events: [item(11, 'Old handoff [draft] <img src=x>')], olderBefore: 11 });
       if (before === 11) return Promise.resolve({ events: [item(10, 'Third page')], olderBefore: 10 });
       if (before === 10) return Promise.resolve({ events: [item(9, 'Fourth page')], olderBefore: 9 });
       return Promise.resolve({ events: [item(7, 'Earliest handoff [draft]')], olderBefore: 0 });
     },
     describeAuthor: () => 'You',
-    openMatch: (scope, id) => opened.push([scope, id]),
+    openMatch: (scope, id, signal) => opened.push([scope, id, signal]),
   });
   function type(value) {
     input.value = value;
@@ -72,18 +72,37 @@ async function exercise(mountConversationFind) {
   await wait();
   check(status.textContent === '2 of 3 matches' && calls.at(-1).before === 9 && more.hidden,
     'Earlier search did not continue from its own cursor or settle the final count');
+  $('.find-next').click();
+  key(input, 'Enter');
+  check(opened.at(-1)[1] === 7, 'Next did not select the earliest result');
+  $('.find-previous').click();
+  key(input, 'Enter');
+  check(opened.at(-1)[1] === 11, 'Previous did not return to the older result');
 
-  type('redacted');
+  const literalQuery = 'the [redacted] marker';
+  type(literalQuery);
+  check(opened.at(-1)[2].aborted, 'Changing the query did not cancel the previous result jump');
   await wait();
   more.click();
   await wait();
-  check(status.textContent === 'No matches' && !$('.find-match'), 'A redaction placeholder became a hit');
+  check(status.textContent === '1 of 1 match' && $('.find-match mark')?.textContent === literalQuery,
+    'Find did not match the literal [redacted] text in the displayed message');
+  key(input, 'Escape', { isComposing: true });
+  check(input.value === literalQuery && !panel.hidden, 'Escape cleared Find during composition');
+  check(!key(input, 'Escape') && !panel.hidden && !input.value && !status.textContent &&
+    document.activeElement === input, 'Escape did not clear the query and keep Find focused');
   key(input, 'Escape');
   check(panel.hidden && document.activeElement === draft && draft.value === 'Unsent draft',
     'Escape did not restore the composer focus and draft');
 
-  holdRequest = true;
   toggle.click();
+  type('absent from the conversation');
+  await wait();
+  more.click();
+  await wait();
+  check(status.textContent === 'No matches' && !$('.find-match'), 'Find reported a match for an absent query');
+
+  holdRequest = true;
   type('handoff');
   await wait();
   const stale = calls.at(-1);

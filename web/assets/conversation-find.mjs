@@ -9,20 +9,15 @@ const textFields = new Map([
 function snippetFor(event, pattern) {
   const text = event.data[textFields.get(event.kind)];
   if (typeof text !== 'string') return null;
-  // Redaction placeholders describe the projection and are not message text.
-  const parts = text.split('[redacted]');
-  for (const [partIndex, part] of parts.entries()) {
-    const match = pattern.exec(part);
-    if (!match) continue;
-    const before = Array.from(part.slice(0, match.index));
-    const after = Array.from(part.slice(match.index + match[0].length));
-    return {
-      before: (partIndex || before.length > 44 ? '…' : '') + before.slice(-44).join(''),
-      match: match[0],
-      after: after.slice(0, 70).join('') + (after.length > 70 || partIndex < parts.length - 1 ? '…' : ''),
-    };
-  }
-  return null;
+  const match = pattern.exec(text);
+  if (!match) return null;
+  const before = Array.from(text.slice(0, match.index));
+  const after = Array.from(text.slice(match.index + match[0].length));
+  return {
+    before: (before.length > 44 ? '…' : '') + before.slice(-44).join(''),
+    match: match[0],
+    after: after.slice(0, 70).join('') + (after.length > 70 ? '…' : ''),
+  };
 }
 
 function element(tag, className, text = '') {
@@ -102,7 +97,7 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
       search.index = index;
       markCurrent(button);
       renderStatus();
-      openMatch(context, result.id);
+      void openMatch(context, result.id, search.controller.signal);
     });
     row.append(button);
     return row;
@@ -213,7 +208,11 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     if (shortcut && open()) event.preventDefault();
     if (event.key === 'Escape' && !panel.hidden && !document.querySelector('dialog[open]')) {
       event.preventDefault();
-      close(true);
+      if (input.value) {
+        if (panel.contains(document.activeElement)) input.focus({ preventScroll: true });
+        input.value = '';
+        query();
+      } else close(true);
     }
   });
 
