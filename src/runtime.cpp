@@ -61,6 +61,7 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
 
 struct TaskDecision : Decision {
     Json usage = Json::object();
+    Id attemptId = 0;
 };
 
 bool needsDoneWhen(const Json& task) {
@@ -1264,15 +1265,20 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (isGitTool(tool)) {
             Json result;
             try {
+                // Decisions saved before attempt IDs still replay against their original event key.
+                const auto invocation = decision.attemptId ? "attempt/" + std::to_string(decision.attemptId)
+                                                           : "event/" + event.at("id").dump();
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
-                                    "event/" + event.at("id").dump(),snapshot.at("generation").get<Id>());
+                                    invocation,snapshot.at("generation").get<Id>());
             } catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
             change(snapshot,[&](Json& current) {
                 auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
                 if (!row.next()) return false;
                 auto data = row.json(0);
                 if (!data.contains("gitResults")) data["gitResults"] = Json::array();
-                data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
+                if (result.contains("readId"))
+                    data["gitResults"].push_back({{"tool",tool},{"readId",result.at("readId")}});
+                else data["gitResults"].push_back(db.redactor(field(current,"botId")).record(
                     Json{{"tool",tool},{"result",std::move(result)}}));
                 if (data["gitResults"].size() > 4) data["gitResults"].erase(data["gitResults"].begin());
                 db.exec("UPDATE events SET data=? WHERE id=?",{data,event.at("id")});
@@ -1376,7 +1382,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage")};
+        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
+                            saved->value("attemptId",Id{0})};
     }
 
     std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
@@ -1432,14 +1439,17 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             transaction.commit();
         }
         if (!attempt) return std::nullopt;
+        if (options.gitHost && event.at("kind") == "result")
+            db.projectTaskGitReads(*options.gitHost,task,event);
         auto turn = db.callModel(field(task,"botId"),model,
             {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
              needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
         if (turn.calls.size() != 1) throw Conflict("Return one task action");
-        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage)};
+        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage),attempt};
         // Bookkeeping must not advance the generation observed by conversation turns.
         const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
-            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage},
+            {"attemptId",decision.attemptId}};
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
@@ -1508,7 +1518,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
             if (options.gitHost && task["activeRun"].is_null() && event["kind"] == "result")
-                tools.insert(tools.end(),gitTools().begin(),gitTools().end());
+                tools.insert(tools.end(),gitTools(false).begin(),gitTools(false).end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
             if (!decision)

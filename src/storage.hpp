@@ -109,6 +109,8 @@ struct Store::Impl {
     void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {});
+    void projectTaskGitReads(GitHost&, const Json& task, Json& event);
+    Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
