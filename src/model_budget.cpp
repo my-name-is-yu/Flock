@@ -73,9 +73,7 @@ std::string Store::Impl::messageModelBudget(Id messageId) {
     if (!row.next()) throw Conflict("The originating message is missing");
     const auto routing = row.json(0);
     if (auto saved = field(routing,"modelBudgetId"); !saved.empty()) return saved;
-    const auto budget = ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
-    exec("UPDATE messages SET routing=json_set(routing,'$.modelBudgetId',?) WHERE id=?",{budget,messageId});
-    return budget;
+    return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
 }
 
 std::string Store::Impl::taskModelBudget(const Json& task) {
