@@ -735,7 +735,8 @@ void resumeRestoresCancelledTaskDirections() {
           f.task(last)["environmentId"] == "cloud","the second resume lost its current work contract");
     const auto& resumed = f.t3.sent.back().instruction;
     check(resumed.find(trace) != resumed.npos,"the second resume lost the accepted trace direction");
-    check(resumed.find(abandonedMove) == resumed.npos,"the second resume replayed the superseded move");
+    check(f.t3.sent.back().environmentId == "cloud",
+          "the second resume did not use its current destination");
     check(resumed.find(mixedDirections) != resumed.npos,"the second resume lost the earlier mixed move direction");
     check(resumed.find(revisionRequest) != resumed.npos,"the second resume lost the revised mixed direction");
     check(resumed.find("Report baseline latency") == resumed.npos,"the second resume replayed superseded criteria");
@@ -796,26 +797,36 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
           "the live replan started with the wrong destination or work contract");
     check(instruction.find(trace) != instruction.npos && instruction.find(trace) == instruction.rfind(trace),
           "the live replan dropped or duplicated the trace direction");
-    check(instruction.find("The authoritative current task intent is \"Measure the release dataset\" and supersedes any intent in the quote.") != instruction.npos,
-          "the live replan did not mark the current intent authoritative");
-    const auto criteriaAuthority = instruction.find("The authoritative current completion criteria are");
-    const auto criteriaValue = instruction.find(correctedCriteria,criteriaAuthority);
-    const auto criteriaSuperseded = instruction.find("supersede any criteria in the quote.",criteriaAuthority);
-    check(criteriaAuthority != instruction.npos && criteriaValue != instruction.npos &&
-          criteriaSuperseded != instruction.npos && criteriaValue < criteriaSuperseded,
-          "the live replan did not mark the current criteria authoritative");
-    check(instruction.find("The authoritative current execution destination is \"desktop\" and supersedes any destination in the quote.") != instruction.npos,
+    const auto intentHeading = instruction.find("Task intent:\n");
+    const auto criteriaHeading = instruction.find("Completion criteria:\n");
+    const auto contractAuthority = instruction.find(
+        "The current Task intent and Completion criteria in this prompt are authoritative.");
+    const auto intentValue = instruction.find(goal,intentHeading);
+    const auto criteriaValue = instruction.find(correctedCriteria,criteriaHeading);
+    check(intentHeading != instruction.npos && intentHeading == instruction.rfind("Task intent:\n") &&
+          intentValue != instruction.npos && intentValue == instruction.rfind(goal) &&
+          criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
+          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(correctedCriteria) &&
+          contractAuthority != instruction.npos,
+          "the live replan did not state the authoritative task intent and criteria once");
+    check(instruction.find("The current execution destination is \"desktop\" and supersedes any destination in the quote.") != instruction.npos,
           "the live replan did not mark the current destination authoritative");
 }
 
 void environmentOnlyMoveKeepsWorkAcrossResume() {
     Fixture f;
-    const auto original = f.store->submit(f.routing("Measure the reference dataset","alpha","cloud"));
+    const std::string goal = "Measure " + std::string(4992,'g');
+    const std::string criteria = "Complete " + std::string(3991,'c');
+    constexpr auto create = "Start a large checksum measurement";
+    f.script(create,{start({{"request",goal},{"doneWhen",criteria},{"environment","クラウドMac"}})});
+    f.receive("large-contract",create);
+    const auto original = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(original,"running");
 
     constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
-    constexpr auto direction = "Move this run to ローカルMac and include checksum "
-                               "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    constexpr auto trace = "trace:latency-samples-42";
+    const auto direction = std::string("Move this run to ローカルMac and include checksum ") + checksum +
+                           " and attach trace " + trace;
     f.script(direction,{change(original,{{"environment","ローカルMac"}})});
     f.receive("move-with-checksum",direction);
     const auto pending = f.task(original)["pendingInstructions"].back();
@@ -826,7 +837,9 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the move was not delivered to its new Session");
     const auto& moved = f.t3.sent.back();
     check(moved.environmentId == "desktop" && moved.instruction.find(checksum) != moved.instruction.npos &&
-          moved.instruction.find(checksum) == moved.instruction.rfind(checksum),
+          moved.instruction.find(checksum) == moved.instruction.rfind(checksum) &&
+          moved.instruction.find(trace) != moved.instruction.npos &&
+          moved.instruction.find(trace) == moved.instruction.rfind(trace),
           "the move direction was not delivered to the new destination exactly once");
     f.store->operate(original,0,"cancel");
     f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(),"Desktop work settled");
@@ -841,12 +854,66 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     f.reach(resumed,"running");
     const auto& command = f.t3.sent.back();
     const auto& instruction = command.instruction;
+    check(command.environmentId == "cloud" && f.task(resumed)["environmentId"] == "cloud" &&
+          f.task(resumed)["intent"] == goal && f.task(resumed)["doneWhen"] == criteria,
+          "the resumed task did not use its current destination");
+    check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum) &&
+          instruction.find(trace) != instruction.npos && instruction.find(trace) == instruction.rfind(trace),
+          "the resumed Session dropped or duplicated the checksum or trace direction");
+    const auto intentHeading = instruction.find("Task intent:\n");
+    const auto criteriaHeading = instruction.find("Completion criteria:\n");
+    const auto intentValue = instruction.find(goal);
+    const auto criteriaValue = instruction.find(criteria);
+    check(intentHeading != instruction.npos && intentHeading == instruction.rfind("Task intent:\n") &&
+          intentValue != instruction.npos && intentValue == instruction.rfind(goal) && intentValue > intentHeading &&
+          criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
+          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(criteria) && criteriaValue > criteriaHeading,
+          "the resumed prompt duplicated or lost its large task contract");
+    const auto destinationAuthority = "The current execution destination is \"cloud\" and supersedes any destination in the quote.";
+    check(instruction.find("The current Task intent and Completion criteria in this prompt are authoritative.") != instruction.npos &&
+          instruction.find(destinationAuthority) != instruction.npos,
+          "the resumed Session did not make its current destination authoritative");
+    check(sessionPrompt(command.actionId,instruction).size() <= maxSessionPromptBytes,
+          "the resumed prompt exceeded the Session prompt cap");
+}
+
+void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
+    Fixture f;
+    const auto original = f.store->submit(f.routing("Measure the checksum target","alpha","cloud"));
+    f.reach(original,"running");
+
+    constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    constexpr auto direction = "Move this run to ローカルMac and include checksum "
+                               "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    f.script(direction,{change(original,{{"environment","ローカルMac"}})});
+    f.receive("cancel-before-move-delivery",direction);
+    const auto pending = f.task(original)["pendingInstructions"].back();
+    check(pending["replaceKey"] == "environment" && !pending.contains("intent") && !pending.contains("doneWhen"),
+          "the fixture did not create an environment-only instruction");
+    const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
+    f.store->operate(original,0,"cancel");
+    f.t3.finish(activeRun,"Cloud work cancelled before the move was delivered");
+    f.reach(original,"cancelled");
+    check(f.t3.sent.size() == 1,"the environment-only move was delivered before cancellation");
+
+    Id cancellation = 0;
+    for (const auto& row : f.store->history(original))
+        if (row["kind"] == "cancelled") cancellation = row["id"];
+    check(cancellation > 0,"the cancelled task had no resume anchor");
+    constexpr auto request = "Resume the checksum work on クラウドMac";
+    f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true},
+                            {"environment","クラウドMac"}})});
+    f.receive("resume-before-delivery",request,cancellation);
+    const auto resumed = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(resumed,"running");
+    const auto& command = f.t3.sent.back();
+    const auto& instruction = command.instruction;
     check(command.environmentId == "cloud" && f.task(resumed)["environmentId"] == "cloud",
           "the resumed task did not use its current destination");
     check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum),
-          "the resumed Session dropped or duplicated the checksum direction");
-    check(instruction.find("The authoritative current execution destination is \"cloud\" and supersedes any destination in the quote.") != instruction.npos,
-          "the resumed Session did not make its current destination authoritative");
+          "the cancelled pending direction was dropped or duplicated");
+    check(instruction.find("The current execution destination is \"cloud\" and supersedes any destination in the quote.") != instruction.npos,
+          "the cancelled pending direction did not defer to the current destination");
 }
 
 void appendWaitsForSafeBoundary() {
@@ -1609,6 +1676,7 @@ int main() {
         resumeRestoresCancelledTaskDirections();
         liveMoveAndCriteriaCorrectionKeepCurrentContract();
         environmentOnlyMoveKeepsWorkAcrossResume();
+        environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume();
         appendWaitsForSafeBoundary();
         resumedBacklogFitsOneT3Command();
         repacksHistoryAfterDroppingOlderReference();

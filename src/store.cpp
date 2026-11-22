@@ -352,6 +352,7 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     const auto workKey = [](const Json& item) -> std::string {
         if (item.contains("doneWhen")) return "criteria";
         if (item.contains("intent")) return "intent";
+        if (item.contains("environmentId") && field(item,"replaceKey") == "environment") return {};
         return field(item,"replaceKey");
     };
     std::set<std::string> replaced{"environment"};
@@ -371,10 +372,9 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
         if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
         auto text = field(item,"text");
         if (item.contains("environmentId")) {
-            text = "Apply the work directions in this earlier message. The authoritative current task intent is \"" +
-                   std::string(intent) + "\" and supersedes any intent in the quote. The authoritative current completion "
-                   "criteria are \"" + criteria + "\" and supersede any criteria in the quote. The authoritative "
-                   "current execution destination is \"" + field(task,"environmentId") +
+            text = "Apply the work directions in this earlier message. The current Task intent and Completion criteria "
+                   "in this prompt are authoritative. The current execution destination is \"" +
+                   field(task,"environmentId") +
                    "\" and supersedes any destination in the quote.\n" + text;
             item["replaceKey"] = key;
             item.erase("environmentId");
@@ -402,10 +402,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
 )SQL",{owner,count});
         while (bytes && rows.next()) {
             --count;
-            auto item = rows.json(0);
-            if (item.contains("environmentId") && field(item,"replaceKey") == "environment" &&
-                !item.contains("intent") && !item.contains("doneWhen")) item.erase("replaceKey");
-            remember(std::move(item),bytes);
+            remember(rows.json(0),bytes);
         }
     };
 
