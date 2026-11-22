@@ -45,7 +45,7 @@ private:
 class SecretRedactor {
 public:
     explicit SecretRedactor(std::vector<std::string> values);
-    std::string text(const std::string&) const;
+    std::string text(std::string_view source, bool truncated = false) const;
     Json payload(const Json&) const;
     enum class Fields { protocol, external };
     Json record(Json, Fields = Fields::protocol) const;
@@ -59,10 +59,12 @@ struct Store::Impl {
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
+    class SessionEvidence;
     void migrateAccess();
-    void migrateSessionRead();
-    Json sessionReadTool(std::string_view bot, const Json& config, const Decision&, T3&);
+    Json sessionReadTool(std::string_view bot, const Decision&, T3&);
+    void authorizeSessionHistory(std::string_view bot, Json& steps, T3&);
     SecretRedactor redactor(std::string_view bot) const;
+    SecretRedactor sessionRedactor() const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;

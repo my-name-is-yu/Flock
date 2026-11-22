@@ -251,4 +251,25 @@ Json Client::call(std::string_view tool, Json arguments) {
     if (!data.is_object()) invalidResponse();
     return data;
 }
+
+Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars,
+                Json args, int runLimit) {
+    args.update(Json{{"threadId",threadId},{"view",view},{"limit",limit},{"maxCharsPerItem",chars},{"runLimit",runLimit}});
+    auto page = client.call("t3_thread_read",std::move(args));
+    if (str(member(page,"thread"),"threadId") != threadId || array(page,"items").size() > limit)
+        invalidResponse();
+    return page;
+}
+
+void advancePosition(const Json& item, Id& after) {
+    const auto next = position(member(item,"position"));
+    if (next <= after) invalidResponse();
+    after = next;
+}
+
+bool moreHistory(const Json& page, Id after, Id start) {
+    if (!boolean(page,"hasMore")) return false;
+    if (after <= start || position(member(page,"nextPosition")) != after) invalidResponse();
+    return true;
+}
 }

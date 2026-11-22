@@ -11,6 +11,7 @@ namespace {
 constexpr auto staging = "internal-staging-thread";
 constexpr auto second = "internal-second-investigation";
 constexpr auto env = "desktop";
+constexpr auto otherEnv = "remote-desktop";
 constexpr auto timestamp = "2026-11-21T12:34:56.123Z";
 constexpr auto failureId = "internal-failed-event";
 constexpr auto logId = "internal-test-log";
@@ -24,6 +25,8 @@ struct Backend : T3 {
     std::vector<Command> writes;
     int stops = 0, reads = 0;
     std::function<void()> onRead;
+    std::string secret;
+    bool denyAttachment = false;
 
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
@@ -37,27 +40,45 @@ struct Backend : T3 {
     bool allowed(const SessionTarget& target) {
         ++reads;
         if (onRead) onRead();
-        return target.environmentId == env && !denied[target.threadId] &&
+        return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
-    std::optional<SessionMetadata> findSession(const SessionTarget& target,std::string_view query) override {
-        if (!allowed(target) || (!query.empty() && query != "staging")) return {};
-        const std::string title = target.threadId == second ? "Second staging investigation" : "Staging investigation";
-        return SessionMetadata{title,title,"Release Pipeline","release","failed",timestamp,timestamp,
-                               "The staging regression failed."};
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages) override {
+        if (!allowed(target)) return {};
+        std::string title = target.threadId == second ? "Staging investigation 2" : "Staging investigation";
+        if (!secret.empty()) title.append(235-title.size(),'x').append(secret);
+        SessionMetadata metadata{title,"Release Pipeline","release","failed",timestamp,timestamp,{},false};
+        if (includeMessages) {
+            std::string preview = "The staging regression failed.";
+            if (!secret.empty()) preview += " " + secret;
+            metadata.messages.push_back({std::move(preview),false});
+        }
+        return metadata;
     }
     SessionEvent item(unsigned i) {
         SessionEvent result{};
         result.id = i == 2 ? failureId : "internal-event-"+std::to_string(i);
-        result.kind = i == 2 ? "command_execution" : "assistant_message";
+        result.kind = i == 2 ? "command_execution" : (i == 3 ? "error" : "assistant_message");
         result.time = timestamp;
         result.status = i == 2 ? "failed" : "completed";
-        result.text = i == 2 ? "integration test failed" : "Investigation note";
+        result.text = i == 2 ? "$ cd build\nctest --output-on-failure\nTest 7 failed" : "Investigation note";
+        if (i == 0 && !secret.empty()) result.text = std::string(479,'x') + "🙂";
+        if (i == 3) result.text = "timeout";
+        if (i == 4) {
+            result.kind = "command_execution";
+            result.text = "$ cd build\ntrue";
+        }
         if (i == 2) {
-            result.command = "ctest --output-on-failure";
-            result.output = "Test 7 failed";
-            result.error = "timeout";
             result.attachments.push_back({logId,"test.log","text/plain",{},false});
+            if (!secret.empty()) {
+                result.title = secret;
+                result.text.append(476-result.text.size(),'x').append(secret);
+                result.attachments.front().name = secret;
+            }
+        }
+        if (i == 3 && !secret.empty()) {
+            result.text += " " + secret.substr(0,12);
+            result.textTruncated = true;
         }
         return result;
     }
@@ -65,20 +86,22 @@ struct Backend : T3 {
                                                   const SessionEventFilter& filter) override {
         if (!allowed(target)) return {};
         SessionEventPage page;
-        unsigned i = filter.cursor.empty() ? 0U : static_cast<unsigned>(std::stoul(filter.cursor));
+        unsigned i = static_cast<unsigned>(filter.afterPosition.value_or(-1)+1);
         for (; i < 5 && page.items.size() < filter.limit; ++i) {
             auto event = item(i);
             if ((filter.kind.empty() || event.kind == filter.kind) &&
-                session_read::contains(event.text,filter.query) &&
+                (!filter.matchText || filter.matchText(event)) &&
                 session_read::inRange(event.time,filter.fromTime,filter.toTime))
                 page.items.push_back(std::move(event));
         }
-        if (i < 5) page.nextCursor = std::to_string(i);
+        if (i < 5) page.nextPosition = i-1;
         return page;
     }
     std::optional<SessionEvent> sessionEvent(const SessionTarget& target,std::string_view id) override {
-        if (!allowed(target) || id != failureId) return {};
-        return item(2);
+        if (!allowed(target)) return {};
+        for (unsigned i = 0; i < 5; ++i)
+            if (auto event = item(i); event.id == id) return event;
+        return {};
     }
     std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
         if (!allowed(target)) return {};
@@ -86,7 +109,9 @@ struct Backend : T3 {
     }
     std::optional<SessionAttachment> sessionAttachment(const SessionTarget& target,std::string_view id,
                                                        std::string_view attachment) override {
-        if (!allowed(target) || id != failureId || attachment != logId) return {};
+        if (!allowed(target) || id != failureId || attachment != logId || denyAttachment) return {};
+        if (!secret.empty()) return SessionAttachment{logId,secret,"text/plain",
+            std::string(8188,'x')+secret+"🙂",false};
         return SessionAttachment{logId,"test.log","text/plain","fixture failed at the staging health check\n"+
                                  std::string(9000,'x'),false};
     }
@@ -156,7 +181,7 @@ void acceptance() {
     const auto events = "flock_session_events";
     const Json filters{{"query","staging"},{"project","Release Pipeline"},{"status","failed"},
                        {"fromTime","2026-11-21T00:00:00Z"},{"toTime","2026-11-22T00:00:00Z"},{"limit",1}};
-    const Json empty{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr}};
+    const Json empty{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr},{"truncated",false}};
     check(f.call(search,filters) == empty && f.t3.reads == 0,"unshared Session contacted T3 or entered search");
     const auto missing = f.call(events,{{"sessionRef","random"},{"operation","counts"}});
     check(missing == f.call(events,{{"sessionRef",staging},{"operation","counts"},{"bot","beta"}}) &&
@@ -169,6 +194,7 @@ void acceptance() {
     } catch (const Conflict&) {}
     f.share(staging);
     f.share(second);
+    for (int i = 0; i < 65; ++i) f.share("internal-shared-but-denied-"+std::to_string(i));
     const auto found = f.call(search,filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(),"search pagination missing");
@@ -182,6 +208,19 @@ void acceptance() {
           "search pagination repeated a candidate");
     check(found.dump().find("internal-") == std::string::npos && next.dump().find("internal-") == std::string::npos,
           "search returned an internal thread identifier");
+    const auto preview = f.call(search,{{"query","regression failed"}});
+    check(preview.at("sessions").size() == 2 &&
+          preview.at("sessions").at(0).at("matchExcerpt") == "The staging regression failed.",
+          "message-only search lost an authorized local match");
+    check(f.call(search,{{"query","2"}}).at("sessions").size() == 1 &&
+          f.call(search,{{"query",std::string(201,'x')}}) == empty,
+          "Flock text filtering inherited T3 project-search limits");
+    check(f.call(search,{{"fromTime","2026-11-21T12:34:56.123000000Z"},
+                         {"toTime","2026-11-21T12:34:56.123Z"}}).at("sessions").size() == 2 &&
+          f.call(search,{{"toTime","2026-11-21T12:34:56.122999999Z"}}) == empty &&
+          f.call(search,{{"fromTime","2026-02-29T00:00:00Z"}}).at("ok") == false &&
+          f.call(search,{{"limit",21}}).at("ok") == false,
+          "UTC range or limit validation is incorrect");
 
     const auto sessionRef = next.at("sessions").at(0).at("sessionRef");
     const auto otherRef = found.at("sessions").at(0).at("sessionRef");
@@ -203,9 +242,14 @@ void acceptance() {
     const auto detail = request("read_event",{{"eventRef",eventRef}});
     const auto& event = detail.at("event");
     const auto attachmentRef = event.at("attachments").at(0).at("attachmentRef");
-    check(event.at("command") == "ctest --output-on-failure" && event.at("output") == "Test 7 failed" &&
-          event.at("error") == "timeout" && !detail.at("truncated").get<bool>() &&
+    check(event.at("text") == "$ cd build\nctest --output-on-failure\nTest 7 failed" &&
+          !event.contains("command") && !event.contains("output") &&
+          !detail.at("truncated").get<bool>() &&
           detail.dump().find("internal-") == std::string::npos,"failed event details or reference scope incorrect");
+    const auto last = request("list",{{"limit",5}}).at("events");
+    const auto quiet = request("read_event",{{"eventRef",last.at(4).at("eventRef")}}).at("event");
+    check(quiet.at("text") == "$ cd build\ntrue" && !quiet.contains("output"),
+          "multiline command lines were reported as output");
     check(request("counts",{{"limit",1},{"kind","error"}}).at("counts") == Json{{"messages",11},{"runs",3}},
           "counts were scoped to a page or filter");
     check(request("counts",{{"bot","alpha"}},"beta") == missing &&
@@ -219,6 +263,23 @@ void acceptance() {
     check(log.at("attachment").at("content").get<std::string>().starts_with("fixture failed") &&
           log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
+    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::grant);
+    const auto acrossEnvironments = f.call(search,Json::object()).at("sessions");
+    const auto remoteRef = acrossEnvironments.back().at("sessionRef");
+    check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
+          f.call(events,{{"sessionRef",remoteRef},{"operation","read_event"},{"eventRef",eventRef}}).dump() == missing.dump() &&
+          f.call(events,{{"sessionRef",remoteRef},{"operation","list"},{"cursor",cursor}}).dump() == missing.dump() &&
+          f.call(events,{{"sessionRef",remoteRef},{"operation","get_attachment"},{"attachmentRef",attachmentRef}}).dump() ==
+              missingAttachment.dump(),
+          "references crossed environments for the same T3 thread identifier");
+    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::revoke);
+    auto tampered = sessionRef.get<std::string>();
+    tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
+    check(f.call(events,{{"sessionRef",tampered},{"operation","counts"}}).dump() == missing.dump() &&
+          f.call(events,{{"operation","counts"}}).dump() == missing.dump() &&
+          request("list",{{"cursor",std::string(129,'x')}}).dump() == missing.dump() &&
+          request("get_attachment",{{"attachmentRef",std::string(129,'x')}}).dump() == missingAttachment.dump(),
+          "invalid or missing references produced a distinct response");
     f.restart();
     check(fetchLog() == log && request("list",{{"cursor",cursor},{"limit",2}}) == secondPage &&
           f.call(search,nextSearch) == next,"restart lost scoped references or the read grant");
@@ -247,9 +308,16 @@ void acceptance() {
     check(request("list",{{"cursor",cursor},{"limit",2}}) == missing &&
           request("counts") == missing && fetchLog() == missingAttachment &&
           f.call(search,nextSearch) == empty,"T3 denial did not override the active grant");
+    check(request("list",{{"fromTime","invalid"}}).dump() ==
+          f.call(events,{{"operation","list"},{"sessionRef","missing"},{"fromTime","invalid"}}).dump() &&
+          request("unknown").dump() == f.call(events,{{"operation","unknown"},{"sessionRef","missing"}}).dump(),
+          "request validation depended on whether a Session existed");
     f.t3.denied[staging] = false;
     f.share(second,GrantChange::revoke);
-    check(f.call(search,nextSearch) == missing,"revoked search cursor still returned a page");
+    auto missingSearch = nextSearch;
+    missingSearch["cursor"] = "missing";
+    check(f.call(search,nextSearch).dump() == f.call(search,missingSearch).dump() &&
+          f.call(search,nextSearch) == missing,"revoked search cursor still returned a page");
 
     f.t3.onRead = [&] {
         Store writer(f.dir/"state.db");
@@ -263,11 +331,66 @@ void acceptance() {
     f.share("foreign-thread",GrantChange::revoke);
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
 }
+
+void redactionAndResumedHistory() {
+    Fixture f;
+    f.share(staging);
+    auto access = f.store->access();
+    const auto secret = "synthetic-session-credential";
+    const auto key = access.requestSecret("beta",{"beta-fixture"});
+    access.submitSecret({"root",true},"beta",key,secret);
+    f.t3.secret = secret;
+
+    const auto found = f.call("flock_session_search",{{"query","regression"}});
+    const auto& row = found.at("sessions").front();
+    check(found.dump().find("synt") == std::string::npos &&
+          row.at("matchExcerpt") == "The staging regression failed. [redacted]" &&
+          found.at("truncated") == true,"search exposed a protected value across an excerpt boundary");
+    const auto ref = row.at("sessionRef");
+    const auto events = f.call("flock_session_events",{{"sessionRef",ref},{"operation","list"}});
+    const auto& failed = events.at("events").at(2);
+    const auto& error = events.at("events").at(3);
+    check(events.dump().find("synt") == std::string::npos && failed.at("title") == "[redacted]" &&
+          events.at("events").front().at("excerpt").get<std::string>().size() == 479 &&
+          error.at("excerpt") == "timeout [redacted]" && error.at("truncated") == true,
+          "list exposed event metadata or a truncated protected value");
+    const auto detail = f.call("flock_session_events",{{"sessionRef",ref},{"operation","read_event"},
+                                                       {"eventRef",error.at("eventRef")}});
+    check(detail.at("event").at("error") == "timeout [redacted]","event error was not redacted");
+    const Json attachment{{"sessionRef",ref},{"operation","get_attachment"},
+                          {"attachmentRef",failed.at("attachments").front().at("attachmentRef")}};
+    const auto log = f.call("flock_session_events",attachment);
+    check(log.at("attachment").at("content").get<std::string>().size() == 8192 &&
+          log.at("attachment").at("name") == "[redacted]" && log.dump().find("synt") == std::string::npos &&
+          log.at("truncated") == true,"attachment exposed a protected value at the byte limit");
+
+    const auto missing = f.call("flock_session_events",{{"sessionRef","unknown"},{"operation","counts"}});
+    const auto pauseThenRevoke = [&](Decision step, const std::function<void()>& revoke) {
+        f.model.next = std::move(step);
+        f.model.result = nullptr;
+        auto intake = f.intake("alpha");
+        intake.config["modelCallLimit"] = 1;
+        f.store->receive(intake,std::to_string(++f.sequence),"Look for the failure");
+        f.runtime->runConversations();
+        const auto paused = f.store->pausedConversations("alpha");
+        check(paused.size() == 1 && f.model.result.is_null(),"turn did not pause after reading evidence");
+        revoke();
+        f.restart();
+        f.store->approveMessageModelCall("alpha",paused.front().at("messageId").get<Id>());
+        f.runtime->runConversations();
+        check(f.model.result.dump() == missing.dump(),"reopened turn exposed inaccessible cached evidence");
+    };
+    pauseThenRevoke({"flock_session_events",attachment,"Read the log"},[&] { f.t3.denyAttachment = true; });
+    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.t3.denied[staging] = true; });
+    f.t3.denied[staging] = false;
+    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.share(staging,GrantChange::revoke); });
+}
 }
 
 int main() {
     try {
         acceptance();
+        redactionAndResumedHistory();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

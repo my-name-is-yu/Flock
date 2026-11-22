@@ -10,7 +10,7 @@ namespace t3detail {
 namespace {
 using Outcome = Delivery::Kind;
 using Observed = Observation::Kind;
-using Position = std::int64_t;
+using Position = Id;
 using Clock = std::chrono::steady_clock;
 constexpr int ExcerptChars = 2730; // T3 uses UTF-16 offsets. 2730 code units occupy at most 8190 UTF-8 bytes.
 constexpr int PageSize = 30;
@@ -59,7 +59,7 @@ Position readCursor(const std::string& text) {
     if (text.empty()) return -1;
     Position parsed = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
-    if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > 9007199254740991)
+    if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > maxHistoryPosition)
         throw Failure(Failure::Kind::Settings, "Invalid T3 history cursor");
     return parsed;
 }
@@ -71,10 +71,7 @@ const Json& detail(const Json& response, const std::string& threadId) {
 }
 
 Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
-    auto page = client.call(ThreadRead, {{"threadId", threadId}, {"view", "messages"},
-                                         {"limit", 1}, {"maxCharsPerItem", 32}, {"runLimit", runLimit}});
-    detail(page, threadId);
-    return page;
+    return readThread(client,threadId,"messages",1,32,Json::object(),runLimit);
 }
 
 bool fromRun(const Json& item, const RunRef& run) {
@@ -86,19 +83,13 @@ void walkThreadHistoryForward(Client& client, Scan& scan, const std::string& thr
           int maxChars, Position after, Visit visit) {
     for (;;) {
         scan.step();
-        const auto page = client.call(ThreadRead, {{"threadId", threadId}, {"view", view}, {"limit", PageSize},
-            {"runLimit", 1}, {"maxCharsPerItem", maxChars}, {"afterPosition", after}});
-        detail(page, threadId);
-        const auto& items = array(page, "items");
         const auto start = after;
-        for (const auto& item : items) {
-            const auto next = position(member(item, "position"));
-            if (next <= after) invalidResponse();
-            after = next;
+        const auto page = readThread(client,threadId,view,PageSize,maxChars,{{"afterPosition",after}});
+        for (const auto& item : array(page,"items")) {
+            advancePosition(item,after);
             if (!visit(item)) return;
         }
-        if (!boolean(page, "hasMore")) return;
-        if (after <= start || cursor(page, "nextPosition") != after) invalidResponse();
+        if (!moreHistory(page,after,start)) return;
     }
 }
 
@@ -117,10 +108,8 @@ TextPage itemText(const Json& item, std::size_t offset = 0) {
 
 Json readItem(Client& client, const std::string& threadId, std::string_view view,
               const std::string& itemId, std::size_t offset, int chars = ExcerptChars) {
-    if (itemId.empty() || offset > 9007199254740991ULL) invalidResponse();
-    const auto response = client.call(ThreadRead, {{"threadId", threadId}, {"view", view}, {"limit", 1},
-        {"runLimit", 1}, {"maxCharsPerItem", chars}, {"itemId", itemId}, {"textOffset", offset}});
-    detail(response, threadId);
+    if (itemId.empty() || offset > maxHistoryPosition) invalidResponse();
+    const auto response = readThread(client,threadId,view,1,chars,{{"itemId",itemId},{"textOffset",offset}});
     const auto& items = array(response, "items");
     if (items.size() != 1 || str(items.front(), "itemId") != itemId) invalidResponse();
     return items.front();
@@ -851,8 +840,8 @@ public:
         return excerpt;
     }
 
-    std::optional<SessionMetadata> findSession(const SessionTarget& target, std::string_view query) override {
-        return t3detail::findSession(directory_,target,query);
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
+        return t3detail::sessionMetadata(directory_,target,includeMessages);
     }
     std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
         return t3detail::sessionEvents(directory_,target,filter);
@@ -872,7 +861,15 @@ private:
     std::filesystem::path directory_;
 
     Credential credential(const std::string& environment, const Json& config) const {
-        return readCredential(directory_, environment, config);
+        auto connection = loadCredential(directory_, environment);
+        if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
+            throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
+        if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
+            const auto hint = str(config["t3"], "mcpUrl");
+            if (checkedUrl(hint).full != connection.mcpUrl)
+                throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
+        }
+        return connection;
     }
 
     static void requireOperate(const Credential& connection) {

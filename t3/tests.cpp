@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/session_read.hpp"
 
 #include <iostream>
 #include <sys/stat.h>
@@ -290,23 +291,27 @@ int main(int argc, char** argv) {
         const auto readOnly = other.authGeneration;
         fixture({{"scenario","session-read"}});
         const SessionTarget session{"env-1","manual"};
-        const auto metadata = restarted->findSession(session,"health check");
+        const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&
-              metadata->status == "failed" && metadata->matchExcerpt == "staging health check failed",
-              "Session metadata or indexed evidence lost");
-        check(!restarted->findSession(session,"private excerpt"),"another Session's hit was attributed to this Session");
+              metadata->status == "failed" &&
+              std::ranges::any_of(metadata->messages,[](const SessionPreview& message) {
+                  return message.text == "staging health check failed";
+              }),"Session metadata or local preview lost");
+        check(std::ranges::none_of(metadata->messages,[](const SessionPreview& message) {
+            return message.text == "private history" || message.text.size() > 720;
+        }),"Session preview exceeded its bounds or contained inherited text");
         SessionEventFilter filter{};
         filter.limit = 2;
         const auto firstPage = restarted->sessionEvents(session,filter);
-        check(firstPage && firstPage->items.size() == 2 && !firstPage->nextCursor.empty() &&
+        check(firstPage && firstPage->items.size() == 2 && firstPage->nextPosition &&
               firstPage->items[0].kind == "user_message" && firstPage->items[1].kind == "command_execution",
               "Session history did not return an ordered first page");
-        filter.cursor = firstPage->nextCursor;
+        filter.afterPosition = firstPage->nextPosition;
         const auto secondPage = restarted->sessionEvents(session,filter);
         check(secondPage && secondPage->items.size() == 2 && secondPage->items[0].id == "item-2",
               "Session history did not resume after the previous page");
         filter = {};
-        filter.query = "HEALTH";
+        filter.matchText = [](const SessionEvent& event) { return session_read::contains(event.text,"HEALTH"); };
         filter.kind = "error";
         filter.fromTime = "2026-01-01T00:00:00Z";
         filter.toTime = "2026-01-01T00:00:00Z";
@@ -316,16 +321,30 @@ int main(int argc, char** argv) {
         const auto command = restarted->sessionEvent(session,"item-1");
         const auto error = restarted->sessionEvent(session,"item-2");
         const auto longEvent = restarted->sessionEvent(session,"item-7");
-        check(command && command->command == "ctest --output-on-failure" && command->output == "Test 7 failed" &&
-              command->attachments.size() == 2 && error && error->error == "staging health check failed" &&
-              longEvent && longEvent->truncated && longEvent->text.size() <= 8192,
+        check(command && command->text == "$ ctest --output-on-failure\nTest 7 failed" &&
+              command->attachments.size() == 2 && error && error->text == "staging health check failed" &&
+              longEvent && longEvent->textTruncated && longEvent->text.size() <= 8192,
               "Session event details, attachment references or truncation lost");
         check(!restarted->sessionEvent(session,"item-6"),"inherited item exposed another Session");
         const auto totals = restarted->sessionCounts(session);
         check(totals && totals->messages == 5 && totals->runs == 4,"counts were derived from a partial page");
+        fixture({{"longHistory",true}});
+        filter = {};
+        filter.kind = "checkpoint";
+        filter.limit = 1;
+        for (Id expected : {11,23}) {
+            const auto partial = restarted->sessionEvents(session,filter);
+            check(partial && partial->items.empty() && partial->nextPosition == expected,
+                  "selective event search did not return a progressing cursor at its scan bound");
+            filter.afterPosition = partial->nextPosition;
+        }
+        const auto resumed = restarted->sessionEvents(session,filter);
+        check(resumed && resumed->items.size() == 1 && resumed->items.front().id == "item-25" && !resumed->nextPosition,
+              "resuming a bounded scan skipped a local event");
+        fixture({{"longHistory",false}});
         const auto attachment = restarted->sessionAttachment(session,"item-1","test-log");
         const auto reference = restarted->sessionAttachment(session,"item-1","reference-only");
-        check(attachment && attachment->truncated && attachment->content && attachment->content->size() == 8192 &&
+        check(attachment && attachment->content && attachment->content->size() > 8192 &&
               attachment->content->starts_with("Test 7 failed") && reference && !reference->content,
               "attachment did not preserve content bounds or reference-only evidence");
         fixture({{"denyAttachment",true}});
@@ -333,8 +352,8 @@ int main(int argc, char** argv) {
               !restarted->sessionAttachment(session,"item-1","missing"),"denied attachment was distinguishable from missing");
         fixture({{"denyRead",true}});
         const SessionTarget missing{"env-1","missing"};
-        filter.cursor = firstPage->nextCursor;
-        check(!restarted->findSession(session,{}) && !restarted->findSession(missing,{}) &&
+        filter.afterPosition = firstPage->nextPosition;
+        check(!restarted->sessionMetadata(session,false) && !restarted->sessionMetadata(missing,false) &&
               !restarted->sessionEvents(session,filter) && !restarted->sessionEvent(session,"item-1") &&
               !restarted->sessionCounts(session) && !restarted->sessionAttachment(session,"item-1","test-log"),
               "history references bypassed a T3 read denial");
