@@ -1,6 +1,10 @@
 const [, , botId, section] = location.pathname.split('/').map(decodeURIComponent);
 const $ = (id) => document.getElementById(id);
 $('back').href = '/?' + new URLSearchParams({bot: botId});
+// Like an iOS back button, name the screen this page returns to: the Bot whose access is shown.
+fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
+  $('back-label').textContent = bots.find(bot => bot.id === botId)?.name || botId;
+}).catch(() => { $('back-label').textContent = botId; });
 const resource = $('resource').elements;
 function configureResourceForm(operations) {
   const kinds = Object.keys(operations);
