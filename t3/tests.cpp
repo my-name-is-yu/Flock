@@ -288,6 +288,57 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "reauthorization with read scope recovers the original Run");
         const auto readOnly = other.authGeneration;
+        fixture({{"scenario","session-read"}});
+        const SessionTarget session{"env-1","manual"};
+        const auto metadata = restarted->findSession(session,"health check");
+        check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&
+              metadata->status == "failed" && metadata->matchExcerpt == "staging health check failed",
+              "Session metadata or indexed evidence lost");
+        check(!restarted->findSession(session,"private excerpt"),"another Session's hit was attributed to this Session");
+        SessionEventFilter filter{};
+        filter.limit = 2;
+        const auto firstPage = restarted->sessionEvents(session,filter);
+        check(firstPage && firstPage->items.size() == 2 && !firstPage->nextCursor.empty() &&
+              firstPage->items[0].kind == "user_message" && firstPage->items[1].kind == "command_execution",
+              "Session history did not return an ordered first page");
+        filter.cursor = firstPage->nextCursor;
+        const auto secondPage = restarted->sessionEvents(session,filter);
+        check(secondPage && secondPage->items.size() == 2 && secondPage->items[0].id == "item-2",
+              "Session history did not resume after the previous page");
+        filter = {};
+        filter.query = "HEALTH";
+        filter.kind = "error";
+        filter.fromTime = "2026-01-01T00:00:00Z";
+        filter.toTime = "2026-01-01T00:00:00Z";
+        const auto matched = restarted->sessionEvents(session,filter);
+        check(matched && matched->items.size() == 1 && matched->items[0].id == "item-2",
+              "Session event filtering did not find the failed health check");
+        const auto command = restarted->sessionEvent(session,"item-1");
+        const auto error = restarted->sessionEvent(session,"item-2");
+        const auto longEvent = restarted->sessionEvent(session,"item-7");
+        check(command && command->command == "ctest --output-on-failure" && command->output == "Test 7 failed" &&
+              command->attachments.size() == 2 && error && error->error == "staging health check failed" &&
+              longEvent && longEvent->truncated && longEvent->text.size() <= 8192,
+              "Session event details, attachment references or truncation lost");
+        check(!restarted->sessionEvent(session,"item-6"),"inherited item exposed another Session");
+        const auto totals = restarted->sessionCounts(session);
+        check(totals && totals->messages == 5 && totals->runs == 4,"counts were derived from a partial page");
+        const auto attachment = restarted->sessionAttachment(session,"item-1","test-log");
+        const auto reference = restarted->sessionAttachment(session,"item-1","reference-only");
+        check(attachment && attachment->truncated && attachment->content && attachment->content->size() == 8192 &&
+              attachment->content->starts_with("Test 7 failed") && reference && !reference->content,
+              "attachment did not preserve content bounds or reference-only evidence");
+        fixture({{"denyAttachment",true}});
+        check(!restarted->sessionAttachment(session,"item-1","test-log") &&
+              !restarted->sessionAttachment(session,"item-1","missing"),"denied attachment was distinguishable from missing");
+        fixture({{"denyRead",true}});
+        const SessionTarget missing{"env-1","missing"};
+        filter.cursor = firstPage->nextCursor;
+        check(!restarted->findSession(session,{}) && !restarted->findSession(missing,{}) &&
+              !restarted->sessionEvents(session,filter) && !restarted->sessionEvent(session,"item-1") &&
+              !restarted->sessionCounts(session) && !restarted->sessionAttachment(session,"item-1","test-log"),
+              "history references bypassed a T3 read denial");
+        fixture({{"scenario","settled"}});
         fixture({{"revoked", true}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Unavailable && observation.status == "auth",
