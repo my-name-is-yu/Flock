@@ -47,6 +47,7 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
