@@ -73,7 +73,8 @@ void channelEndpoints(const std::filesystem::path& database) {
         },
     };
     const auto identities = database.parent_path() / "channel-identities.json";
-    std::ofstream(identities) << Json::array({{{"authorization","Bearer fixture-owner"},{"person",owner.id},{"adminRoot",true}}});
+    std::ofstream(identities) << Json::array({{{"authorization","Bearer fixture-owner"},{"person",owner.id},{"adminRoot",true}},
+                                            {{"authorization","Bearer fixture-sender"},{"person",sender.id}}});
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store,identities,cb);
     check(!store.access().permitsPerson({owner.id},"release",Role::decide),"Machine owner has a redundant Bot grant");
@@ -115,8 +116,20 @@ void channelEndpoints(const std::filesystem::path& database) {
     Browser::checked(bridge.Get("/api/channels/local-connections"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     const auto history = browser.get("/api/conversation?bot=release").at("events");
-    check(history.size() == 4 && history.at(0).at("data").at("channel").at("channelKind") == "slack" &&
-          history.at(1).at("data").at("channel").at("channelKind") == "imessage","HTTP conversation does not show channel intake");
+    check(history.size() == 4 && history.at(0).at("kind") == "conversation_message" &&
+          history.at(1).at("kind") == "conversation_message","HTTP conversation does not show channel intake");
+    check(history[0]["data"]["channel"] == Json{{"channelKind","slack"},{"fromViewer",false}} &&
+          history[1]["data"]["channel"] == Json{{"channelKind","imessage"},{"fromViewer",false}},
+          "HTTP channel provenance must include only the kind and whether the viewer sent it");
+    check(browser.get("/api/view?bot=release").at("events") == history,
+          "The initial timeline and conversation history must project the same channel provenance");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-sender"}});
+    const auto ownHistory = browser.get("/api/conversation?bot=release").at("events");
+    check(ownHistory[0]["data"]["channel"] == Json{{"channelKind","slack"},{"fromViewer",true}} &&
+          ownHistory[1]["data"]["channel"] == Json{{"channelKind","imessage"},{"fromViewer",true}} &&
+          browser.get("/api/view?bot=release").at("events") == ownHistory,
+          "The signed-in sender did not see their channel messages attributed to themselves");
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     const auto attachment = history[0]["data"]["attachments"][0]["id"].get<Id>();
     const auto file = browser.client.Get("/api/channels/attachments/" + std::to_string(attachment));
     check(file && file->status == 200 && file->body == image,"HTTP screenshot download missing");

@@ -169,6 +169,8 @@ Json eventView(const Json& event) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
             if (!run.is_null()) {
+                const auto status = field(source,"status");
+                if (!status.empty() && !field(run,"runId").empty()) details["runStatus"] = status;
                 copyFields(run,source,{"itemId"});
                 details["run"] = std::move(run);
             }
@@ -186,8 +188,9 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
+        if (kind == "conversation_message") copyFields(details,data,{"imageAttachmentCount"});
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
-            copyFields(details["channel"] = Json::object(),*channel,{"channelKind","workspaceId","threadRef","externalMessageId"});
+            copyFields(details["channel"] = Json::object(),*channel,{"channelKind","fromViewer"});
         for (const auto* key : {"attachments","artifacts"}) {
             const auto items = data.find(key);
             if (items != data.end() && items->is_array()) details[key] = *items;
@@ -278,7 +281,7 @@ Json sessionGroup(const Json& task) {
         if (!seen.emplace(field(session,"environmentId"),thread).second) continue;
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
-        session["state"] = active ? displayState(task) : "ended";
+        session["state"] = active ? displayState(task) : run->value("status","ended");
         sessions.push_back(std::move(session));
     }
     auto group = taskSummary(task);
@@ -348,8 +351,8 @@ Json botList(Store& store, const Json& bots) {
     return result;
 }
 
-Json conversation(Store& store, std::string_view bot, Id before) {
-    const auto events = store.conversation(bot,before,conversationSize + 1);
+Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
+    const auto events = store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer);
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];
@@ -418,9 +421,9 @@ Json taskDetail(const Json& task, const Json& latestResult) {
     return result;
 }
 
-Json botView(Store& store, const Json& bot, const Json* changedSessionTasks) {
+Json botView(Store& store, const Json& bot, const Json* changedSessionTasks, std::string_view viewer) {
     const auto id = field(bot,"id");
-    auto result = conversation(store,id,0);
+    auto result = conversation(store,id,0,viewer);
     const auto activeTasks = store.activeTasks(id);
     result.update(activity(activeTasks,id));
     if (changedSessionTasks) {
