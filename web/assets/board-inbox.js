@@ -1,3 +1,5 @@
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
+
 const labels = {
   user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
   model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
@@ -9,7 +11,6 @@ const labels = {
   link_pr: 'Pull request linked', reject_pr: 'Operation rejected',
 };
 const actions = {
-  user_question: [['answer', 'Send answer']],
   extra_run: [['approve', 'Approve one run']],
   deadline: [['extend', 'Extend deadline']],
   model_budget: [['approve', 'Approve one call']],
@@ -26,6 +27,9 @@ const draftStorage = 'flock-inbox-answer-drafts';
 
 function answerKey(item) {
   return JSON.stringify([item.botId, item.taskId]);
+}
+function choiceKey(item) {
+  return JSON.stringify([item.botId, item.taskId, 'choice']);
 }
 function decisionTarget(item) {
   return JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
@@ -66,7 +70,112 @@ function card(title, meta) {
   article.append(element('p', meta, 'board-inbox-meta'), element('h3', title));
   return article;
 }
-function decisionCard(item, submit, drafts, remember, saving) {
+function questionForms(item, submit, drafts, remember, saving, focus) {
+  const key = answerKey(item);
+  const selectionKey = choiceKey(item);
+  const target = decisionTarget(item);
+  const draft = drafts.get(key);
+  const savedChoice = drafts.get(selectionKey);
+  const choiceStale = savedChoice?.target === target && savedChoice.stale;
+  let selected = savedChoice?.target === target && !choiceStale ? savedChoice.text : undefined;
+  let draftTarget = draft?.target ?? target;
+  let stale = draft?.stale;
+  let busy = Boolean(saving);
+  const changed = draftTarget !== target;
+  const group = element('div', '', 'board-inbox-question');
+  const form = element('form', '', 'board-inbox-form');
+  const input = element('textarea');
+  input.dataset.answerKey = key;
+  input.rows = 2;
+  input.maxLength = 8000;
+  input.required = true;
+  input.value = draft?.text ?? '';
+  const send = element('button', 'Send answer');
+  send.type = 'submit';
+  let review;
+  let choices;
+  let reply;
+  const saveAnswer = () => remember(key, { target: draftTarget, text: input.value, stale });
+  const useCurrentQuestion = () => {
+    draftTarget = target;
+    stale = false;
+    saveAnswer();
+    review.remove();
+    review = undefined;
+    setBusy(busy);
+  };
+  input.addEventListener('input', () => {
+    if (draftTarget !== target && input.value !== draft?.text) useCurrentQuestion();
+    else saveAnswer();
+  });
+  if (changed || stale) {
+    review = element('div');
+    review.append(element('p', changed
+      ? 'The question changed. Review the current question before using this draft.'
+      : 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
+    if (changed) {
+      const useDraft = element('button', 'Use draft for this question');
+      useDraft.type = 'button';
+      useDraft.addEventListener('click', () => {
+        useCurrentQuestion();
+        input.focus();
+      });
+      review.append(useDraft);
+    }
+    form.append(review);
+  }
+  if (hasQuestionChoices(item.choices)) {
+    const actions = element('div', '', 'question-actions');
+    form.hidden = !draft && focus?.key !== key;
+    form.id = `inbox-answer-${item.waitId}`;
+    send.textContent = 'Send reply';
+    choices = questionChoiceForm({
+      key: target, prompt: item.prompt, choices: item.choices, answer: selected, busy: busy || choiceStale,
+      select(answer) {
+        selected = answer;
+        remember(selectionKey, { target, text: answer });
+        updateQuestionChoiceForm(choices, selected, busy);
+      },
+      submit(answer) { void sendAnswer(answer, true); },
+    });
+    reply = questionReplyButton(() => {
+      form.hidden = false;
+      reply.setAttribute('aria-expanded', 'true');
+      input.focus();
+    });
+    reply.setAttribute('aria-controls', form.id);
+    reply.setAttribute('aria-expanded', String(!form.hidden));
+    actions.append(choices, reply);
+    group.append(actions);
+    if (choiceStale) group.append(element('p', 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
+  }
+  const buttons = element('div', '', 'board-inbox-actions');
+  buttons.append(send);
+  form.append(labeled('Answer', input), buttons);
+  group.append(form);
+  function setBusy(value) {
+    busy = value;
+    for (const control of form.elements) control.disabled = busy;
+    send.disabled = busy || Boolean(review);
+    if (choices) updateQuestionChoiceForm(choices, selected, busy || choiceStale);
+    if (reply) reply.disabled = busy;
+  }
+  async function sendAnswer(text, choice = false) {
+    const active = document.activeElement;
+    const focus = !choice && form.contains(active) ? { ...answerFocus(input), origin: active } : undefined;
+    setBusy(true);
+    try { await submit(item, 'answer', { text }, focus, choice); }
+    finally { setBusy(false); }
+  }
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (event.submitter === send && !send.disabled) void sendAnswer(input.value);
+  });
+  setBusy(busy);
+  saving?.then(() => setBusy(false), () => setBusy(false));
+  return group;
+}
+function decisionCard(item, submit, drafts, remember, saving, focus) {
   const article = card(item.requestTitle, `${item.botName} · ${labels[item.itemKind]}`);
   if (item.request && item.request !== item.requestTitle) article.append(element('p', item.request));
   article.append(element('p', item.prompt));
@@ -76,68 +185,14 @@ function decisionCard(item, submit, drafts, remember, saving) {
     article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
   }
+  if (item.itemKind === 'user_question') {
+    article.append(questionForms(item, submit, drafts, remember, saving, focus));
+    return article;
+  }
   const form = element('form', '', 'board-inbox-form');
   const inputs = {};
   const buttons = element('div', '', 'board-inbox-actions');
-  let review;
-  if (item.itemKind === 'user_question') {
-    const key = answerKey(item);
-    const target = decisionTarget(item);
-    const draft = drafts.get(key);
-    let draftTarget = draft?.target ?? target;
-    let stale = draft?.stale;
-    const changed = draftTarget !== target;
-    inputs.text = element('textarea');
-    inputs.text.dataset.answerKey = key;
-    inputs.text.rows = 2;
-    inputs.text.maxLength = 8000;
-    inputs.text.required = true;
-    inputs.text.value = draft?.text ?? '';
-    const saveAnswer = () => remember(key, { target: draftTarget, text: inputs.text.value, stale });
-    const useCurrentQuestion = () => {
-      draftTarget = target;
-      stale = false;
-      saveAnswer();
-      review?.remove();
-      review = undefined;
-      setBusy(false);
-    };
-    inputs.text.addEventListener('input', () => {
-      if (draftTarget !== target && inputs.text.value !== draft?.text) useCurrentQuestion();
-      else saveAnswer();
-    });
-    if (changed || stale) {
-      review = element('div');
-      review.append(element('p', changed
-        ? 'The question changed. Review the current question before using this draft.'
-        : 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
-      if (changed) {
-        const useDraft = element('button', 'Use draft for this question');
-        useDraft.type = 'button';
-        useDraft.addEventListener('click', () => {
-          useCurrentQuestion();
-          inputs.text.focus();
-        });
-        review.append(useDraft);
-      }
-      form.append(review);
-    }
-    form.append(labeled('Answer', inputs.text));
-    if (item.choices?.length) {
-      const choices = element('div', '', 'board-inbox-actions');
-      for (const choice of item.choices) {
-        const button = element('button', choice);
-        button.type = 'button';
-        button.addEventListener('click', () => {
-          inputs.text.value = choice;
-          if (draftTarget !== target) useCurrentQuestion();
-          else saveAnswer();
-        });
-        choices.append(button);
-      }
-      form.append(choices);
-    }
-  } else if (item.itemKind === 'deadline') {
+  if (item.itemKind === 'deadline') {
     inputs.deadline = element('input');
     inputs.deadline.type = 'datetime-local';
     inputs.deadline.required = true;
@@ -164,7 +219,7 @@ function decisionCard(item, submit, drafts, remember, saving) {
   }
   form.append(buttons);
   function setBusy(busy) {
-    for (const input of form.elements) input.disabled = busy || (input.type === 'submit' && Boolean(review));
+    for (const input of form.elements) input.disabled = busy;
   }
   setBusy(Boolean(saving));
   saving?.then(() => setBusy(false), () => setBusy(false));
@@ -174,10 +229,8 @@ function decisionCard(item, submit, drafts, remember, saving) {
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
     if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
     if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
-    const active = document.activeElement;
-    const focus = inputs.text && form.contains(active) ? { ...answerFocus(inputs.text), origin: active } : undefined;
     setBusy(true);
-    try { await submit(item, event.submitter.value, data, focus); }
+    try { await submit(item, event.submitter.value, data); }
     finally { setBusy(false); }
   });
   article.append(form);
@@ -195,8 +248,8 @@ export function mountBoardInbox(api, sourceAction) {
   try { drafts = new Map(JSON.parse(sessionStorage.getItem(draftStorage))); } catch {}
   const saving = new Map();
   const views = {
-    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item) =>
-      decisionCard(item, submit, drafts, remember, saving.get(decisionTarget(item)))],
+    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item, focus) =>
+      decisionCard(item, submit, drafts, remember, saving.get(decisionTarget(item)), focus)],
     'inbox/history': ['Recent decisions', 'decisions', 'No recorded decisions.', (entry) => card(labels[entry.itemKind],
       `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)],
   };
@@ -210,10 +263,12 @@ export function mountBoardInbox(api, sourceAction) {
     try { sessionStorage.setItem(draftStorage, JSON.stringify([...drafts])); } catch {}
   }
 
-  async function submit(item, decision, data, focus) {
+  async function submit(item, decision, data, focus, choice = false) {
     const displayed = version;
-    const key = decision === 'answer' ? answerKey(item) : undefined;
+    const key = decision === 'answer' ? (choice ? choiceKey(item) : answerKey(item)) : undefined;
+    const otherKey = key && (choice ? answerKey(item) : choiceKey(item));
     const draft = drafts.get(key);
+    const otherDraft = drafts.get(otherKey);
     const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
     const attempt = decisionTarget(item);
     message.textContent = 'Saving decision…';
@@ -223,7 +278,10 @@ export function mountBoardInbox(api, sourceAction) {
       const response = await request;
       saving.delete(attempt);
       if (!response.accepted) throw new Error('decision_unconfirmed');
-      if (draft?.target === attempt && draft.text === data.text && drafts.get(key) === draft) remember(key);
+      if (draft?.target === attempt && draft.text === data.text && drafts.get(key) === draft) {
+        remember(key);
+        if (otherDraft && drafts.get(otherKey) === otherDraft) remember(otherKey);
+      }
       if (dialog.open && view === 'inbox') await load(response.status === 'approved'
         ? 'Decision saved. The Bot change still needs to be applied in Access settings.' : 'Decision saved.');
     } catch (error) {
@@ -263,11 +321,12 @@ export function mountBoardInbox(api, sourceAction) {
       const [result, configured] = await Promise.all([api(query.size ? `${view}?${query}` : view), availableBots]);
       if (displayed !== version) return;
       const cards = result[key].map((item) => {
-        const card = render(item);
+        const card = render(item, focus);
         if (key === 'items') {
           const bot = configured.find(({ id }) => id === item.botId);
           if (bot && sourceAction) card.insertBefore(
-            sourceAction(bot, item.conversationEventId, () => dialog.close()), card.querySelector('form'));
+            sourceAction(bot, item.conversationEventId, () => dialog.close()),
+            card.querySelector('.board-inbox-question, form'));
         }
         return card;
       });

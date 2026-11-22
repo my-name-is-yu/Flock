@@ -3,7 +3,7 @@ import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
-import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -789,8 +789,8 @@ const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.curren
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  const choices = task.wait.choices ?? [];
-  if (choices.length) {
+  const choices = task.wait.choices;
+  if (hasQuestionChoices(choices)) {
     const key = questionKey(task);
     const selections = context.questionChoices ??= new Map();
     actions.append(questionChoiceForm({
@@ -807,9 +807,9 @@ function questionActions(context, task, { dialog = false } = {}) {
       },
     }));
   }
-  const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
+  const reply = questionReplyButton(() => {
     if (view?.id === context.id) beginReply(target);
-  });
+  }, dialog);
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
   return actions;

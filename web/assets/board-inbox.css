@@ -1,11 +1,11 @@
-.board-inbox-nav, .board-inbox-filters, .board-inbox-actions {
+.board-inbox-nav, .board-inbox-filters, .board-inbox-actions, .board-inbox-question .question-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: end;
   gap: .5rem;
 }
 .board-inbox-nav { padding: .3rem .85rem .65rem; }
-.board-inbox-nav button, .board-inbox button:not(.icon-button), .board-inbox select {
+.board-inbox-nav button, .board-inbox button:not(.icon-button, .question-confirm, .question-reply), .board-inbox select {
   border: 1px solid var(--hairline);
   border-radius: var(--radius-md);
   padding: .38rem .65rem;
@@ -14,7 +14,7 @@
   font: inherit;
   font-size: var(--text-sm);
 }
-.board-inbox-nav button:hover, .board-inbox button:not(.icon-button):hover { background: var(--hover); }
+.board-inbox-nav button:hover, .board-inbox button:not(.icon-button, .question-confirm, .question-reply):hover { background: var(--hover); }
 .board-inbox { width: min(49rem, calc(100% - 1.5rem)); height: min(46rem, 88dvh); }
 .board-inbox-filters label, .board-inbox-form label {
   display: grid;
@@ -22,7 +22,8 @@
   color: var(--text-2);
   font-size: var(--text-sm);
 }
-.board-inbox-items, .board-inbox-card, .board-inbox-form { display: grid; gap: .65rem; }
+.board-inbox-items, .board-inbox-card, .board-inbox-form, .board-inbox-question { display: grid; gap: .65rem; }
+.board-inbox-question .question-actions { align-items: center; gap: .4rem; }
 .board-inbox-card {
   padding: .85rem 1rem;
   border: 1px solid var(--hairline);
