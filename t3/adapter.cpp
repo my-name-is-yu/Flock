@@ -530,7 +530,7 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     problem.detail = "Could not verify the specialist's pinned workspace";
     if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
     const auto head = threadHead(client,source.threadId);
-    const auto& thread = detail(head,source.threadId);
+    const auto& thread = member(head,"thread");
     const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
     if (!actual) return problem;
     if (actual->clean && actual->commit == pin) return {};
@@ -654,7 +654,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
     const auto until = Clock::now() + std::chrono::seconds(8);
     while (Clock::now() < until) {
         const auto head = threadHead(client,threadId);
-        const auto& thread = detail(head,threadId);
+        const auto& thread = member(head,"thread");
         if (str(thread,"projectId") != command.projectId || str(thread,"createdBy") != "agent" ||
             str(thread,"creationSource") != "mcp" || boolean(thread,"archived")) invalidResponse();
         if (!member(thread,"latestRunId").is_null() || !member(thread,"activeRunId").is_null())
@@ -769,7 +769,7 @@ public:
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                         const auto head = threadHead(client,recovered.run.threadId);
                         const auto workspace = workspaceHead(client,command.projectId,
-                                                             detail(head,recovered.run.threadId),true);
+                                                             member(head,"thread"),true);
                         if (!workspace || !workspace->clean || workspace->commit != pin)
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
