@@ -146,6 +146,25 @@ void freshLaunch(const std::filesystem::path& path) {
           "pending launch permission reached T3");
 }
 
+void repeatedSecretRequests(const std::filesystem::path& path) {
+    Store left(path), right(path);
+    auto access = left.access();
+    const SecretRef ref{"fixture-token"};
+    std::barrier start(2);
+    auto request = [&](Store& store) {
+        start.arrive_and_wait();
+        return store.access().requestSecret("Ernest",ref);
+    };
+    auto other = std::async(std::launch::async,request,std::ref(right));
+    const auto id = request(left);
+    check(id == other.get(),"repeated secret request returned a different ID");
+    denied([&]{ access.submitSecret(owner,"Ernest",id,"nest"); });
+    access.submitSecret(owner,"Ernest",id,credential);
+    check(access.administration(owner,"Ernest").at("secretInputs") ==
+          Json::array({{{"id",id},{"name",ref.name},{"status","fulfilled"}}}),"duplicate request remained after fulfillment");
+    denied([&]{ access.requestSecret("Ernest",ref); });
+}
+
 void exercise(const std::filesystem::path& dir) {
     auto path=dir/"state.db";
     Id request;
@@ -275,6 +294,7 @@ int main() {
         concurrentApproval(directory/"race.db");
         freshLaunch(directory/"fresh.db");
         runningSessions(directory/"peers.db");
+        repeatedSecretRequests(directory/"secret-requests"/"state.db");
         exercise(directory);
     }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(tmp);return 1;}

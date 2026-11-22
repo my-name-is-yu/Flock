@@ -24,6 +24,9 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
   run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand|prefill]
   bots
+  access grant BOT KIND RESOURCE ACTION
+  access revoke BOT KIND RESOURCE ACTION
+  access list BOT
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
   status TASK
@@ -270,6 +273,22 @@ void taskCommand(Store& store, const std::string& command, Arguments& args) {
     } else print(store.tasks(bot,cursor,limit));
 }
 
+void accessCommand(Store& store, Arguments& args) {
+    const auto action = args.pop("access command (grant, revoke or list)");
+    if (action != "grant" && action != "revoke" && action != "list")
+        throw Conflict("Unknown access command: " + action);
+    const auto bot = args.pop("Bot ID");
+    if (!validBotId(bot)) throw Conflict("Invalid Bot ID");
+    auto access = store.access();
+    if (action != "list") {
+        const Scope scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
+        args.end();
+        if (!scope.valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
+        access.resourceGrant(Person{"local-cli",true},bot,scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
+    } else args.end();
+    print(access.grants(bot));
+}
+
 int runCli(Arguments& args) {
     if (args.empty() || args.peek() == "--help" || args.peek() == "-h") {
         std::cout << usage;
@@ -292,6 +311,7 @@ int runCli(Arguments& args) {
     std::filesystem::create_directories(home);
     Store store(home / "flock.sqlite3");
     if (command == "run") daemon(args,home,store,bots);
+    else if (command == "access") accessCommand(store,args);
     else if (command == "submit") {
         const auto bot = bots.get(args.pop("Bot ID"));
         const auto request = args.pop("request");

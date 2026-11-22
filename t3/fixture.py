@@ -234,11 +234,15 @@ class Fixture(BaseHTTPRequestHandler):
         if "followup" in state:
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
         if scenario == "session-read":
-            if thread_id != "manual":
+            failure = state.get("threadReadErrors", {}).get(thread_id)
+            if failure is not None:
+                return failure
+            if thread_id not in ("deleted", "manual"):
                 return {"code": "thread_not_found", "message": "The thread was not found."}
             if state.get("denyRead"):
                 return {"code": "capability_denied", "message": "Read scope required."}
-            summary |= {"title": "Staging investigation", "status": "failed", "runCount": 4, "archived": True,
+            title = "Former investigation" if thread_id == "deleted" else "Staging investigation"
+            summary |= {"title": title, "status": "failed", "runCount": 4, "archived": True,
                         "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
             rows = [self.item(thread_id, 0, "root", "user_message", "Investigate staging", source="web"),
                     self.item(thread_id, 1, "root", "command_execution", "$ ctest --output-on-failure\nTest 7 failed",

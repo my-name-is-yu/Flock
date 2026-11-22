@@ -18,9 +18,10 @@ auto withSession(const std::filesystem::path& directory, const SessionTarget& ta
         Client client(loadCredential(directory,target.environmentId));
         return read(client);
     } catch (const Failure& error) {
+        const bool missingThread = error.code == "thread_not_found" ||
+            (error.code == "invalid_request" && error.serverMessage == "The thread was not found.");
         if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||
-            error.code == "thread_not_found" || error.code == "item_not_found" ||
-            error.code == "attachment_not_found") return {};
+            missingThread || error.code == "item_not_found" || error.code == "attachment_not_found") return {};
         throw;
     }
 }

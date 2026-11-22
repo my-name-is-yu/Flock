@@ -18,11 +18,14 @@ target_link_libraries(flock PRIVATE flock_app_support)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  add_executable(flock_app_tests tests.cpp demo.cpp)
+  add_executable(flock_app_tests tests.cpp session_tests.cpp demo.cpp)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
   find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_app_headless_access
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/headless-access.mjs" "$<TARGET_FILE:flock>")
+    set_tests_properties(flock_app_headless_access PROPERTIES TIMEOUT 20)
     add_test(NAME flock_app_login
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/login.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_login PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
