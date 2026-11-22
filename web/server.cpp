@@ -249,7 +249,8 @@ public:
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
-                if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
+                const auto actor = web::person(callbacks_,req);
+                if (!store_.access().permitsPerson(actor,id,Role::view)) return error(res,403,"access_denied");
                 const auto known = bots();
                 const auto* bot = botById(known,id);
                 if (!bot) return error(res,404,"bot_not_found");
@@ -280,7 +281,7 @@ public:
                         if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
                             view["changedMessageIds"] = changed->second;
                         view["sessionCursor"] = sessionThrough;
-                        json(res,200,view);
+                        json(res,200,withConversationAccess(actor,id,std::move(view)));
                     } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
@@ -478,11 +479,16 @@ private:
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const { return botList(person); }
 
+    Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
+        view["canDecide"] = store_.access().permitsPerson(actor,bot,Role::decide);
+        return view;
+    }
+
     Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
         if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
         const auto bot = findBot(view.bot);
         if (bot.is_null()) return nullptr;
-        return store_.access().redactSecrets(view.bot,web::botView(store_,bot));
+        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot)));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
