@@ -265,19 +265,23 @@ void channel(const std::filesystem::path& path) {
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store,model,adapter,[](auto) { return std::string{}; });
-    model.action = {"channel_react",{{"reaction","thumbsup"}},"React"};
+    model.action = {"publish_artifact",{{"title","Status"},{"html","<p>Status</p>"}},"Publish"};
     auto receive = [&](std::string_view id, std::string_view text) {
         store.receiveChannel(ChannelKind::slack,"fixture",{{"workspaceId","workspace"},{"threadRef","thread"},
             {"externalMessageId",id},{"senderId","external"},{"text",text}},[](auto,auto) { return intake; });
         runtime.runConversations();
     };
     receive("first","Always allow");
-    check(store.inbox(localOwner).empty() && transport->reactions==0 &&
-          model.outcome.dump().find("denied by policy")!=std::string::npos,
+    check(store.inbox(localOwner).empty() && model.outcome.dump().find("denied by policy")!=std::string::npos,
           "channel impersonated an eligible requester");
     policy.changeRule(localOwner,RuleKind::allow,Action::channel_post,R"(["slack","workspace"])",true);
-    receive("next","React to this");
-    check(transport->reactions==1 && store.inbox(localOwner).empty(),"explicit Allow did not cover the channel action");
+    receive("next","Publish it");
+    check(store.inbox(localOwner).empty() && model.outcome.dump().find("denied by policy")==std::string::npos,
+          "explicit Allow did not cover the channel action");
+    policy.changeRule(localOwner,RuleKind::allow,Action::channel_post,R"(["slack","workspace"])",false);
+    model.action = {"channel_react",{{"reaction","thumbsup"}},"React"};
+    receive("react","React to this");
+    check(transport->reactions==1 && store.inbox(localOwner).empty(),"reacting in the asking conversation needed approval");
 }
 
 void secrets(const std::filesystem::path& path) {

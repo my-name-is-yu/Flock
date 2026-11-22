@@ -96,12 +96,12 @@ ownership apply in both modes.
 | Action | Supervised default |
 | --- | --- |
 | Repository writes, PR changes, reviews, and issue or PR comments | Ask |
-| Channel posts and email sends | Ask |
+| Channel posts outside the asking conversation, published artifacts, and email sends | Ask |
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
 | Distinct destructive operations or secret use at a new destination | Ask |
 | MCP tool calls | Ask when the invocation has no read-only annotation available |
-| Reads, workspace work, and ordinary replies in the originating conversation | Allow |
+| Reads, workspace work, and replies, reactions, edits, and attachments in the originating conversation | Allow |
 
 Targets match exactly or with a `*` glob. **Never** applies in both modes.
 Supervised evaluates **Ask first** ahead of **Allow**, then uses the defaults

@@ -413,7 +413,10 @@ std::optional<Resource> Store::Impl::channelToolPolicy(Id message, std::string_v
     auto source = query("SELECT origin FROM channel_messages WHERE message_id=?",{message});
     if (!source.next()) return {};
     return Resource{tool == "read_channel_attachment" ? Action::channel_read : Action::channel_post,
-                    channelPolicyTarget(originFrom(source.json(0))),tool == "reply"};
+                    channelPolicyTarget(originFrom(source.json(0))),
+                    // Acting inside the conversation that asked is part of answering it; publishing is not.
+                    tool == "reply" || tool == "channel_react" || tool == "channel_edit_message" ||
+                    tool == "channel_send_attachment"};
 }
 
 Json Store::Impl::channelTool(Id message, std::string_view bot, const Decision& decision) {
