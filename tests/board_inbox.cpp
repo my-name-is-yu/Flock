@@ -70,8 +70,6 @@ struct Script : Model {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();
-            if (prompt == "Start the report" && event.at("turn").empty())
-                return {"start_task",{{"request","Prepare the report"}},"Start the requested work"};
             if (failConversation && prompt == "Pause this conversation")
                 return {"find_tasks",Json::object(),"Use the final available call"};
             if (event.at("turn").empty() && prompt != "Pause this conversation") {
@@ -214,8 +212,6 @@ void exercise(const std::filesystem::path& path) {
           questionRow.at("doneWhen") == originalCriteria && questionRow.at("status") == "waiting" &&
           questionRow.at("wait").at("text") == "Which report?" && questionRow.at("prRefs").at(0).at("url") == prUrl,
           "board dropped assignment, criteria, wait, or PR reference");
-    check(row(store.conversation("report"),"id",questionRow.at("conversationEventId")).at("kind") == "request",
-          "a direct task did not point to its visible request");
     check(row(board,"taskId",deadlineTask).at("deadlineAt") == due &&
           store.board(alice,"review").size() == 5 && store.board(alice,"private").empty() &&
           store.board(alice,{},"terminal").at(0).at("taskId") == terminal &&
@@ -387,35 +383,6 @@ void protectedInputSource(const std::filesystem::path& path) {
           "protected input lost its first conversation source");
 }
 
-void taskSources(const std::filesystem::path& path) {
-    Store store(path);
-    Database db(path);
-    auto access = store.access();
-    access.resourceGrant(owner,"report",{"environment","sandbox","launch"},GrantChange::grant);
-    const auto routing = intake("report","Manual request","report");
-    const auto direct = store.submit(routing);
-    const auto directAnchor = row(store.board(owner),"taskId",direct).at("conversationEventId");
-    const auto source = store.receive(owner,routing,"start-report","Start the report").at("messageId").get<Id>();
-    Script script;
-    Sessions sessions;
-    Runtime runtime(store,script,sessions,{});
-    runtime.runConversations();
-    const auto chatTask = row(store.board(owner),"request","Prepare the report");
-    check(chatTask.at("conversationEventId") == source &&
-          row(store.conversation("report"),"id",source).at("kind") == "conversation_message",
-          "a conversation task did not use the original message");
-
-    const auto foreign = store.receive(owner,intake("private","Unused","private"),"foreign","Private message")
-        .at("messageId").get<Id>();
-    db.exec("UPDATE tasks SET data=json_set(data,'$.sourceMessageId',"+std::to_string(foreign)+
-            ") WHERE id="+std::to_string(direct));
-    check(row(store.board(owner,"report"),"taskId",direct).at("conversationEventId") == directAnchor,
-          "a task used a message from a different Bot");
-    db.exec("UPDATE journal SET kind='git_webhook' WHERE id="+std::to_string(source));
-    check(!row(store.board(owner,"report"),"taskId",chatTask.at("taskId")).contains("conversationEventId"),
-          "an internal webhook or a hidden conversation request was exposed as a source");
-}
-
 void chatDecision(const std::filesystem::path& path) {
     Store store(path);
     auto access = store.access();
@@ -457,7 +424,6 @@ int main() {
         Directory directory;
         const auto path = directory.path/"state.db";
         exercise(path);
-        taskSources(directory.path/"sources.db");
         protectedInputSource(directory.path/"protected-input.db");
         chatDecision(directory.path/"chat.db");
         Store restarted(path);

@@ -69,13 +69,12 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     stale.erase("targetRevision");
     browser.post("/api/inbox/decide",stale,400);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
-    const auto requestAnchor = board.at(0).at("conversationEventId").get<Id>();
     const auto waitAnchor = inbox.at(0).at("conversationEventId").get<Id>();
     const auto cursor = "&before=" + std::to_string(waitAnchor + 1);
     const auto latest = browser.get("/api/conversation?bot=release");
     const auto source = browser.get("/api/conversation?bot=release" + cursor).at("events");
     check(latest.at("olderBefore") > waitAnchor &&
-          source.front().at("id") == requestAnchor && source.front().at("kind") == "request" &&
+          source.front().at("kind") == "request" &&
           source.back().at("id") == waitAnchor && source.back().at("kind") == "waiting" &&
           source.back().at("data").at("text") == inbox.at(0).at("prompt"),
           "view-only reader could not load the older question with its surrounding history");

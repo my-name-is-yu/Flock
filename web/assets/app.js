@@ -888,6 +888,7 @@ function updateFindOverlap() {
   return overlap;
 }
 function focusConversationMessage(target) {
+  // Scroll within the conversation and keep the message clear of the floating controls.
   const scroller = elements.conversation;
   const overlap = updateFindOverlap();
   const viewport = scroller.getBoundingClientRect();
@@ -1238,6 +1239,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const data = source ? null : view?.data;
   const context = timelineContext();
   const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
+  elements.conversation.classList.toggle('viewing-source', !!source);
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
@@ -1246,7 +1248,6 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   peerStatus.hidden = !olderFailed;
   peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
-  scroller.classList.toggle('historical-page', !!source);
   const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
   const focusedLink = focused?.dataset.peerFocus;
   const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
