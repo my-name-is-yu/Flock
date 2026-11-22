@@ -28,10 +28,15 @@ struct Backend : T3 {
     std::string secret;
     bool denyAttachment = false;
 
+    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
         writes.push_back(command);
-        return {Delivery::Kind::Accepted,{"foreign-thread","foreign-run",{}},{}};
+        const RunRef run{"foreign-thread","foreign-run",{}};
+        if (command.tool == "steer" &&
+            (command.target.threadId != run.threadId || command.target.runId != run.runId))
+            return {Delivery::Kind::NotAccepted,{},"The assigned Run is unavailable",true};
+        return {Delivery::Kind::Accepted,run,{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }

@@ -92,6 +92,7 @@ struct SimulatedT3 : T3 {
     int launches = 0, follows = 0, replies = 0, interrupts = 0, reconciles = 0, reads = 0, polls = 0;
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
+    bool delayLaunchRunId = false;
     bool failBeforeWorkSend = false;
     bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
@@ -141,6 +142,8 @@ struct SimulatedT3 : T3 {
         check(assignments.emplace(cmd.actionId,run).second,"duplicated action");
         if (auto callback = std::exchange(beforeWorkAcknowledgement,{})) callback();
         if (std::exchange(loseAcknowledgement,false)) return {};
+        if (cmd.tool == "delegate" && std::exchange(delayLaunchRunId,false))
+            return {Delivery::Kind::Unknown,{run.threadId,{},run.link},"Run ID pending"};
         return {Delivery::Kind::Accepted,run,{}};
     }
     Delivery reconcile(const Command& cmd) override {
@@ -765,6 +768,26 @@ void recoveredDelivery() {
     f.reach(id,"running");
     check(f.t3.replies==1 && f.t3.launches==1 && f.t3.reconciles==1 && f.task(id)["additionalUsed"]==0,
           "recovered answer created duplicate work");
+}
+
+void launchReceiptSurvivesRecovery() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id,"sending");
+    f.t3.delayLaunchRunId = true;
+    f.runtime->tick();
+    check(f.logs(id,"run_id_pending") == 1,"launch receipt did not persist");
+
+    f.restart();
+    f.t3.hasReconciledRun = false;
+    const auto wait = f.wait(id,"unknown_delivery");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+    f.t3.hasReconciledRun = true;
+    f.reach(id,"running");
+    check(f.t3.recovery.back().launchReceiptThreadId == "thread-1" &&
+          f.t3.recovery.back().candidate.threadId.empty() && f.t3.launches == 1,
+          "reconciliation lost the launch receipt or sent another launch");
 }
 
 void unsentAnswerRemainsRetryable() {
@@ -3249,7 +3272,8 @@ int main() {
             {"discard expired question after connection recovery",connectionRecoveryDiscardsExpiredSessionQuestion},
             {"recover the question's model approval",connectionRecoveryRestoresQuestionModelApproval},
             {"reconsider new directions after question recovery",connectionRecoveryReconsidersNewDirections},
-            {"delivery recovery",recoveredDelivery},{"retry unsent Session answer",unsentAnswerRemainsRetryable},
+            {"delivery recovery",recoveredDelivery},{"launch receipt recovery",launchReceiptSurvivesRecovery},
+            {"retry unsent Session answer",unsentAnswerRemainsRetryable},
             {"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"settled report recovery across restart",settledReportCanRecoverAfterRestart},

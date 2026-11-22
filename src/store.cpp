@@ -1,7 +1,9 @@
 #include "storage.hpp"
+#include "flock/base64.hpp"
 #include "flock/session_settings.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <limits>
 #include <map>
@@ -9,6 +11,8 @@
 #include <set>
 #include <system_error>
 #include <tuple>
+
+#include <openssl/sha.h>
 
 namespace flockv0 {
 namespace {
@@ -111,6 +115,10 @@ CREATE TABLE IF NOT EXISTS tasks(
 CREATE INDEX IF NOT EXISTS tasks_route ON tasks(environment_id,project_id,id)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS tasks_bot ON tasks(bot_id,id DESC);
+CREATE TABLE IF NOT EXISTS task_request_receipts(
+  bot_id TEXT NOT NULL, person_id TEXT NOT NULL, client_request_id TEXT NOT NULL,
+  request_digest TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
+  PRIMARY KEY(bot_id,person_id,client_request_id));
 CREATE TABLE IF NOT EXISTS journal(
   id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id),
   time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, conversation_bot_id TEXT,
@@ -514,6 +522,50 @@ Id Store::submit(const Intake& item) {
     const auto id = p_->submit(item);
     transaction.commit();
     return id;
+}
+
+Id Store::submitRequest(const Person& actor, std::string_view bot, std::string_view clientId,
+                        std::string_view request, const IntakeResolver& route) {
+    const auto valid = [](std::string_view text, std::size_t limit) {
+        return text.size() <= limit && text.find_first_not_of(" \t\r\n") != text.npos &&
+            text.find('\0') == text.npos;
+    };
+    if (!valid(clientId,256) || !valid(request,16000)) throw Conflict("Invalid Task request");
+    std::array<unsigned char,SHA256_DIGEST_LENGTH> digest{};
+    if (!SHA256(reinterpret_cast<const unsigned char*>(request.data()),request.size(),digest.data()))
+        throw std::runtime_error("Could not hash the Task request");
+    const auto encoded = encodeBase64({reinterpret_cast<const char*>(digest.data()),digest.size()});
+    const auto receipt = [&]() -> std::optional<Id> {
+        if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+        auto row = p_->query("SELECT task_id,request_digest FROM task_request_receipts"
+                             " WHERE bot_id=? AND person_id=? AND client_request_id=?", {bot,actor.id,clientId});
+        if (!row.next()) return std::nullopt;
+        if (row.string(1) != encoded) throw Conflict("This client request ID already has different text");
+        return row.number(0);
+    };
+    {
+        std::lock_guard lock(p_->mutex);
+        Transaction transaction(p_->db,Transaction::Mode::read);
+        const auto existing = receipt();
+        transaction.commit();
+        if (existing) return *existing;
+    }
+
+    // Load Bot configuration outside the SQLite transaction, then recheck before writing.
+    auto intake = route(bot,request);
+    intake.botId = bot;
+    intake.request = request;
+    std::lock_guard lock(p_->mutex);
+    Transaction transaction(p_->db);
+    auto id = receipt();
+    if (!id) {
+        p_->redactor(bot).requirePublic({actor.id,clientId});
+        id = p_->submit(intake);
+        p_->exec("INSERT INTO task_request_receipts(bot_id,person_id,client_request_id,request_digest,task_id)"
+                 " VALUES(?,?,?,?,?)", {bot,actor.id,clientId,encoded,*id});
+    }
+    transaction.commit();
+    return *id;
 }
 
 Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source,

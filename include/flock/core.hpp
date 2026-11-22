@@ -114,6 +114,7 @@ struct Command {
     RunRef candidate; // User-specified reconciliation hint. T3 must verify ownership.
     std::string candidateQuestionId;
     std::string ownerBotId;
+    std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -179,6 +180,8 @@ struct SessionCounts {
 class T3 {
 public:
     virtual ~T3() = default;
+    // A steer must affect only the requested Run, even if another Run takes over.
+    virtual bool supportsRunTargetedSteer() const { return false; }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
@@ -257,6 +260,9 @@ public:
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&);
+    // Creates an explicit Task for an authorized person. An identical retry returns its Task ID.
+    Id submitRequest(const Person&, std::string_view botId, std::string_view clientRequestId,
+                     std::string_view request, const IntakeResolver&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());

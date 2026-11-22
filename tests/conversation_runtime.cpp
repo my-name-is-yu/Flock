@@ -126,11 +126,13 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> deliveries;
     std::map<std::string,Observation> observations;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
+    bool runTargetedSteer = true;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
     std::function<void()> duringAuthLookup;
 
     std::vector<Command> steered;
+    bool supportsRunTargetedSteer() const override { return runTargetedSteer; }
     std::string authGeneration(const std::string&,const Json&) override {
         if (auto callback = std::exchange(duringAuthLookup,{})) callback();
         return login;
@@ -1907,6 +1909,28 @@ void notesReachTheRunningSession() {
           "a note for a finished task reached T3");
 }
 
+void notesWaitForTheNextSafePointWithoutTargetedSteering() {
+    Fixture f;
+    f.t3.runTargetedSteer = false;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    constexpr auto text = "Use the staging database for the next measurement";
+    f.script(text,{[id](const ModelInput& input) {
+        check(std::ranges::find(input.tools,"message_session") == input.tools.end() &&
+              std::ranges::find(input.tools,"send_to_task") != input.tools.end(),"the wrong note tools were offered");
+        return note(id)(input);
+    },send(id,Json::object())});
+    const auto message = f.receive("pending-note",text);
+    const auto turn = f.lastTurn();
+    check(turn.at(0).at("result")["ok"] == false &&
+          turn.at(0).at("result").at("error").get<std::string>().find("next safe point") != std::string::npos &&
+          turn.at(1).at("result")["ok"] == true && f.t3.steered.empty() && f.t3.sent.size() == 1 &&
+          f.task(id)["pendingInstructions"][0]["text"] == text &&
+          f.conversationMessage(message["messageId"])["deliveredToT3"] == false &&
+          f.event(id,"instruction_steered").is_null(),
+          "an unsupported steer ran, or its safe-point replacement was reported as delivered");
+}
+
 void notesRejectStoppingTasks() {
     for (const bool replanning : {false,true}) {
         Fixture f;
@@ -2220,6 +2244,7 @@ int main() {
         conversationCanReadAndChangeTheFullCurrentContract();
         environmentsResolveByNameOrId();
         notesReachTheRunningSession();
+        notesWaitForTheNextSafePointWithoutTargetedSteering();
         notesRejectStoppingTasks();
         cancellationDuringSteerPreparation();
         newSessionsReceivePersistedTaskDecisions();

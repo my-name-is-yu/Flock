@@ -3,9 +3,10 @@
 #include "demo.hpp"
 #include "model.hpp"
 #include "git_github.hpp"
+#include "flock/identity.hpp"
 
 #ifdef FLOCK_WITH_T3
-#include "flock/root_delivery.hpp"
+#include "flock/session_handoff.hpp"
 #include "flock/t3_mcp.hpp"
 #endif
 #ifdef FLOCK_WITH_WEB
@@ -17,6 +18,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <set>
 #include <thread>
 
 namespace flockv0::app {
@@ -193,14 +195,22 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
-#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
-    auto handoffSession = web && !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
+    const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
+        return bots.get(botId).intake(request);
+    };
+    const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
+    const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
+    const auto identities = identityFile ? loadIdentities(store,identityFile) : ConfiguredIdentities{};
+#ifdef FLOCK_WITH_T3
+    auto handoffSession = !fixed && identities.resolvePerson
+        ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
     std::shared_ptr<SessionHandoff> handoffs;
-    SessionHandoff::People handoffPeople;
-    if (handoffSession) {
+    if (!fixed) {
         options.resolveSpecialistPerson = [&](std::string_view person) -> std::optional<Person> {
-            return handoffPeople ? handoffPeople(person) : std::nullopt;
+            return identities.resolvePerson ? identities.resolvePerson(person) : std::nullopt;
         };
+    }
+    if (handoffSession) {
         options.observeSpecialistInput = [&](const Person& person, Id channel) -> std::optional<std::string> {
             if (!handoffs) return {};
             const auto view = handoffs->view(person,channel);
@@ -209,61 +219,36 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         };
     }
 #endif
-    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
+    Runtime runtime(store,*model,*t3,soul,options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
+#ifdef FLOCK_WITH_T3
+    if (handoffSession) {
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,identities.resolvePerson,&runtime,options.peers);
+        handoffs->recover();
+    }
+    std::jthread handoffWorker;
+#endif
 #ifdef FLOCK_WITH_WEB
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
-        [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+        intake,
         [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
         [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
             return bots.updateProfile(botId,profile,image);
         },
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
-        {},
+        identities.authenticate,
         [&](const BotChange& change) { bots.apply(change); },
         options.clock,
     };
+    callbacks.resolveIdentity = identities.resolveRoot;
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
-    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"))
-        configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
 #ifdef FLOCK_WITH_T3
-    std::jthread handoffWorker;
-    if (handoffSession && callbacks.configuredPerson) {
-        handoffPeople = callbacks.configuredPerson;
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
-        handoffs->recover();
-        callbacks.sessionHandoffs = handoffs;
-        handoffWorker = std::jthread([handoffs, person=handoffPeople, intake=callbacks.intake,
-                                     soul=[&](std::string_view botId) { return bots.soul(botId); },
-                                     &model](std::stop_token stop) {
-            Id after = 0;
-            while (!stop.stop_requested()) {
-                try {
-                    const auto pending = handoffs->pending(after);
-                    if (pending.empty()) after = 0;
-                    for (const auto& [channel, personId] : pending) {
-                        if (stop.stop_requested()) return;
-                        after = channel;
-                        const auto actor = person ? person(personId) : std::nullopt;
-                        if (!actor) continue;
-                        try {
-                            const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
-                            else handoffs->consult(*actor,channel,*model,intake,soul);
-                        } catch (const std::exception&) {
-                        }
-                    }
-                } catch (const std::exception&) {
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-            }
-        });
-    }
+    callbacks.sessionHandoffs = handoffs;
 #endif
     std::unique_ptr<WebServer> server;
     if (web) {
@@ -274,13 +259,53 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 #endif
     std::signal(SIGINT,requestStop);
     std::signal(SIGTERM,requestStop);
+#ifdef FLOCK_WITH_T3
+    if (handoffs) {
+        handoffWorker = std::jthread([&](std::stop_token stop) {
+            Id after = 0;
+            bool pollingFailed = false;
+            std::set<Id> reportedFailures;
+            while (!stop.stop_requested()) {
+                try {
+                    const auto pending = handoffs->pending(after);
+                    pollingFailed = false;
+                    if (pending.empty()) after = 0;
+                    for (const auto& [channel, personId] : pending) {
+                        if (stop.stop_requested()) return;
+                        after = channel;
+                        try {
+                            const auto actor = identities.resolvePerson(personId);
+                            if (!actor) {
+                                if (reportedFailures.insert(channel).second)
+                                    std::cerr << "Session handoff " << channel << " has no configured identity.\n";
+                                continue;
+                            }
+                            const auto view = handoffs->view(*actor,channel);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
+                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                            reportedFailures.erase(channel);
+                        } catch (const std::exception&) {
+                            if (reportedFailures.insert(channel).second)
+                                std::cerr << "Could not advance Session handoff " << channel
+                                          << ". Check its access and Bot settings.\n";
+                        }
+                    }
+                } catch (const std::exception&) {
+                    if (!pollingFailed) std::cerr << "Could not load pending Session handoffs.\n";
+                    pollingFailed = true;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        });
+    }
+#endif
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
     while (!stopRequested) {
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+#ifdef FLOCK_WITH_T3
     handoffWorker.request_stop();
 #endif
     runtime.requestStop();

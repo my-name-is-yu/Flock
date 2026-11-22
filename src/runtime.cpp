@@ -940,6 +940,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         c.authGeneration = field(action,"authGeneration");
         c.candidate = runRef(action.value("candidate",Json::object()));
         c.candidateQuestionId = field(action,"candidateQuestionId");
+        c.launchReceiptThreadId = field(action,"launchReceiptThreadId");
         return c;
     }
 
@@ -1066,6 +1067,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 saved.erase("phase");
                 saved.erase("authGeneration");
                 saved["candidate"] = runJson(outcome.run);
+                if (action["tool"] == "delegate") saved["launchReceiptThreadId"] = outcome.run.threadId;
                 db.exec("UPDATE outbox SET data=? WHERE id=?", {saved,action["id"]});
                 db.journal(id,"run_id_pending",{{"actionId",action["id"]},{"thread",runJson(outcome.run)}});
                 return true;
@@ -1096,7 +1098,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     std::optional<Delivery> replaySpecialistLaunch(Id id, const Command& command) {
-        if (command.tool != "delegate" || command.authGeneration.empty() || !command.candidate.threadId.empty()) return {};
+        if (command.tool != "delegate" || command.authGeneration.empty() ||
+            !command.launchReceiptThreadId.empty() || !command.candidate.threadId.empty()) return {};
         const auto origin = [&]() -> std::optional<SpecialistOrigin> {
             std::lock_guard lock(db.mutex);
             if (!db.query("SELECT 1 FROM specialist_launches WHERE task_id=? AND action_id=?",
