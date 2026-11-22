@@ -295,6 +295,22 @@ std::pair<std::int64_t,std::int64_t> Store::changeStamp() const {
     return {sqlite3_total_changes64(p_->db),version.next() ? version.number(0) : 0};
 }
 
+Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
+    std::lock_guard lock(p_->mutex);
+    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal");
+    newest.next();
+    ConversationChanges changes{newest.number(0),{}};
+    if (!after || *after >= changes.through) return changes;
+    auto rows = p_->query(R"SQL(
+SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
+  WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId') ELSE json_extract(j.data,'$.messageId') END
+WHERE j.id>? AND j.id<=? AND (?='' OR m.bot_id=?)
+  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_steered','instruction_delivered')
+)SQL",{*after,changes.through,bot,bot});
+    while (rows.next()) changes.messages[rows.string(0)].push_back(rows.number(1));
+    return changes;
+}
+
 Id Store::submit(const Intake& item) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);

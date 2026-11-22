@@ -1,6 +1,6 @@
 import { accentColor, showAvatar } from '/avatars.js';
-import { collectEventPages, mergeEventPages } from '/event-history.mjs';
-import { createLiveUpdates } from '/live-updates.js';
+import { refreshEventHistory } from '/event-history.mjs';
+import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
@@ -219,7 +219,16 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   save('flock-selected-bot', botId);
   elements.conversation.scrollTop = 0;
   render('bottom');
-  if (view) void requestSync({ bot: true, dm: !!view.dm, scroll: 'bottom' });
+  const context = view;
+  if (context) {
+    context.pageRead = Promise.resolve();
+    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
+    void context.refresh('bottom');
+    if (context.dm) {
+      context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
+      void context.dm.refresh('bottom');
+    }
+  }
   subscribeToView();
 }
 function selectLocation() {
@@ -890,7 +899,7 @@ function peerThread(events, dm) {
   const fragment = document.createDocumentFragment();
   if (!events.length) {
     const empty = node('div', 'empty-state');
-    const title = dm.error ? 'DM unavailable' : dm.loaded ? 'No messages yet' : 'Loading…';
+    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     empty.append(node('h2', null, title));
     if (dm.error) empty.append(node('p', null, dm.error));
     fragment.append(empty);
@@ -962,7 +971,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   if (view?.dm) {
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
-    if (!changed('timeline', dm.id, dm.peerId, events, dm.loaded, dm.error, participants, dayFormat.format(Date.now()))) return;
+    if (!changed('timeline', dm.id, dm.peerId, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
     elements.timeline.replaceChildren(peerThread(events, dm));
     moveScroll();
@@ -1247,7 +1256,7 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await requestSync({ list: true, bot: view?.id === savedBot.id });
+    await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
@@ -1519,70 +1528,85 @@ async function conversationPage(timeline, before) {
   const { messages, hasOlder } = await api(peerQuery(timeline, before));
   return { events: messages, olderBefore: hasOlder ? messages[0].id : 0 };
 }
-async function refreshPeerConversation(context) {
+async function refreshPeerConversation(context, scroll) {
+  if (context !== view) return;
   const dm = context.dm;
   const isCurrent = () => context === view;
   const readPage = before => conversationPage(dm, before);
   try {
     const latest = await readPage();
-    const pages = await collectEventPages(latest, dm.newestEvent, readPage, isCurrent);
-    if (!pages || !isCurrent()) return true;
-    mergeEventPages(dm, pages);
-    dm.loaded = true;
+    await refreshEventHistory(dm, latest, readPage, isCurrent);
+    if (!isCurrent()) return;
     dm.error = null;
   } catch (error) {
-    if (!isCurrent()) return true;
-    if (!dm.loaded) dm.error = errors[error.message] ?? 'Could not load this conversation.';
-    return [403, 404].includes(error.status);
+    if (!isCurrent()) return;
+    if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    if (![403, 404].includes(error.status)) retrySync();
   }
-  return true;
+  renderTimeline(scroll);
 }
-async function refreshView(context) {
+async function refreshView(context, scroll) {
+  if (context !== view) return;
   const isCurrent = () => context === view;
   try {
-    const latest = await api(botQuery('view', context.id));
-    const pages = await collectEventPages(latest, context.newestEvent, before => conversationPage(context, before), isCurrent);
-    if (!pages || !isCurrent()) return true;
-    mergeEventPages(context, pages);
+    const params = new URLSearchParams({ bot: context.id });
+    if (context.data) params.set('changesAfter', context.data.historyCursor);
+    const latest = await api(`view?${params}`);
+    await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
+    if (!isCurrent()) return;
     mergeLatest(context, latest);
     setConnection('ready');
-    return true;
   } catch (error) {
-    if (!isCurrent()) return true;
-    if (error.status === 404) {
-      void requestSync({ list: true });
-      return true;
+    if (!isCurrent()) return;
+    if (error.status === 404) void refreshBots();
+    else {
+      setConnection('offline');
+      retrySync();
     }
-    setConnection('offline');
-    return false;
+    return;
+  }
+  render(scroll);
+  if (context.openSettingsOnLoad) {
+    context.openSettingsOnLoad = null;
+    openSettingsFromMenu(context.id);
   }
 }
-async function refreshBots() {
+const refreshBots = coalescedRefresh(async () => {
   try {
     const latest = await api('bots');
     bots = latest;
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
-    return true;
+    render();
   } catch {
     setConnection('offline');
-    return false;
+    retrySync();
   }
+});
+// Serialize manual pages with refreshes of the same Bot so a late page cannot restore stale badges.
+function readTimeline(context, read) {
+  const next = (context.pageRead ?? Promise.resolve()).then(read, read);
+  context.pageRead = next;
+  return next;
 }
+
 async function loadOlder() {
   const context = timelineContext();
-  const cursor = context?.olderBefore;
-  if (!cursor || context.loadingOlder) return;
+  if (!context?.olderBefore || context.loadingOlder) return;
   context.loadingOlder = true;
   if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
-    const { events, olderBefore } = await conversationPage(context, cursor);
-    if (context !== timelineContext() || context.olderBefore !== cursor) return;
-    context.olderBefore = olderBefore;
-    for (const event of events) context.events.set(event.id, event);
-    renderTimeline('older');
+    await readTimeline(context, async () => {
+      if (context !== timelineContext() || !context.olderBefore) return;
+      const cursor = context.olderBefore;
+      const { events, olderBefore } = await conversationPage(context, cursor);
+      if (context !== timelineContext() || context.olderBefore !== cursor) return;
+      context.olderBefore = olderBefore;
+      for (const event of events) context.events.set(event.id, event);
+      renderTimeline('older');
+    });
   } catch {
     if (context !== timelineContext()) return;
     if (context.peerId) context.olderFailed = true;
@@ -1634,7 +1658,7 @@ async function submitOperation(context, key, payload) {
     if (isOpen()) showDetailError(message);
     failed = true;
   } finally {
-    if ((failed || !liveUpdates.live) && view?.id === context.id) await requestSync({ bot: true, list: true });
+    if ((failed || !liveUpdates.live) && view?.id === context.id) await Promise.all([view.refresh(), refreshBots()]);
     pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
@@ -1661,7 +1685,7 @@ async function submit(event) {
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
-    if (!liveUpdates.live) await requestSync({ list: true, bot: showingComposer(context.id), scroll: 'bottom' });
+    if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
     if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
@@ -1759,63 +1783,25 @@ document.addEventListener('keydown', (event) => {
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
-let pendingSync;
-let syncInFlight;
 let syncRetry;
-
-function requestSync({ list = false, bot = false, dm = false, scroll } = {}) {
-  if (!pendingSync || pendingSync.context !== view) {
-    pendingSync = { list: pendingSync?.list, context: view };
-  }
-  pendingSync.list ||= list;
-  pendingSync.bot ||= bot;
-  pendingSync.dm ||= dm;
-  pendingSync.scroll ??= scroll;
-  syncInFlight ??= Promise.resolve().then(async () => {
-    try {
-      while (pendingSync) {
-        const next = pendingSync;
-        pendingSync = null;
-        await syncView(next);
-      }
-    } finally {
-      syncInFlight = null;
-    }
-  });
-  return syncInFlight;
-}
-
-async function syncView({ context, list, bot, dm, scroll }) {
-  const selected = context && context === view;
-  const results = await Promise.all([
-    !list || refreshBots(),
-    !bot || !selected || refreshView(context),
-    !dm || !selected || !context.dm || refreshPeerConversation(context),
-  ]);
-  render(view === context ? scroll : undefined);
-  if (bot && view === context && context?.data && context.openSettingsOnLoad) {
-    const botId = context.openSettingsOnLoad;
-    context.openSettingsOnLoad = null;
-    openSettingsFromMenu(botId);
-  }
-  if (results.includes(false) && !document.hidden) {
-    syncRetry ??= setTimeout(syncAll, 2500);
-  }
+function retrySync() {
+  if (!document.hidden) syncRetry ??= setTimeout(syncAll, 2500);
 }
 
 function syncAll() {
   clearTimeout(syncRetry);
   syncRetry = null;
-  if (!document.hidden) void requestSync({ list: true, bot: !!view, dm: !!view?.dm });
+  if (document.hidden) return;
+  void refreshBots();
+  void view?.refresh();
+  void view?.dm?.refresh();
 }
 
 const liveUpdates = createLiveUpdates(syncAll, (change) => {
+  if (change.list === true) void refreshBots();
+  if (view && change.bot === view.id) void view.refresh();
   const dm = view?.dm;
-  void requestSync({
-    list: change.list === true,
-    bot: !!view && change.bot === view.id,
-    dm: !!dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId,
-  });
+  if (dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId) void dm.refresh();
 });
 
 function subscribeToView() {

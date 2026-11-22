@@ -44,7 +44,7 @@ private:
         std::optional<Json> snapshot;
     };
     void monitor();
-    std::set<Scope> refresh(const std::vector<Scope>&);
+    std::set<Scope> refresh(const std::vector<Scope>&, const Store::ConversationChanges&);
 
     Store& store_;
     Load load_;

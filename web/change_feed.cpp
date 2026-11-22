@@ -79,7 +79,8 @@ void ChangeFeed::stop() {
     if (worker_.joinable()) worker_.join();
 }
 
-std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes) {
+std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes,
+                                                const Store::ConversationChanges& changes) {
     std::set<Scope> failed;
     std::map<Scope,Json> snapshots;
     for (const auto& scope : scopes) {
@@ -94,6 +95,12 @@ std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes
         item->second.snapshot = std::move(snapshot);
         item->second.revision = ++revision_;
     }
+    // An older message can change delivery status without changing the latest page.
+    for (const auto& [bot,ids] : changes.messages) {
+        const auto item = watched_.find(BotView{bot});
+        if (item != watched_.end() && item->second.revision <= previousRevision)
+            item->second.revision = ++revision_;
+    }
     if (revision_ != previousRevision) changed_.notify_all();
     return failed;
 }
@@ -102,9 +109,11 @@ void ChangeFeed::monitor() {
     std::unique_lock lock(mutex_);
     std::optional<decltype(store_.changeStamp())> lastStamp;
     std::set<Scope> retry;
+    std::optional<Id> journalCursor;
     auto checkProfiles = std::chrono::steady_clock::now();
     while (!stopping_) {
         if (watched_.empty()) {
+            journalCursor.reset();
             changed_.wait(lock,[&] { return stopping_ || !watched_.empty(); });
             continue;
         }
@@ -117,7 +126,12 @@ void ChangeFeed::monitor() {
             const auto stamp = store_.changeStamp();
             if (!requested && !profileCheck && stamp == lastStamp)
                 std::erase_if(scopes,[&](const Scope& scope) { return !retry.contains(scope); });
-            if (!scopes.empty()) retry = refresh(scopes);
+            if (!scopes.empty()) {
+                Store::ConversationChanges changes{journalCursor.value_or(0),{}};
+                if (!journalCursor || stamp != lastStamp) changes = store_.conversationChangesSince(journalCursor);
+                retry = refresh(scopes,changes);
+                journalCursor = changes.through;
+            }
             lastStamp = stamp;
             if (profileCheck) checkProfiles = std::chrono::steady_clock::now() + 2500ms;
         } catch (const std::exception&) {

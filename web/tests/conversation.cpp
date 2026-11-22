@@ -285,6 +285,8 @@ void conversationEntry(const std::filesystem::path& path) {
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
+    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").get<Id>();
+    const auto since = "&changesAfter=" + std::to_string(cursor);
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
     check(model.turns == 0 && store.tasks().size() == 1,"HTTP intake ran the model before returning its receipt");
     disableIntake = true;
@@ -298,7 +300,10 @@ void conversationEntry(const std::filesystem::path& path) {
     browser.post("/api/messages",{{"botId","release"},{"text","追加確認"}},400);
 
     tick(runtime,3);
-    const auto page = browser.get("/api/view?bot=release");
+    const auto page = browser.get("/api/view?bot=release" + since);
+    check(page.at("changedMessageIds") == Json::array({messageId}) &&
+          browser.get("/api/view?bot=triage" + since).at("changedMessageIds").empty(),
+          "a processed message was not invalidated exclusively for its own Bot");
     unsigned questions = 0, answers = 0;
     for (const auto& event : page.at("events")) {
         if (event["kind"] == "conversation_message") {

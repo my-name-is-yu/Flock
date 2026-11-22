@@ -1,20 +1,38 @@
-export async function collectEventPages(latest, newestEvent, readOlder, isCurrent) {
-  const pages = [latest];
-  let before = latest.olderBefore;
-  while (isCurrent() && newestEvent != null && before > newestEvent) {
-    const page = await readOlder(before);
-    if (page.olderBefore >= before) throw new Error('Invalid conversation cursor');
-    pages.push(page);
-    before = page.olderBefore;
+export async function refreshEventHistory(history, latest, readOlder, isCurrent) {
+  const updates = new Map(latest.events.map(event => [event.id, event]));
+  async function readPage(cursor, loadedOnly) {
+    const page = await readOlder(cursor);
+    if (page.olderBefore >= cursor) throw new Error('Invalid conversation cursor');
+    for (const event of page.events) {
+      if (!loadedOnly || history.events.has(event.id)) updates.set(event.id, event);
+    }
+    return page.olderBefore;
   }
-  return isCurrent() ? pages : null;
-}
 
-export function mergeEventPages(history, pages) {
-  if (!history.events.size) history.olderBefore = pages[0].olderBefore;
-  else if (pages.length > 1) history.olderBefore = Math.min(history.olderBefore, pages.at(-1).olderBefore);
-  for (const page of pages) {
-    for (const event of page.events) history.events.set(event.id, event);
+  let before = latest.olderBefore;
+  while (history.newestEvent != null && before > history.newestEvent) {
+    if (!isCurrent()) return;
+    before = await readPage(before, false);
   }
-  history.newestEvent = pages[0].events.at(-1)?.id ?? history.newestEvent;
+
+  const changed = new Set(latest.changedMessageIds);
+  // Approving a paused turn reopens the original message and closes its budget reply in place.
+  for (const event of history.events.values()) {
+    if (event.kind === 'conversation_reply' && event.data.route === 'model_budget' && event.data.status === 'needs_you') {
+      changed.add(event.id);
+      changed.add(event.data.replyToMessageId);
+    }
+  }
+  const older = [...changed].filter(id => id < before && history.events.has(id)).sort((a, b) => b - a);
+  let uncovered = before;
+  for (const id of older) {
+    if (!isCurrent()) return;
+    if (id < uncovered) uncovered = await readPage(id + 1, true);
+  }
+  if (!isCurrent()) return;
+
+  // Commit only after all reads succeed. Keep pages manually loaded during the refresh.
+  history.olderBefore = history.newestEvent == null ? before : Math.min(history.olderBefore, before);
+  for (const [id, event] of updates) history.events.set(id, event);
+  history.newestEvent = latest.events.at(-1)?.id ?? history.newestEvent ?? 0;
 }
