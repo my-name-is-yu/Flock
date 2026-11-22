@@ -31,11 +31,9 @@
   overflow-wrap: anywhere;
 }
 .board-inbox-card h3 { font-size: var(--text-md); }
-.board-inbox-card p, .board-inbox-card dd { white-space: pre-wrap; }
-.board-inbox-card p, .board-inbox-card dl, .board-inbox-card a { font-size: var(--text-sm); }
-.board-inbox-card dl { display: grid; grid-template-columns: auto 1fr; gap: .3rem .8rem; margin: 0; }
-.board-inbox-card dd { margin: 0; }
-.board-inbox-card dt, .board-inbox-meta, #work-view-message { color: var(--text-2); }
+.board-inbox-card p { white-space: pre-wrap; }
+.board-inbox-card p, .board-inbox-card a { font-size: var(--text-sm); }
+.board-inbox-meta, #work-view-message { color: var(--text-2); }
 .board-inbox-card a { color: var(--accent); justify-self: start; }
 .board-inbox-form input, .board-inbox-form textarea {
   width: min(100%, 32rem);
