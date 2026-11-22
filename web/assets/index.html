@@ -29,8 +29,10 @@
         <button id="close-navigation" class="icon-button narrow-only" type="button" aria-label="Close Bot list">×</button>
       </div>
       <div class="board-inbox-nav" role="group" aria-label="Across Bots">
-        <button type="button" data-work-view="board" aria-haspopup="dialog">Task board</button>
-        <button type="button" data-work-view="inbox" aria-haspopup="dialog">Decision inbox</button>
+        <button type="button" data-work-view="inbox" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>
+          <span>Decision inbox</span>
+        </button>
       </div>
       <div class="sidebar-scroll">
         <section class="nav-section bots" aria-labelledby="bots-heading">
@@ -78,10 +80,13 @@
             </button>
           </h1>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <h1 id="peer-heading" class="peer-heading" tabindex="-1" hidden></h1>
+          <div id="peer-identity" class="peer-identity" hidden>
+            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
+            <h1 id="peer-heading" class="peer-title" tabindex="-1"></h1>
+          </div>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
-            <span>Back to Bot</span>
+            <span id="peer-back-label"></span>
           </button>
           <button id="peer-picker" class="header-text-button peer-picker" type="button" aria-label="Bot DMs" aria-haspopup="dialog" title="Bot DMs" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
@@ -96,7 +101,12 @@
           <div id="timeline" class="timeline"></div>
         </div>
       </section>
+      <button id="jump-to-latest" class="jump-to-latest" type="button" aria-controls="conversation" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-5-5 5 5 5-5"/></svg>
+        Jump to latest
+      </button>
       <div class="composer-container" id="composer-container" hidden>
+        <p id="view-only-notice" class="view-only-notice" role="status" hidden>View only</p>
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
             <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
@@ -136,15 +146,6 @@
     <div class="dialog-body">
       <div class="board-inbox-filters">
         <label>Bot <select id="work-view-bot"><option value="">All Bots</option></select></label>
-        <label id="work-view-status-label">Status
-          <select id="work-view-status">
-            <option value="">All statuses</option><option value="active">Active</option>
-            <option value="running">Working</option><option value="waiting">Waiting</option>
-            <option value="peer_waiting">Waiting for another Bot</option><option value="blocked">Blocked</option>
-            <option value="queued">Queued</option><option value="replanning">Replanning</option>
-            <option value="terminal">Closed</option>
-          </select>
-        </label>
         <button id="work-view-refresh" type="button">Refresh</button>
         <button id="work-view-history" type="button">Recent decisions</button>
       </div>

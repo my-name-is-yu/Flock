@@ -92,6 +92,19 @@ Json persistence(const std::filesystem::path& db, std::string_view operationId) 
     return Json::parse(reinterpret_cast<const char*>(sqlite3_column_text(stmt,0)));
 }
 
+std::string watchedPrUrl(const std::filesystem::path& db) {
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(db.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,"could not read fixture database");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> connection(raw,sqlite3_close);
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(raw,"SELECT url FROM git_pr_watches",-1,&stmt,nullptr) == SQLITE_OK,"could not query PR watches");
+    std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(stmt,sqlite3_finalize);
+    check(sqlite3_step(stmt) == SQLITE_ROW,"no pull request is watched");
+    std::string url = reinterpret_cast<const char*>(sqlite3_column_text(stmt,0));
+    check(sqlite3_step(stmt) == SQLITE_DONE,"more than one pull request is watched");
+    return url;
+}
+
 void freshPrReviewSchema() {
     Directory directory;
     const auto path = directory.path/"fresh.db";
@@ -348,8 +361,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
                 } catch (const Conflict&) {}
                 store.decideInbox(localOwner,decision,"link_pr",{{"prNumber",1}});
                 check(persistence(path,operationId).at("prNumber") == 1,"Selecting a verified PR did not link it");
-                check(store.board(localOwner,"owner").at(0).at("prRefs").at(0).at("url") ==
-                      "https://github.com/org/flock/pull/1","Selected PR was not watched");
+                check(watchedPrUrl(path) == "https://github.com/org/flock/pull/1","Selected PR was not watched");
             } else {
                 check(candidates.empty(),"Title collision was offered for manual linking");
                 store.decideInbox(localOwner,decision,"reject_pr");
@@ -365,8 +377,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
                   "the original PR was not recovered");
             check(store.inbox(localOwner,"owner").dump().find("pr_reconciliation") == std::string::npos,
                   "resolved reconciliation still pending");
-            check(store.board(localOwner,"owner").at(0).at("prRefs").at(0).at("url") == recovered.at("url"),
-                  "recovered pull request is missing from the task board");
+            check(watchedPrUrl(path) == recovered.at("url").get<std::string>(),"recovered pull request is not watched");
         }
     }
 }
