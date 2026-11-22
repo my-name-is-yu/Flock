@@ -163,9 +163,9 @@ struct FakeMcp : McpTools {
         if (cursor == "tools-page-2") return {{"tools",{"second"}}};
         return {{"tools",{"lookup"}},{"nextCursor","tools-page-2"}};
     }
-    Json invoke(std::string_view, std::string_view name, const Json& args) override {
+    McpToolResult invoke(std::string_view, std::string_view name, const Json& args) override {
         ++calls;
-        return {{"toolName",name},{"arguments",args}};
+        return {{{"toolName",name},{"arguments",args}},false};
     }
     Json readResource(std::string_view, std::string_view uri) override { ++reads; return {{"uri",uri}}; }
 };
@@ -671,25 +671,74 @@ void freshConversationStepArrays(Fixture& f) {
     }
 }
 
-void mcpSessionPagination(Fixture& f, std::string_view url) {
-    write(f.home/"bot-tools.json",Json{{"mcpServers",{{"one",{{"url",url}}},{"two",{{"url",url}}}}}}.dump());
-    const auto adapter = app::loadBotTools(f.home)->mcp;
-    const auto first = adapter->discover("alpha","one",McpCollection::tools,{});
+void mcpSessionPagination(McpTools& adapter) {
+    const auto first = adapter.discover("alpha","one",McpCollection::tools,{});
     const auto cursor = first.at("nextCursor").get<std::string>();
     check(first.at("tools") == Json::array({"first"}) && cursor != "session-bound",
           "The first page did not return an opaque continuation");
     const auto expectDenied = [&](std::string_view bot, std::string_view server, McpCollection collection) {
-        try { adapter->discover(bot,server,collection,cursor); }
+        try { adapter.discover(bot,server,collection,cursor); }
         catch (const Conflict&) { return; }
         throw std::runtime_error("A discovery cursor was accepted outside its original scope or after use");
     };
     expectDenied("beta","one",McpCollection::tools);
     expectDenied("alpha","two",McpCollection::tools);
     expectDenied("alpha","one",McpCollection::resources);
-    const auto next = adapter->discover("alpha","one",McpCollection::tools,cursor);
+    const auto next = adapter.discover("alpha","one",McpCollection::tools,cursor);
     check(next.at("tools") == Json::array({"second"}) && !next.contains("nextCursor"),
           "MCP continuation did not reach the original session");
     expectDenied("alpha","one",McpCollection::tools);
+}
+
+void mcpToolOutcomes(Fixture& f) {
+    const auto invoke = [](std::string_view name, std::string_view server = "one") {
+        return call("mcp_call_tool",{{"server",server},{"name",name},{"arguments",Json::object()}});
+    };
+    const auto expectUnknown = [](const Json& result, std::string_view name) {
+        check(result.at("ok") == false && result.value("delivery","") == "unknown" && !result.contains("data"),
+              "Malformed MCP result was exposed as evidence: " + std::string(name));
+    };
+
+    f.grant({"mcp_server","one","invoke"});
+    f.batch({invoke("numeric-content")},2);
+    f.restart();
+    f.approve();
+    expectUnknown(f.model.seen.at(0).at("result"),"numeric-content after restart");
+
+    for (const auto* name : {"missing-content","invalid-block","invalid-resource","invalid-structured-content","invalid-is-error"})
+        expectUnknown(f.run(invoke(name)),name);
+
+    const auto success = f.run(invoke("extension"));
+    check(success.at("ok") == true && success.at("untrustedData") == true &&
+          success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
+          success.at("data").at("content").at(1).at("payload") == 7 &&
+          success.at("data").at("structuredContent").at("count") == 1,
+          "Valid MCP content and extensions did not reach the model");
+
+    const auto failure = f.run(invoke("tool-failure"));
+    check(failure.at("ok") == false && !failure.contains("delivery") && failure.at("untrustedData") == true &&
+          failure.at("data").at("content").at(0).at("text") == "Tool failed" &&
+          !failure.at("data").contains("isError"),"Definite MCP tool failure did not survive credential redaction");
+
+    const auto rejected = f.run(invoke("rejected"));
+    check(rejected.at("ok") == false && !rejected.contains("delivery") && rejected.contains("error"),
+          "JSON-RPC rejection was classified as an ambiguous dispatch");
+
+    f.grant({"mcp_server","failed-init","invoke"});
+    const auto initFailure = f.run(invoke("never-dispatched","failed-init"));
+    check(initFailure.at("ok") == false && !initFailure.contains("delivery") && initFailure.contains("error"),
+          "MCP initialization failure was classified as an ambiguous dispatch");
+}
+
+void mcpLoopback(Fixture& f, std::string_view url) {
+    write(f.home/"bot-tools.json",Json{{"mcpServers",{
+        {"one",{{"url",url},{"tokenEnv","FLOCK_MCP_TEST_TOKEN"}}},
+        {"two",{{"url",url}}},
+        {"failed-init",{{"url",std::string(url) + "/failed-init"}}}
+    }}}.dump());
+    f.tools->mcp = app::loadBotTools(f.home)->mcp;
+    mcpSessionPagination(*f.tools->mcp);
+    mcpToolOutcomes(f);
 }
 
 void approvalWhileAnotherTurnIsInferring(Fixture& f) {
@@ -714,7 +763,7 @@ int main(int argc, char** argv) {
     try {
         Fixture fixture;
         if (argc == 2) {
-            mcpSessionPagination(fixture,argv[1]);
+            mcpLoopback(fixture,argv[1]);
             return 0;
         }
         workspaceAndLifecycle(fixture);

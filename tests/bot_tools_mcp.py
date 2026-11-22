@@ -1,8 +1,24 @@
 import json
+import os
 import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+TOOL_RESULTS = {
+    "numeric-content": {"content": 42, "isError": False},
+    "missing-content": {"structuredContent": {}},
+    "invalid-block": {"content": [{"type": "text", "text": 42}]},
+    "invalid-resource": {"content": [{"type": "resource", "resource": {"uri": "fixture://data"}}]},
+    "invalid-structured-content": {"content": [], "structuredContent": []},
+    "invalid-is-error": {"content": [], "isError": 1},
+    "extension": {
+        "content": [{"type": "text", "text": "Tool evidence"}, {"type": "fixture-extension", "payload": 7}],
+        "structuredContent": {"count": 1},
+    },
+    "tool-failure": {"content": [{"type": "text", "text": "Tool failed"}], "isError": True},
+}
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -21,11 +37,13 @@ class Fixture(BaseHTTPRequestHandler):
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         method = request["method"]
-        cursor = request.get("params", {}).get("cursor")
+        params = request.get("params", {})
+        cursor = params.get("cursor")
+        name = params.get("name")
         session = self.headers.get("Mcp-Session-Id")
-        self.calls.append((method, session, cursor))
+        self.calls.append((method, session, name if method == "tools/call" else cursor))
         if method == "notifications/initialized":
-            self.send_json(202)
+            self.send_json(503 if self.path.endswith("/failed-init") else 202)
             return
         result = {"jsonrpc": "2.0", "id": request["id"]}
         if method == "initialize":
@@ -34,27 +52,42 @@ class Fixture(BaseHTTPRequestHandler):
         elif method == "tools/list" and session == "session-1" and cursor in (None, "session-bound"):
             result["result"] = {"tools": ["second"]} if cursor else {"tools": ["first"], "nextCursor": "session-bound"}
             self.send_json(200, result)
+        elif method == "tools/call" and name in TOOL_RESULTS:
+            result["result"] = TOOL_RESULTS[name]
+            self.send_json(200, result)
         else:
             result["error"] = {"code": -32602, "message": "Invalid session or cursor"}
             self.send_json(400, result)
 
     def do_DELETE(self):
         self.calls.append(("delete", self.headers.get("Mcp-Session-Id"), None))
-        self.send_json(204)
+        self.send_json(405 if self.path.endswith("/failed-init") else 204)
 
 
 with HTTPServer(("127.0.0.1", 0), Fixture) as server:
     worker = threading.Thread(target=server.serve_forever)
     worker.start()
     try:
-        subprocess.run([sys.argv[1], f"http://127.0.0.1:{server.server_port}/mcp"], check=True, timeout=20)
+        subprocess.run(
+            [sys.argv[1], f"http://127.0.0.1:{server.server_port}/mcp"],
+            env={**os.environ, "FLOCK_MCP_TEST_TOKEN": "isError"},
+            check=True,
+            timeout=20,
+        )
     finally:
         server.shutdown()
         worker.join()
-    assert Fixture.calls == [
+    expected = [
         ("initialize", None, None),
         ("notifications/initialized", "session-1", None),
         ("tools/list", "session-1", None),
         ("tools/list", "session-1", "session-bound"),
         ("delete", "session-1", None),
-    ], Fixture.calls
+    ]
+    for name in (*TOOL_RESULTS, "rejected", None):
+        session = f"session-{len(expected) + 1}"
+        expected.extend([("initialize", None, None), ("notifications/initialized", session, None)])
+        if name is not None:
+            expected.append(("tools/call", session, name))
+        expected.append(("delete", session, None))
+    assert Fixture.calls == expected, Fixture.calls
