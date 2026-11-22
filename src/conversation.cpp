@@ -24,6 +24,9 @@ CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,i
 WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
+CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
+  json_extract(data,'$.messageId'),task_id,coalesce(json_extract(data,'$.step'),0))
+  WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
@@ -31,9 +34,9 @@ CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL,
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
-    reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
-    person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
-    UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
+  reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
+  person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
+  UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
@@ -73,8 +76,6 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     return revision;
 }
 
-// True while a message of this Bot has not been read yet. A turn paused for a model call approval does not hold
-// completion: it may wait indefinitely, and once approved it sees the tasks as they are then.
 bool Store::Impl::conversationPending(std::string_view bot) const {
     return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
                  " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();

@@ -24,7 +24,7 @@ Decision converse(const ModelInput& input, const std::string& tool, Id taskId, J
             if (task.at("taskId") != taskId) continue;
             args["taskId"] = taskId;
             args["generation"] = task.at("generation");
-            if (tool == "change_task") args["revisionId"] = task.at("revisionId");
+            if (tool == "change_task" || tool == "answer_task_question") args["revisionId"] = task.at("revisionId");
         }
     }
     const auto text = tool == "start_task" ? "request" : "instruction";
@@ -32,7 +32,7 @@ Decision converse(const ModelInput& input, const std::string& tool, Id taskId, J
     return {tool,std::move(args),"Scripted turn"};
 }
 void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
-void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool active) {
+void executeSql(const std::filesystem::path& databaseFile, const char* sql) {
     sqlite3* database = nullptr;
     const auto opened = sqlite3_open(databaseFile.c_str(),&database);
     if (opened != SQLITE_OK) {
@@ -41,15 +41,17 @@ void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, boo
         throw std::runtime_error(message);
     }
     char* error = nullptr;
-    const auto result = sqlite3_exec(database,active ?
-        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
-        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END" :
-        "DROP TRIGGER fail_session_read_journal",
-        nullptr,nullptr,&error);
+    const auto result = sqlite3_exec(database,sql,nullptr,nullptr,&error);
     const std::string message = error ? error : sqlite3_errmsg(database);
     sqlite3_free(error);
     sqlite3_close(database);
     if (result != SQLITE_OK) throw std::runtime_error(message);
+}
+void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool active) {
+    executeSql(databaseFile,active ?
+        "CREATE TRIGGER fail_session_read_journal BEFORE INSERT ON journal "
+        "WHEN NEW.kind='session_read' BEGIN SELECT RAISE(ABORT,'injected journal failure'); END" :
+        "DROP TRIGGER fail_session_read_journal");
 }
 constexpr auto Evidence = "report and independent verification";
 
@@ -69,7 +71,7 @@ Decision botRequest(std::string bot, const char* kind, const char* message) {
     if (std::string_view(kind) == "work") args["doneWhen"] = Evidence;
     return {"send_bot_message",std::move(args),"Ask the specialist"};
 }
-Decision botReply(const char* kind, const char* message) {
+Decision botReply(const char* kind, std::string_view message) {
     return {"reply_to_bot",{{"kind",kind},{"text",message}},"Respond to the current exchange"};
 }
 bool hasTool(const ModelInput& input, std::string_view tool) {
@@ -91,6 +93,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
+    std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
@@ -151,12 +154,15 @@ struct SimulatedT3 : T3 {
         readRequests.push_back(req);
         ++reads;
         if (beforeRead) beforeRead();
+        if (!historyPages.empty()) return historyPages.at(reads - 1);
         return {reads == 1 ? "commit wanted, updates enabled" : "RSS 25 MiB",
                 req.threadId,req.runId,"item-"+std::to_string(reads),"next",100,reads==1};
     }
     void question(std::string run) {
         runs.at(run).kind = Observation::Kind::Question;
-        runs.at(run).question = {"branch-question",Json::array({{{"id","branch"},{"options",Json::array({"main","dev"})}}})};
+        runs.at(run).question = {"branch-question",Json::array({{{"id","branch"},{"options",Json::array({
+            {{"label","Main branch"},{"value","main"}},{{"label","Development branch"},{"value","dev"}}
+        })}}})};
     }
     void external(std::string run) {
         runs.at(run).kind = Observation::Kind::ExternalInput;
@@ -265,22 +271,91 @@ void invalidDecisions() {
     f.runtime->tick();
     f.restart();
     const auto wait = f.wait(id,"model_failure");
-    check(f.model.calls == 3 && f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
+    check(f.model.calls == 5 && f.logs(id,"model_failure") == 3 && f.logs(id,"tool_error") == 2 &&
+          f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"retry");
     f.rejects(id,wait,"retry");
-    f.model.script = [](const ModelInput&) { return work(); };
+    f.model.script = [](const ModelInput& input) {
+        check(input.feedback.empty() && input.event.at("decisionFeedback").empty(),"retry kept prior errors");
+        return work();
+    };
     f.reach(id,"running");
     f.t3.question("run-1");
+    f.t3.runs.at("run-1").question.fields.push_back({{"id","checks"},{"multiple",true},{"freeform",true},
+        {"options",Json::array({{{"label","Lint"},{"value","lint"}}})}});
     f.model.script = [](const ModelInput&) { return work(); };
     const auto questionWait = f.wait(id,"model_failure");
     check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence,"invalid in-question action executed");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),questionWait),"retry");
-    f.model.script = [](const ModelInput&) { return reply(); };
+    int answerAttempts = 0;
+    f.model.script = [&](const ModelInput& input) {
+        auto answer = reply();
+        if (++answerAttempts == 1) answer.args["answers"]["checks"] = Json::array({"lint","another check"});
+        else {
+            check(!input.event.at("decisionFeedback").empty(),"model did not receive feedback on its invalid answer");
+            answer.args["answers"]["checks"] = "another check";
+        }
+        return answer;
+    };
     f.reach(id,"running");
+    check(answerAttempts == 2 && f.t3.replies == 1 && f.t3.seen.back().answers.at("checks") == "another check",
+          "T3 received the invalid answer instead of the model's correction");
     f.t3.finish("run-1");
     f.model.script = [](const ModelInput&) { return work(); };
     f.wait(id,"model_failure");
     check(f.t3.launches == 1 && f.task(id)["doneWhen"] == Evidence,"doneWhen overwritten");
+}
+
+void correctInvalidTaskArguments() {
+    Fixture f;
+    const auto id = f.submit();
+    const Json badArgs = {{"question","Which branch?"},{"choices",12}};
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (f.model.calls == 1) return {"ask_user",badArgs,"Need a branch"};
+        const auto& feedback = input.event.at("decisionFeedback");
+        check(feedback.size() == 1 && feedback[0].at("tool") == "ask_user" && feedback[0].at("args") == badArgs &&
+              feedback[0].at("result").at("ok") == false &&
+              feedback[0].at("result").at("error") == "Expected up to twelve short textual choices",
+              "model did not receive the rejected arguments and validation result");
+        return ask();
+    };
+    f.reach(id,"deciding");
+    f.runtime->tick();
+    f.restart();
+    const auto wait = f.wait(id,"user_question");
+    check(f.model.calls == 2 && !f.logs(id,"model_failure") && f.logs(id,"decision") == 1,
+          "correcting an invalid tool call consumed a model-failure strike");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"answer",{{"text","main"}});
+    f.model.script = [](const ModelInput& input) {
+        check(input.event.at("decisionFeedback").empty(),"validation errors leaked into the user's answer event");
+        return work();
+    };
+    f.reach(id,"running");
+}
+
+void replayQuestionDecision() {
+    for (const bool stillOpen : {true,false}) {
+        Fixture f;
+        const auto id = f.store->submit({"alpha","Use main","e","p",{{"modelCallLimit",2}}});
+        f.model.script = [&](const ModelInput& input) {
+            if (input.event.at("kind") == "intake") return work();
+            // Lose T3 visibility at the post-inference liveness check, before any reply can commit.
+            f.t3.runs.at("run-1").kind = Observation::Kind::Unavailable;
+            return reply();
+        };
+        f.reach(id,"running");
+        f.t3.question("run-1");
+        f.reach(id,"deciding");
+        f.runtime->tick();
+        check(f.model.calls == 2 && f.task(id)["state"] == "deciding" && !f.t3.replies,
+              "reply did not stop between inference and effect");
+        f.restart();
+        if (stillOpen) f.t3.question("run-1");
+        else f.t3.runs.at("run-1") = {};
+        f.reach(id,"running");
+        check(f.model.calls == 2 && f.t3.replies == int(stillOpen) && !f.task(id).contains("pendingDecision"),
+              "restart repeated inference or applied a stale question reply");
+    }
 }
 
 void ambiguityAndFailure() {
@@ -364,7 +439,7 @@ void budgetAndStaleWaits() {
         if (input.event["kind"] == "question") return reply();
         const auto used = input.task["additionalUsed"].get<int>();
         if (used == 3 && !input.event.contains("userAnswer") && f.logs(id,"user_answer")==0) return ask();
-        return work(used == 0 || used == 2 ? "follow_up" : "delegate",false);
+        return work(used == 1 ? "delegate" : "follow_up",false);
     };
     f.reach(id,"running");
     for (int i = 1; i <= 3; ++i) {
@@ -379,7 +454,8 @@ void budgetAndStaleWaits() {
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),question),"answer",{{"text","keep going"}});
     const auto budget = f.wait(id,"budget");
     f.rejects(id,budget,"answer",{{"text","yes"}});
-    check(f.task(id)["remaining"] == 0 && f.t3.seen.size()==4,"normal answer increased budget or fourth work sent");
+    check(f.task(id)["wait"]["attempted"] == "follow_up" && f.task(id)["remaining"] == 0 &&
+          f.t3.seen.size() == 4,"normal answer permitted an extra follow-up");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),budget),"approve");
     f.rejects(id,budget,"approve");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),0),"cancel");
@@ -408,8 +484,20 @@ void sessionQuestions() {
         f.reach(id,"deciding");
         if (needsUser) {
             const auto wait = f.wait(id,"user_question");
+            const auto task = f.task(id);
+            check(task["question"]["target"] == Json{{"waitId",wait},{"eventId",task["eventId"]},
+                {"run",task["activeRun"]},{"requestId","branch-question"}},"user wait lost its Session target");
+            executeSql(f.store->path(),"UPDATE tasks SET data=json_set(data,'$.question.target.eventId',0) WHERE state='waiting'");
+            f.rejects(id,wait,"answer",{{"text","main"}});
+            check(f.logs(id,"user_answer") == 0,"answer for a stale question target was recorded");
+            executeSql(f.store->path(),"UPDATE tasks SET data=json_set(data,'$.question.target.eventId',"
+                                       "json_extract(data,'$.eventId')) WHERE state='waiting'");
             f.restart();
             f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"answer",{{"text","main"}});
+            const auto answered = f.task(id);
+            check(answered["question"]["target"]["waitId"].is_null() &&
+                  answered["question"]["target"]["eventId"] == answered["eventId"] &&
+                  answered["eventId"] != task["eventId"],"answer did not advance the question target");
         }
         f.reach(id,"running");
         check(f.t3.replies==1 && f.t3.launches==1 && f.t3.follows==0 &&
@@ -445,6 +533,21 @@ void waitsExpireWithReality() {
     f.reach(id,"completed");
     check(f.t3.replies==0 && f.logs(id,"user_answer")==0 && f.t3.seen.size()==1,
           "stale waiting operation executed");
+}
+
+void failedPreflightIsUnsent() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.t3.onPreflight = [] { throw ModelError("Missing T3 settings",false); };
+    const auto wait = f.wait(id,"settings");
+    check(f.t3.seen.empty() && f.logs(id,"send_started") == 0,"failed preflight started a delivery");
+    f.restart();
+    f.t3.onPreflight = {};
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+    f.reach(id,"running");
+    check(f.t3.launches == 1 && f.t3.reconciles == 0 && f.logs(id,"send_started") == 1,
+          "preflight failure did not leave one unsent action");
 }
 
 void recoveredDelivery() {
@@ -598,6 +701,82 @@ void evidenceResume() {
           "history read did not resume its budget");
 }
 
+void redactedHistoryPagination() {
+    Fixture f;
+    f.read = "on_demand";
+    f.restart();
+    const std::string secret = "fixture-history-secret";
+    auto access = f.store->access();
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"history-token"}),secret);
+    f.t3.historyPages = {
+        {"Token: " + secret,{},{},"history-item","7",64,true},
+        {"Verified " + secret,{},{},"history-item",{},0,false},
+    };
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        const auto& run = input.event.at("run");
+        Json ref = {{"threadId",run.at("threadId")},{"runId",run.at("runId")}};
+        if (input.evidence.empty()) return Decision{"session_read",ref,"Read the first page"};
+        const auto& first = input.evidence.front();
+        check(first.at("text") == "Token: [redacted]" && first.at("more") == true &&
+              first.at("itemTruncated") == true && first.at("nextCursor") == "7" && first.at("nextOffset") == 64,
+              "redaction lost the adapter's continuation");
+        if (input.evidence.size() == 1) {
+            ref["itemId"] = first.at("itemId");
+            ref["offset"] = first.at("nextOffset");
+            return Decision{"session_read",ref,"Read the final page"};
+        }
+        const auto& last = input.evidence.back();
+        check(last.at("text") == "Verified [redacted]" && last.at("more") == false &&
+              last.at("itemTruncated") == false && last.at("nextCursor") == "" && last.at("nextOffset") == 0,
+              "redaction made a complete excerpt appear truncated");
+        return complete();
+    };
+    const auto id = f.submit();
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.readRequests.size() == 2 && f.t3.readRequests.back().offset == 64,
+          "history did not resume at the adapter's offset");
+}
+
+void taskPagesShowProjectOwners() {
+    Fixture f;
+    f.model.script = [](const ModelInput&) { return work(); };
+    const auto desktop = f.submit("Verify main", "beta");
+    f.reach(desktop,"running");
+    const auto cloud = f.store->submit({"beta","Check cloud","cloud","p"});
+    const auto desktopNext = f.submit("Desktop follow-up");
+    const auto independent = f.submit("Separate release","alpha","another-project");
+    const auto cancelled = f.submit("Withdrawn release");
+    f.store->operate(localOwner,TaskTarget::from(f.task(cancelled),0),"cancel");
+    const auto cloudNext = f.store->submit({"alpha","Cloud follow-up","cloud","p"});
+    f.restart();
+
+    const auto newest = f.store->tasks("alpha",0,2);
+    const Json cloudOwner = {{"id",cloud},{"botId","beta"},{"request","Check cloud"},{"state","queued"}};
+    check(newest.size() == 2 && newest[0].at("id") == cloudNext && newest[0].at("blockedBy") == cloudOwner &&
+          newest[1].at("id") == cancelled && newest[1].at("state") == "cancelled" && newest[1].at("blockedBy").is_null(),
+          "the newest page lost the off-page cloud owner or blocked cancelled work");
+    const auto older = f.store->tasks("alpha",cancelled,2);
+    const Json desktopOwner = {{"id",desktop},{"botId","beta"},{"request","Verify main"},{"state","running"}};
+    check(older.size() == 2 && older[0].at("id") == independent && older[0].at("blockedBy").is_null() &&
+          older[1].at("id") == desktopNext && older[1].at("blockedBy") == desktopOwner &&
+          f.store->tasks("alpha",desktopNext,2).empty(),
+          "the older page skipped a task, repeated the cursor or mixed up project owners");
+    const auto active = f.store->activeTasks("alpha");
+    check(active.size() == 3 && active.front().at("id") == cloudNext && active.front().at("blockedBy") == cloudOwner &&
+          active.back().at("id") == desktopNext && active.back().at("blockedBy") == desktopOwner,
+          "the active task list lost the owners of work in separate environments");
+
+    const auto history = f.store->tasks({},cloud,1);
+    check(history.size() == 1 && history[0].at("id") == desktop && history[0].at("blockedBy").is_null() &&
+          history[0].at("runs").size() == 1 && history[0].at("runs")[0].at("link") == "https://t3.test/thread" &&
+          history[0].at("revisions").size() == 1 && history[0].at("revisions")[0].at("doneWhen") == Evidence &&
+          history[0].at("runs")[0].at("revisionId") == history[0].at("revisions")[0].at("id"),
+          "the unfiltered task page lost the running owner's Session link or revision after restart");
+}
+
 void peerWorkAndRestart() {
     Fixture f;
     f.allowBeta();
@@ -717,32 +896,23 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     Fixture f;
     f.allowBeta();
     const auto root = f.submit("Verify and report the PR");
-    int results = 0;
-    const auto requestPeerWork = [](int number) {
-        Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR, pass " + std::to_string(number)}};
-        if (number == 1) args["doneWhen"] = Evidence;
-        return Decision{"send_bot_message",std::move(args),"Use the configured verifier"};
-    };
+    int peerReplies = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.task["id"] == root) {
-            if (input.event["kind"] == "intake") return requestPeerWork(++results);
-            if (input.event["kind"] == "bot_result") {
-                ++results;
-                if (results <= 4) return requestPeerWork(results);
-                return work("delegate",false);
-            }
-            if (input.event["kind"] == "result") return work("follow_up",false);
-            throw std::runtime_error("Unexpected sender event in peer budget test");
+        if (input.task["id"] != root) {
+            ++peerReplies;
+            return botReply("result","Verified the requested pass");
         }
-        check(input.event["kind"] == "bot_request","peer work received an unexpected event");
-        return botReply("result","Verified the requested pass");
+        if (input.event["kind"] == "bot_result" && peerReplies == 4) return work("delegate",false);
+        Json args = {{"botId","beta"},{"kind","work"},{"text","Verify the PR"}};
+        if (input.event["kind"] == "intake") args["doneWhen"] = Evidence;
+        return {"send_bot_message",std::move(args),"Use the configured verifier",{{"total_tokens",37}}};
     };
 
     for (int step = 0; step < 64 && f.task(root)["state"] != "waiting"; ++step) f.runtime->tick();
-    check(f.task(root)["state"] == "waiting","peer work did not reach its exhausted-budget wait");
     const auto budget = f.wait(root,"budget");
-    check(f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 3 &&
-          f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
+    const auto beforeApproval = f.task(root);
+    check(beforeApproval["wait"]["attempted"] == "delegate" && beforeApproval["remaining"] == 0 &&
+          beforeApproval["additionalUsed"] == 3 && f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
           "direct T3 work bypassed the allowance exhausted by peer work");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(root),budget),"approve");
     f.reach(root,"running");
@@ -750,9 +920,12 @@ void peerWorkSharesBudgetWithDirectT3Work() {
           "one approval did not admit exactly one direct T3 action");
     f.t3.finish("run-1");
     const auto secondBudget = f.wait(root,"budget");
-    check(secondBudget != budget && f.t3.launches == 1 && f.task(root)["remaining"] == 0 &&
-          f.task(root)["additionalUsed"] == 4 && f.task(root)["wait"]["attempted"] == "follow_up",
-          "the approved direct T3 action granted an additional unapproved action");
+    const auto paused = f.task(root);
+    check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 4 &&
+          f.store->tasks("beta").size() == 4,"the approved direct T3 action also granted unapproved peer work");
+    const auto& wait = paused.at("wait");
+    check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
+          wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
@@ -842,7 +1015,7 @@ void peerClarificationAfterRun() {
     for (const auto mode : {"on_demand","prefill","off"}) checkPeerClarificationAfterRun(mode);
 }
 
-void revisionWaitsForPeerClarification() {
+void revisionWaitsForPeerClarification(bool direct = false) {
     Fixture f;
     f.allowBeta();
     const Intake routing{"alpha","Release check","e","p",
@@ -851,7 +1024,12 @@ void revisionWaitsForPeerClarification() {
     bool answeredPeer = false;
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& kind = input.event.at("kind");
-        if (kind == "conversation_turn") return converse(input,"change_task",root,{{"environment","cloud"}});
+        if (kind == "conversation_turn") {
+            if (input.event.at("text") == "Use main")
+                return converse(input,"answer_task_question",root,{{"waitId",input.event.at("replyTo").at("waitId")},
+                                {"text",input.event.at("text")}});
+            return converse(input,"change_task",root,{{"environment","cloud"}});
+        }
         if (input.task.at("botId") == "beta") {
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && input.event.at("text") == "Use main",
@@ -859,18 +1037,17 @@ void revisionWaitsForPeerClarification() {
             return botReply("result","Verified main");
         }
         if (kind == "bot_question") {
+            if (!input.event.contains("userAnswer")) return ask();
             check(f.task(root).at("environmentId") == "e" && f.t3.launches == 0,
                   "Replanning ran before the Bot exchange finished");
-            if (!input.event.contains("userAnswer")) return ask();
             check(input.event.at("userAnswer") == "Use main","The peer question lost the human answer");
             answeredPeer = true;
-            return botReply("answer","Use main");
+            return botReply("answer",input.event.at("userAnswer").get_ref<const std::string&>());
         }
         check(kind == "intake","Unexpected event for the sender");
         return answeredPeer ? work() : botRequest("beta","consult","Check the release");
     };
 
-    f.reach(root,"peer_waiting");
     const auto oldWait = f.wait(root,"user_question");
     const auto old = TaskTarget::from(f.task(root),oldWait);
     f.store->receive(localOwner,routing,"move-release-check","Run Release check on cloud");
@@ -885,8 +1062,14 @@ void revisionWaitsForPeerClarification() {
     check(pending.size() == 1 && pending.at(0).at("itemKind") == "user_question" && pending.at(0).at("waitId") != old.waitId,
           "Replanning stranded the peer question");
     const auto& current = pending.at(0);
-    f.store->decideInbox(localOwner,{"alpha",InboxKind::user_question,current.at("itemId"),current.at("waitId"),root,
-        current.at("targetRevision"),current.at("targetGeneration")},"answer",{{"text","Use main"}});
+    if (direct) {
+        f.store->decideInbox(localOwner,{"alpha",InboxKind::user_question,current.at("itemId"),current.at("waitId"),root,
+            current.at("targetRevision"),current.at("targetGeneration")},"answer",{{"text","Use main"}});
+    } else {
+        f.store->receive(localOwner,routing,"branch-answer","Use main",f.task(root).at("wait").at("messageId"));
+        f.runtime->runConversations();
+    }
+    check(f.logs(root,"user_answer") == 1,"The conversation rejected the answer the peer is waiting for");
     f.reach(root,"running");
     const auto messages = f.botMessages("alpha");
     check(answeredPeer && messages.size() == 4 && messages.back().at("messageType") == "result" &&
@@ -894,15 +1077,62 @@ void revisionWaitsForPeerClarification() {
           "The task did not finish the Bot exchange before launching once in the new environment");
 }
 
+void peerCompletionAfterEnvironmentMove() {
+    for (const auto [kind,environment] : {std::pair{"work","cloud"},{"consult","cloud"},{"work","e"}}) {
+        Fixture f;
+        f.allowBeta();
+        const Intake routing{"alpha","Release check","e","p",{{"conversationEnvironments",{{"cloud","cloud"}}}}};
+        const auto sender = f.store->submit(routing);
+        f.model.script = [&](const ModelInput& input) -> Decision {
+            const auto& event = input.event;
+            if (event.at("kind") == "conversation_turn")
+                return converse(input,"change_task",sender,{{"environment","cloud"}});
+            if (input.task.at("botId") == "beta")
+                return {"reply_to_bot",{{"kind","result"},{"text",event.at("text")}},"Return the requested result"};
+            if (event.at("kind") == "intake") {
+                if (!input.task.contains("userInstructions")) return botRequest("beta","work","Original result");
+                check(f.task(sender).at("environmentId") == "cloud" && !hasTool(input,"complete"),
+                      "the pre-move result unlocked completion after the move");
+                return {"send_bot_message",{{"botId","beta"},{"kind",kind},{"text","Cloud result"}},"Verify the moved task"};
+            }
+            if (std::string_view(environment) != "cloud") {
+                check(!hasTool(input,"complete"),"a peer on the old route unlocked completion");
+                return ask();
+            }
+            check(event.at("kind") == "bot_result" && event.at("text") == "Cloud result" && hasTool(input,"complete"),
+                  "the current peer result did not unlock completion");
+            const auto& move = input.task.at("userInstructions").at(0);
+            return {"complete",{{"report","Cloud result"},{"acknowledgedInstructions",Json::array({
+                {{"messageId",move.at("messageId")},{"step",move.at("step")}}})}},"Verified after the move"};
+        };
+        f.reach(sender,"peer_waiting");
+        f.peers.at("alpha").front().intake.environmentId = environment;
+        f.store->receive(localOwner,routing,"move-release-check","Move Release check to cloud");
+        f.runtime->runConversations();
+        if (std::string_view(environment) != "cloud") {
+            f.wait(sender,"user_question");
+            continue;
+        }
+        f.reach(sender,"completed");
+        const auto task = f.task(sender);
+        check(task.at("revisions").size() == 1 && !task.contains("newSessionRequired") &&
+              !task.contains("pendingInstructions") && f.t3.launches == 0 && f.logs(sender,"completed") == 1,
+              "peer completion left the moved task unfinished");
+    }
+}
+
 void recipientRevisionContinuesTheOpenWorkExchange() {
     Fixture f;
     f.allowBeta();
     const auto sender = f.submit("Release verification");
     Id recipient = 0;
+    bool attemptedFailure = false;
     constexpr auto revisedCriteria = "Confirm the rollback plan with the revised evidence";
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& event = input.event;
         const auto kind = event.at("kind").get<std::string>();
+        if (kind == "conversation_turn" && event["text"] == "How is verification going?")
+            return {"reply",{{"text","Checking."}},"Report progress"};
         if (kind == "conversation_turn") return converse(input,"change_task",recipient,{{"doneWhen",revisedCriteria}});
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta","work","Verify release");
@@ -912,6 +1142,13 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
             return complete();
         }
         if (kind == "bot_request") return work();
+        if (input.task.contains("userInstructions") && kind == "result") {
+            if (!std::exchange(attemptedFailure,true)) {
+                f.store->receive(localOwner,{"beta","","e","p",Json::object()},"status","How is verification going?");
+                return botReply("failed","Unable to verify the original criteria");
+            }
+            return work("follow_up",false);
+        }
         check(kind == "result" && input.task["doneWhen"] == revisedCriteria &&
               event["run"]["runId"] == "run-2",
               "the old Run result was exposed as the receiving Bot's revised evidence");
@@ -941,6 +1178,9 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
           "revised work started before the old Run was settled");
 
     f.t3.finish("run-1");
+    for (int step = 0; step < 12 && !attemptedFailure; ++step) f.runtime->tick();
+    check(attemptedFailure && !f.task(recipient).contains("pendingDecision") && f.logs(recipient,"tool_error") == 1 &&
+          !f.logs(recipient,"peer_completed"),"failed reply bypassed the outstanding revision before deferral");
     for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
     check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" &&
           f.t3.seen.back().target.runId == "run-1" &&
@@ -1002,7 +1242,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
         check(kind == "bot_answer" && event["text"] == "Use main" &&
               event["sessionResult"]["run"]["runId"] == "run-1" &&
               input.task["doneWhen"] == revisedCriteria &&
-              input.task.value("userInstructions",std::string{}).find(revisedCriteria) != std::string::npos,
+              input.task.at("userInstructions").front().at("text").get<std::string>().find(revisedCriteria) != std::string::npos,
               "the sender answer or revised instructions did not reach the recipient model");
         offeredFollowUp = hasTool(input,"follow_up");
         if (!attemptedInvalidDecision) {
@@ -1067,7 +1307,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
           alphaMessages.back()["evidence"][0]["environmentId"] == (moves ? "cloud" : "e") &&
           alphaMessages.back()["evidence"][0]["runId"] == "run-2-result" &&
           f.logs(recipient,"peer_completed") == 1 && f.logs(sender,"completed") == 1 &&
-          f.logs(recipient,"model_failure") == 1 && f.logs(sender,"model_failure") == 0 &&
+          f.logs(recipient,"tool_error") == 1 && f.logs(sender,"model_failure") == 0 &&
           f.task(sender)["wait"].is_null() && f.task(recipient)["wait"].is_null(),
           "the revised result did not close the same exchange once without model-failure waits");
 }
@@ -1094,6 +1334,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
         }
         if (input.task["id"] == unrelated) return kind == "intake" ? work() : complete();
         if (kind == "bot_request") return work();
+        if (kind == "result" && input.task.contains("userInstructions")) return work("delegate",false);
         check(kind == "result" && input.event["environmentId"] == "e","the recipient judged the earlier Run");
         return botReply("result","Verification complete");
     };
@@ -1162,7 +1403,7 @@ void consultationRepliesAfterUserInstructions() {
             }
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && event["text"] == "Use main" && !hasTool(input,"delegate") &&
-                  input.task.value("userInstructions",std::string{})
+                  input.task.at("userInstructions").front().at("text").get<std::string>()
                           .find(revise ? instruction : "exclude deprecated branches") != std::string::npos,
                   "the consultation lost the peer answer or the user instruction");
             return botReply("result","Rollback policy confirmed");
@@ -1194,7 +1435,7 @@ void peerConsultationAndPermission() {
         return botRequest("gamma","consult","What is the release policy?");
     };
     f.wait(denied,"model_failure");
-    check(deniedAttempts == 3 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
+    check(deniedAttempts == 6 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
           "an unlisted recipient received a message or the available send tool was not exercised");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(denied),0),"cancel");
     f.reach(denied,"cancelled");
@@ -1215,6 +1456,11 @@ void peerConsultationAndPermission() {
     };
     f.reach(busy,"running");
     const auto consultation = f.submit("Ask the Verifier about our release policy");
+    f.reach(consultation,"peer_waiting");
+    const auto consulting = f.store->tasks("beta",0,1);
+    check(consulting.size() == 1 && consulting[0].at("request") == "What is the release policy?" &&
+          consulting[0].at("state") == "queued" && consulting[0].at("blockedBy").is_null(),
+          "the consultation was shown as blocked by the Verifier's running task");
     f.reach(consultation,"completed");
     const auto messages = f.botMessages("alpha");
     check(f.t3.seen.size() == 1 && f.t3.interrupts == 0 && f.task(busy)["state"] == "running" &&
@@ -1223,6 +1469,26 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
+}
+
+void requestedCriteriaApplyToFirstPeerWork() {
+    Fixture f;
+    f.allowBeta();
+    const auto receipt = f.store->receive(localOwner,{"alpha","","e","p"},"work-with-criteria","Check the release");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "conversation_turn")
+            return converse(input,"start_task",0,{{"doneWhen","Confirm the signature"}});
+        check(!input.needsDoneWhen && input.task.at("requestedDoneWhen") == "Confirm the signature",
+              "peer work required the model to repeat the user's criterion");
+        return {"send_bot_message",{{"kind","work"},{"text","Verify the release"},{"botId","beta"}},"Ask the verifier"};
+    };
+    f.runtime->runConversations();
+    const Id sender = f.store->tasks("alpha").at(0).at("id");
+    f.reach(sender,"peer_waiting");
+    const auto task = f.task(sender);
+    check(task.at("doneWhen") == "Confirm the signature" && task.at("remaining") == 3 &&
+          task.at("revisions").at(0).at("sourceMessageId") == receipt.at("messageId"),
+          "first peer work did not adopt the saved criterion and its source");
 }
 
 void modelBudgetFollowsBotConsultation() {
@@ -1405,6 +1671,10 @@ void concurrentPeerHandoff() {
     const auto recipient = f.store->tasks("beta").front().at("id").get<Id>();
     check(f.task(source)["state"] == "peer_waiting" && f.task(next)["blockedBy"]["id"] == recipient,
           "the queued Task did not report the active peer as the owner");
+    const auto page = f.store->tasks("alpha",0,1);
+    const Json owner = {{"id",recipient},{"botId","beta"},{"request","Verify the release"},{"state","running"}};
+    check(page.size() == 1 && page[0].at("id") == next && page[0].at("blockedBy") == owner,
+          "the queued task page lost the work recipient that inherited the sender's slot");
     f.runtime.reset();
     f.t3.finish("run-1");
     f.restart();
@@ -1448,20 +1718,21 @@ void consultationRestoresOwnEvidence() {
     }
 }
 
-void freshResultStillRequiresPrefill() {
+void freshResultSurvivesUnavailableHistory() {
     Fixture f;
     f.read = "prefill";
     f.restart();
     f.t3.beforeRead = [] { throw std::runtime_error("Fixture T3 history unavailable"); };
     const auto task = f.submit("Verify fresh evidence");
     f.model.script = [&](const ModelInput& input) {
-        check(input.event["kind"] == "intake","fresh result reached the model without required prefill");
-        return work();
+        if (input.event["kind"] == "intake") return work();
+        check(input.event.at("historyUnavailable") == true && input.evidence.empty(),"missing history was not visible");
+        return complete();
     };
     f.reach(task,"running");
     f.t3.finish("run-1");
-    f.wait(task,"model_failure");
-    check(f.model.calls == 1 && f.logs(task,"completed") == 0,"failed prefill completed or judged a fresh result");
+    f.reach(task,"completed");
+    check(f.model.calls == 2 && f.logs(task,"completed") == 1,"settled report was lost after prefill failed");
 }
 
 void prefillPersistenceFailureDoesNotProceed() {
@@ -1698,15 +1969,21 @@ void prefillWithoutGrant() {
 
 int main() {
     for (const auto& [name,run] : std::vector<std::pair<const char*, void(*)()>>{
-            {"invalid decisions",invalidDecisions},{"clarification and failure",ambiguityAndFailure},
+            {"invalid decisions",invalidDecisions},{"correct invalid task arguments",correctInvalidTaskArguments},
+            {"failed preflight",failedPreflightIsUnsent},
+            {"replay saved question decision",replayQuestionDecision},{"clarification and failure",ambiguityAndFailure},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
-            {"history reading restart",evidenceResume},{"prefill without a read grant",prefillWithoutGrant},
+            {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
+            {"redacted history pagination",redactedHistoryPagination},
+            {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
-            {"Task revision during Bot clarification",revisionWaitsForPeerClarification},
+            {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
+            {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
+            {"peer completion after environment move",peerCompletionAfterEnvironmentMove},
             {"recipient revision continues its work exchange",recipientRevisionContinuesTheOpenWorkExchange},
             {"recipient revision during peer question preserves answer",recipientRevisionDuringPeerQuestionPreservesTheAnswer},
             {"recipient move during peer question starts a fresh Session",recipientMoveDuringPeerQuestionStartsAFreshSession},
@@ -1714,13 +1991,14 @@ int main() {
             {"work recipient move waits for an unrelated owner",workRecipientMoveWaitsForUnrelatedOwner},
             {"consultation replies after user instructions",consultationRepliesAfterUserInstructions},
             {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Requested criteria for first peer work",requestedCriteriaApplyToFirstPeerWork},
             {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
             {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
             {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
             {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
-            {"Fresh result prefill failure",freshResultStillRequiresPrefill},
+            {"Fresh result prefill failure",freshResultSurvivesUnavailableHistory},
             {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},

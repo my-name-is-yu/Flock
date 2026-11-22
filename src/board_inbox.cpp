@@ -80,7 +80,7 @@ Role inboxDecisionRole(InboxKind kind) {
     return kind == grant_request || kind == protected_input || kind == bot_change ? Role::admin : Role::decide;
 }
 
-void Store::Impl::migrateBoardInbox() {
+void Store::Impl::initializeBoardInboxSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS pr_review_items(
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),

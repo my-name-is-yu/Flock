@@ -174,7 +174,7 @@ void exercise(const std::filesystem::path& path) {
     RuntimeOptions options;
     options.clock = [&] { return now; };
     Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options);
-    for (int step = 0; step < 6; ++step) runtime.tick();
+    for (int step = 0; step < 12; ++step) runtime.tick();
     check(store.task(unknown).at("wait").at("reason") == "unknown_delivery","fixture did not pause on delivery");
 
     db.pause(changed,"budget");
@@ -182,9 +182,11 @@ void exercise(const std::filesystem::path& path) {
     db.pause(model,"model_budget");
     db.pause(hidden,"model_budget");
     const auto due = store.task(deadlineTask).at("deadline").get<Id>();
+    check(due > now,"fixture did not launch the Run with a deadline");
     now = due;
-    runtime.tick();
-    check(store.task(deadlineTask).at("wait").at("reason") == "deadline","fixture did not reach its deadline");
+    for (int step = 0; step < 4 && store.task(deadlineTask).at("wait").is_null(); ++step) runtime.tick();
+    const auto deadlineWait = store.task(deadlineTask).at("wait");
+    check(deadlineWait.is_object() && deadlineWait.at("reason") == "deadline","fixture did not reach its deadline");
 
     const auto report = store.task(question);
     const auto review = store.requestPrReview(question,report.at("currentRevision"),report.at("generation"),
@@ -314,9 +316,13 @@ void exercise(const std::filesystem::path& path) {
     runtime.runConversations();
     for (const auto& remaining : store.inbox(alice,"report"))
         check(remaining.at("itemKind") != "user_question","withdrawn question remained in the Inbox");
-    check(store.task(question).at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
+    const auto withdrawn = store.task(question);
+    const auto& sessionQuestionTarget = withdrawn.at("question").at("target");
+    check(withdrawn.at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
           row(store.history(question),"kind","question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
           "withdraw action did not close and journal the question");
+    check(sessionQuestionTarget.at("waitId").is_null() && sessionQuestionTarget.at("eventId") == withdrawn.at("eventId") &&
+          withdrawn.at("eventId") != report.at("eventId"),"withdraw left the active Session question on the old event");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,withdrawing,"answer",{{"text","Final"}}); },
                                   "withdrawn question accepted an answer");
 

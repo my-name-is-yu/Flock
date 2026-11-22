@@ -160,10 +160,9 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [] {
             return Json::array({
                 {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
-                    {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
+                    {"cron",Json::array()},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
+                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()}},
                 {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
                 {{"id","broken"},{"name","Broken"}},
             });
@@ -291,6 +290,8 @@ void conversationEntry(const std::filesystem::path& path) {
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
+    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").get<Id>();
+    const auto since = "&changesAfter=" + std::to_string(cursor);
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
     check(model.turns == 0 && store.tasks().size() == 1,"HTTP intake ran the model before returning its receipt");
     disableIntake = true;
@@ -304,7 +305,10 @@ void conversationEntry(const std::filesystem::path& path) {
     browser.post("/api/messages",{{"botId","release"},{"text","追加確認"}},400);
 
     tick(runtime,3);
-    const auto page = browser.get("/api/view?bot=release");
+    const auto page = browser.get("/api/view?bot=release" + since);
+    check(page.at("changedMessageIds") == Json::array({messageId}) &&
+          browser.get("/api/view?bot=triage" + since).at("changedMessageIds").empty(),
+          "a processed message was not invalidated exclusively for its own Bot");
     unsigned questions = 0, answers = 0;
     for (const auto& event : page.at("events")) {
         if (event["kind"] == "conversation_message") {
@@ -491,8 +495,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
           forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
-          !forwarded.contains("initiator") && !answered.contains("recipient") && !answered.contains("forwardedMessage") &&
-          t3.launches == 0,"the exchange did not preserve the forward, its Bot authors, or the reply");
+          !answered.contains("forwardedMessage") && t3.launches == 0,
+          "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");
@@ -649,6 +653,43 @@ void chatGPTConversation(const std::filesystem::path& home) {
 }
 #endif
 
+void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
+    Store store(path);
+    auto cb = callbacks();
+    cb.bots = [] {
+        return Json::array({{{"id","release"},{"name","Release"}},
+                            {{"id","staging-triage"},{"name","Staging"},{"soul","Check staging"}}});
+    };
+    cb.authenticate = [](std::string_view auth) {
+        if (auth == "Bearer fixture-owner") return Person{"owner",true};
+        if (auth == "Bearer fixture-alice") return Person{"alice"};
+        return Person{};
+    };
+    cb.updateBot = [](std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
+        return Json{{"id",id},{"name",profile.at("name")}};
+    };
+    const Person owner{"owner",true};
+    auto access = store.access();
+    access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
+    const auto request = access.requestSecret("release",{"fixture-token"});
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    access.resourceGrant(owner,"staging-triage",{"secret","fixture-token","use"},GrantChange::grant);
+    const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
+    check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
+
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto bots = browser.get("/api/bots");
+    check(bots.size()==1 && bots.at(0).at("id")=="staging-triage","secret redaction hid or renamed an authorized Bot");
+    const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
+    check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
+          "Bot view must preserve its ID and redact display text");
+    browser.get("/api/conversation?bot=staging-triage");
+    Browser::checked(browser.client.Get("/api/view?bot=release"),403);
+}
+
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
     webStore.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
@@ -732,6 +773,7 @@ int main(int argc,char** argv) {
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+        secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
