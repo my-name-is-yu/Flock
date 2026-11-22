@@ -75,10 +75,13 @@
             <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
           </button>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <h1 id="peer-heading" class="peer-heading" tabindex="-1" hidden></h1>
+          <div id="peer-identity" class="peer-identity" hidden>
+            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
+            <h1 id="peer-heading" class="peer-title" tabindex="-1"></h1>
+          </div>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
-            <span>Back to Bot</span>
+            <span id="peer-back-label"></span>
           </button>
           <button id="peer-picker" class="header-text-button peer-picker" type="button" aria-label="Bot DMs" aria-haspopup="dialog" title="Bot DMs" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
