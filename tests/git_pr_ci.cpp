@@ -239,6 +239,48 @@ void webhookHeadPeriods() {
           "A SHA-only delivery was routed again when another watch moved to the same head");
 }
 
+void reviewAfterTaskProgress() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"pr");
+    const auto task = store.submit(intake());
+    for (int i = 0; i < 4 && store.task(task).value("currentRevision",Id{0}) == 0; ++i) runtime.tick();
+    check(store.task(task).value("currentRevision",Id{0}) > 0,"task has no initial revision");
+
+    auto args = openArgs();
+    args["taskId"] = task;
+    check(invoke(store,runtime,script,"open-review-pr","git_open_pr",args).at("status") == "created",
+          "fixture did not open a PR awaiting review");
+    const auto gitReview = target(store.inbox(localOwner,"owner").at(0));
+    const auto manualReview = store.requestPrReview(task,gitReview.targetRevision,gitReview.targetGeneration,
+                                                  "https://github.com/org/flock/pull/1","Check changes","Verify tests");
+    check(store.inbox(localOwner,"owner").size() == 2,"fixture did not create both reviews");
+
+    check(invoke(store,runtime,script,"send-instruction","send_to_task",{{"taskId",task},
+                 {"generation",gitReview.targetGeneration},{"instruction","Include the test results"}}).at("ok") == true,
+          "fixture did not update the task within its revision");
+    const auto inbox = store.inbox(localOwner,"owner");
+    check(inbox.size() == 1,"manual review should expire after a Task generation change");
+    const auto latest = target(inbox.at(0));
+    check(latest.itemId == gitReview.itemId && latest.targetRevision == gitReview.targetRevision &&
+          latest.targetGeneration > gitReview.targetGeneration,"Git review did not follow the Task within its revision");
+    auto invalidManual = latest;
+    invalidManual.itemId = manualReview;
+    for (const auto& stale : {gitReview,invalidManual}) {
+        try {
+            store.decideInbox(localOwner,stale,"approve");
+            throw std::runtime_error("A PR review decision with an invalid generation was accepted");
+        } catch (const RequestChanged&) {}
+    }
+    store.decideInbox(localOwner,latest,"approve");
+    check(store.inbox(localOwner,"owner").empty(),"Refreshed Git review decision did not close the item");
+}
+
 void reconciliationAfterTaskRevision() {
     Directory directory;
     const auto path = directory.path/"state.db";
@@ -271,8 +313,10 @@ void reconciliationAfterTaskRevision() {
         {{"taskId",task},{"generation",before.at("generation")},{"revisionId",before.at("currentRevision")},
          {"instruction","Update the success criteria"},{"doneWhen","Verify the new completion criteria"}});
     check(changed.at("ok") == true && store.task(task).at("replanning") == true,"fixture did not revise the active task");
+    check(invoke(store,runtime,script,"retry-after-replan","git_open_pr",args).at("status") == "ambiguous",
+          "fixture did not keep the PR creation unresolved");
     const auto latest = store.inbox(localOwner,"owner").at(0);
-    check(latest.at("targetRevision") != initial.at("targetRevision") &&
+    check(latest.at("itemId") == initial.at("itemId") && latest.at("targetRevision") != initial.at("targetRevision") &&
           latest.at("targetRevision") == store.task(task).at("currentRevision") &&
           latest.at("targetGeneration") == store.task(task).at("generation") &&
           latest.at("candidates") == initial.at("candidates"),"Reconciliation lost its current target or verified candidates");
@@ -618,6 +662,7 @@ int main() {
         schemas();
         runner();
         webhookHeadPeriods();
+        reviewAfterTaskProgress();
         reconciliationAfterTaskRevision();
         recovery(FakeHost::State::open,false);
         recovery(FakeHost::State::closed,false);

@@ -153,11 +153,10 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                       {base.host,base.repo,id,context.taskId}).next()) continue;
             candidates.push_back({{"prNumber",id},{"url",pr.url},{"headSha",pr.headSha},{"awaitingReview",pr.awaitingReview}});
         }
-        auto pending = query("SELECT id,target_revision,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'",
+        auto pending = query("SELECT id,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'",
                              {request.operationId});
-        const auto revision = task.value("currentRevision",Id{0});
         const bool hasPending = pending.next();
-        if (!hasPending || pending.number(1) != revision || pending.json(2) != candidates) {
+        if (!hasPending || pending.json(1) != candidates) {
             if (hasPending) exec("UPDATE pr_review_items SET status='superseded' WHERE id=?",{pending.number(0)});
             insertPrReview(task,"https://" + base.resource() + "/pulls","Reconcile pull request creation",
                 "Verify the original PR for " + head.resource() + ":" + headRef + " into " + baseRef +

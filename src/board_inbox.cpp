@@ -246,21 +246,23 @@ WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
             addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
                       (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
                       changes.number(5));
+        // A Git review follows Task generations within its original revision.
         auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates,j.id
+SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
-WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
-AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-AND (p.operation_id IS NOT NULL OR NOT coalesce(json_extract(t.data,'$.replanning'),0)) ORDER BY p.id DESC
+WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
+    p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
+    AND (p.git_key IS NOT NULL OR p.target_generation=t.generation)
+    AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
 )SQL",{id});
         while (reviews.next()) {
-            const auto task = reviews.json(7);
-            const auto kind = reviews.string(8).empty() ? pr_review : pr_reconciliation;
-            add({id,kind,reviews.number(0),0,reviews.number(1),reviews.number(2),reviews.number(3)},
+            const auto task = reviews.json(3);
+            const auto kind = reviews.number(7) ? pr_reconciliation : pr_review;
+            add({id,kind,reviews.number(0),0,reviews.number(1),task.value("currentRevision",Id{0}),reviews.number(2)},
                 {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
-                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(9)}},reviews.number(10));
+                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(8)}},reviews.number(9));
         }
     }
     snapshot.commit();
@@ -349,15 +351,17 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
-        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id"
+        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id IS NOT NULL,git_key IS NOT NULL"
                                 " FROM pr_review_items WHERE id=? AND task_id=?",
                                 {item.itemId,item.taskId});
         if (!review.next()) throw RequestChanged{};
         if (review.string(2) != "pending") throw DecisionUnavailable{};
-        if (review.string(3).empty() != (kind == pr_review)) throw RequestChanged{};
-        if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration ||
-            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration ||
-            (kind == pr_review && task.value("replanning",false))) throw RequestChanged{};
+        if (review.number(3) != (kind == pr_reconciliation) || item.waitId ||
+            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration)
+            throw RequestChanged{};
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false) ||
+                                  (!review.number(4) && review.number(1) != item.targetGeneration)))
+            throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
         else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
                       {decision == "approve" ? "approved" : "changes_requested",item.itemId});
