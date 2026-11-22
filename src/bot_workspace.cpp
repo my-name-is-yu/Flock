@@ -20,7 +20,12 @@ namespace {
 constexpr std::size_t maxEntries = 2048;
 constexpr std::size_t maxSearchBytes = 1024 * 1024;
 constexpr std::size_t maxFileBytes = 8192;
+constexpr std::size_t maxPipelineStages = 4;
+constexpr std::size_t maxPipelineBytes = 32768;
 constexpr auto supervisorDeadline = 12s;
+constexpr std::array<std::string_view,14> pipelineExecutables{
+    "cat","cut","echo","grep","head","printf","sleep","sort","tail","tee","tr","uniq","wc","yes"
+};
 
 std::string safeOutput(std::string_view value) {
     return Json::parse(Json(std::string(value)).dump(-1,' ',false,Json::error_handler_t::replace)).get<std::string>();
@@ -193,8 +198,7 @@ Workspace openWorkspace(const fs::path& database, const ToolContext& ctx) {
     return {basePath / ctx.bot,Fd(openExactChildDirectory(base.get(),ctx.bot))};
 }
 
-std::vector<std::string> commandArguments(const Json& args) {
-    const auto& argv = args.at("argv");
+std::vector<std::string> commandArguments(const Json& argv) {
     if (!argv.is_array() || argv.empty() || argv.size() > 32) throw Conflict("Expected 1 to 32 command arguments");
     std::vector<std::string> result;
     for (const auto& value : argv) {
@@ -205,6 +209,70 @@ std::vector<std::string> commandArguments(const Json& args) {
     }
     if (result.front().empty() || result.front().starts_with('-')) throw Conflict("Invalid executable");
     return result;
+}
+
+bool nativeExecutable(const fs::path& path) {
+    const int fd = open(path.c_str(),O_RDONLY|O_CLOEXEC);
+    if (fd < 0) return false;
+    unsigned char magic[4]{};
+    const auto count = pread(fd,magic,sizeof(magic),0);
+    close(fd);
+#if defined(__linux__)
+    return count == 4 && magic[0] == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+#elif defined(__APPLE__)
+    return count == 4 && ((magic[0] == 0xfe && magic[1] == 0xed && magic[2] == 0xfa &&
+                           (magic[3] == 0xce || magic[3] == 0xcf)) ||
+                          (magic[0] == 0xce && magic[1] == 0xfa && magic[2] == 0xed && magic[3] == 0xfe) ||
+                          (magic[0] == 0xcf && magic[1] == 0xfa && magic[2] == 0xed && magic[3] == 0xfe) ||
+                          (magic[0] == 0xca && magic[1] == 0xfe && magic[2] == 0xba &&
+                           (magic[3] == 0xbe || magic[3] == 0xbf)) ||
+                          (magic[0] == 0xbe && magic[1] == 0xba && magic[2] == 0xfe && magic[3] == 0xca) ||
+                          (magic[0] == 0xbf && magic[1] == 0xba && magic[2] == 0xfe && magic[3] == 0xca));
+#else
+    return false;
+#endif
+}
+
+fs::path pipelineExecutable(const std::string& name) {
+    const fs::path requested(name);
+    fs::path candidate;
+    if (requested.is_absolute()) {
+        if (requested.parent_path() != "/bin" && requested.parent_path() != "/usr/bin")
+            throw Conflict("Unsupported pipeline executable; use a T3 Session for scripts or helpers");
+        candidate = requested;
+    } else if (!requested.has_parent_path()) {
+        for (const auto& directory : {fs::path("/usr/bin"),fs::path("/bin")}) {
+            const auto current = directory/requested;
+            if (access(current.c_str(),X_OK) == 0) {
+                candidate = current;
+                break;
+            }
+        }
+        if (candidate.empty())
+            throw Conflict("Unsupported pipeline executable; use a T3 Session for scripts or helpers");
+    } else {
+        throw Conflict("Unsupported pipeline executable; use a T3 Session for scripts or helpers");
+    }
+    std::error_code error;
+    const auto resolved = fs::canonical(candidate,error);
+    if (error || (resolved.parent_path() != fs::canonical("/bin") &&
+                  resolved.parent_path() != fs::canonical("/usr/bin")) ||
+        std::ranges::find(pipelineExecutables,resolved.filename().string()) == pipelineExecutables.end() ||
+        access(resolved.c_str(),X_OK) != 0 || !fs::is_regular_file(resolved) || !nativeExecutable(resolved))
+        throw Conflict("Unsupported pipeline executable; use a T3 Session for scripts or helpers");
+    return resolved;
+}
+
+std::vector<std::vector<std::string>> pipelineArguments(const Json& pipeline) {
+    if (!pipeline.is_array() || pipeline.empty() || pipeline.size() > maxPipelineStages)
+        throw Conflict("A pipeline must contain 1 to 4 stages; use a T3 Session for larger workflows");
+    std::vector<std::vector<std::string>> stages;
+    for (const auto& value : pipeline) {
+        auto arguments = commandArguments(value);
+        arguments.front() = pipelineExecutable(arguments.front()).string();
+        stages.push_back(std::move(arguments));
+    }
+    return stages;
 }
 
 fs::path systemExecutable(const fs::path& path) {
@@ -252,8 +320,9 @@ const std::array systemRoots{
 #endif
 };
 
-std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cwd, const Json& args, bool writable,
-                                        const fs::path& database) {
+std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cwd,
+                                        std::vector<std::string> command, bool writable,
+                                        const fs::path& database, bool pipelineStage, bool includeSupervisor) {
     const auto state = stateDirectory(database);
     const auto actualDatabase = fs::weakly_canonical(database);
     for (const auto* directory : systemRoots) {
@@ -262,7 +331,6 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
         if (system == state || pathContains(system,state) || pathContains(system,root) || pathContains(system,actualDatabase))
             throw Conflict("Flock state and Bot workspaces must be outside sandbox system directories");
     }
-    auto command = commandArguments(args);
     command.front() = executable(root,command.front()).string();
 #if defined(__APPLE__)
     const auto workspace = "(subpath " + sandboxLiteral(root.string()) + ")";
@@ -286,6 +354,7 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
     if (pathContains(root,command.front())) command.front() = inner(root,command.front());
     std::vector<std::string> launch{"/usr/bin/bwrap","--unshare-all","--die-with-parent",
         "--new-session","--disable-userns","--cap-drop","ALL","--dev","/dev"};
+    if (pipelineStage) launch.insert(launch.begin()+1,{"--seccomp","4"});
     for (const auto* path : systemRoots) if (fs::exists(path))
         launch.insert(launch.end(),{"--ro-bind",path,path});
     launch.insert(launch.end(),{writable ? "--bind-fd" : "--ro-bind-fd","3","/workspace",
@@ -296,9 +365,32 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
     throw Conflict("No supported command sandbox on this host");
     std::vector<std::string> launch;
 #endif
-    launch.insert(launch.begin(),FLOCK_WORKSPACE_SUPERVISOR);
+    if (includeSupervisor) launch.insert(launch.begin(),FLOCK_WORKSPACE_SUPERVISOR);
     launch.insert(launch.end(),command.begin(),command.end());
     return launch;
+}
+
+std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cwd, const Json& args, bool writable,
+                                        const fs::path& database) {
+    return sandboxCommand(root,cwd,commandArguments(args.at("argv")),writable,database,false,true);
+}
+
+std::vector<std::string> pipelineSupervisorCommand(const fs::path& root, const fs::path& cwd, const Json& pipeline,
+                                                   bool writable, const fs::path& database) {
+    auto stages = pipelineArguments(pipeline);
+    std::vector<std::string> command{FLOCK_WORKSPACE_SUPERVISOR,"--flock-pipeline-v1",std::to_string(stages.size())};
+    for (auto& stage : stages) {
+        auto sandbox = sandboxCommand(root,cwd,std::move(stage),writable,database,true,false);
+        command.push_back(std::to_string(sandbox.size()));
+        command.insert(command.end(),sandbox.begin(),sandbox.end());
+    }
+    std::size_t bytes = 0;
+    for (const auto& argument : command) {
+        if (argument.size() + 1 > maxPipelineBytes - std::min(bytes,maxPipelineBytes))
+            throw Conflict("Pipeline arguments exceed 32768 serialized bytes; use a T3 Session");
+        bytes += argument.size()+1;
+    }
+    return command;
 }
 
 struct Spawn {
@@ -465,7 +557,17 @@ void Store::Impl::validateWorkspace(const ToolContext& ctx, const Decision& call
     }
     if (call.tool == "workspace_run_command") {
         if (args.contains("cwd")) relativeToolPath(toolText(args,"cwd",1024));
-        executable({},commandArguments(args).front());
+        if (args.contains("argv") == args.contains("pipeline"))
+            throw Conflict("Use exactly one of argv or pipeline");
+        if (args.contains("pipeline")) {
+#if defined(__APPLE__) || defined(__linux__)
+            pipelineArguments(args.at("pipeline"));
+#else
+            throw Conflict("Workspace pipelines are unavailable on this host; use a T3 Session");
+#endif
+        } else {
+            executable({},commandArguments(args.at("argv")).front());
+        }
         return;
     }
     if (call.tool != "workspace_search" || args.contains("path")) {
@@ -496,7 +598,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
         return {{"commandId",id},{"state",row.string(0)},{"stdout",row.string(1)},{"stderr",row.string(2)},
                 {"truncated",row.number(3)!=0},{"exitCode",exit < 0 ? Json(nullptr) : Json(exit)}};
     }
-    const auto workspace = openWorkspace(path,ctx);
+    auto workspace = openWorkspace(path,ctx);
     const auto root = workspace.directory.get();
     if (call.tool == "workspace_search") {
         auto relative = args.contains("path") ? relativeToolPath(toolText(args,"path",1024)) : fs::path{};
@@ -516,7 +618,14 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     verifyTree(root);
     const auto cwd = relative.empty() ? workspace.path : workspace.path / relative;
     const bool writable = Access(*this).permits(ctx.bot,{"workspace",ctx.bot,"write"},true);
+    const bool pipeline = args.contains("pipeline");
+#if defined(__APPLE__) || defined(__linux__)
+    auto command = pipeline ? pipelineSupervisorCommand(workspace.path,cwd,args.at("pipeline"),writable,path)
+                            : sandboxCommand(workspace.path,cwd,args,writable,path);
+#else
+    if (pipeline) throw Conflict("Workspace pipelines are unavailable on this host; use a T3 Session");
     auto command = sandboxCommand(workspace.path,cwd,args,writable,path);
+#endif
     Pipe out, err, lease;
     std::lock_guard lock(mutex);
     std::erase_if(workspaceJobs,[](const auto& entry) { return entry.second->done.load(); });
@@ -530,7 +639,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     auto [entry,inserted] = workspaceJobs.emplace(id,std::move(job));
     (void)inserted;
     try {
-        control->worker = std::jthread([this,control,id,cwd,command = std::move(command),
+        control->worker = std::jthread([this,control,id,cwd,pipeline,command = std::move(command),
 #ifdef __APPLE__
                                         working = std::move(working),
 #else
@@ -538,6 +647,9 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
 #endif
                                         out = std::move(out),err = std::move(err),lease = std::move(lease)](std::stop_token shutdown) mutable {
             pid_t pid = 0;
+            bool supervisorReaped = false;
+            bool workerTimeout = false;
+            int supervisorStatus = 0;
             try {
                 if (control->stop || shutdown.stop_requested()) lease.ends.second.reset();
                 pid = launchSandbox(cwd,working.get(),std::move(command),lease.ends.first.get(),out.ends.second.get(),err.ends.second.get());
@@ -550,7 +662,10 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                 const auto deadline = std::chrono::steady_clock::now() + supervisorDeadline;
                 while (true) {
                     if (control->stop || shutdown.stop_requested()) lease.ends.second.reset();
-                    if (std::chrono::steady_clock::now() >= deadline) throw Conflict("Sandbox supervisor exceeded its deadline");
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        workerTimeout = true;
+                        throw Conflict("Sandbox supervisor exceeded its deadline");
+                    }
                     const auto polled = poll(readers.data(),readers.size(),30);
                     if (polled < 0 && errno != EINTR) throw Conflict("Cannot capture sandbox output");
                     bool changed = false;
@@ -563,6 +678,8 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                     if (child < 0 && errno != EINTR) throw Conflict("Cannot observe sandbox process");
                     if (child > 0) {
                         pid = 0;
+                        supervisorReaped = true;
+                        supervisorStatus = status;
                         for (unsigned i = 0; i < readers.size(); ++i) capture.readAvailable(readers[i].fd,i);
                     }
                     if (shutdown.stop_requested() && child > 0) break;
@@ -575,23 +692,38 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                         const auto output = bounded(stdoutText,workspaceOutputLimit);
                         const auto error = bounded(stderrText,workspaceOutputLimit-output.size());
                         const bool truncated = capture.truncated || output != stdoutText || error != stderrText;
-                        const auto exit = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                        const bool unknown = pipeline && child > 0 && WIFSIGNALED(status);
+                        const auto exit = WIFEXITED(status) ? WEXITSTATUS(status) :
+                                          WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 125;
                         exec("UPDATE workspace_commands SET stdout=?,stderr=?,truncated=?,"
-                             "state=CASE WHEN ? THEN 'exited' ELSE state END,exit_code=? WHERE id=?",
+                             "state=CASE WHEN ? THEN 'unknown_after_restart' WHEN ? THEN 'exited' ELSE state END,"
+                             "exit_code=CASE WHEN ? THEN NULL WHEN ? THEN ? ELSE exit_code END WHERE id=?",
                              {output,error,int(truncated),
-                              int(child > 0),child > 0 ? Json(exit) : Json(nullptr),id});
+                              int(unknown),int(child > 0 && !unknown),int(unknown),int(child > 0 && !unknown),
+                              child > 0 && !unknown ? Json(exit) : Json(nullptr),id});
                     }
                     if (child > 0) break;
                 }
             } catch (const std::exception&) {
                 lease.ends.second.reset();
                 if (pid > 0) {
-                    while (waitpid(pid,nullptr,0) < 0 && errno == EINTR) {}
+                    int status = 0;
+                    pid_t waited;
+                    do waited = waitpid(pid,&status,0); while (waited < 0 && errno == EINTR);
+                    if (waited == pid) {
+                        supervisorReaped = true;
+                        supervisorStatus = status;
+                    }
                 }
                 try {
                     std::lock_guard guard(mutex);
-                    exec("UPDATE workspace_commands SET state='exited',exit_code=125,"
-                         "stderr='Sandbox command or supervisor failed' WHERE id=?",{id});
+                    const bool unknown = pipeline &&
+                                         ((supervisorReaped && WIFSIGNALED(supervisorStatus)) ||
+                                          (!supervisorReaped && pid > 0));
+                    const int exit = workerTimeout ? 124 : 125;
+                    exec("UPDATE workspace_commands SET state=?,exit_code=?,"
+                         "stderr='Sandbox command or supervisor failed' WHERE id=?",
+                         {unknown ? "unknown_after_restart" : "exited",unknown ? Json(nullptr) : Json(exit),id});
                 } catch (const std::exception&) {}
             }
             control->done = true;

@@ -170,12 +170,34 @@ Conversation turns can use the Bot's workspace under `<home>/workspaces/<botId>`
 Grant `workspace/<botId>/read` for files and search, `write` for edits, and
 `exec` plus `read` to run a command. Commands receive write access when the Bot
 also has the `write` grant. macOS uses the system sandbox. Linux requires
-`/usr/bin/bwrap` with unprivileged namespaces and FD-based bind support.
-Commands have a 10-second wall limit and share an 8 KiB stdout and stderr
-limit. On macOS, run one executable at a time. Shell built-ins and `exec`
-work within this limit. Regular project builds and tests run in T3 Sessions.
-A running command whose outcome is unknown after a restart is recorded as
-`unknown_after_restart`.
+`/usr/bin/bwrap` with unprivileged namespaces, FD-based bind support, and
+seccomp filtering; Linux builds also require the libseccomp development
+library. Existing single-command `argv` calls retain their behavior. On
+macOS and Linux, `workspace_run_command` also accepts a structured pipeline:
+
+```json
+{"pipeline":[["cat","allowed.txt"],["wc","-c"]]}
+```
+
+A pipeline contains 1–4 argv arrays. Its executable in each stage must resolve
+to system `/bin` or `/usr/bin` and have one of these names: `cat`, `cut`,
+`echo`, `grep`, `head`, `printf`, `sleep`, `sort`, `tail`, `tee`, `tr`,
+`uniq`, `wc`, or `yes`. Shell syntax is not parsed; metacharacters remain
+literal argv data. Scripts, shells, interpreters, workspace executables, and
+other helpers are rejected before any stage starts; use T3 Sessions for them,
+regular builds, and tests. This allowlist is a partial supported subset, not a
+security boundary: macOS retains its fork-denying profile, and Linux applies
+a libseccomp filter through Bubblewrap to prevent stage process/thread
+creation. Filter-generation or kernel/Bubblewrap refusal fails closed.
+
+Commands have a shared 10-second wall limit and combined 8 KiB stdout/stderr
+capture, with one active command per Bot and noninteractive stdin. Each
+pipeline payload stage receives a CPU limit of `max(1, floor(5/N))` seconds;
+core dumps are disabled, file size is limited to 1 MiB, and open files to 64.
+These are per-process limits and do not guarantee a strict aggregate CPU
+ceiling for trusted Bubblewrap monitor overhead. A running command whose
+outcome cannot be confirmed after restart or supervisor failure is recorded
+as `unknown_after_restart` and is not replayed automatically.
 
 Web fetch requires `web/<hostname>/fetch` and accepts public HTTPS text
 responses. Web search requires `web/public/search` and the host environment
