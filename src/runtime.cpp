@@ -61,6 +61,7 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
 
 struct TaskDecision : Decision {
     Json usage = Json::object();
+    bool argumentsChecked = true;
 };
 
 bool needsDoneWhen(const Json& task) {
@@ -1376,7 +1377,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (saved == task.end() || saved->at("eventId") != event.at("id") ||
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
-        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage")};
+        return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
+                            saved->value("argumentsChecked",false)};
     }
 
     std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
@@ -1436,10 +1438,17 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
              needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
         if (turn.calls.size() != 1) throw Conflict("Return one task action");
-        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage)};
+        auto& call = turn.calls.front();
+        const TaskDecision decision{std::move(call),std::move(turn.usage)};
+        if (!call.rejection.empty()) {
+            if (task["activeRun"].is_null() || questionStillOpen(task))
+                rejectDecision(task,event,decision,call.rejection);
+            return std::nullopt;
+        }
         // Bookkeeping must not advance the generation observed by conversation turns.
         const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
-            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage},
+            {"argumentsChecked",true}};
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
@@ -1511,10 +1520,18 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 tools.insert(tools.end(),gitTools().begin(),gitTools().end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
-            if (!decision)
-                decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
+            const bool replay = decision.has_value();
+            if (!decision) decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
             if (!decision) return;
             if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
+            if (replay) {
+                auto call = db.checkModelCall(field(task,"botId"),*decision,tools,false,!decision->argumentsChecked);
+                if (!call.rejection.empty()) {
+                    rejectDecision(task,event,TaskDecision{std::move(call)},call.rejection);
+                    return;
+                }
+                decision->reason = std::move(call.reason);
+            }
             try {
                 if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
                     std::ranges::find(tools,decision->tool) == tools.end())

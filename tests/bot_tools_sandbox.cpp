@@ -656,6 +656,42 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     check(f.run(write).at("ok") == true && fs::is_regular_file(path),"A new user message could not request an action");
 }
 
+void protectedArgumentsDoNotChangeToolTargets() {
+    Fixture f;
+    const std::string marker = "protected-model-argument-fixture";
+    auto access = f.store->access();
+    access.submitSecret(owner,"alpha",access.requestSecret("alpha",{"argument-fixture"}),marker);
+    f.grant({"workspace","alpha","write"});
+    f.grant({"mcp_server","fixture","invoke"});
+    const auto calls = f.mcp->calls.load();
+    const auto workspace = f.home/"workspaces"/"alpha";
+    const auto writeFile = [](std::string path) {
+        return call("workspace_write_file",{{"path",std::move(path)},{"text","Fixture data"}});
+    };
+    const auto invoke = [](Json arguments) {
+        return call("mcp_call_tool",{{"server","fixture"},{"name","lookup"},{"arguments",std::move(arguments)}});
+    };
+    auto sensitivePath = writeFile(marker + ".txt");
+    sensitivePath.reason = "Write " + marker;
+    const auto steps = f.batch({sensitivePath,invoke({{"query",{{marker,"protected key"},{"[redacted]","public key"}}}}),
+                                writeFile("public-arguments.txt")});
+    check(steps.size() == 3 && steps[0].at("result").at("ok") == false && steps[1].at("result").at("ok") == false &&
+          steps[2].at("result").at("ok") == true && f.mcp->calls == calls &&
+          !fs::exists(workspace/(marker + ".txt")) && !fs::exists(workspace/"[redacted].txt") &&
+          read(workspace/"public-arguments.txt") == "Fixture data",
+          "A protected path or structured key changed an effect, or a safe sibling did not execute");
+    const auto persisted = f.sql("SELECT decision || result FROM conversation_steps WHERE step=1 AND message_id=" +
+                                 std::to_string(f.lastMessage));
+    check(persisted.find(marker) == persisted.npos && steps.dump().find(marker) == std::string::npos &&
+          f.model.content.dump().find(marker) == std::string::npos &&
+          f.store->conversation("alpha").dump().find(marker) == std::string::npos,
+          "Rejected arguments exposed protected material");
+
+    const Json publicArgs{{"query",{{"[redacted]","literal key"}}}};
+    check(f.run(invoke(publicArgs)).at("data").at("arguments") == publicArgs && f.mcp->calls == calls+1,
+          "A public structured argument changed during dispatch");
+}
+
 void freshConversationStepArrays(Fixture& f) {
     const auto message = std::to_string(f.lastMessage);
     check(f.sql("SELECT json_type(decision) || ':' || json_type(result) FROM conversation_steps WHERE message_id=" +
@@ -717,6 +753,7 @@ int main(int argc, char** argv) {
             mcpSessionPagination(fixture,argv[1]);
             return 0;
         }
+        protectedArgumentsDoNotChangeToolTargets();
         workspaceAndLifecycle(fixture);
         mountedWorkspaceDirectoryIdentity();
         externalTools(fixture);

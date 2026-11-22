@@ -36,6 +36,15 @@ Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, 
 
 enum class RequestJournal { record, skip };
 
+struct ModelCall : Decision {
+    std::string rejection;
+};
+
+struct CheckedModelTurn {
+    std::vector<ModelCall> calls;
+    Json usage;
+};
+
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
@@ -171,7 +180,7 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
+    bool runBotTools(const ToolContext&, int step, const std::vector<ModelCall>&);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -179,7 +188,11 @@ struct Store::Impl {
     Id takeReservedConversationCall(Id messageId);
     void releaseModelCall(std::string_view budget, Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
-    ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
+    SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
+                                     bool gitNotification) const;
+    ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
+                             bool gitNotification, bool legacy = false) const;
+    CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
@@ -189,8 +202,9 @@ struct Store::Impl {
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
-    Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<ModelImage>& images);
+    Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
     Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
+    bool gitConversationEffectStarted(Id message, int step) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);

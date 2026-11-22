@@ -1,4 +1,5 @@
 #include "flock/board_inbox.hpp"
+#include "flock/channels.hpp"
 
 #include <sqlite3.h>
 
@@ -196,6 +197,102 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     execution.runtime.runConversations();
     check(calls == 1 && store.tasks("alpha").size() == 1 && reply(store,message)["text"] == "Queued.",
           "A saved decision was decided again or applied twice");
+}
+
+void missingToolCannotBeAddedAfterInferenceStarts() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    store.setRootPeople({localOwner.id});
+    const auto id = task(store,"Prepare a local Session");
+    execution.reach(store,id,"running");
+    const auto run = store.task(id).at("activeRun");
+    const Decision request{"request_local_machine_connection",
+        {{"threadId",run.at("threadId")},{"runId",run.at("runId")},{"machineId","fixture-machine"},
+         {"rules",Json::array({{{"operation","read_file"},{"path",fixture.database().string()}}})}},"Request local access"};
+
+    bool rejected = false;
+    execution.model.conversation = [&](const ModelInput& input) {
+        if (turn(input).empty()) {
+            check(std::ranges::find(input.tools,request.tool) == input.tools.end(),"The tool was offered before connecting");
+            store.connectLocalMachine("fixture-machine",hostLocalMachine(localOwner.id));
+            return request;
+        }
+        rejected = turn(input).at(0).at("result").at("ok") == false;
+        return say("Checked the request.");
+    };
+    receive(store,"unoffered","Check whether local access can be requested.");
+    execution.runtime.runConversations();
+    check(rejected && store.localConnections(localOwner).empty(),"The unoffered call created a connection request");
+
+    execution.model.conversation = [&](const ModelInput& input) {
+        if (!turn(input).empty()) return say("Requested local access.");
+        check(std::ranges::find(input.tools,request.tool) != input.tools.end(),"The connected machine did not enable the tool");
+        return request;
+    };
+    receive(store,"offered","Request local access now.");
+    execution.runtime.runConversations();
+    check(store.localConnections(localOwner).size() == 1,"The offered call did not create a connection request");
+}
+
+void protectedArgumentKeyCannotReachTaskIntake() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const std::string marker = "protected-top-level-key-fixture";
+    auto access = store.access();
+    access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),marker);
+    Json observed;
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        observed = turn(input);
+        if (!observed.empty()) return say("The blocked content was " + marker);
+        return {"start_task",{{"request","Prepare release notes"},{marker,"Extra"}},"Candidate"};
+    };
+    const auto message = receive(store,"protected-key","Prepare release notes.");
+    execution.runtime.runConversations();
+    check(store.tasks("alpha").empty() && observed.at(0).at("result").at("ok") == false &&
+          observed.dump().find(marker) == std::string::npos &&
+          reply(store,message).at("text") == "The blocked content was [redacted]" &&
+          fixture.count("SELECT count(*) FROM conversation_steps WHERE instr(decision,'" + marker + "') > 0") == 0,
+          "A protected top-level key reached task intake, persistence, or conversation history");
+}
+
+void savedCallsAreCheckedBeforeExecution() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    store.access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
+    const auto save = [&](Id message, const Decision& call) {
+        const auto id = std::to_string(message);
+        fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
+        const auto decision = Json::array({{{"tool",call.tool},{"args",call.args},{"reason",call.reason}}});
+        fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id + ",1,'" + decision.dump() + "')");
+    };
+    save(receive(store,"saved-unavailable","Check my repository."),
+         {"git_repo_info",{{"host","github.com"},{"repo","example/fixture"}},"Saved with a Git connection"});
+    save(receive(store,"saved-redacted","Write my workspace file."),
+         {"workspace_write_file",{{"path","[redacted].txt"},{"text","Fixture data"}},"Saved before argument checks"});
+    const auto taskId = task(store,"Prepare repository evidence");
+    const auto inFlight = receive(store,"saved-git-effect","Comment on the issue.");
+    const Json comment{{"taskId",taskId},{"host","github.com"},{"repo","example/fixture"},
+                       {"target","issue"},{"number",1},{"body","Fixture comment"}};
+    save(inFlight,{"git_comment",comment,"Saved with a Git connection"});
+    const auto invocation = Json::array({"turn/" + std::to_string(inFlight) + "/1","git_comment",comment});
+    fixture.sql("INSERT INTO git_mutations(task_id,invocation) VALUES(" + std::to_string(taskId) +
+                ",'" + invocation.dump() + "')");
+    unsigned replies = 0;
+    execution.model.conversation = [&](const ModelInput& input) {
+        const auto steps = turn(input);
+        check(steps.size() == 1 && steps.at(0).at("args").empty() && steps.at(0).at("result").at("ok") == false,
+              "The model received an executable or unsanitized saved call");
+        if (input.event.at("messageId") == inFlight)
+            check(steps.at(0).at("result").at("delivery") == "unknown","The started Git operation lost its uncertain outcome");
+        ++replies;
+        return say("The saved call could not run.");
+    };
+    execution.runtime.runConversations();
+    check(replies == 3 && !std::filesystem::exists(fixture.dir/"workspaces"/"alpha"/"[redacted].txt"),
+          "An unavailable or possibly redacted saved call executed");
 }
 
 void sessionNoteIsNotResentAfterARestart() {
@@ -454,6 +551,9 @@ int main() {
     try {
         retryAcrossConnections();
         savedDecisionIsAppliedWithoutAnotherModelCall();
+        missingToolCannotBeAddedAfterInferenceStarts();
+        protectedArgumentKeyCannotReachTaskIntake();
+        savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
         sessionNoteIsNotResentAfterARestart();
         modelFailureReportsWhatWasAlreadyDone();

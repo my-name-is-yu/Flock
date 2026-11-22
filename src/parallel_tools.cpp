@@ -58,7 +58,7 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
          {results,message,step});
 }
 
-bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls) {
+bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<ModelCall>& calls) {
     std::vector<std::size_t> reserved;
     {
         std::lock_guard lock(mutex);
@@ -79,6 +79,10 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                           {"error","Flock restarted during this tool call. Its outcome is unknown."}};
             }
             if (!result.is_null()) continue;
+            if (!calls[i].rejection.empty()) {
+                result = toolFailure(calls[i].rejection);
+                continue;
+            }
             if (ctx.hasWebEvidence && !allowedAfterWebEvidence(calls[i])) {
                 result = webEvidenceActionDenied();
                 continue;

@@ -209,13 +209,19 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
                     result = shared.record(std::move(result));
                 }
             }
+            if ((decision.contains("rejection") && result.value("untrustedData",false)) ||
+                modelCallRedactor(message.bot,field(decision,"tool"),args,message.routing.contains("gitEvent"))
+                    .containsProtected(args)) {
+                args = Json::object();
+                result = toolFailure("Saved tool history is unavailable. Check the target before retrying.");
+            }
             turn.push_back({{"tool",decision.at("tool")},{"args",std::move(args)},{"result",std::move(result)}});
         }
     }
     return turn;
 }
 
-Json Store::Impl::turnInput(const Message& message, int step, Seconds now, std::vector<ModelImage>& images) {
+Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images) {
     if (message.routing.contains("gitEvent")) {
         auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
             {"currentTime",now},{"replyTo",nullptr},{"turn",conversationSteps(message,step,images)},
@@ -343,10 +349,6 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
     event.update(channel);
     if (web) event["attachments"] = attachmentViews(message.id);
-    Json machines = Json::array();
-    for (const auto& [id,machine] : localMachines)
-        if (permitsLocalMachineOwner(machine->owner(),message.bot))
-            machines.push_back(id);
     Json task{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
               {"localMachines",std::move(machines)}};
     if (web) {
@@ -703,6 +705,21 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         if (!field(webhook,"headSha").empty()) tools.push_back("git_commit_status");
         if (webhook.at("jobId") != 0) tools.push_back("git_read_ci_logs");
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
+    if (web) {
+        tools.insert(tools.end(),webTools.begin(),webTools.end());
+        tools.insert(tools.end(),botToolNames().begin(),botToolNames().end());
+    }
+    if (!message.channelScope.empty()) tools.insert(tools.end(),channelTools.begin(),channelTools.end());
+    const auto available = [&] {
+        auto offered = tools;
+        auto machines = Json::array();
+        if (!notification) {
+            for (const auto& [machineId,machine] : localMachines)
+                if (permitsLocalMachineOwner(machine->owner(),message.bot)) machines.push_back(machineId);
+            if (!machines.empty()) offered.push_back("request_local_machine_connection");
+        }
+        return std::pair{std::move(offered),std::move(machines)};
+    };
     const bool ja = japanese(message.text);
     const auto finish = [&](std::string text, std::string_view route) {
         std::lock_guard lock(mutex);
@@ -714,18 +731,32 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
         if (!message.channelScope.empty()) deliverChannels();
-        std::vector<Decision> calls;
+        std::vector<ModelCall> calls;
+        bool saveCalls = false, botEffects = false, sessionEffect = false;
         bool hasWebEvidence = false;
         {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return true; }
-            auto row = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step=?",{id,step});
+            auto row = query("SELECT decision,result,json_type(effect) FROM conversation_steps WHERE message_id=? AND step=?",
+                             {id,step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
+                botEffects = row.string(2) == "array";
+                sessionEffect = row.string(2) == "object";
                 if (!row.string(0).empty()) {
-                    for (const auto& call : row.json(0))
-                        calls.push_back({call.at("tool"),call.at("args"),call.at("reason")});
+                    const auto [offered,machines] = available();
+                    for (const auto& saved : row.json(0)) {
+                        Decision call{saved.at("tool"),saved.at("args"),saved.at("reason")};
+                        if (auto rejection = saved.value("rejection",std::string{}); !rejection.empty())
+                            calls.push_back({std::move(call),std::move(rejection)});
+                        else {
+                            auto checked = checkModelCall(message.bot,std::move(call),offered,notification,
+                                                          !saved.value("argumentsChecked",false));
+                            saveCalls |= !checked.rejection.empty();
+                            calls.push_back(std::move(checked));
+                        }
+                    }
                 }
             }
             hasWebEvidence = query(R"SQL(
@@ -757,18 +788,11 @@ LIMIT 1
                 Transaction transaction(db);
                 if (!authorizeTurn(message)) { transaction.commit(); return true; }
                 std::vector<ModelImage> images;
-                const auto context = turnInput(message,step,now,images);
+                auto [offered,machines] = available();
+                const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = tools,.feedback = {},.config = message.routing.at("config"),
+                         .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
-                if (input.event.contains("channel") && input.event.at("channel").contains("capabilities"))
-                    input.tools.insert(input.tools.end(),channelTools.begin(),channelTools.end());
-                if (web) {
-                    input.tools.insert(input.tools.end(),webTools.begin(),webTools.end());
-                    input.tools.insert(input.tools.end(),botToolNames().begin(),botToolNames().end());
-                }
-                if (!notification && !input.task.at("localMachines").empty())
-                    input.tools.push_back("request_local_machine_connection");
                 attempt = takeReservedConversationCall(id);
                 if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
                 if (!attempt) pauseTurn(message);
@@ -793,38 +817,41 @@ LIMIT 1
                 finish(failure,"error");
                 return true;
             }
+            saveCalls = true;
+        }
+        if (saveCalls) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             auto saved = Json::array();
             if (turnPending(id) && !authorizeTurn(message)) { transaction.commit(); return true; }
-            for (const auto& call : calls)
-                saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
+            for (const auto& call : calls) {
+                Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason},{"argumentsChecked",true}};
+                if (!call.rejection.empty()) entry["rejection"] = call.rejection;
+                saved.push_back(std::move(entry));
+            }
             exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",{saved,id,step});
             transaction.commit();
         }
 
         const auto& decision = calls.front();
-        if (notification && std::ranges::find(tools,decision.tool) == tools.end()) {
+        if (botEffects || isBotTool(decision.tool)) {
+            if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls)) return true;
+            continue;
+        }
+        if (!decision.rejection.empty() && !sessionEffect) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return true; }
-            saveTurnResults(id,step,Json::array({toolFailure("Tool unavailable for a Git notification")}));
+            auto result = toolFailure(decision.rejection);
+            if (isGitTool(decision.tool) && gitConversationEffectStarted(id,step)) {
+                result["delivery"] = "unknown";
+                result["error"] = "The host outcome is unknown. Check the target before retrying.";
+            }
+            saveTurnResults(id,step,Json::array({result}));
             transaction.commit();
             continue;
         }
-        if (isBotTool(decision.tool)) {
-            if (web) {
-                if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls)) return true;
-            } else {
-                std::lock_guard lock(mutex);
-                Transaction transaction(db);
-                if (!authorizeTurn(message)) { transaction.commit(); return true; }
-                saveTurnResults(id,step,std::vector<Json>(calls.size(),toolFailure("Use Flock Web for this action")));
-                transaction.commit();
-            }
-            continue;
-        }
-        if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+        if (!sessionEffect && hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return true; }
