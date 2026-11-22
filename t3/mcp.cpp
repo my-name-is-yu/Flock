@@ -221,7 +221,7 @@ Client::~Client() {
 
 HttpResponse Client::request(std::string_view method, const std::string& body, long timeoutMs) {
     // Leave time for best-effort MCP session teardown within the same deadline.
-    const auto cleanupTime = std::chrono::milliseconds(method == "DELETE" ? 0 : 50);
+    const auto cleanupTime = std::chrono::milliseconds(method == "DELETE" ? 0 : 250);
     const auto remaining = deadline_ ? std::chrono::ceil<std::chrono::milliseconds>(
         *deadline_ - std::chrono::steady_clock::now() - cleanupTime).count() : timeoutMs;
     if (remaining <= 0) throw SessionReadTimeout();

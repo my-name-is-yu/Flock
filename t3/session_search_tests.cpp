@@ -134,9 +134,14 @@ void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const 
 
     auto resume = query;
     resume["cursor"] = partial.at("nextCursor");
-    const auto stalled = conversation.search(resume);
-    check(stalled.at("ok") == false && !stalled.contains("nextCursor"),
-          "a deadline without progress returned a cursor that could not advance");
+    const auto deferred = conversation.search(resume);
+    check(deferred.at("ok") == true && deferred.at("truncated") == true && deferred.at("sessions").empty() &&
+          deferred.at("nextCursor").is_string(),"a repeatedly slow candidate did not return an incomplete continuation");
+    auto pastSlow = query;
+    pastSlow["cursor"] = deferred.at("nextCursor");
+    const auto later = conversation.search(pastSlow);
+    check(later.at("sessions").size() == 1 && later.at("sessions").at(0).at("title") == "Staging failure B" &&
+          later.at("nextCursor").is_null(),"a persistently slow candidate blocked later matches");
     fixture({{"slowSearchThread",nullptr}});
     const auto resumed = conversation.search(resume);
     check(resumed.at("sessions").size() == 2 && resumed.at("nextCursor").is_null() &&

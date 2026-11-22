@@ -115,6 +115,11 @@ public:
                     if (permitted(target)) item = t3_.sessionMetadata(target,!filters.query.empty(),deadline);
                 } catch (const SessionReadTimeout&) {
                     timedOut = true;
+                    // A candidate that used a fresh page's budget must not block every later match.
+                    if (scanned == 0) {
+                        incomplete.push_back(target);
+                        ++scanned;
+                    }
                     break;
                 }
                 ++scanned;
