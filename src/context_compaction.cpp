@@ -30,6 +30,10 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
     for (auto step = turn.rbegin(); step != turn.rend(); ++step) {
         auto& result = step->at("result");
         if (step->at("tool") != "expand_context" || !result.contains("messages")) continue;
+        if (auto revision = result.find("_redactionRevision"); revision != result.end()) {
+            (*step)["_redactionRevision"] = std::move(*revision);
+            result.erase(revision);
+        }
         const auto bytes = result.dump().size();
         if (expandedBytes+bytes > expandedContextBytes) {
             result.erase("messages");
@@ -46,6 +50,12 @@ void Store::Impl::initializeCompactionSchema() {
         end_message_id INTEGER NOT NULL REFERENCES journal(id), summary TEXT NOT NULL, original_count INTEGER NOT NULL,
         created_at INTEGER NOT NULL, created_by TEXT NOT NULL))SQL");
     exec("CREATE INDEX IF NOT EXISTS compactions_bot ON conversation_compactions(bot_id,id DESC)");
+    exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_expansion_cursors(
+        id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, message_id INTEGER NOT NULL REFERENCES journal(id),
+        byte_offset INTEGER NOT NULL, redaction_revision TEXT NOT NULL, end_message_id INTEGER NOT NULL,
+        query_message_id INTEGER NOT NULL, query_step INTEGER NOT NULL,
+        FOREIGN KEY(query_message_id,query_step) REFERENCES conversation_steps(message_id,step),
+        UNIQUE(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)))SQL");
     exec(R"SQL(CREATE VIEW IF NOT EXISTS compactable_messages AS
         SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,
           CASE j.kind
@@ -149,15 +159,15 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     }
 
     const auto& bot = message.bot;
-    const auto scrub = redactor(bot);
     const auto latest = compactions(bot,0,1);
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
     if (tool == "compact_conversation") {
         const auto end = identifier(args,"endMessageId",true);
-        const auto summary = scrub.text(conversation_storage::text(args,"summary",4000,true));
+        const auto summary = redactor(bot).text(conversation_storage::text(args,"summary",4000,true));
         if (summary.size()>4000 || Json(summary).dump().size()>expandedContextBytes)
             throw Conflict("Escaped summary exceeds the context budget");
-        if (end<boundary || end>=message.id) throw Conflict("Supply an older boundary covering the previous summary");
+        if (end<=boundary || end>=message.id)
+            throw Conflict("Use a boundary after the previous summary and before the current message");
         auto range = query("SELECT min(id),max(id),count(*) FROM compactable_messages WHERE bot_id=? AND id<=?",{bot,end});
         range.next();
         if (range.number(1)!=end) throw Conflict("Unknown conversation boundary");
@@ -173,27 +183,76 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         end = std::min(end,row.number(0));
     }
     if (args.contains("endMessageId")) end = std::min(end,identifier(args,"endMessageId",true));
-    const Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
-    const auto needle = conversation_storage::text(args,"query",512,false);
+    Json revision;
+    const auto scrub = redactor(bot,&revision);
+    Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
+    Id offset = identifier(args,"offset",false,0);
+    Id queryMessage = message.id, queryStep = step;
+    auto needle = conversation_storage::text(args,"query",512,false);
+    if (args.contains("cursor")) {
+        const auto cursor = identifier(args,"cursor",true);
+        auto saved = query(R"SQL(
+SELECT c.message_id,c.byte_offset,c.redaction_revision,c.end_message_id,c.query_message_id,c.query_step,
+       json_extract(s.decision,'$[0].args.query')
+FROM conversation_expansion_cursors c
+JOIN conversation_steps s ON s.message_id=c.query_message_id AND s.step=c.query_step
+WHERE c.id=? AND c.bot_id=?
+)SQL",{cursor,bot});
+        if (!saved.next() || saved.json(2)!=revision)
+            throw Conflict("Expansion cursor is stale or unknown. Read again from the start of the message.");
+        auto originalNeedle = saved.string(6);
+        if (!conversation_storage::hasText(originalNeedle)) originalNeedle.clear();
+        if ((args.contains("startMessageId") && start!=saved.number(0)) ||
+            (args.contains("offset") && offset!=saved.number(1)) ||
+            (args.contains("query") && needle!=originalNeedle))
+            throw Conflict("Cursor does not match the requested message, offset or search");
+        start = saved.number(0);
+        offset = saved.number(1);
+        end = std::min(end,saved.number(3));
+        queryMessage = saved.number(4);
+        queryStep = saved.number(5);
+        needle = std::move(originalNeedle);
+    } else if (offset) {
+        if (!args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
+        auto saved = query("SELECT DISTINCT redaction_revision FROM conversation_expansion_cursors "
+                           "WHERE bot_id=? AND message_id=? AND byte_offset=? LIMIT 2",{bot,start,offset});
+        // Numeric offsets issued before this change or shared by different views are ambiguous.
+        if (!saved.next() || saved.json(0)!=revision || saved.next())
+            throw Conflict("Expansion offset is stale or unknown. Restart at the message and use nextCursor to continue.");
+    }
     if (end<start) throw Conflict("No compacted messages in this range");
     auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",
                       {bot,start,end});
     Json result = {{"ok",true},{"messages",Json::array()}};
     constexpr std::size_t chunkBytes = 2000, cursorBytes = 128;
     const std::size_t limit = args.contains("limit") ? std::min<Id>(identifier(args,"limit",true),8) : 8;
-    std::size_t offset = identifier(args,"offset",false,0);
-    if (offset && !args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
+    const auto continueAt = [&](Id id, Id next) {
+        result["nextMessageId"] = id;
+        if (next) result["nextOffset"] = next;
+        auto saved = query(R"SQL(
+INSERT INTO conversation_expansion_cursors(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)
+VALUES(?,?,?,?,?,?,?)
+ON CONFLICT(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)
+DO UPDATE SET byte_offset=excluded.byte_offset RETURNING id
+)SQL",{bot,id,next,revision,end,queryMessage,queryStep});
+        saved.next();
+        result["nextCursor"] = saved.number(0);
+    };
     std::size_t used = result.dump().size()+cursorBytes;
     while (rows.next()) {
         const auto body = scrub.text(rows.string(2));
+        if (offset && (rows.number(0)!=start || static_cast<std::size_t>(offset)>=body.size() ||
+                       (static_cast<unsigned char>(body[offset])&0xc0)==0x80))
+            throw Conflict("Invalid UTF-8 byte offset");
         if (!needle.empty() && std::search(body.begin(),body.end(),needle.begin(),needle.end(),
-                [](unsigned char lhs, unsigned char rhs) { return asciiLower(lhs) == asciiLower(rhs); })==body.end()) continue;
+                [](unsigned char lhs, unsigned char rhs) { return asciiLower(lhs) == asciiLower(rhs); })==body.end()) {
+            if (offset) throw Conflict("Cursor message does not match this search");
+            continue;
+        }
         if (result["messages"].size()>=limit || expandedContextBytes-used<cursorBytes) {
-            result["nextMessageId"] = rows.number(0);
+            continueAt(rows.number(0),0);
             break;
         }
-        if ((offset && rows.number(0)!=start) || offset>body.size() || (offset<body.size() && (static_cast<unsigned char>(body[offset])&0xc0)==0x80))
-            throw Conflict("Invalid UTF-8 byte offset");
         Json entry = {{"messageId",rows.number(0)},{"kind",rows.string(1)},{"text",""}};
         const auto available = expandedContextBytes-used-entry.dump().size()-1;
         const auto tail = std::string_view(body).substr(offset);
@@ -203,13 +262,14 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
         entry["text"] = chunk;
         used += entry.dump().size()+1;
         result["messages"].push_back(std::move(entry));
-        if (offset+chunk.size()<body.size()) {
-            result["nextMessageId"] = rows.number(0);
-            result["nextOffset"] = offset+chunk.size();
+        const auto next = offset+static_cast<Id>(chunk.size());
+        if (static_cast<std::size_t>(next)<body.size()) {
+            continueAt(rows.number(0),next);
             break;
         }
         offset = 0;
     }
+    result["_redactionRevision"] = std::move(revision);
     return result;
 }
 }

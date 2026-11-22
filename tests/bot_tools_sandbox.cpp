@@ -71,9 +71,11 @@ struct Provider : Model {
     Json seen;
     Json content;
     std::function<void(const ModelInput&)> beforeTurn;
+    std::function<void(const Json&)> inspectRequest;
     std::function<std::vector<Decision>(const Json&)> followStep;
     ModelTurn decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
+        if (inspectRequest) inspectRequest(request);
         auto output = Json::array();
         auto emit = [&](const Decision& action) {
             auto args = action.args;
@@ -656,6 +658,72 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
     check(f.run(write).at("ok") == true && fs::is_regular_file(path),"A new user message could not request an action");
 }
 
+void escapedToolHistoryFitsBridgeAndCanBeReread() {
+    Fixture f;
+    f.grant({"workspace","alpha","read"});
+    const auto root = f.home/"workspaces"/"alpha";
+    fs::create_directories(root);
+    const auto data = [](unsigned i) {
+        return "Evidence for slot " + std::to_string(i) + " 根" + std::string(8169,'\x01');
+    };
+    std::vector<Decision> batch;
+    for (unsigned i = 0; i < 8; ++i) {
+        const auto file = std::to_string(i) + ".txt";
+        write(root/file,data(i));
+        batch.push_back(call("workspace_read_file",{{"path",file}}));
+    }
+    constexpr unsigned batches = 19, calls = batches * 8;
+    unsigned requests = 0;
+    f.model.inspectRequest = [&](const Json& request) {
+        ++requests;
+        check(request.dump().size() <= 8 * 1024 * 1024,"Serialized request exceeded the production bridge limit");
+        const auto context = Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
+        check(context.at("event").at("text") == "Check the fixture","Tool evidence displaced the current user message");
+    };
+    Json firstRef, secondRef;
+    bool recovered = false, revoked = false;
+    f.model.followStep = [&](const Json& steps) -> std::vector<Decision> {
+        if (steps.size() < calls) return batch;
+        if (steps.size() == calls) {
+            check(steps.front().at("result").at("evidenceOmitted") == true &&
+                  steps.front().at("result").at("untrustedData") == true,
+                  "The earlier result disappeared without an explicit evidence status");
+            firstRef = steps.at(0).at("result").at("resultRef");
+            secondRef = steps.at(1).at("result").at("resultRef");
+            check(firstRef != secondRef,"Parallel results shared a reference");
+            for (unsigned i = 0; i < 8; ++i)
+                check(steps.at(calls - 8 + i).at("result").at("text") == data(i),
+                      "The latest batch lost evidence or changed call order");
+            return {call("read_tool_result",firstRef)};
+        }
+        const auto& reread = steps.back().at("result").at("result");
+        if (steps.size() == calls+1) {
+            check(reread.at("ok") == true && reread.at("text") == data(0) &&
+                  steps.back().at("result").at("args").at("path") == "0.txt",
+                  "The omitted result was lost, rerun, or resolved to the wrong slot after restart");
+            recovered = true;
+            return {call("read_tool_result",secondRef)};
+        }
+        check(reread.at("accessRevoked") == true && !reread.contains("text") &&
+              !steps.at(calls).at("result").at("result").contains("text"),
+              "A reread or its replay bypassed current workspace authorization");
+        revoked = true;
+        return {};
+    };
+    f.batch(batch,batches * 9);
+    check(requests == batches,"The stress fixture did not finish all batches before pausing");
+    write(root/"0.txt","Changed on disk after the original read");
+    f.restart();
+    f.approve();
+    f.restart();
+    f.approve();
+    f.store->access().resourceGrant(owner,"alpha",{"workspace","alpha","read"},GrantChange::revoke);
+    f.approve();
+    check(recovered && revoked && requests == batches+3,"The paused turn did not finish all recovery checks");
+    f.model.followStep = {};
+    check(f.run(call("read_tool_result",firstRef)).at("ok") == false,"A reference was accepted from another turn");
+}
+
 void freshConversationStepArrays(Fixture& f) {
     const auto message = std::to_string(f.lastMessage);
     check(f.sql("SELECT json_type(decision) || ':' || json_type(result) FROM conversation_steps WHERE message_id=" +
@@ -712,6 +780,10 @@ void approvalWhileAnotherTurnIsInferring(Fixture& f) {
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--tool-history") {
+            escapedToolHistoryFitsBridgeAndCanBeReread();
+            return 0;
+        }
         Fixture fixture;
         if (argc == 2) {
             mcpSessionPagination(fixture,argv[1]);

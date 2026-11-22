@@ -29,7 +29,7 @@ constexpr std::size_t sourceSize = 8192;
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "record_task_blocker","withdraw_task_question",
                                          "cancel_task","message_session","interrupt_session","read_result",
-                                         "find_tasks","flock_session_search","flock_session_events","reply"};
+                                         "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
     "list_grants","request_access","list_secrets","request_secret_input",
@@ -187,7 +187,7 @@ Json sourceRef(const Json& result) {
 
 Json Store::Impl::conversationSteps(const Message& message, int step, std::vector<ModelImage>& images) {
     Json turn = Json::array();
-    auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
+    auto steps = query("SELECT decision,result,step FROM conversation_steps WHERE message_id=? AND step<?"
                        " AND result IS NOT NULL ORDER BY step",{message.id,step});
     while (steps.next()) {
         const auto calls = steps.json(0);
@@ -209,7 +209,8 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
                     result = shared.record(std::move(result));
                 }
             }
-            turn.push_back({{"tool",decision.at("tool")},{"args",std::move(args)},{"result",std::move(result)}});
+            turn.push_back({{"tool",decision.at("tool")},{"args",std::move(args)},{"result",std::move(result)},
+                {"_ref",{{"messageId",message.id},{"step",steps.number(2)},{"callIndex",i+1}}}});
         }
     }
     return turn;
@@ -366,6 +367,20 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (tool == "read_tool_result") {
+        const auto sourceMessage = identifier(args,"messageId",true);
+        const auto sourceStep = identifier(args,"step",true);
+        const auto index = identifier(args,"callIndex",true);
+        if (sourceMessage != message.id || sourceStep >= step || index > static_cast<Id>(maxToolCalls))
+            throw ToolError("Unknown tool result in this turn");
+        auto saved = query("SELECT json_extract(decision,?) FROM conversation_steps "
+                           "WHERE message_id=? AND step=? AND result IS NOT NULL",
+                           {"$[" + std::to_string(index-1) + "].tool",message.id,sourceStep});
+        if (!saved.next() || !conversation_storage::canRereadToolResult(saved.string(0)))
+            throw ToolError("Unknown tool result in this turn");
+        // The model view resolves this reference against the currently authorized source.
+        return {{"ok",true}};
+    }
     if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
@@ -697,7 +712,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto webhook = message.routing.value("gitEvent",Json(nullptr));
     const bool notification = webhook.is_object();
     const bool web = message.channelScope.empty() && !notification;
-    auto tools = notification ? std::vector<std::string>{"reply"} : turnTools;
+    auto tools = notification ? std::vector<std::string>{"reply","read_tool_result"} : turnTools;
     if (gitHost && notification) {
         tools.push_back("git_pr_status");
         if (!field(webhook,"headSha").empty()) tools.push_back("git_commit_status");
