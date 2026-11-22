@@ -1,5 +1,5 @@
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { refreshEventHistory } from '/event-history.mjs';
+import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
@@ -831,7 +831,7 @@ function eventTime(event, extra) {
 }
 function sourceAction(source, label = 'Open source') {
   return button(label, 'text-button', async () => {
-    const target = byId(`event-${source.messageId}`);
+    const target = byId(`event-${source.messageId}`)?.closest('article');
     if (target) {
       closeDetail();
       target.focus();
@@ -862,7 +862,7 @@ function runIcon(run) {
   link.replaceChildren(icon('open'));
   return link;
 }
-function eventCard(event, context, place) {
+function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const side = messageSide(event);
@@ -877,6 +877,12 @@ function eventCard(event, context, place) {
   const row = node('article', `msg ${side}`);
   row.id = `event-${event.id}`;
   row.tabIndex = -1;
+  if (report) {
+    const anchor = node('span');
+    anchor.id = `event-${report.id}`;
+    anchor.setAttribute('aria-hidden', 'true');
+    row.append(anchor);
+  }
   row.classList.toggle('group-start', place.groupStart);
   row.classList.toggle('task-start', place.taskStart);
   const trigger = event.kind === 'request' ? data.trigger : null;
@@ -1006,7 +1012,11 @@ function eventCard(event, context, place) {
 
   if (replyTarget) {
     const [label, target] = replyTarget;
-    actions.append(iconButton('reply', label, () => beginReply(target)));
+    actions.append(iconButton('reply', report ? 'Reply to Bot completion' : label, () => beginReply(target)));
+  }
+  if (report) {
+    actions.append(iconButton('reply', 'Reply to Session report', () =>
+      beginReply({ kind: 'result', messageId: report.id, summary: report.data.report })));
   }
   line.append(bubble, actions);
   row.append(line, ...extras);
@@ -1138,7 +1148,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
-  const shown = events.filter((event) => event.kind !== 'wait_closed');
+  const shown = timelineMessages(events, dayLabel);
   const fragment = document.createDocumentFragment();
   let peerMessages = [];
   const appendPeerMessages = () => {
@@ -1148,7 +1158,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   };
   let day = '';
   let previous = null;
-  shown.forEach((event, index) => {
+  shown.forEach(({ event, report }, index) => {
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
@@ -1158,14 +1168,14 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
     const side = messageSide(event);
-    const next = shown[index + 1];
+    const next = shown[index + 1]?.event;
     const place = {
       groupStart: previous?.side !== side,
       groupEnd: !next || next.kind === 'bot_message' || messageSide(next) !== side || dayLabel(next.time) !== day,
       taskStart: previous?.taskId !== event.taskId,
       afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
     };
-    fragment.append(eventCard(event, timeline, place));
+    fragment.append(eventCard(event, timeline, place, report));
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
   appendPeerMessages();
