@@ -713,6 +713,69 @@ void resumeRestoresCancelledTaskDirections() {
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
           f.t3.sent.back().tool == "delegate",
           "resume omitted the original intent, criteria, or accepted directions");
+
+    constexpr auto goal = "Measure the release dataset";
+    constexpr auto criteria = "Report median throughput";
+    constexpr auto trace = "attach the raw trace";
+    constexpr auto revisionRequest = "Move this run to ローカルMac, measure the release dataset, "
+                                     "report median throughput, and attach the raw trace";
+    f.script(revisionRequest,{change(next,{{"intent",goal},{"doneWhen",criteria},{"environment","ローカルMac"}})});
+    f.receive("revise-resumed",revisionRequest);
+    check(f.task(next)["pendingEnvironmentId"] == "desktop" && f.task(next)["intent"] == goal &&
+          f.task(next)["doneWhen"] == criteria,"the combined move and work revision was not accepted");
+    constexpr auto abandonedMove = "Use ローカルMac for the next run";
+    f.script(abandonedMove,{change(next,{{"environment","ローカルMac"}})});
+    f.receive("old-destination",abandonedMove);
+    constexpr auto correctedCriteria = "Report p95 latency";
+    constexpr auto correction = "Change the completion criteria to report p95 latency";
+    f.script(correction,{change(next,{{"doneWhen",correctedCriteria}})});
+    f.receive("correct-criteria",correction);
+    f.store->operate(next,0,"cancel");
+    f.t3.finish(f.task(next)["activeRun"]["runId"].get<std::string>(),"Resumed work settled");
+    f.reach(next,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(next))
+        if (row["kind"] == "cancelled") anchor = row["id"];
+    const auto secondRequest = std::string("Resume the measurement on クラウドMac and keep the flamegraph ") +
+                               std::string(9000,'r');
+    f.script(secondRequest,{start({{"request",secondRequest},{"sourceResultMessageId",anchor},
+                                  {"resume",true},{"environment","クラウドMac"}})});
+    f.receive("resume-again",secondRequest,anchor);
+    const auto last = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(last != next && f.task(last)["sourceTaskId"] == next,"the second resume did not create fresh work");
+    f.reach(last,"running");
+    check(f.task(last)["intent"] == goal && f.task(last)["doneWhen"] == correctedCriteria &&
+          f.task(last)["environmentId"] == "cloud","the second resume lost its current work contract");
+    const auto& resumed = f.t3.sent.back().instruction;
+    check(resumed.find(trace) != resumed.npos,"the second resume lost the accepted trace direction");
+    check(f.t3.sent.back().environmentId == "cloud",
+          "the second resume did not use its current destination");
+    check(resumed.find(revisionRequest) != resumed.npos,"the second resume lost the revised mixed direction");
+    check(resumed.find("Report baseline latency") == resumed.npos,"the second resume replayed superseded criteria");
+    check(f.task(last)["remaining"] == 3,"the second resume charged for old work");
+
+    constexpr auto localNote = "Record the CPU model";
+    f.script(localNote,{send(last)});
+    f.receive("cpu-model",localNote);
+    f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(),"Measurement ready");
+    f.advanceUntil([&] { return f.t3.sent.back().tool == "follow_up"; },
+                   "the supplement never reached the Session");
+    const auto& follow = f.t3.sent.back().instruction;
+    check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos,
+          "the follow-up omitted or replayed directions");
+
+    constexpr auto move = "Continue the measurement on ローカルMac";
+    f.script(move,{change(last,{{"environment","ローカルMac"}})});
+    f.receive("move-resumed",move);
+    f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(),"Cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.back().environmentId == "desktop"; },
+                   "the resumed task did not move");
+    const auto& moved = f.t3.sent.back().instruction;
+    check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) &&
+          moved.find(trace) != moved.npos &&
+          sessionPrompt(f.t3.sent.back().actionId,moved).size() <= maxSessionPromptBytes &&
+          f.task(last)["remaining"] == 1,
+          "the moved Session lost an applicable direction or spent extra allowance");
 }
 
 void liveMoveAndCriteriaCorrectionKeepCurrentContract() {

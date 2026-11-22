@@ -774,8 +774,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         WorkPrompt prompt;
         auto& [instruction,pending,contextIds,resultReferences] = prompt;
         // Use the same allowance before and after the model supplies its instruction and criteria.
-        // The action ID appears in both the adapter wrapper and our footer.
-        std::size_t overhead = 8000 + 512 + 2 * std::max<std::size_t>(64,actionIdBytes);
+        std::size_t overhead = 8000 + 512 + std::max<std::size_t>(64,actionIdBytes);
         if (event.contains("userAnswer")) {
             contextIds["answerEventId"] = event.at("id");
             instruction += "\n\nUser answer:\n" + field(event,"userAnswer");
@@ -820,7 +819,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
                 if (source.at("taskId") == task.at("sourceTaskId")) quoteSource(source);
         }
         overhead += instruction.size();
-        pending = pendingBatch(task,overhead < 120000 ? 120000 - overhead : 0,quotes);
+        pending = pendingBatch(task,overhead < maxSessionPromptBytes ? maxSessionPromptBytes - overhead : 0,quotes);
         includeInstructions(instruction,pending);
         for (const auto& item : pending)
             if (item.contains("source")) quoteSource(item.at("source"));
