@@ -127,7 +127,7 @@ function decisionCard(item, submit) {
   return article;
 }
 
-export function mountBoardInbox(api) {
+export function mountBoardInbox(api, sourceAction) {
   const byId = (id) => document.getElementById(id);
   const dialog = byId('board-inbox');
   const bots = byId('work-view-bot');
@@ -141,6 +141,7 @@ export function mountBoardInbox(api) {
   };
   let view;
   let version = 0;
+  let availableBots;
 
   async function submit(item, decision, data) {
     const displayed = version;
@@ -173,9 +174,17 @@ export function mountBoardInbox(api) {
     const query = new URLSearchParams();
     if (bots.value) query.set('bot', bots.value);
     try {
-      const result = await api(query.size ? `${view}?${query}` : view);
+      const [result, configured] = await Promise.all([api(query.size ? `${view}?${query}` : view), availableBots]);
       if (displayed !== version) return;
-      const cards = result[key].map(render);
+      const cards = result[key].map((item) => {
+        const card = render(item);
+        if (key === 'items') {
+          const bot = configured.find(({ id }) => id === item.botId);
+          if (bot && sourceAction) card.insertBefore(
+            sourceAction(bot, item.conversationEventId, () => dialog.close()), card.querySelector('form'));
+        }
+        return card;
+      });
       for (const entry of cards) items.append(entry);
       message.textContent = [update, cards.length ? '' : empty].filter(Boolean).join(' ');
     } catch {
@@ -189,11 +198,11 @@ export function mountBoardInbox(api) {
     button.addEventListener('click', async () => {
       view = button.dataset.workView;
       bots.value = '';
-      const allBots = api('bots').catch(() => []);
+      const allBots = availableBots = api('bots').catch(() => []);
       load();
       dialog.showModal();
       const configured = await allBots;
-      if (!dialog.open) return;
+      if (!dialog.open || allBots !== availableBots) return;
       const selected = bots.value;
       bots.replaceChildren(new Option('All Bots', ''), ...configured.map(({ id, name }) => new Option(name, id)));
       bots.value = selected;
