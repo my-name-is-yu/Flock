@@ -89,6 +89,7 @@ struct SimulatedT3 : T3 {
     int launches = 0, follows = 0, replies = 0, interrupts = 0, reconciles = 0, reads = 0, polls = 0;
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
+    bool failNextAnswerRead = false;
     bool hasReconciledRun = true;
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
@@ -108,6 +109,8 @@ struct SimulatedT3 : T3 {
         seen.push_back(cmd);
         check(cmd.authGeneration == generation,"OAuth generation missing from committed send");
         if (cmd.tool == "answer_session_question") {
+            if (std::exchange(failNextAnswerRead,false))
+                return {Delivery::Kind::Unknown,{},"T3 question read failed",true};
             ++replies;
             check(cmd.questionId == "branch-question" && cmd.answers["branch"] == "main","wrong T3 answer");
             runs.at(cmd.target.runId) = {};
@@ -142,10 +145,11 @@ struct SimulatedT3 : T3 {
         ++polls;
         return runs.at(ref.runId);
     }
-    void interrupt(const std::string&,const Json&,const RunRef& ref) override {
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& ref) override {
         check(runs.contains(ref.runId),"interrupted unrelated Run");
         interruptedRuns.push_back(ref);
         ++interrupts;
+        return InterruptOutcome::Requested;
     }
     Excerpt read(const ReadRequest& req) override {
         const bool reported = std::any_of(runs.begin(),runs.end(),[&](const auto& entry) {
@@ -605,6 +609,32 @@ void recoveredDelivery() {
     f.reach(id,"running");
     check(f.t3.replies==1 && f.t3.launches==1 && f.t3.reconciles==1 && f.task(id)["additionalUsed"]==0,
           "recovered answer created duplicate work");
+}
+
+void unsentAnswerRemainsRetryable() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput& i) { return i.event["kind"] == "intake" ? work() : reply(); };
+    f.reach(id,"running");
+    const auto run = f.task(id).at("activeRun");
+    f.t3.question("run-1");
+    f.reach(id,"sending");
+    f.t3.failNextAnswerRead = true;
+    const auto wait = f.wait(id,"unknown_delivery");
+    const auto answer = f.t3.seen.back();
+    check(f.t3.replies == 0 && f.task(id)["wait"]["text"].get<std::string>().find("was not sent") != std::string::npos,
+          "the user was not told the Session answer was unsent");
+
+    f.restart();
+    f.rejects(id,wait,"reconcile",{{"questionId","another-question"}});
+    check(f.task(id).at("wait").at("id") == wait && f.t3.replies == 0,
+          "a mismatched reconciliation hint allowed an unsent answer to proceed");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile",{{"questionId",answer.questionId}});
+    f.reach(id,"running");
+    const auto retry = f.t3.seen.back();
+    check(f.t3.replies == 1 && f.t3.launches == 1 && f.t3.reconciles == 0 && f.task(id)["activeRun"] == run &&
+          f.logs(id,"session_answered") == 1 && retry.actionId == answer.actionId && retry.questionId == answer.questionId,
+          "the unsent Session answer was not retried once for the same Run and question");
 }
 
 void cancelDuringDelivery() {
@@ -2174,7 +2204,8 @@ int main() {
             {"replay saved question decision",replayQuestionDecision},{"clarification and failure",ambiguityAndFailure},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
-            {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
+            {"delivery recovery",recoveredDelivery},{"retry unsent Session answer",unsentAnswerRemainsRetryable},
+            {"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
             {"redacted history pagination",redactedHistoryPagination},

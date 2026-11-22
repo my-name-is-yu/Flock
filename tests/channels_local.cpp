@@ -44,7 +44,7 @@ struct SessionAdapter final : T3 {
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
         return observeRun ? observeRun(run) : Observation{};
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
         evidenceReads.push_back(target);
         return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};

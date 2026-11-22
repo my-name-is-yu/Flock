@@ -615,8 +615,8 @@ Tasks do the work: start_task creates one, send_to_task records an instruction f
 safe point, change_task changes its intent, criteria, or environment, answer_task_question answers a task's
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
 blocks an active task and withdraw_task_question when an open question no longer needs an answer. message_session delivers a note to a running
-Session immediately, and interrupt_session interrupts that Run without closing the task. read_result and find_tasks let you inspect results and older
-tasks. Each result appears in event.turn. If a
+Session immediately, and interrupt_session asks T3 to interrupt that Run while keeping the task open.
+Use read_result and find_tasks to inspect results and older tasks. Each result appears in event.turn. If a
 result says delivery is unknown, check the target before repeating the action. When a
 result says stale, read the current state it returns and decide again. When you need more information,
 ask in reply instead of guessing. A message that replies to a task question and matches one of its

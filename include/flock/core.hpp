@@ -113,6 +113,7 @@ struct Delivery {
     std::string detail;
     bool definitelyUnsent = false;
 };
+enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
@@ -176,7 +177,7 @@ public:
     virtual Delivery send(const Command&) = 0;
     virtual Delivery reconcile(const Command&) = 0;
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
-    virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
+    virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }

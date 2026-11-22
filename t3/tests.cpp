@@ -155,6 +155,19 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
+        const auto submittedAnswers = effects("t3_pending_request").size();
+        fixture({{"scenario", "question"}, {"failAnswerRecheck", true}});
+        delivery = adapter->send(answer);
+        check(delivery.definitelyUnsent && effects("t3_pending_request").size() == submittedAnswers,
+              "failed question recheck was recorded as an ambiguous answer or sent a response");
+        fixture({{"failAnswerRecheck", false}, {"dropAnswerReply", true}});
+        delivery = adapter->send(answer);
+        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
+              effects("t3_pending_request").size() == submittedAnswers + 1 &&
+              restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone,
+              "a lost response was treated as definitely unsent or retried");
+        fixture({{"dropAnswerReply", false}});
+
         auto badConfig = launch.config;
         badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
         observation = adapter->observe("env-1", badConfig, run);
@@ -265,12 +278,19 @@ int main(int argc, char** argv) {
         bool rejected = false;
         try { adapter->read(read); } catch (const std::runtime_error&) { rejected = true; }
         check(rejected, "foreign item cannot be read");
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal &&
+              effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
         fixture({{"scenario", "running"}});
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::Requested &&
+              effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
               "T3 receives exactly one interrupt for the assigned Run");
+        fixture({{"interruptReply", "no_active_run"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::NoActiveRun,
+              "a Run becoming inactive before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", "completed"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal,
+              "a Run ending before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", false}});
 
         Command note = launch;
         note.tool = "steer";
