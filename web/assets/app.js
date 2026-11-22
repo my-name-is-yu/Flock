@@ -12,7 +12,7 @@ const elements = Object.fromEntries([
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -547,7 +547,6 @@ const botPeers = (id) => participant(id).peers ?? [];
 function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
-  const heading = elements['peer-heading'];
   const profile = elements.profile;
   profile.hidden = !bot || !!dm;
   elements['settings-button'].hidden = !bot || !!dm;
@@ -555,17 +554,13 @@ function renderHeader() {
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
-  elements['peer-back'].setAttribute('aria-label', bot ? `Back to ${bot.name}` : 'Back to Bot');
-  heading.hidden = !dm;
+  elements['peer-identity'].hidden = !dm;
   if (dm) {
+    elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
     const pair = [dm.id, dm.peerId].sort().map(participant);
-    const label = pair.map(({ name }) => name).join(' & ');
     if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      const faces = node('span', 'peer-faces');
-      faces.setAttribute('aria-hidden', 'true');
-      faces.append(...pair.map((bot) => avatar(bot, 'peer-face')));
-      heading.replaceChildren(faces, node('span', 'profile-pill peer-title', label));
-      heading.title = label;
+      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot)));
+      elements['peer-heading'].textContent = pair.map(({ name }) => name).join(' & ');
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -1428,7 +1423,6 @@ const botEditor = createBotEditor(elements['bot-editor'], {
 function openNewBot(origin = elements['new-bot-button']) {
   reopenSettingsOnClose = false;
   closeMenu(false);
-  openNavigation(false, false);
   closeDetail();
   botEditor.openCreate({ bots, origin });
 }
