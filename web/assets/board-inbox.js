@@ -27,6 +27,17 @@ const actions = {
   pr_review: [['approve', 'Approve review'], ['request_changes', 'Request changes']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
+const draftStorage = 'flock-inbox-answer-drafts';
+
+function answerKey(item) {
+  return JSON.stringify([item.botId, item.taskId]);
+}
+function decisionTarget(item) {
+  return JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
+}
+function answerFocus(input) {
+  return { key: input.dataset.answerKey, selection: [input.selectionStart, input.selectionEnd, input.selectionDirection] };
+}
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -76,7 +87,7 @@ function taskCard(task) {
   for (const pr of task.prRefs) article.append(prLink(pr.url, pr.title));
   return article;
 }
-function decisionCard(item, submit) {
+function decisionCard(item, submit, drafts, remember, saving) {
   const article = card(item.requestTitle, `${item.botName} · ${labels[item.itemKind]}`);
   if (item.request && item.request !== item.requestTitle) article.append(element('p', item.request));
   article.append(element('p', item.prompt));
@@ -88,18 +99,54 @@ function decisionCard(item, submit) {
   }
   const form = element('form', '', 'board-inbox-form');
   const inputs = {};
+  const buttons = element('div', '', 'board-inbox-actions');
+  let review;
   if (item.itemKind === 'user_question') {
+    const key = answerKey(item);
+    const target = decisionTarget(item);
+    const draft = drafts.get(key);
+    let draftTarget = draft?.target ?? target;
+    let stale = draft?.stale;
+    const changed = draftTarget !== target;
     inputs.text = element('textarea');
+    inputs.text.dataset.answerKey = key;
     inputs.text.rows = 2;
     inputs.text.maxLength = 8000;
     inputs.text.required = true;
+    inputs.text.value = draft?.text ?? '';
+    const saveAnswer = () => remember(key, { target: draftTarget, text: inputs.text.value, stale });
+    inputs.text.addEventListener('input', saveAnswer);
+    if (changed || stale) {
+      review = element('div');
+      review.append(element('p', changed
+        ? 'The question changed. Review the current question before using this draft.'
+        : 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
+      if (changed) {
+        const useDraft = element('button', 'Use draft for this question');
+        useDraft.type = 'button';
+        useDraft.addEventListener('click', () => {
+          draftTarget = target;
+          stale = false;
+          saveAnswer();
+          review.remove();
+          review = undefined;
+          setBusy(false);
+          inputs.text.focus();
+        });
+        review.append(useDraft);
+      }
+      form.append(review);
+    }
     form.append(labeled('Answer', inputs.text));
     if (item.choices?.length) {
       const choices = element('div', '', 'board-inbox-actions');
       for (const choice of item.choices) {
         const button = element('button', choice);
         button.type = 'button';
-        button.addEventListener('click', () => { inputs.text.value = choice; });
+        button.addEventListener('click', () => {
+          inputs.text.value = choice;
+          saveAnswer();
+        });
         choices.append(button);
       }
       form.append(choices);
@@ -116,7 +163,6 @@ function decisionCard(item, submit) {
     inputs.value.required = true;
     form.append(labeled('Protected value', inputs.value));
   }
-  const buttons = element('div', '', 'board-inbox-actions');
   for (const pr of item.candidates || []) {
     const button = element('button', `Link #${pr.prNumber}`);
     button.type = 'submit';
@@ -131,18 +177,22 @@ function decisionCard(item, submit) {
     buttons.append(button);
   }
   form.append(buttons);
+  function setBusy(busy) {
+    for (const input of form.elements) input.disabled = busy || (input.type === 'submit' && Boolean(review));
+  }
+  setBusy(Boolean(saving));
+  saving?.then(() => setBusy(false), () => setBusy(false));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (!event.submitter) return;
+    if (!event.submitter || event.submitter.disabled) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
     if (event.submitter.dataset.prNumber) data.prNumber = Number(event.submitter.dataset.prNumber);
     if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
-    const fields = [...form.elements];
-    for (const input of fields) input.disabled = true;
-    try { await submit(item, event.submitter.value, data); }
-    finally {
-      for (const input of fields) input.disabled = false;
-    }
+    const active = document.activeElement;
+    const focus = inputs.text && form.contains(active) ? { ...answerFocus(inputs.text), origin: active } : undefined;
+    setBusy(true);
+    try { await submit(item, event.submitter.value, data, focus); }
+    finally { setBusy(false); }
   });
   article.append(form);
   return article;
@@ -156,24 +206,50 @@ export function mountBoardInbox(api) {
   const message = byId('work-view-message');
   const items = byId('work-view-items');
   const history = byId('work-view-history');
+  let drafts = new Map();
+  try { drafts = new Map(JSON.parse(sessionStorage.getItem(draftStorage))); } catch {}
+  const saving = new Map();
   const views = {
     board: ['Task board', 'tasks', 'No matching tasks.', taskCard],
-    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item) => decisionCard(item, submit)],
+    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item) =>
+      decisionCard(item, submit, drafts, remember, saving.get(decisionTarget(item)))],
     'inbox/history': ['Recent decisions', 'decisions', 'No recorded decisions.', (entry) => card(labels[entry.itemKind],
       `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)],
   };
   let view;
   let version = 0;
 
-  async function submit(item, decision, data) {
+  function remember(key, draft) {
+    if (draft?.text || draft?.stale) drafts.set(key, draft);
+    else drafts.delete(key);
+    try { sessionStorage.setItem(draftStorage, JSON.stringify([...drafts])); } catch {}
+  }
+
+  async function submit(item, decision, data, focus) {
     const displayed = version;
+    const key = decision === 'answer' ? answerKey(item) : undefined;
+    const draft = drafts.get(key);
+    const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
+    const attempt = decisionTarget(item);
     message.textContent = 'Saving decision…';
     try {
-      const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
-      const response = await api('inbox/decide', { ...target, decision, data });
-      if (displayed === version) await load(response.status === 'approved'
+      const request = api('inbox/decide', { ...target, decision, data });
+      saving.set(attempt, request);
+      const response = await request;
+      saving.delete(attempt);
+      if (!response.accepted) throw new Error('decision_unconfirmed');
+      if (draft?.target === attempt && draft.text === data.text && drafts.get(key) === draft) remember(key);
+      if (dialog.open && view === 'inbox') await load(response.status === 'approved'
         ? 'Decision saved. The Bot change still needs to be applied in Access settings.' : 'Decision saved.');
     } catch (error) {
+      saving.delete(attempt);
+      if (key && error.message === 'request_changed') {
+        if (drafts.get(key) === draft) remember(key, { target: attempt, text: data.text, stale: true });
+        const active = document.activeElement;
+        if (dialog.open && view === 'inbox') await load('The request changed.',
+          displayed === version && (active === focus?.origin || active === document.body) ? focus : undefined);
+        return;
+      }
       if (displayed !== version) return;
       const messages = {
         request_changed: 'The request changed. Refresh and review it before deciding again.',
@@ -185,7 +261,9 @@ export function mountBoardInbox(api) {
     }
   }
 
-  async function load(update = '') {
+  async function load(update = '', focus) {
+    const active = document.activeElement;
+    if (!focus && items.contains(active) && active.dataset.answerKey) focus = answerFocus(active);
     const displayed = ++version;
     const [title, key, empty, render] = views[view];
     byId('work-view-title').textContent = title;
@@ -193,6 +271,7 @@ export function mountBoardInbox(api) {
     history.hidden = view === 'board';
     history.textContent = view === 'inbox' ? 'Recent decisions' : 'Pending decisions';
     items.replaceChildren();
+    const focusWhileLoading = document.activeElement;
     items.setAttribute('aria-busy', 'true');
     message.textContent = 'Loading…';
     const query = new URLSearchParams();
@@ -204,6 +283,13 @@ export function mountBoardInbox(api) {
       const cards = result[key].map(render);
       for (const entry of cards) items.append(entry);
       message.textContent = [update, cards.length ? '' : empty].filter(Boolean).join(' ');
+      if (focus && document.activeElement === focusWhileLoading) {
+        const answer = Array.from(items.querySelectorAll('textarea')).find((input) => input.dataset.answerKey === focus.key);
+        if (answer && !answer.disabled) {
+          answer.focus();
+          answer.setSelectionRange(...focus.selection);
+        }
+      }
     } catch {
       if (displayed === version) message.textContent = 'Flock could not load this view. Try refreshing.';
     } finally {
