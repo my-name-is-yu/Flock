@@ -749,6 +749,33 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
           "the instructions were not both delivered");
 }
 
+void cancellationTakesOverRevisionStop() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Change criteria",{change(id,{{"doneWhen","Include timings"}})});
+    f.receive("revision","Change criteria");
+    f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"revision did not interrupt its Run");
+    const auto stop = f.task(id).at("runStop");
+    check(stop.at("intent") == "replan" && stop.at("run") == f.task(id).at("activeRun"),"wrong revision stop target");
+    f.store->operate(id,0,"cancel");
+    f.restart();
+    f.tick();
+    check(f.task(id).at("runStop").at("intent") == "cancel" && f.t3.interrupted.size() == 1,
+          "cancellation issued a second interrupt before its retry time");
+    f.now += 5;
+    f.tick();
+    check(f.t3.interrupted.size() == 2 && f.t3.interrupted[0] == f.t3.interrupted[1],"stop retry changed its Run");
+    f.t3.finish("run-1","Interrupted",false);
+    f.tick();
+    check(f.task(id)["state"] == "cancelling" && f.task(id)["activeRun"] == stop.at("run"),
+          "interrupt request released unsettled delegated work");
+    f.t3.finish("run-1","Interrupted");
+    f.reach(id,"cancelled");
+    check(f.t3.sent.size() == 1 && !f.task(id).contains("runStop") &&
+          f.event(id,"interrupt_settled")["intent"] == "cancel","settlement resumed superseded work");
+}
+
 void unknownSendThenScopeChange() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -915,9 +942,13 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
     check(f.task(other)["state"] == "completed" && f.task(id)["state"] == "deciding" && completionCalls == 1,
           "a received message failed to hold same-Bot completion or held another Bot's completion");
 
+    const auto held = f.task(id);
+    check(held.at("deferredTerminal").at("eventId") == held.at("eventId") &&
+          held.at("deferredTerminal").at("generation") == held.at("generation") &&
+          held.at("deferredTerminal").at("tool") == "complete","deferred decision lost its task or event identity");
     f.restart();
     f.reach(id,"completed");
-    check(f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
+    check(!f.task(id).contains("deferredTerminal") && f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
           "the buffered completion was lost or requested another model call after the read-only turn");
 }
 
@@ -1345,6 +1376,7 @@ int main() {
         appendWaitsForSafeBoundary();
         settledInstructionsCanBeAcknowledgedWithoutAnotherRun();
         twoInstructionsFromOneMessageAreTrackedSeparately();
+        cancellationTakesOverRevisionStop();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();
         receivedRevisionPrecedesCompletion();

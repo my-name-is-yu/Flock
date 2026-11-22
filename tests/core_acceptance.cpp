@@ -403,6 +403,9 @@ void sessionQuestions() {
         f.reach(id,"deciding");
         if (needsUser) {
             const auto wait = f.wait(id,"user_question");
+            const auto task = f.task(id);
+            check(task["question"]["target"] == Json{{"waitId",wait},{"eventId",task["eventId"]},
+                {"run",task["activeRun"]},{"requestId","branch-question"}},"user wait lost its Session target");
             f.restart();
             f.store->operate(id,wait,"answer",{{"text","main"}});
         }
@@ -924,10 +927,13 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     f.allowBeta();
     const auto sender = f.submit("Release verification");
     Id recipient = 0;
+    bool attemptedFailure = false;
     constexpr auto revisedCriteria = "Confirm the rollback plan with the revised evidence";
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& event = input.event;
         const auto kind = event.at("kind").get<std::string>();
+        if (kind == "conversation_turn" && event["text"] == "How is verification going?")
+            return {"reply",{{"text","Checking."}},"Report progress"};
         if (kind == "conversation_turn") return converse(input,"change_task",recipient,{{"doneWhen",revisedCriteria}});
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta","work","Verify release");
@@ -937,7 +943,13 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
             return complete();
         }
         if (kind == "bot_request") return work();
-        if (input.task.contains("userInstructions") && kind == "result") return work("follow_up",false);
+        if (input.task.contains("userInstructions") && kind == "result") {
+            if (!std::exchange(attemptedFailure,true)) {
+                f.store->receive({"beta","","e","p",Json::object()},"status","How is verification going?");
+                return botReply("failed","Unable to verify the original criteria");
+            }
+            return work("follow_up",false);
+        }
         check(kind == "result" && input.task["doneWhen"] == revisedCriteria &&
               event["run"]["runId"] == "run-2",
               "the old Run result was exposed as the receiving Bot's revised evidence");
@@ -967,6 +979,9 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
           "revised work started before the old Run was settled");
 
     f.t3.finish("run-1");
+    for (int step = 0; step < 12 && !attemptedFailure; ++step) f.runtime->tick();
+    check(attemptedFailure && !f.task(recipient).contains("deferredTerminal") && f.logs(recipient,"model_failure") == 1 &&
+          !f.logs(recipient,"peer_completed"),"failed reply bypassed the outstanding revision before deferral");
     for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
     check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" &&
           f.t3.seen.back().target.runId == "run-1" &&
