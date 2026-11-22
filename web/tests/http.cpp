@@ -805,9 +805,20 @@ void conversationPermissions(const std::filesystem::path& path) {
         if (credential == "Bearer decider") return Person{"decider"};
         return Person{};
     };
+    bool deciderAvailable = true;
+    web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
+        if (person == "reader" || (person == "decider" && deciderAvailable)) return false;
+        return std::nullopt;
+    };
 
     const auto taskId = store.submit(web.intake("release","Draft release notes"));
-    FixedModel model;
+    struct ConversationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "conversation_turn")
+                return {{{"reply",{{"text","Ready to check the release"}},"Reply to the user"}}};
+            return FixedModel::decide(input);
+        }
+    } model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     tick(runtime,3);
@@ -844,7 +855,23 @@ void conversationPermissions(const std::filesystem::path& path) {
         return true;
     });
     decider.post("/api/operations",answer);
-    decider.post("/api/messages",message,201);
+    const auto authorized = decider.post("/api/messages",message,201).at("messageId");
+    runtime.runConversations();
+    const auto assertReply = [&](const Json& id, std::string_view route) {
+        const auto events = reader.get(viewPath).at("events");
+        check(std::ranges::any_of(events,[&](const Json& event) {
+            return event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == id &&
+                   event.at("data").at("route") == route;
+        }),"Queued message did not use the custom identity resolver");
+    };
+    assertReply(authorized,"reply");
+
+    auto queued = message;
+    queued["clientMessageId"] = "removed-before-run";
+    const auto revoked = decider.post("/api/messages",queued,201).at("messageId");
+    deciderAvailable = false;
+    runtime.runConversations();
+    assertReply(revoked,"access");
 }
 
 void retryEventProjection(const std::filesystem::path& path) {

@@ -125,15 +125,18 @@ void Store::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> ma
     p_->localMachines[std::move(id)] = std::move(machine);
 }
 
+void Store::setRootPeople(std::vector<std::string> ids) {
+    std::lock_guard lock(p_->mutex);
+    p_->rootPeople = std::move(ids);
+}
+
 void Store::setWebOrigin(std::string origin) {
     std::lock_guard lock(p_->mutex);
     p_->webOrigin = std::move(origin);
 }
 
 bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
-    const Person person{std::string(owner),std::ranges::any_of(webPeople,[owner](const Person& entry) {
-        return entry.id == owner && entry.adminRoot;
-    })};
+    const Person person{std::string(owner),std::ranges::find(rootPeople,owner) != rootPeople.end()};
     return Access(const_cast<Impl&>(*this)).permitsPerson(person,bot,Role::decide);
 }
 

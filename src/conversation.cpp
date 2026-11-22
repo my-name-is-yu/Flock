@@ -13,9 +13,9 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-void Store::setWebPeople(std::vector<Person> people) {
+void Store::setWebIdentityResolver(WebIdentityResolver resolver) {
     std::lock_guard lock(p_->mutex);
-    p_->webPeople = std::move(people);
+    p_->resolveWebIdentity = std::move(resolver);
 }
 
 void Store::Impl::initializeConversationSchema() {

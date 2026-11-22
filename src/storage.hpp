@@ -66,7 +66,8 @@ struct Store::Impl {
     class SessionEvidence;
     std::map<ChannelKind,ChannelConnector> channels;
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
-    std::vector<Person> webPeople;
+    std::vector<std::string> rootPeople;
+    WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     void initializeChannelSchema();

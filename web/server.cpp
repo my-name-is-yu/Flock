@@ -198,7 +198,10 @@ public:
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
-        if (callbacks_.authenticate) store_.access().requireWebIdentity();
+        if (callbacks_.authenticate) {
+            store_.access().requireWebIdentity();
+            store_.setWebIdentityResolver(callbacks_.resolveIdentity);
+        }
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)

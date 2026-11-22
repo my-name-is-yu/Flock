@@ -202,6 +202,8 @@ enum class ChannelKind;
 struct ChannelResource;
 struct VerifiedChannelMessage;
 namespace conversation { enum class PrincipalSource; }
+// An absent result means the person is unavailable. Otherwise the value is their current root authority.
+using WebIdentityResolver = std::function<std::optional<bool>(std::string_view personId)>;
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
@@ -282,8 +284,8 @@ public:
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
-    // Install the current Web identity directory on the Store that processes conversation turns.
-    void setWebPeople(std::vector<Person> people);
+    void setRootPeople(std::vector<std::string> ids);
+    void setWebIdentityResolver(WebIdentityResolver);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;

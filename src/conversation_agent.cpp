@@ -678,15 +678,13 @@ Person Store::Impl::turnActor(const Message& message) {
             // A legacy shared Web receipt cannot be distinguished from a trusted intake by ID alone.
             return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
         case PrincipalSource::web: {
-            bool present = false;
-            bool root = true;
-            for (const auto& current : webPeople) {
-                if (current.id != admitted.id) continue;
-                present = true;
-                // Credentials for one person can disagree. Only authority common to them is safe to reuse.
-                root = root && current.adminRoot;
+            if (!resolveWebIdentity) return {};
+            try {
+                if (const auto root = resolveWebIdentity(admitted.id)) return {admitted.id,*root};
+            } catch (const std::exception&) {
+                // An unavailable identity provider cannot authorize a queued turn.
             }
-            return present ? Person{admitted.id,root} : Person{};
+            return {};
         }
     }
     return {};
@@ -702,11 +700,11 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
+    } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
+    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+    if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
-    } else {
-        if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
-        finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
-    }
+    else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
     return false;
 }
 

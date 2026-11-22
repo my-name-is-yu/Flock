@@ -910,12 +910,15 @@ struct AuthorityModel final : Model {
     bool leakedCredential = false;
 
     ModelTurn decide(const ModelInput& input) override {
+        if (input.event.at("kind") == "intake")
+            return {{{"delegate",{{"instruction","Check the release"},{"doneWhen","Report the result"}},"Start the task"}}};
         const auto request = input.event.at("text").get<std::string>();
         inputs.push_back(request);
         leakedCredential = leakedCredential || (input.event.dump() + input.task.dump() + input.history.dump() +
             input.config.dump()).find("Bearer fixture-") != std::string::npos;
         const auto first = input.event.at("turn").empty();
-        if (request.starts_with("Paused") && first) return {{{"find_tasks",{{"query","release"}},"Find release tasks"}}};
+        if (request == "Paused retained root" && first)
+            return {{{"find_tasks",{{"query","release"}},"Find release tasks"}}};
         if (request == "Demoted during model call") demoteDuringCall();
         const auto call = first ? Decision{"start_task",{{"request",request}},"Start requested work"}
                                 : Decision{"reply",{{"text","Authorized conversation reply"}},"Reply to the user"};
@@ -955,7 +958,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     };
     AuthorityModel model;
     FixedT3 t3;
-    Id demotedQueue, removedQueue, retainedQueue, grantedQueue, demotedPause, retainedPause, mixedQueue, trustedQueue;
+    Id demotedQueue, removedQueue, retainedQueue, grantedQueue, demotedPause, retainedPause, mixedQueue, trustedQueue, taskFromDemotedTurn;
     Json pauses;
     {
         Store store(path);
@@ -965,12 +968,15 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         store.access().personGrant(localOwner,"release","granted",Role::decide,GrantChange::grant);
         store.access().personGrant(localOwner,"release","removed",Role::decide,GrantChange::grant);
         store.access().personGrant(localOwner,"release",localOwner.id,Role::view,GrantChange::grant);
+        store.access().resourceGrant(localOwner,"release",{"environment","local-env","launch"},GrantChange::grant);
         demotedPause = send(browser,demoted,"Paused demoted root");
         retainedPause = send(browser,retained,"Paused retained root");
         Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
         runtime.runConversations();
         pauses = browser.get(view).at("pausedConversations");
-        check(pauses.size() == 2 && store.tasks().empty(),"Fixture did not pause two turns before their replies");
+        const auto tasks = store.tasks();
+        check(pauses.size() == 2 && tasks.size() == 1,"Fixture did not pause two turns after creating one task");
+        taskFromDemotedTurn = tasks.at(0).at("id");
 
         demotedQueue = send(browser,demoted,"Queued demoted root");
         removedQueue = send(browser,removed,"Queued removed root");
@@ -1007,17 +1013,24 @@ void queuedWebAuthority(const std::filesystem::path& path) {
             check(latestRoute(id) == "reply","A currently authorized queued or resumed message was denied");
         const std::vector<std::string> expected{"Paused retained root","Queued retained root","Queued retained root",
             "Queued demoted root with decide grant","Queued demoted root with decide grant","Trusted local owner","Trusted local owner"};
-        check(model.inputs == expected && store.tasks().size() == 3 && page.at("pausedConversations").empty(),
+        check(model.inputs == expected && store.tasks().size() == 4 && page.at("pausedConversations").empty(),
               "Access changes delivered model context or ran work for a revoked actor");
         check(!model.leakedCredential && page.dump().find("Bearer fixture-") == std::string::npos,
               "Web credentials entered a model request or conversation output");
 
         const auto racing = send(browser,retained,"Demoted during model call");
-        model.demoteDuringCall = [&] { store.setWebPeople({{"retained",false}}); };
+        model.demoteDuringCall = [&] {
+            store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+                return person == "retained" ? std::optional{false} : std::nullopt;
+            });
+        };
         runtime.runConversations();
         const auto denied = conversationReply(browser.get(view),racing);
         check(model.inputs.back() == "Demoted during model call" && denied.at("route") == "access" &&
-              denied.at("actions").empty() && store.tasks().size() == 3,"Revoked authority survived the pre-effect check");
+              denied.at("actions").empty() && store.tasks().size() == 4,"Revoked authority survived the pre-effect check");
+        tick(runtime,3);
+        check(t3.launches == 1 && store.task(taskFromDemotedTurn).at("state") == "running",
+              "A denied resume consumed the unused model call shared by its existing task");
     }
 }
 
@@ -1040,7 +1053,9 @@ INSERT INTO messages VALUES(1,'release','legacy',1,NULL,'Legacy Web request',
   '{"environmentId":"local-env","projectId":"release","config":{}}','local-owner',1);
 )SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"Could not seed the legacy message fixture");
     Store store(path);
-    store.setWebPeople({{"local-owner",true}});
+    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        return person == localOwner.id ? std::optional{true} : std::nullopt;
+    });
     AuthorityModel model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
