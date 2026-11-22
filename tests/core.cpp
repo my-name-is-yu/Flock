@@ -53,7 +53,7 @@ struct FixedT3 : T3 {
         check(ref.threadId == "thread-1" && ref.runId == "run-1","wrong run");
         return current;
     }
-    void interrupt(const std::string&,const Json&,const RunRef&) override { throw std::runtime_error("unexpected interrupt"); }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { throw std::runtime_error("unexpected interrupt"); }
 };
 }
 int main() {

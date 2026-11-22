@@ -6,13 +6,16 @@
 #endif
 
 #include <httplib.h>
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <ranges>
 
 using namespace flockv0;
 namespace {
@@ -153,7 +156,7 @@ struct FixedT3 : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return observations[run.threadId]; }
-    void interrupt(const std::string&, const Json&, const RunRef&) override { ++interruptions; }
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { ++interruptions; return InterruptOutcome::Requested; }
 };
 
 WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
@@ -222,6 +225,11 @@ Json conversationReply(const Json& page, Id messageId) {
     return result;
 }
 
+void writeWebIdentities(const std::filesystem::path& path, const Json& accounts) {
+    std::ofstream(path) << accounts;
+    std::filesystem::permissions(path,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+}
+
 void inspectors(const std::filesystem::path& path) {
     struct InspectorModel : Model {
         const std::string credential = "credential-protected-after-inspector-write";
@@ -279,6 +287,11 @@ void imageAttachmentCountInConversation(const std::filesystem::path& path) {
         if (credential == "Bearer owner") return Person{"owner",true};
         if (credential == "Bearer reader") return Person{"reader",false};
         return Person{};
+    };
+    config.resolveIdentity = [](std::string_view person) -> std::optional<bool> {
+        if (person == "owner") return true;
+        if (person == "reader") return false;
+        return std::nullopt;
     };
     store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
     const auto server = startWeb(store,0,std::move(config));
@@ -555,18 +568,19 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     web.peers = peers;
     if (authenticated) {
         const Person author{"fixture-message-author",true};
-        web.authenticate = [author](std::string_view credential) {
-            if (credential == "Bearer author") return author;
-            if (credential == "Bearer reader") return Person{"fixture-shared-reader"};
-            return Person{};
-        };
+        const auto identities = path.string() + ".identities";
+        writeWebIdentities(identities,Json::array({
+            {{"authorization","Bearer fixture-author"},{"person",author.id},{"adminRoot",true}},
+            {{"authorization","Bearer fixture-reader"},{"person","fixture-shared-reader"}}
+        }));
+        configureWebIdentities(store,identities,web);
         for (const auto* bot : {"ernest","reviewer"})
             store.access().personGrant(author,bot,"fixture-shared-reader",Role::view,GrantChange::grant);
     }
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
-    if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer author"}});
+    if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer fixture-author"}});
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
@@ -612,7 +626,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     if (authenticated) {
         const auto anchored = std::string(dm) + "&anchor=" + std::to_string(messages.front().at("id").get<Id>());
         check(browser.get(anchored).at("messages") == messages,"the author lost attribution in anchored history");
-        browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+        browser.client.set_default_headers({{"Authorization","Bearer fixture-reader"}});
         auto shared = messages;
         shared.front()["data"]["forwardedMessage"] = original;
         check(browser.get(anchored).at("messages") == shared &&
@@ -895,6 +909,165 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
           "approval did not resume the unfinished turn from its saved steps");
 }
 
+struct AuthorityModel final : Model {
+    std::vector<std::string> inputs;
+    std::function<void()> demoteDuringCall;
+    bool leakedCredential = false;
+
+    ModelTurn decide(const ModelInput& input) override {
+        if (input.event.at("kind") == "intake")
+            return {{{"delegate",{{"instruction","Check the release"},{"doneWhen","Report the result"}},"Start the task"}}};
+        const auto request = input.event.at("text").get<std::string>();
+        inputs.push_back(request);
+        leakedCredential = leakedCredential || (input.event.dump() + input.task.dump() + input.history.dump() +
+            input.config.dump()).find("Bearer fixture-") != std::string::npos;
+        const auto first = input.event.at("turn").empty();
+        if (request == "Paused retained root" && first)
+            return {{{"find_tasks",{{"query","release"}},"Find release tasks"}}};
+        if (request == "Demoted during model call") demoteDuringCall();
+        const auto call = first ? Decision{"start_task",{{"request",request}},"Start requested work"}
+                                : Decision{"reply",{{"text","Authorized conversation reply"}},"Reply to the user"};
+        return {{call}};
+    }
+};
+
+void queuedWebAuthority(const std::filesystem::path& path) {
+    constexpr auto demoted = "Bearer fixture-demoted";
+    constexpr auto removed = "Bearer fixture-removed";
+    constexpr auto retained = "Bearer fixture-retained";
+    constexpr auto granted = "Bearer fixture-granted";
+    constexpr auto alternate = "Bearer fixture-alternate";
+    constexpr auto view = "/api/view?bot=release";
+    const auto identities = path.string() + ".identities";
+    const auto identity = [](const char* credential, std::string_view person, bool root) {
+        return Json{{"authorization",credential},{"person",person},{"adminRoot",root}};
+    };
+    const auto setup = [&](Store& store, const Json& accounts) {
+        writeWebIdentities(identities,accounts);
+        auto web = callbacks();
+        web.intake = [original = web.intake](std::string_view bot, std::string_view request) {
+            auto intake = original(bot,request);
+            if (request.starts_with("Paused")) intake.config["modelCallLimit"] = 1;
+            return intake;
+        };
+        configureWebIdentities(store,identities,web);
+        return startWeb(store,0,std::move(web));
+    };
+    const auto signIn = [](Browser& browser, const char* credential) {
+        browser.client.set_default_headers({{"Authorization",credential}});
+    };
+    const auto send = [&](Browser& browser, const char* credential, std::string_view request) -> Id {
+        signIn(browser,credential);
+        return browser.post("/api/messages",{{"botId","release"},{"clientMessageId",request},{"text",request}},201)
+            .at("messageId");
+    };
+    AuthorityModel model;
+    FixedT3 t3;
+    Id demotedQueue, removedQueue, retainedQueue, grantedQueue, demotedPause, retainedPause, mixedQueue, trustedQueue, taskFromDemotedTurn;
+    Json pauses;
+    {
+        Store store(path);
+        auto server = setup(store,Json::array({identity(demoted,localOwner.id,true),identity(removed,"removed",true),
+            identity(retained,"retained",true),identity(granted,"granted",true),identity(alternate,"mixed",true)}));
+        Browser browser(*server);
+        store.access().personGrant(localOwner,"release","granted",Role::decide,GrantChange::grant);
+        store.access().personGrant(localOwner,"release","removed",Role::decide,GrantChange::grant);
+        store.access().personGrant(localOwner,"release",localOwner.id,Role::view,GrantChange::grant);
+        store.access().resourceGrant(localOwner,"release",{"environment","local-env","launch"},GrantChange::grant);
+        demotedPause = send(browser,demoted,"Paused demoted root");
+        retainedPause = send(browser,retained,"Paused retained root");
+        Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+        runtime.runConversations();
+        pauses = browser.get(view).at("pausedConversations");
+        const auto tasks = store.tasks();
+        check(pauses.size() == 2 && tasks.size() == 1,"Fixture did not pause two turns after creating one task");
+        taskFromDemotedTurn = tasks.at(0).at("id");
+
+        demotedQueue = send(browser,demoted,"Queued demoted root");
+        removedQueue = send(browser,removed,"Queued removed root");
+        retainedQueue = send(browser,retained,"Queued retained root");
+        grantedQueue = send(browser,granted,"Queued demoted root with decide grant");
+        mixedQueue = send(browser,alternate,"Queued mixed credential roles");
+        trustedQueue = store.receive(localOwner,{"release","","local-env","release"},"local","Trusted local owner")
+            .at("messageId");
+    }
+    {
+        Store store(path);
+        auto server = setup(store,Json::array({identity(demoted,localOwner.id,false),identity(retained,"retained",true),
+            identity(granted,"granted",false),identity(alternate,"mixed",false),identity("Bearer fixture-other","mixed",true)}));
+        Browser browser(*server);
+        signIn(browser,retained);
+        for (const auto& pause : pauses)
+            browser.post("/api/inbox/decide",{{"botId","release"},{"itemKind","conversation_model_budget"},
+                {"itemId",pause.at("replyToMessageId")},{"waitId",pause.at("messageId")},{"taskId",0},
+                {"targetRevision",0},{"targetGeneration",pause.at("messageId")},{"decision","approve"}});
+        model.inputs.clear();
+        Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+        runtime.runConversations();
+        const auto page = browser.get(view);
+        const auto latestRoute = [&page](Id messageId) {
+            for (const auto& event : page.at("events") | std::views::reverse)
+                if (event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == messageId)
+                    return event.at("data").at("route");
+            return Json(nullptr);
+        };
+        for (auto id : {demotedQueue,removedQueue,mixedQueue,demotedPause})
+            check(latestRoute(id) == "access","Queued or resumed message retained unavailable Web authority");
+        for (auto id : {retainedQueue,grantedQueue,trustedQueue,retainedPause})
+            check(latestRoute(id) == "reply","A currently authorized queued or resumed message was denied");
+        const std::vector<std::string> expected{"Paused retained root","Queued retained root","Queued retained root",
+            "Queued demoted root with decide grant","Queued demoted root with decide grant","Trusted local owner","Trusted local owner"};
+        check(model.inputs == expected && store.tasks().size() == 4 && page.at("pausedConversations").empty(),
+              "Access changes delivered model context or ran work for a revoked actor");
+        check(!model.leakedCredential && page.dump().find("Bearer fixture-") == std::string::npos,
+              "Web credentials entered a model request or conversation output");
+
+        const auto racing = send(browser,retained,"Demoted during model call");
+        model.demoteDuringCall = [&] {
+            store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+                return person == "retained" ? std::optional{false} : std::nullopt;
+            });
+        };
+        runtime.runConversations();
+        const auto denied = conversationReply(browser.get(view),racing);
+        check(model.inputs.back() == "Demoted during model call" && denied.at("route") == "access" &&
+              denied.at("actions").empty() && store.tasks().size() == 4,"Revoked authority survived the pre-effect check");
+        tick(runtime,3);
+        check(t3.launches == 1 && store.task(taskFromDemotedTurn).at("state") == "running",
+              "A denied resume consumed the unused model call shared by its existing task");
+    }
+}
+
+void legacyWebAuthority(const std::filesystem::path& path) {
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open(path.c_str(),&raw);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the legacy message fixture");
+    check(sqlite3_exec(raw,R"SQL(
+CREATE TABLE journal(id INTEGER PRIMARY KEY, task_id INTEGER, time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL,
+  conversation_bot_id TEXT, CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
+CREATE TABLE messages(id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL, client_message_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL, reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL, person_id TEXT NOT NULL,
+  person_root INTEGER NOT NULL CHECK(person_root IN (0,1)), UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
+CREATE TABLE web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
+INSERT INTO web_identity_required VALUES(1);
+INSERT INTO journal VALUES(1,NULL,1,'conversation_message','{}','release');
+INSERT INTO messages VALUES(1,'release','legacy',1,NULL,'Legacy Web request',
+  '{"environmentId":"local-env","projectId":"release","config":{}}','local-owner',1);
+)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"Could not seed the legacy message fixture");
+    Store store(path);
+    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        return person == localOwner.id ? std::optional{true} : std::nullopt;
+    });
+    AuthorityModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    runtime.runConversations();
+    const auto reply = conversationReply({{"events",store.conversation("release")}},1);
+    check(model.inputs.empty() && store.tasks().empty() && reply.at("route") == "access",
+          "A legacy Web receipt ran with authority inferred from the saved root flag or person ID");
+}
+
 void memoryAutomationEndpoints(const std::filesystem::path& path) {
     Store store(path,[](auto) { return "Initial convention"; });
     auto cb = callbacks();
@@ -993,6 +1166,8 @@ int main(int argc,char** argv) {
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
+        queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
+        legacyWebAuthority(directory.path / "legacy-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {

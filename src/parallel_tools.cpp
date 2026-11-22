@@ -58,11 +58,13 @@ void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
          {results,message,step});
 }
 
-bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls) {
+bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls,
+                             std::stop_token shutdown) {
     std::vector<std::size_t> reserved;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(loadTurnMessage(ctx.messageId))) { transaction.commit(); return false; }
         auto previous = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
                               {ctx.messageId,step});
@@ -90,6 +92,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             } catch (const Conflict& error) {
                 result = toolFailure(scrub.text(error.what()));
                 continue;
+            } catch (const StorageError&) {
+                throw;
             } catch (const std::exception&) {
                 result = toolFailure("Bot tool target is unavailable");
                 continue;
@@ -125,6 +129,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                     result = {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
                 } catch (const Conflict& error) {
                     result = toolFailure(error.what());
+                } catch (const StorageError&) {
+                    throw;
                 } catch (const std::exception&) {
                     result = toolFailure("Bot tool execution failed");
                 }

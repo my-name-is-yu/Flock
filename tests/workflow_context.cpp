@@ -46,7 +46,7 @@ struct SessionService : T3 {
     RunEvidence readRunEvidence(const std::string& env,const Json& config,const RunRef& run,std::string_view status) override {
         return recoverEvidence ? recoverEvidence(run) : T3::readRunEvidence(env,config,run,status);
     }
-    void interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); return InterruptOutcome::Requested; }
     void finish(std::string run, Json report, std::string status = "completed") {
         auto& observation = observations[run];
         observation.kind = Observation::Kind::Finished;

@@ -47,6 +47,7 @@ private:
         std::size_t subscribers = 0;
         std::uint64_t revision = 0;
         std::optional<Json> snapshot;
+        bool historyPending = false;
     };
     void monitor();
     std::set<Scope> refresh(const std::vector<Scope>&, const Store::ConversationChanges&);

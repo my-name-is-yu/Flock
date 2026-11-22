@@ -9,6 +9,9 @@ using namespace flockv0;
 using flockv0::t3detail::http;
 
 void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
+void boundedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
+                          const std::function<Json(std::string_view)>&);
+void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 
 namespace {
 void check(bool pass, std::string_view reason) {
@@ -105,8 +108,13 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", false}});
         const auto launches = effects("t3_thread_launch");
         check(launches.size() == 1, "launch reconciliation creates no additional T3 threads");
-        check(launches.at(0).at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
+        const auto& args = launches.at(0);
+        check(args.at("clientRequestId") == launch.actionId &&
+              args.at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
               "T3 receives the original launch instruction followed by one canonical marker");
+        check(!args.contains("modelSelection") && !args.contains("runtimeMode") &&
+              !args.contains("workspaceStrategy") && !args.contains("interactionMode"),
+              "T3 uses its defaults when Session settings are omitted");
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
@@ -146,6 +154,19 @@ int main(int argc, char** argv) {
               "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
+
+        const auto submittedAnswers = effects("t3_pending_request").size();
+        fixture({{"scenario", "question"}, {"failAnswerRecheck", true}});
+        delivery = adapter->send(answer);
+        check(delivery.definitelyUnsent && effects("t3_pending_request").size() == submittedAnswers,
+              "failed question recheck was recorded as an ambiguous answer or sent a response");
+        fixture({{"failAnswerRecheck", false}, {"dropAnswerReply", true}});
+        delivery = adapter->send(answer);
+        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
+              effects("t3_pending_request").size() == submittedAnswers + 1 &&
+              restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone,
+              "a lost response was treated as definitely unsent or retried");
+        fixture({{"dropAnswerReply", false}});
 
         auto badConfig = launch.config;
         badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
@@ -287,12 +308,19 @@ int main(int argc, char** argv) {
         bool rejected = false;
         try { adapter->read(read); } catch (const std::runtime_error&) { rejected = true; }
         check(rejected, "foreign item cannot be read");
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal &&
+              effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
         fixture({{"scenario", "running"}});
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::Requested &&
+              effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
               "T3 receives exactly one interrupt for the assigned Run");
+        fixture({{"interruptReply", "no_active_run"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::NoActiveRun,
+              "a Run becoming inactive before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", "completed"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal,
+              "a Run ending before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", false}});
 
         Command note = launch;
         note.tool = "steer";
@@ -352,6 +380,8 @@ int main(int argc, char** argv) {
         const auto readOnly = other.authGeneration;
         fixture({{"scenario","session-read"}});
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
+        boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);
+        sessionSearchDeadline(*restarted,home.parent_path()/"search-deadline.db",fixture);
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&

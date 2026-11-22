@@ -35,7 +35,7 @@ struct Backend : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-    void interrupt(const std::string&,const Json&,const RunRef&) override { ++stops; }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { ++stops; return InterruptOutcome::Requested; }
 
     bool allowed(const SessionTarget& target) {
         ++reads;
@@ -43,7 +43,8 @@ struct Backend : T3 {
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages) override {
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
+                                                  SessionReadDeadline) override {
         if (!allowed(target)) return {};
         std::string title = target.threadId == second ? "Staging investigation 2" : "Staging investigation";
         if (!secret.empty()) title.append(235-title.size(),'x').append(secret);
@@ -195,7 +196,7 @@ void acceptance() {
     } catch (const Conflict&) {}
     f.share(staging);
     f.share(second);
-    for (int i = 0; i < 65; ++i) f.share("internal-shared-but-denied-"+std::to_string(i));
+    f.share("internal-shared-but-denied");
     const auto found = f.call(search,filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(),"search pagination missing");

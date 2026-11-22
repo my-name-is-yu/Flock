@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -340,35 +341,29 @@ void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_v
 }
 
 Json launchArgs(const Command& command) {
-    Json args = {{"projectId", command.projectId}, {"title", "Flock task"},
-                 {"message", sessionPrompt(command.actionId,command.instruction)}, {"clientRequestId", command.actionId}};
     if (!command.config.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-    const auto settings = command.config.value("session", Json::object());
-    if (!settings.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-    for (const auto field : {"runtimeMode", "interactionMode", "workspaceStrategy"}) {
-        if (settings.contains(field) && !settings[field].is_null()) args[field] = settings[field];
+    auto settings = command.config.value("session", Json::object());
+    // The direct adapter API also supports interaction mode for T3 callers.
+    Json interactionMode;
+    if (settings.contains("interactionMode")) {
+        interactionMode = std::move(settings["interactionMode"]);
+        settings.erase("interactionMode");
     }
-    if (args.contains("runtimeMode")) {
-        const auto mode = str(args, "runtimeMode");
-        if (mode != "approval-required" && mode != "auto-accept-edits" && mode != "auto" && mode != "full-access")
-            throw Failure(Failure::Kind::Settings, "Invalid T3 runtime mode");
-    }
-    if (args.contains("interactionMode") && args["interactionMode"] != "default" && args["interactionMode"] != "plan")
+    if (!interactionMode.is_null() && interactionMode != "default" && interactionMode != "plan")
         throw Failure(Failure::Kind::Settings, "Invalid T3 interaction mode");
-    if (settings.contains("providerInstanceId") || settings.contains("model")) {
-        const auto provider = str(settings, "providerInstanceId");
-        const auto model = str(settings, "model");
-        if (trim(provider).empty() || trim(model).empty())
-            throw Failure(Failure::Kind::Settings, "Specify both the T3 provider instance and Session model");
-        args["modelSelection"] = {{"instanceId", provider}, {"model", model}};
+    Json args;
+    try { args = normalizeSessionSettings(settings); }
+    catch (const Conflict& error) { throw Failure(Failure::Kind::Settings, error.what()); }
+    if (args.contains("model")) {
+        args["modelSelection"] = {{"instanceId", std::move(args["providerInstanceId"])}, {"model", std::move(args["model"])}};
+        args.erase("providerInstanceId");
+        args.erase("model");
     }
-    if (args.contains("workspaceStrategy")) {
-        const auto& workspace = args["workspaceStrategy"];
-        const auto type = str(workspace, "type");
-        if (type != "root" && (type != "worktree" || trim(str(workspace, "baseRef")).empty()) &&
-            (type != "existing_worktree" || trim(str(workspace, "worktreePath")).empty()))
-            throw Failure(Failure::Kind::Settings, "Invalid T3 workspace strategy");
-    }
+    if (!interactionMode.is_null()) args["interactionMode"] = std::move(interactionMode);
+    args["projectId"] = command.projectId;
+    args["title"] = "Flock task";
+    args["message"] = sessionPrompt(command.actionId,command.instruction);
+    args["clientRequestId"] = command.actionId;
     return args;
 }
 
@@ -586,7 +581,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     return result(Outcome::Accepted, {}, std::move(received));
 }
 
-Delivery answer(Client& client, const Command& command) {
+Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
     const auto watching = wait(client, command.target, false, 1);
@@ -605,6 +600,7 @@ Delivery answer(Client& client, const Command& command) {
     try {
         if (readQuestion(client, thread, command.questionId) != attribution.raw)
             return result(Outcome::NotAccepted, "The T3 question changed before the saved answer could be sent");
+        invoked = true;
         const auto responded = client.call(PendingRequest, {{"action", "respond"}, {"threadId", thread},
             {"requestId", command.questionId}, {"answers", answers}});
         position(member(responded, "sequence"));
@@ -626,10 +622,10 @@ public:
     std::optional<Delivery> preflight(const Command& command) override {
         try {
             verifyCommand(command);
+            if (command.tool == "delegate") launchArgs(command);
             auto connection = credential(command.environmentId, command.config);
             requireOperate(connection);
             if (command.tool == "delegate") {
-                launchArgs(command);
                 Client client(std::move(connection));
                 const auto project = client.call("t3_project_read",{{"projectId",command.projectId}});
                 if (str(project,"id") != command.projectId)
@@ -645,20 +641,21 @@ public:
         bool invoked = false;
         try {
             verifyCommand(command);
+            const bool launch = command.tool == "delegate";
+            Json launchParameters;
+            if (launch) launchParameters = launchArgs(command);
             auto connection = credential(command.environmentId, command.config);
             if (command.authGeneration.empty() || connection.generation != command.authGeneration)
                 return {Outcome::Auth, {}, "The T3 sign-in changed before Flock sent this action", true};
             requireOperate(connection);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            if (command.tool == "answer_session_question") return answer(client, command);
+            if (command.tool == "answer_session_question") return answer(client, command, invoked);
             if (command.tool == "steer") return steer(client, command, invoked);
-            const bool launch = command.tool == "delegate";
             Json reply;
             if (launch) {
-                auto args = launchArgs(command);
                 invoked = true;
-                reply = client.call("t3_thread_launch", std::move(args));
+                reply = client.call("t3_thread_launch", std::move(launchParameters));
                 if (str(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 if (!followUpReady(client, command))
@@ -675,9 +672,9 @@ public:
             if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
             return result(Outcome::Accepted, {}, std::move(run));
         } catch (const Failure& failure) {
-            if (invoked) return workReply(failure);
+            if (invoked && command.tool != "answer_session_question") return workReply(failure);
             auto refused = failureDelivery(failure);
-            if (command.tool != "answer_session_question") refused.definitelyUnsent = true;
+            refused.definitelyUnsent = !invoked;
             return refused;
         }
     }
@@ -768,7 +765,7 @@ public:
         }
     }
 
-    void interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
+    InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef& run) override {
         if (!hasRun(run)) throw Failure(Failure::Kind::Settings, "The assigned T3 Run is missing");
         auto connection = credential(environmentId, config);
         requireOperate(connection);
@@ -776,13 +773,16 @@ public:
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
         const auto current = wait(client, run, false, 1);
         const auto effective = str(current, "runId");
-        if (terminal(str(current, "status"))) return;
+        if (terminal(str(current, "status"))) return InterruptOutcome::AlreadyTerminal;
         if (!active(str(current, "status"))) invalidResponse();
         const auto reply = client.call("t3_thread_interrupt", {{"threadId", run.threadId}, {"runId", effective}});
         const auto status = str(reply, "status");
-        if (str(reply, "threadId") != run.threadId ||
-            (status != "no_active_run" && (str(reply, "runId") != effective || (status != "interrupt_requested" && !terminal(status)))))
-            invalidResponse();
+        if (str(reply, "threadId") != run.threadId) invalidResponse();
+        if (status == "no_active_run") return InterruptOutcome::NoActiveRun;
+        if (str(reply, "runId") != effective) invalidResponse();
+        if (status == "interrupt_requested") return InterruptOutcome::Requested;
+        if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
+        invalidResponse();
     }
 
     Excerpt read(const ReadRequest& request) override {
@@ -822,8 +822,9 @@ public:
         return excerpt;
     }
 
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
-        return t3detail::sessionMetadata(directory_,target,includeMessages);
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
+                                                  SessionReadDeadline deadline) override {
+        return t3detail::sessionMetadata(directory_,target,includeMessages,deadline);
     }
     std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
         return t3detail::sessionEvents(directory_,target,filter);
