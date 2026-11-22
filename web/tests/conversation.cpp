@@ -913,9 +913,21 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
         {"waitId",wait.at("messageId")},{"taskId",0},{"targetRevision",0},{"targetGeneration",wait.at("messageId")},
         {"decision","approve"}};
     browser.post("/api/inbox/decide",approval,409);
+    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").dump();
     approval["botId"] = "release";
     browser.post("/api/inbox/decide",approval);
     browser.post("/api/inbox/decide",approval,409);
+    const auto approved = browser.get("/api/view?bot=release&changesAfter=" + cursor);
+    const auto& events = approved.at("events");
+    const auto input = std::find_if(events.begin(),events.end(),[&](const Json& event) {
+        return event.at("id") == receipt.at("messageId");
+    });
+    check(approved.at("changedMessageIds") == Json::array({receipt.at("messageId"),wait.at("messageId")}) &&
+          browser.get("/api/view?bot=triage&changesAfter=" + cursor).at("changedMessageIds").empty() &&
+          input != events.end() && input->at("data").at("status") == "received" &&
+          conversationReply(approved,receipt.at("messageId")).at("status") == "done" &&
+          approved.at("pausedConversations").empty(),
+          "Approval did not invalidate both changed events for the owning Bot before resuming the turn");
     runtime->runConversations();
     const auto resumed = browser.get("/api/view?bot=release");
     const auto& answer = resumed.at("events").back().at("data");

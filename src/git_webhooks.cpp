@@ -134,6 +134,7 @@ ORDER BY id,pr_number LIMIT ?
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0 FROM messages WHERE bot_id=?
 )SQL",{message,bot,key,routing,bot});
+        exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{message});
     }
     transaction.commit();
     if (deliveries.size() < batchSize) gitWebhooksDrainedAt = version;

@@ -201,12 +201,44 @@ void retryAcrossConnections() {
     check(calls == 2 && restarted.tasks("alpha").size() == 1,"The retry ran an applied message again");
 }
 
+void upgradesUnstartedConversationInput() {
+    Fixture fixture;
+    Id pending, legacyDone, running;
+    {
+        Store store(fixture.database());
+        pending = receive(store,"unstarted","First");
+        legacyDone = receive(store,"legacy-done","Already handled");
+        running = receive(store,"running","Second");
+    }
+    fixture.sql("DELETE FROM conversation_turns WHERE message_id IN (" + std::to_string(pending) + "," +
+                std::to_string(legacyDone) + ")");
+    fixture.sql("UPDATE journal SET data='{\"status\":\"done\"}' WHERE id=" + std::to_string(legacyDone));
+    fixture.sql("UPDATE journal SET data='{\"status\":\"needs_you\"}' WHERE id=" + std::to_string(running));
+    fixture.sql("CREATE INDEX journal_pending_turn ON journal(conversation_bot_id,id)"
+                " WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL");
+
+    Store reopened(fixture.database());
+    const auto initial = reopened.conversation("alpha");
+    check(initial.at(0).at("data").at("status") == "received" &&
+          initial.at(1).at("data").at("status") == "done" &&
+          initial.at(2).at("data").at("status") == "received",
+          "The upgrade lost legacy history or preferred stale journal status to a running turn");
+    RuntimeFixture execution(reopened);
+    auto messages = Json::array();
+    execution.model.conversation = [&](const ModelInput& input) {
+        messages.push_back(input.event.at("text"));
+        return say("Handled.");
+    };
+    execution.runtime.runConversations();
+    check(messages == Json::array({"First","Second"}) && reply(reopened,legacyDone).is_null(),
+          "The upgrade skipped or reordered pending input, or reran handled legacy input");
+}
+
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
     Fixture fixture;
     Store store(fixture.database());
     const auto message = receive(store,"saved-decision","Write a release note");
     const auto id = std::to_string(message);
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
                 ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
     RuntimeFixture execution(store);
@@ -305,7 +337,6 @@ void savedCallsAreCheckedBeforeExecution() {
     store.access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
     const auto save = [&](Id message, const Decision& call) {
         const auto id = std::to_string(message);
-        fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
         const auto decision = Json::array({{{"tool",call.tool},{"args",call.args},{"reason",call.reason}}});
         fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id + ",1,'" + decision.dump() + "')");
     };
@@ -348,7 +379,6 @@ void sessionNoteIsNotResentAfterARestart(bool webEvidence) {
     const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
                          {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
                          {"actionId","flock-turn-" + mid + "-" + step}};
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
     if (webEvidence)
         fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(" + mid + ",1,"
                     "'[{\"tool\":\"web_fetch\",\"args\":{\"url\":\"https://example.com/source\"},\"reason\":\"Read a source\"}]',"
@@ -417,6 +447,7 @@ void transientFailureResumesAfterTheLastFinishedStep() {
           "Restart repeated a finished step or lost a turn");
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
           "The failed call was not counted against the message budget");
+    check(fixture.count("SELECT count(*) FROM conversation_retries") == 0,"A completed turn kept stale retry metadata");
     check(fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 4 &&
           fixture.count("SELECT count(*) FROM messages WHERE id=" + std::to_string(message) +
                         " AND json_type(routing,'$.modelBudgetId') IS NULL") == 1,
@@ -702,7 +733,23 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     const auto waitMessage = pauses[0]["messageId"].get<Id>();
     const InboxTarget target{"alpha",InboxKind::conversation_model_budget,pauses.at(0).at("replyToMessageId"),
                              waitMessage,0,0,waitMessage};
-    store.decideInbox(localOwner,target,"approve");
+    fixture.sql("UPDATE journal SET data=json_remove(data,'$.status') WHERE id=" + std::to_string(paused));
+    fixture.sql("CREATE INDEX journal_pending_turn ON journal(conversation_bot_id,id)"
+                " WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL");
+    Store upgraded(fixture.database());
+    const auto history = upgraded.conversation("alpha");
+    const auto input = std::ranges::find_if(history,[&](const Json& row) { return row.at("id") == paused; });
+    check(input != history.end() && input->at("data").at("status") == "needs_you",
+          "Upgrading an older journal lost a persisted pause");
+    const auto beforeApproval = upgraded.conversation("alpha",0,2);
+    const auto cursor = upgraded.conversationChangesSince(std::nullopt,"alpha").through;
+    upgraded.decideInbox(localOwner,target,"approve");
+    const auto changes = upgraded.conversationChangesSince(cursor,"alpha");
+    const auto afterApproval = upgraded.conversation("alpha",0,2);
+    check(changes.through > cursor && changes.messages.at("alpha") == std::vector<Id>{paused,waitMessage} &&
+          afterApproval.size() == 2 && afterApproval.at(0).at("id") == beforeApproval.at(0).at("id") &&
+          afterApproval.at(1).at("id") == beforeApproval.at(1).at("id"),
+          "Approval did not invalidate both entries or consumed a visible page slot");
     bool rejected = false;
     try { store.decideInbox(localOwner,target,"approve"); }
     catch (const Conflict&) { rejected = true; }
@@ -781,6 +828,7 @@ void conversationPagesCombineTaskAndMessageHistory() {
 int main() {
     try {
         retryAcrossConnections();
+        upgradesUnstartedConversationInput();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         missingToolCannotBeAddedAfterInferenceStarts();
         protectedArgumentKeyCannotReachTaskIntake();

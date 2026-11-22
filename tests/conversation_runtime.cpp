@@ -609,10 +609,7 @@ void resumedChoicesRecoverSavedEffectsWithoutDispatching() {
         sqlite3* raw = nullptr;
         const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
         const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-        const auto insertTurn = "INSERT INTO conversation_turns(message_id,status) VALUES(" +
-            std::to_string(id) + ",'running')";
-        check(opened == SQLITE_OK && sqlite3_exec(db.get(),insertTurn.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
-              "could not save the old conversation turn");
+        check(opened == SQLITE_OK,"could not open the saved turn database");
         sqlite3_stmt* statement = nullptr;
         check(sqlite3_prepare_v2(db.get(),"INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(?,1,?,?)",
                                  -1,&statement,nullptr) == SQLITE_OK,"could not prepare the saved tool call");

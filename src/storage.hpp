@@ -230,7 +230,7 @@ struct Store::Impl {
                  const BotTools&, GitHost*, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
                           T3&, std::stop_token);
-    bool turnPending(Id messageId) const;
+    bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;

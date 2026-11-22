@@ -15,14 +15,7 @@ export async function refreshEventHistory(history, latest, readOlder, isCurrent)
     before = await readPage(before, false);
   }
 
-  const changed = new Set(latest.changedMessageIds);
-  for (const event of history.events.values()) {
-    if (event.kind === 'conversation_reply' && event.data.route === 'model_budget' && event.data.status === 'needs_you') {
-      changed.add(event.id);
-      changed.add(event.data.replyToMessageId);
-    }
-  }
-  const older = [...changed].filter(id => id < before && history.events.has(id)).sort((a, b) => b - a);
+  const older = (latest.changedMessageIds ?? []).filter(id => id < before && history.events.has(id)).sort((a, b) => b - a);
   let uncovered = before;
   for (const id of older) {
     if (!isCurrent()) return;
