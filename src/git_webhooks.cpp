@@ -66,7 +66,6 @@ AND t.state NOT IN ('cancelled','cancelling')
 
 void Store::Impl::deliverGitWebhooks() {
     std::lock_guard lock(mutex);
-    // A late event or watch can match earlier events. Skip only while those inputs are unchanged.
     const auto version = dataVersion();
     if (gitWebhooksDrainedAt == version) return;
     constexpr unsigned batchSize = 100;
