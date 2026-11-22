@@ -8,6 +8,8 @@
 using namespace flockv0;
 using flockv0::t3detail::http;
 
+void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
+
 namespace {
 void check(bool pass, std::string_view reason) {
     if (!pass) throw std::logic_error(std::string(reason));
@@ -290,6 +292,7 @@ int main(int argc, char** argv) {
               delivery.run.runId == "root", "reauthorization with read scope recovers the original Run");
         const auto readOnly = other.authGeneration;
         fixture({{"scenario","session-read"}});
+        deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&
