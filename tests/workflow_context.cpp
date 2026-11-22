@@ -21,6 +21,7 @@ struct SessionService : T3 {
     std::map<std::string,RunRef> runs;
     bool loseReceipt = false, receiptVisible = true;
     std::function<void()> onObserve;
+    std::function<RunEvidence(const RunRef&)> recoverEvidence;
 
     std::string authGeneration(const std::string&,const Json&) override { return "test"; }
     Delivery send(const Command& command) override {
@@ -42,7 +43,10 @@ struct SessionService : T3 {
         if (auto callback = std::exchange(onObserve,{})) callback();
         return observations[run.runId];
     }
-    void interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); }
+    RunEvidence readRunEvidence(const std::string& env,const Json& config,const RunRef& run,std::string_view status) override {
+        return recoverEvidence ? recoverEvidence(run) : T3::readRunEvidence(env,config,run,status);
+    }
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef& run) override { interrupts.insert(run.runId); return InterruptOutcome::Requested; }
     void finish(std::string run, Json report, std::string status = "completed") {
         auto& observation = observations[run];
         observation.kind = Observation::Kind::Finished;
@@ -395,6 +399,47 @@ void uncertainLaunchAndStageStop() {
     require(f.status()["stages"][0]["status"]=="stopped" && f.t3.commands.size()==1,"dependent of stopped stage ran");
 }
 
+void missingStageReportCannotAdvanceWorkflow() {
+    for (const bool recover : {false,true}) {
+        Fixture f;
+        f.call("start_workflow",{{"request","Review and publish"},{"stages",Json::array({
+            {{"stageId","collect"},{"role","collect"}},
+            {{"stageId","publish"},{"role","publish"},{"dependsOn",{"collect"}}}})}});
+        f.ticks(2);
+        f.t3.finish("run-1",{{"artifactVersion",shaA}});
+        auto& observation = f.t3.observations.at("run-1");
+        observation.evidence = RunEvidence::Availability::ReportUnavailable;
+        observation.resultRunId = "collect-result";
+        observation.report.clear();
+        f.ticks(1);
+        const auto pending = f.status();
+        const Id task = pending["stages"][0]["taskId"];
+        require(f.store->task(task)["activeRun"].is_null() && pending["stages"][0]["lastConfirmedState"]=="completed" &&
+                pending["stages"][0]["needsAttention"]==true && pending["stages"][1]["taskId"]==0 &&
+                pending["artifacts"].empty(),"workflow either lost settlement or advanced without the stage report");
+        if (recover) f.t3.recoverEvidence = [&](const RunRef& source) {
+            require(source.runId=="collect-result" && source.threadId=="thread-1","workflow retried an unrelated result");
+            return RunEvidence{RunEvidence::Availability::Available,Json{{"artifactVersion",shaA}}.dump(),"collected","",false};
+        };
+        f.restart();
+        f.now += 5;
+        f.ticks(1);
+        f.now += 10;
+        f.ticks(3);
+        const auto status = f.status();
+        if (recover) {
+            require(status["stages"][0]["status"]=="completed" && status["stages"][1]["taskId"]!=0 &&
+                    status["artifacts"].size()==1 && status["artifacts"][0]["artifactVersion"]==shaA &&
+                    status["artifacts"][0]["resultRunId"]=="collect-result",
+                    "restored stage report did not unlock the dependent stage with its artifact provenance");
+        } else {
+            require(status["stages"][0]["status"]=="failed" && status["stages"][1]["taskId"]==0 &&
+                    status["artifacts"].empty() && f.t3.commands.size()==1,
+                    "a stage without required report evidence produced an artifact or admitted a dependent");
+        }
+    }
+}
+
 void stopDuringUnconfirmedStart() {
     Fixture f;
     f.t3.loseReceipt = true;
@@ -667,6 +712,7 @@ int main() {
         rejectInvalidGraphAndArtifact();
         stopAndDeadline();
         uncertainLaunchAndStageStop();
+        missingStageReportCannotAdvanceWorkflow();
         stopDuringUnconfirmedStart();
         reopenedStageWaitsForProject();
         invalidateDependencyChain();

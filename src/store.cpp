@@ -591,6 +591,16 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         else {
             const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
+            if (action.at("phase") == "ready" && action.at("tool") == "answer_session_question") {
+                const auto differs = [&](std::string_view key, const std::string& saved) {
+                    const auto hint = field(data,key);
+                    return !hint.empty() && hint != saved;
+                };
+                if (differs("threadId",field(action.at("target"),"threadId")) ||
+                    differs("runId",field(action.at("target"),"runId")) ||
+                    differs("questionId",field(action,"questionId")))
+                    throw Conflict("The supplied T3 question is outside the saved answer destination");
+            }
             auto updated = action;
             updated.erase("phase"); updated.erase("authGeneration");
             updated["candidate"] = {{"threadId",field(data,"threadId")},{"runId",field(data,"runId")}};
@@ -641,7 +651,7 @@ Json Store::Impl::sessionTask(Id id) const {
     auto reports = query(R"SQL(
 SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
        json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
-FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",{id});
     using RunKey = std::tuple<std::string,std::string,std::string>;
     std::map<RunKey,std::string> statuses;

@@ -155,6 +155,19 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
+        const auto submittedAnswers = effects("t3_pending_request").size();
+        fixture({{"scenario", "question"}, {"failAnswerRecheck", true}});
+        delivery = adapter->send(answer);
+        check(delivery.definitelyUnsent && effects("t3_pending_request").size() == submittedAnswers,
+              "failed question recheck was recorded as an ambiguous answer or sent a response");
+        fixture({{"failAnswerRecheck", false}, {"dropAnswerReply", true}});
+        delivery = adapter->send(answer);
+        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
+              effects("t3_pending_request").size() == submittedAnswers + 1 &&
+              restarted->reconcile(answer).kind == Delivery::Kind::QuestionGone,
+              "a lost response was treated as definitely unsent or retried");
+        fixture({{"dropAnswerReply", false}});
+
         auto badConfig = launch.config;
         badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
         observation = adapter->observe("env-1", badConfig, run);
@@ -182,6 +195,36 @@ int main(int argc, char** argv) {
         checkResult("server-input-result", false);
         checkResult("ambiguous-title-result", false);
         checkResult("reused-result", false);
+
+        using Availability = RunEvidence::Availability;
+        for (const auto* scenario : {"settled", "notification-result"}) {
+            const bool later = std::string_view(scenario) == "notification-result";
+            fixture({{"scenario",scenario},{"reportReadFailure","messages"}});
+            const auto observed = adapter->observe("env-1",launch.config,run);
+            check(observed.kind == Observation::Kind::Finished && observed.settled && observed.status == "completed" &&
+                  observed.resultRunId == (later ? "later" : "root") && observed.report.empty() &&
+                  observed.evidence == Availability::ReportUnavailable && !observed.detail.empty(),
+                  "unreadable report erased settlement or its proven source");
+            fixture({{"reportReadFailure",nullptr},{"waitFailure",true}});
+            const auto evidence = restarted->readRunEvidence("env-1",launch.config,
+                {run.threadId,observed.resultRunId,run.link},observed.status);
+            check(evidence.availability == Availability::Available &&
+                  evidence.report == (later ? "later report" : "root report"),
+                  "report recovery depended on another wait or read the wrong Run");
+            fixture({{"waitFailure",false}});
+        }
+        fixture({{"scenario","settled"},{"terminalStatus","failed"},{"reportReadFailure","activity"}});
+        observation = adapter->observe("env-1",launch.config,run);
+        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.status == "failed" &&
+              observation.resultRunId == "root" && observation.report == "root report" &&
+              observation.evidence == Availability::DiagnosticUnavailable && !observation.detail.empty(),
+              "unreadable error history erased a proven failure or its written report");
+        fixture({{"scenario","notification-result"},{"terminalStatus","completed"},
+                 {"reportReadFailure",nullptr},{"ownershipReadFailure",true}});
+        observation = adapter->observe("env-1",launch.config,run);
+        check(observation.kind == Observation::Kind::Unavailable && !observation.settled && observation.resultRunId.empty(),
+              "unreadable ownership evidence confirmed another Run's result");
+        fixture({{"ownershipReadFailure",false}});
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
@@ -265,12 +308,19 @@ int main(int argc, char** argv) {
         bool rejected = false;
         try { adapter->read(read); } catch (const std::runtime_error&) { rejected = true; }
         check(rejected, "foreign item cannot be read");
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal &&
+              effects("t3_thread_interrupt").empty(), "T3 receives no interrupt for an already settled Run");
         fixture({{"scenario", "running"}});
-        adapter->interrupt("env-1", launch.config, run);
-        check(effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::Requested &&
+              effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
               "T3 receives exactly one interrupt for the assigned Run");
+        fixture({{"interruptReply", "no_active_run"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::NoActiveRun,
+              "a Run becoming inactive before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", "completed"}});
+        check(adapter->interrupt("env-1", launch.config, run) == InterruptOutcome::AlreadyTerminal,
+              "a Run ending before the interrupt was reported as acknowledged");
+        fixture({{"interruptReply", false}});
 
         Command note = launch;
         note.tool = "steer";

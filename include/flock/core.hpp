@@ -87,6 +87,12 @@ struct Question {
 std::string_view trimSessionQuestionText(std::string_view text);
 // Validate a model answer against the observed fields and encode it for Session submission.
 Json sessionQuestionAnswers(const Json& fields, const Json& answers);
+struct RunEvidence {
+    enum class Availability { Available, ReportUnavailable, DiagnosticUnavailable };
+    Availability availability = Availability::Available;
+    std::string report, itemId, detail;
+    bool truncated = false;
+};
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -94,6 +100,7 @@ struct Observation {
     bool truncated = false;
     bool settled = false; // True on Finished only after delegated work has settled.
     std::string detail;
+    RunEvidence::Availability evidence = RunEvidence::Availability::Available;
 };
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
@@ -113,6 +120,7 @@ struct Delivery {
     std::string detail;
     bool definitelyUnsent = false;
 };
+enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
@@ -176,7 +184,14 @@ public:
     virtual Delivery send(const Command&) = 0;
     virtual Delivery reconcile(const Command&) = 0;
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
-    virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
+    // Recover evidence for an already attributed terminal result without waiting on the Run again.
+    virtual RunEvidence readRunEvidence(const std::string&, const Json&, const RunRef&, std::string_view) {
+        RunEvidence evidence;
+        evidence.availability = RunEvidence::Availability::ReportUnavailable;
+        evidence.detail = "Run report is unavailable";
+        return evidence;
+    }
+    virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }

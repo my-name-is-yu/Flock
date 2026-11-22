@@ -226,7 +226,8 @@ struct Store::Impl {
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, std::stop_token);
-    Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
+    bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
+                          T3&, std::stop_token);
     bool turnPending(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     Person turnActor(const conversation::Message&);

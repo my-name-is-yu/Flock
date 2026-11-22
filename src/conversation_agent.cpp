@@ -540,67 +540,6 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-Json Store::Impl::prepareSessionEffect(const Message& message, int step, const Decision& decision) {
-    const auto& args = decision.args;
-    if (!args.is_object()) throw ToolError("Tool arguments must be an object");
-    const auto task = ownTask(identifier(args,"taskId",true),message);
-    const auto expected = identifier(args,"generation",true,0);
-    if (expected != task.at("generation").get<Id>())
-        throw ToolError("stale",{{"applied",0},{"taskId",task.at("id")},{"expected",{{"generation",expected}}},
-                                 {"current",taskState(task,message)}});
-    if (terminal(task) || task.at("state") == "cancelling")
-        throw ToolError("The task is " + task.at("state").get<std::string>(),{{"taskId",task.at("id")}});
-    const auto& run = task.at("activeRun");
-    if (!run.is_object() || field(run,"runId").empty())
-        throw ToolError("The task has no running Session. Use send_to_task to pass it on at the next safe point",
-                        {{"taskId",task.at("id")},{"current",taskState(task,message)}});
-    Json effect = {{"kind",decision.tool == "message_session" ? "steer" : "interrupt"},{"taskId",task.at("id")},
-                   {"environmentId",field(run,"environmentId").empty() ? field(task,"environmentId") : field(run,"environmentId")},
-                   {"ownerBotId",message.bot},{"projectId",field(task,"projectId")},{"config",task.at("config")},{"run",run},
-                   {"actionId","flock-turn-" + std::to_string(message.id) + "-" + std::to_string(step)}};
-    if (decision.tool == "message_session") effect["text"] = text(args,"text",messageSize,true);
-    return effect;
-}
-
-namespace {
-Json performSessionEffect(T3& t3, const Json& effect) {
-    const auto taskId = effect.at("taskId");
-    const auto environment = field(effect,"environmentId");
-    const auto& config = effect.at("config");
-    const auto run = runRef(effect.at("run"));
-    try {
-        if (effect.at("kind") == "interrupt") {
-            try {
-                t3.interrupt(environment,config,run);
-            } catch (const std::exception& error) {
-                return {{"ok",false},{"taskId",taskId},{"delivery","unknown"},
-                        {"error",std::string("T3 may have received the interrupt: ") + error.what()}};
-            }
-            return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
-        }
-        Command command;
-        command.actionId = field(effect,"actionId");
-        command.ownerBotId = field(effect,"ownerBotId");
-        command.tool = "steer";
-        command.environmentId = environment;
-        command.projectId = field(effect,"projectId");
-        command.instruction = field(effect,"text");
-        command.config = config;
-        command.target = run;
-        command.authGeneration = t3.authGeneration(environment,config);
-        const auto delivery = t3.send(command);
-        if (delivery.kind == Delivery::Kind::Accepted)
-            return {{"ok",true},{"effect","delivered"},{"taskId",taskId},{"run",runJson(delivery.run)}};
-        Json failed = {{"ok",false},{"taskId",taskId},
-            {"error",delivery.detail.empty() ? "T3 did not accept the note" : delivery.detail}};
-        if (delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent) failed["delivery"] = "unknown";
-        return failed;
-    } catch (const std::exception& error) {
-        return {{"ok",false},{"taskId",taskId},{"error",error.what()}};
-    }
-}
-}
-
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route) {
     Json actions = Json::array();
     std::set<Id> touched;
@@ -914,7 +853,12 @@ LIMIT 1
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        if (!decision.rejection.empty() && !sessionEffect) {
+        const bool sessionControl = decision.tool == "message_session" || decision.tool == "interrupt_session";
+        if (sessionControl && (decision.rejection.empty() || sessionEffect)) {
+            if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
+            continue;
+        }
+        if (!decision.rejection.empty()) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return; }
@@ -927,56 +871,11 @@ LIMIT 1
             transaction.commit();
             continue;
         }
-        if (!sessionEffect && hasWebEvidence && !allowedAfterWebEvidence(decision)) {
+        if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             if (!authorizeTurn(message)) { transaction.commit(); return; }
             saveTurnResults(id,step,Json::array({webEvidenceActionDenied()}));
-            transaction.commit();
-            continue;
-        }
-
-        if (decision.tool == "message_session" || decision.tool == "interrupt_session") {
-            Json effect;
-            {
-                std::lock_guard lock(mutex);
-                Transaction transaction(db);
-                if (shutdown.stop_requested()) return;
-                if (!authorizeTurn(message)) { transaction.commit(); return; }
-                auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND effect IS NOT NULL",
-                                   {id,step});
-                if (saved.next()) {
-                    saveTurnResults(id,step,Json::array({Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},
-                        {"delivery","unknown"},{"error","Flock restarted while sending this, so T3 may have received it. "
-                                                       "Check the Session before sending it again"}}}));
-                } else {
-                    try {
-                        effect = prepareSessionEffect(message,step,decision);
-                        exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",{effect,id,step});
-                    } catch (const ToolError& error) {
-                        auto failed = error.details;
-                        failed["ok"] = false;
-                        failed["error"] = error.what();
-                        saveTurnResults(id,step,Json::array({redactor(message.bot).record(failed)}));
-                    }
-                }
-                transaction.commit();
-            }
-            if (effect.is_null()) continue;
-            const auto outcome = redactor(message.bot).record(performSessionEffect(t3,effect));
-            std::lock_guard lock(mutex);
-            Transaction transaction(db);
-            if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
-                return;
-            if (outcome.value("ok",false)) {
-                Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect.at("run"))}};
-                if (effect.contains("text")) {
-                    entry["text"] = effect.at("text");
-                    entry["revisionId"] = effect.at("run").value("revisionId",Json(nullptr));
-                }
-                journal(effect.at("taskId"),effect.at("kind") == "steer" ? "instruction_steered" : "interrupt_requested",entry);
-            }
-            saveTurnResults(id,step,Json::array({outcome}));
             transaction.commit();
             continue;
         }

@@ -90,7 +90,7 @@ class DemoT3 final : public T3 {
         return observed;
     }
 
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 } // namespace
 

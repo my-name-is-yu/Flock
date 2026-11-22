@@ -103,7 +103,7 @@ struct ScriptedModel : Model {
 
 struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
-    unsigned launches = 0;
+    unsigned launches = 0, steers = 0;
     std::function<void()> beforePreflight;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
@@ -112,6 +112,10 @@ struct SimulatedT3 : T3 {
         return std::nullopt;
     }
     Delivery send(const Command& command) override {
+        if (command.tool == "steer") {
+            ++steers;
+            return {Delivery::Kind::Accepted,command.target,{}};
+        }
         check(command.tool == "delegate","Unexpected work command in the Store fixture");
         const auto suffix = std::to_string(++launches);
         return {Delivery::Kind::Accepted,{"thread-" + suffix,"run-" + suffix,{}},{}};
@@ -120,7 +124,7 @@ struct SimulatedT3 : T3 {
     Observation observe(const std::string&, const Json&, const RunRef& run) override {
         return observations[run.runId];
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 struct RuntimeFixture {
@@ -332,7 +336,7 @@ void savedCallsAreCheckedBeforeExecution() {
           "An unavailable or possibly redacted saved call executed");
 }
 
-void sessionNoteIsNotResentAfterARestart() {
+void sessionNoteIsNotResentAfterARestart(bool webEvidence) {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
     RuntimeFixture execution(store);
@@ -340,11 +344,16 @@ void sessionNoteIsNotResentAfterARestart() {
     execution.reach(store,id,"running");
     const auto message = receive(store,"note","Use the staging database");
     const auto mid = std::to_string(message);
+    const std::string step = webEvidence ? "2" : "1";
     const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
                          {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
-                         {"actionId","flock-turn-" + mid + "-1"}};
+                         {"actionId","flock-turn-" + mid + "-" + step}};
     fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
-    fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
+    if (webEvidence)
+        fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(" + mid + ",1,"
+                    "'[{\"tool\":\"web_fetch\",\"args\":{\"url\":\"https://example.com/source\"},\"reason\":\"Read a source\"}]',"
+                    "'[{\"ok\":true,\"untrustedData\":true}]')");
+    fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + "," + step + ",'" +
                 Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
                               {"reason","Saved"}}}).dump() +
                 "','" + effect.dump() + "')");
@@ -354,8 +363,9 @@ void sessionNoteIsNotResentAfterARestart() {
         return say("I may have sent that already.");
     };
     execution.runtime.runConversations();
-    check(seen.size() == 1 && seen[0]["result"]["ok"] == false && seen[0]["result"]["delivery"] == "unknown" &&
-          execution.t3.launches == 1,"a note interrupted by a restart was sent again or reported as not delivered");
+    check(seen.size() == (webEvidence ? 2 : 1) && seen.back()["result"]["ok"] == false &&
+          seen.back()["result"]["delivery"] == "unknown" && execution.t3.steers == 0,
+          "a note interrupted by a restart was sent again or reported as not delivered");
 }
 
 void transientFailureResumesAfterTheLastFinishedStep() {
@@ -753,10 +763,11 @@ int main() {
         rejectedSessionReadStillAllowsAnOrdinaryReply();
         savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
+        sessionNoteIsNotResentAfterARestart(false);
+        sessionNoteIsNotResentAfterARestart(true);
         concurrentWorkerRecoversFromWriterContention();
         concurrentWorkerSurfacesStructuralStorageFailure();
         shutdownLeavesAnUnsentRunReadyForRestart();
-        sessionNoteIsNotResentAfterARestart();
         modelFailureReportsWhatWasAlreadyDone();
         notesFailureEndsTheTurnWithoutWork();
         toolErrorsReturnToTheModel();

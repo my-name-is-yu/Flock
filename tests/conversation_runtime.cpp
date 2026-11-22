@@ -127,9 +127,14 @@ struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
     std::string login = "original-login";
+    InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
+    std::function<void()> duringAuthLookup;
 
     std::vector<Command> steered;
-    std::string authGeneration(const std::string&,const Json&) override { return login; }
+    std::string authGeneration(const std::string&,const Json&) override {
+        if (auto callback = std::exchange(duringAuthLookup,{})) callback();
+        return login;
+    }
     Delivery send(const Command& command) override {
         if (command.tool == "steer") {
             steered.push_back(command);
@@ -158,9 +163,10 @@ struct SimulatedT3 : T3 {
     Observation observe(const std::string&,const Json&,const RunRef& run) override {
         return observations.at(run.runId);
     }
-    void interrupt(const std::string& environment,const Json&,const RunRef& run) override {
+    InterruptOutcome interrupt(const std::string& environment,const Json&,const RunRef& run) override {
         interrupted.emplace_back(environment,run.runId);
         if (std::exchange(loseNextStop,false)) throw std::runtime_error("simulated interrupted acknowledgement");
+        return interruptOutcome;
     }
     void finish(std::string_view run, std::string text, bool settled = true) {
         auto& report = observations.at(std::string(run));
@@ -1698,6 +1704,40 @@ void notesReachTheRunningSession() {
           "a note for a finished task reached T3");
 }
 
+void notesRejectStoppingTasks() {
+    for (const bool replanning : {false,true}) {
+        Fixture f;
+        const auto id = f.store->submit(f.routing());
+        f.reach(id,"running");
+        const auto run = f.task(id).at("activeRun");
+        constexpr auto request = "Change the work and send a note";
+        f.script(request,{replanning ? change(id,{{"doneWhen","Include CPU time"}}) : stop(id),note(id)});
+        f.receive("stopping",request);
+        const auto task = f.task(id);
+        check((replanning ? task.value("replanning",false) : task["state"] == "cancelling") &&
+              task.at("activeRun") == run && f.lastTurn().at(1).at("result")["ok"] == false &&
+              f.t3.steered.empty() && f.event(id,"instruction_steered").is_null(),
+              "a note reached T3 after the Task had started stopping");
+    }
+}
+
+void cancellationDuringSteerPreparation() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    Store writer(f.dir/"state.db");
+    f.t3.duringAuthLookup = [&] {
+        writer.operate(localOwner,TaskTarget::from(writer.task(id),0),"cancel");
+    };
+    constexpr auto request = "Add a chart to the current Run";
+    f.script(request,{note(id)});
+    f.receive("stop-before-dispatch",request);
+    const auto result = f.lastTurn().at(0).at("result");
+    check(f.task(id)["state"] == "cancelling" && result["ok"] == false && result["error"] == "stale" &&
+          !result.contains("delivery") && f.t3.steered.empty() && f.event(id,"instruction_steered").is_null(),
+          "a local cancellation before dispatch was ignored or reported as a possible delivery");
+}
+
 void newSessionsReceivePersistedTaskDecisions() {
     for (const bool explicitFresh : {false,true}) {
         Fixture f;
@@ -1872,6 +1912,34 @@ void interruptLeavesTheTaskOpen() {
           f.response(message)["status"] == "stopping","an interrupt request cancelled the task or missed the Run");
 }
 
+void interruptNoOpsDoNotAcknowledgeARequest() {
+    for (const auto outcome : {InterruptOutcome::AlreadyTerminal,InterruptOutcome::NoActiveRun}) {
+        Fixture f;
+        const auto id = f.store->submit(f.routing());
+        const auto queued = f.store->submit(f.routing("Next project task"));
+        f.reach(id,"running");
+        const auto run = f.task(id).at("activeRun");
+        f.t3.interruptOutcome = outcome;
+        f.script("Pause that run",{interrupt(id)});
+        const auto message = f.receive("interrupt","Pause that run");
+        const auto result = f.lastTurn().at(0).at("result");
+        check(result["ok"] == false &&
+              result["outcome"] == (outcome == InterruptOutcome::AlreadyTerminal ? "already_terminal" : "no_active_run") &&
+              f.response(message)["actions"].empty() && f.response(message)["status"] == "done" &&
+              f.event(id,"interrupt_requested").is_null() && f.event(id,"cancel_requested").is_null() &&
+              f.task(id)["state"] == "running" && f.task(id)["activeRun"] == run,
+              "an interrupt no-op was recorded as a stop or changed the Task");
+
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
+        f.advanceUntil([&] { return f.t3.interrupted.size() == 2; },"cancellation did not contact T3");
+        check(f.task(id)["state"] == "cancelling" && f.task(id)["activeRun"] == run &&
+              f.task(queued)["state"] == "queued" && f.event(id,"interrupt_requested").is_null(),
+              "a no-op interrupt released the cancelling Task's queue slot or was journaled as acknowledged");
+        f.t3.finish(run["runId"].get<std::string>(),"Settled");
+        f.reach(id,"cancelled");
+    }
+}
+
 void environmentsResolveByNameOrId() {
     Fixture f;
     auto routing = f.routing();
@@ -1944,11 +2012,14 @@ int main() {
         startCriteriaAreUsedForFirstDelegation();
         environmentsResolveByNameOrId();
         notesReachTheRunningSession();
+        notesRejectStoppingTasks();
+        cancellationDuringSteerPreparation();
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
         oversizedAuthoritativeHandoffBlocksDelivery();
         legacyIntakeChangeScopesTheFirstSessionAnswers();
         interruptLeavesTheTaskOpen();
+        interruptNoOpsDoNotAcknowledgeARequest();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

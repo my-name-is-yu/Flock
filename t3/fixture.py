@@ -130,6 +130,10 @@ class Fixture(BaseHTTPRequestHandler):
                 self.reply(envelope)
                 return
             content = self.tool(tool["name"], tool["arguments"])
+            if (tool["name"] == "t3_pending_request" and tool["arguments"]["action"] == "respond"
+                    and state.get("dropAnswerReply")):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -202,18 +206,23 @@ class Fixture(BaseHTTPRequestHandler):
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
+            if state.get("waitFailure"):
+                return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "Wait is unavailable."}
             if scenario == "resumed":
                 return {"threadId": "thread", "runId": "continued", "timedOut": True, "status": "running"}
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
             timed_out = active or scenario in ("settling", "settling-input", "manual-active")
+            terminal_status = state.get("terminalStatus", "completed")
             reply = {"threadId": "thread", "runId": "root", "timedOut": timed_out,
-                     "status": "running" if scenario == "running" else "waiting" if active else "completed"}
+                     "status": "running" if scenario == "running" else "waiting" if active else terminal_status}
             if not timed_out and args["untilDelegatedWorkSettled"]:
-                reply["resultRun"] = {"runId": "later" if scenario.endswith("-result") else "root", "status": "completed"}
+                reply["resultRun"] = {"runId": "later" if scenario.endswith("-result") else "root",
+                                      "status": terminal_status}
             return reply
         if name == "t3_thread_interrupt":
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
-            return {"threadId": "thread", "runId": "root", "status": "interrupt_requested"}
+            status = state.get("interruptReply") or "interrupt_requested"
+            return {"threadId": "thread", "runId": None if status == "no_active_run" else "root", "status": status}
         if name == "t3_pending_request":
             assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
@@ -221,6 +230,11 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
+                if state.get("failAnswerRecheck"):
+                    reads = state.get("answerReads", 0) + 1
+                    state["answerReads"] = reads
+                    if reads == 2:
+                        return {"_tag": "OrchestratorMcpFailure", "code": "internal_error"}
                 return {"requestId": "request", "questions": questions}
             assert action == "respond" and scenario != "ambiguous"
             state["scenario"] = "running"
@@ -229,6 +243,9 @@ class Fixture(BaseHTTPRequestHandler):
                         "message": "The user-input request was already answered."}
             return {"sequence": 10}
         assert name == "t3_thread_read", name
+        if (("beforePosition" in args and state.get("reportReadFailure") == args["view"]) or
+                ("afterPosition" in args and state.get("ownershipReadFailure"))):
+            return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "History is unavailable."}
         thread_id = args["threadId"]
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")

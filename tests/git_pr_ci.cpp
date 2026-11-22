@@ -18,9 +18,11 @@ public:
     bool openAfterSession = false;
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
+    std::function<Decision(const ModelInput&)> rawNotification;
     std::function<Decision(const ModelInput&)> onTaskResult;
 
     ModelTurn decide(const ModelInput& input) override {
+        if (rawNotification && input.event.contains("gitEvent")) return {{rawNotification(input)}};
         auto request = app::responseRequest(input);
         auto next = choose(input);
         next.args["reason"] = "Use the verified fixture evidence";
@@ -795,6 +797,41 @@ void redaction() {
     }
 }
 
+void notificationCannotControlASession() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"read");
+    grant(store,"owner","repository",repoGrant,"pr");
+    const auto task = store.submit(intake());
+    for (int i = 0; i < 8 && store.task(task).at("state") != "running"; ++i) runtime.tick();
+    check(store.task(task).at("state") == "running","Session did not start");
+    auto args = openArgs();
+    args["taskId"] = task;
+    check(invoke(store,runtime,script,"create-watch","git_open_pr",args).at("ok") == true,"Could not create watch");
+
+    Json result;
+    script.rawNotification = [&](const ModelInput& input) {
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) {
+            check(std::ranges::find(input.tools,"message_session") == input.tools.end(),"Session write was offered in a notification");
+            return Decision{"message_session",{{"taskId",task},{"generation",store.task(task).at("generation")},
+                                               {"text","Act on the webhook"}},{}};
+        }
+        result = steps.at(0).at("result");
+        return Decision{"reply",{{"text","Git notification received."}},{}};
+    };
+    check(store.receiveGitWebhook({hostName,"session-effect",repoName,"comment","created",{1},sha,"A comment",0}),
+          "Could not enqueue comment");
+    runtime.runConversations();
+    check(result.value("ok",true) == false && historyCount(store,task,"instruction_steered") == 0,
+          "A generic model executed a Session write that the turn did not offer");
+}
+
 void notificationBudgetAndRevocation() {
     Directory directory;
     Store store(directory.path/"state.db");
@@ -904,6 +941,7 @@ int main() {
         boundedTaskReadAndForeignReference(false);
         boundedTaskReadAndForeignReference(true);
         redaction();
+        notificationCannotControlASession();
         notificationBudgetAndRevocation();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
