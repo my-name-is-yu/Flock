@@ -1109,7 +1109,7 @@ function rememberReadingPosition() {
   const { events, olderBefore, newestEvent } = context;
   readingPositions.set(timelineKey(context.id, context.peerId), {
     // Retain loaded pages so an older message is available when its conversation reopens.
-    history: { events, olderBefore, newestEvent },
+    history: { events, olderBefore, newestEvent, historyCursor: context.data?.historyCursor },
     top,
     anchorId: anchor?.id,
     peerFocus: anchor?.dataset.peerFocus,
@@ -1164,6 +1164,8 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
+      // The restored offset already includes the returning composer's height.
+      composerHeight = elements['composer-container'].offsetHeight;
       restoreReadingPosition(position);
       readingPositions.delete(key);
     } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
@@ -1757,13 +1759,12 @@ async function refreshView(context, scroll) {
   const isCurrent = () => context === view;
   try {
     const params = new URLSearchParams({ bot: context.id });
-    if (context.data) {
-      params.set('changesAfter', context.data.historyCursor);
-      params.set('sessionsAfter', context.data.sessionCursor);
-    }
+    const eventHistory = eventHistoryForRefresh(context);
+    const historyCursor = context.data?.historyCursor ?? eventHistory.historyCursor;
+    if (historyCursor != null) params.set('changesAfter', historyCursor);
+    if (context.data) params.set('sessionsAfter', context.data.sessionCursor);
     const latest = await api(`view?${params}`);
     if (!isCurrent()) return;
-    const eventHistory = eventHistoryForRefresh(context);
     await refreshEventHistory(eventHistory, latest, before => conversationPage(context, before), isCurrent);
     if (!isCurrent()) return;
     if (eventHistory !== context) Object.assign(context, eventHistory);
