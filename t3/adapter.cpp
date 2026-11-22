@@ -282,13 +282,6 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     return true;
 }
 
-bool questionGone(const Failure& error) {
-    return error.code == "invalid_request" &&
-        (error.serverMessage == "The pending user-input request was not found." ||
-         error.serverMessage == "The user-input request was already answered." ||
-         error.serverMessage.starts_with("The user-input request is no longer pending ("));
-}
-
 std::set<std::string> pending(Client& client, const std::string& threadId) {
     const auto data = client.call(PendingRequest, {{"action", "list"}, {"threadId", threadId}});
     std::set<std::string> requests;
@@ -350,7 +343,7 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
     Json questions;
     try { questions = readQuestion(client, run.threadId, requestId); }
     catch (const Failure& error) {
-        if (questionGone(error)) return {Attribution::Kind::Resolved, {}, {}};
+        if (error.reason == Failure::Reason::QuestionGone) return {Attribution::Kind::Resolved, {}, {}};
         throw;
     }
     auto fields = questionFields(questions);
@@ -372,16 +365,13 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
             return matching < 2;
         });
     } catch (const Failure& failure) {
-        if (failure.kind == Failure::Kind::Auth) throw;
+        if (failure.kind == Failure::Kind::Auth || failure.kind == Failure::Kind::Settings) throw;
         return {Attribution::Kind::Ambiguous, {}, {}};
     }
     if (unverified || matching != 1 || !exactOwner) return {Attribution::Kind::Ambiguous, {}, {}};
     return {Attribution::Kind::Owned, std::move(fields), std::move(questions)};
 }
 
-std::string actionPrompt(const Command& command) {
-    return "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
-}
 void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_view origin) {
     // checkedUrl permits plaintext HTTP only on loopback. A local-only T3 environment
     // opens in its own browser client, where the user authorized this connection.
@@ -443,17 +433,9 @@ Delivery failureDelivery(const Failure& failure) {
 }
 
 Delivery workReply(const Failure& failure) {
-    if (failure.kind == Failure::Kind::Auth) {
-        auto refused = failureDelivery(failure);
-        refused.definitelyUnsent = true;
-        return refused;
-    }
-    if (failure.code == "model_unavailable" || failure.code == "provider_unavailable" ||
-        (failure.code == "invalid_request" && (failure.serverMessage.starts_with("Pass modelSelection:") ||
-          failure.serverMessage == "The project was not found." ||
-          failure.serverMessage.find("No thread was created.") != std::string::npos)))
-        return {Outcome::Settings, {}, "T3 rejected the project, model, or workspace settings before starting a Run", true};
-    return failureDelivery(failure);
+    auto reply = failureDelivery(failure);
+    reply.definitelyUnsent = failure.kind == Failure::Kind::Auth || failure.reason == Failure::Reason::WorkSettings;
+    return reply;
 }
 
 std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::string& projectId) {
@@ -511,8 +493,9 @@ Delivery reconcileWork(Client& client, const Command& command) {
                 str(item, "senderThreadId").empty()) {
                 const auto full = readCompleteItemText(client, scan, item, threadId, "messages", expected.size());
                 const auto runId = str(item, "runId");
-                if (!full || (runId.empty() && *full == expected)) incomplete = true;
-                if (full && *full == expected && !runId.empty() && (launch || runId != command.target.runId))
+                const bool exact = full && *full == expected;
+                if (!full || (runId.empty() && exact)) incomplete = true;
+                if (exact && !runId.empty() && (launch || runId != command.target.runId))
                     matches[{threadId, runId}] = {threadId, runId, str(thread, "link")};
             }
             // This is a launch, so only its initial local user message could have created the Thread.
@@ -595,11 +578,13 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
         {"message", command.instruction}, {"clientRequestId", command.actionId}});
     // T3 v0.1.11 cannot require the expected Run on send. If another Run of the task's Thread took over in
-    // between, report the Run that actually received the note.
+    // between, surface the mismatch without confirming the assigned Run.
     if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
     RunRef received = command.target;
-    received.runId = effective;
-    if (const auto runId = str(reply, "runId"); !runId.empty()) received.runId = runId;
+    received.runId = str(reply, "runId");
+    if (received.runId != effective)
+        return result(Outcome::Unknown, "T3 did not confirm steer delivery to " + effective +
+                      (received.runId.empty() ? " (no Run ID returned)" : " (returned " + received.runId + ")"));
     return result(Outcome::Accepted, {}, std::move(received));
 }
 
@@ -627,7 +612,7 @@ Delivery answer(Client& client, const Command& command) {
         position(member(responded, "sequence"));
         return result(Outcome::Accepted, {}, command.target);
     } catch (const Failure& error) {
-        if (questionGone(error)) return result(Outcome::QuestionGone);
+        if (error.reason == Failure::Reason::QuestionGone) return result(Outcome::QuestionGone);
         throw;
     }
 }
@@ -654,8 +639,6 @@ public:
             }
             return std::nullopt;
         } catch (const Failure& failure) {
-            if (failure.code == "invalid_request" && failure.serverMessage == "The project was not found.")
-                return result(Outcome::Settings,"The configured T3 project was not found");
             return failureDelivery(failure);
         }
     }
@@ -702,12 +685,13 @@ public:
     }
 
     Delivery reconcile(const Command& command) override {
+        if (command.tool == "steer") return result(Outcome::Unknown, "T3 cannot look up a steered note by action ID");
         try {
             verifyCommand(command);
             auto connection = credential(command.environmentId, command.config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            if (command.tool != "answer_session_question") {
+            if (command.tool == "delegate" || command.tool == "follow_up") {
                 auto recovered = reconcileWork(client, command);
                 useLocalThreadLink(recovered.run,command.environmentId,origin);
                 return recovered;
@@ -731,7 +715,8 @@ public:
             const auto reply = wait(client, run, true);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
-            if (terminal(status) && !boolean(reply, "timedOut")) {
+            const bool finished = terminal(status);
+            if (finished && !boolean(reply, "timedOut")) {
                 auto source = RunRef{run.threadId, effective, run.link};
                 auto observed = state(Observed::Finished, status, true);
                 const auto later = reply.value("resultRun", Json::object());
@@ -758,13 +743,14 @@ public:
                 observed.resultRunId = source.runId;
                 return observed;
             }
-            if (!active(status) && !terminal(status)) invalidResponse();
+            if (!finished && !active(status)) invalidResponse();
             const auto head = threadHead(client, run.threadId);
             const auto& thread = detail(head, run.threadId);
             const auto count = position(member(thread, "pendingRequestCount"));
-            if (count != 0) {
+            if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
+            if (!finished && count == 1) {
                 const auto requests = pending(client, run.threadId);
-                if (count == 1 && requests.size() == 1 && active(status)) {
+                if (requests.size() == 1) {
                     const auto& id = *requests.begin();
                     auto match = attribute(client, {run.threadId, effective, run.link}, id);
                     if (match.kind == Attribution::Kind::Owned) {
@@ -774,10 +760,10 @@ public:
                     }
                     if (match.kind == Attribution::Kind::Resolved) return state(Observed::Running, status);
                 }
-                return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
             }
-            return terminal(status) ? state(Observed::Finished, status) : state(Observed::Running, status);
+            return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
         } catch (const Failure& failure) {
+            if (failure.kind == Failure::Kind::Settings) return state(Observed::Unavailable, "settings");
             return state(Observed::Unavailable, failure.kind == Failure::Kind::Auth ? "auth" : failure.what());
         }
     }

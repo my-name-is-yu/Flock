@@ -24,7 +24,8 @@ class Fixture(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         for key, item in headers.items():
-            self.send_header(key.replace("_", "-"), item)
+            for header_value in item if isinstance(item, list) else [item]:
+                self.send_header(key.replace("_", "-"), header_value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -32,7 +33,10 @@ class Fixture(BaseHTTPRequestHandler):
         origin = self.server.origin
         if self.path == "/fixture/effects":
             self.reply(self.server.state.get("effects", {}))
-        elif self.path == "/.well-known/oauth-protected-resource/mcp":
+        elif self.path == "/protected,resource":
+            if self.server.state.get("oauthFailure") == "discovery":
+                self.reply({"error": "invalid_resource"}, code=400)
+                return
             self.reply({"resource": origin + "/mcp", "authorization_servers": [origin]})
         elif self.path == "/.well-known/oauth-authorization-server":
             self.reply({"issuer": origin, "authorization_endpoint": origin + "/authorize",
@@ -52,6 +56,9 @@ class Fixture(BaseHTTPRequestHandler):
         state = self.server.state
         raw = self.rfile.read(int(self.headers["Content-Length"]))
         if self.path == "/token":
+            if state.get("oauthFailure") == "token":
+                self.reply({"error": "invalid_grant"}, code=400)
+                return
             args = urllib.parse.parse_qs(raw.decode())
             verify = base64.urlsafe_b64encode(hashlib.sha256(args["code_verifier"][0].encode()).digest())
             assert verify.decode().rstrip("=") == state["challenge"]
@@ -85,13 +92,18 @@ class Fixture(BaseHTTPRequestHandler):
                 threading.Thread(target=callback, daemon=True).start()
             self.reply({})
         elif self.path == "/register":
+            if state.get("oauthFailure") == "registration":
+                self.reply({"error": "invalid_client_metadata"}, code=400)
+                return
             assert args["token_endpoint_auth_method"] == "none" and args["grant_types"] == ["authorization_code"]
             state["registered"] = args["redirect_uris"]
             self.reply({"client_id": "fixture-client"}, code=201)
         elif self.path == "/mcp":
             if self.headers.get("Authorization") != "Bearer fixture.signed-token" or state.get("revoked"):
-                self.reply(code=401, WWW_Authenticate='Bearer resource_metadata="' + origin +
-                           '/.well-known/oauth-protected-resource/mcp"')
+                challenge = ('Basic resource_metadata="https://wrong.test/", Negotiate YWJjZA==, '
+                             'bEaReR realm="a, \\"b\\"", RESOURCE_METADATA \t= "' + origin +
+                             '/protected,resource", Basic realm="next"')
+                self.reply(code=401, WWW_Authenticate=[challenge, 'Basic realm="last"'])
                 return
             envelope = {"jsonrpc": "2.0", "id": args.get("id")}
             if args["method"] == "initialize":
@@ -106,9 +118,16 @@ class Fixture(BaseHTTPRequestHandler):
                 return
             assert args["method"] == "tools/call"
             tool = args["params"]
+            if tool["name"] == "t3_project_read" and state.get("projectError"):
+                if state["projectError"] == "rpc":
+                    envelope["error"] = {"code": -32602, "message": "Invalid params"}
+                else:
+                    envelope["result"] = {"isError": True, "content": [{"type": "text", "text": "Tool failed"}]}
+                self.reply(envelope)
+                return
             content = self.tool(tool["name"], tool["arguments"])
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
-                                  "isError": "code" in content}
+                                  "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
                 self.server.launch_accepted.set()
                 assert self.server.allow_launch_disconnect.wait(15), "crash harness did not kill the Runtime"
@@ -131,7 +150,7 @@ class Fixture(BaseHTTPRequestHandler):
             {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
              "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
         ]
-        if (name in ("t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+        if (name in ("t3_thread_read", "t3_thread_list", "t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
@@ -139,7 +158,7 @@ class Fixture(BaseHTTPRequestHandler):
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
             assert args["projectId"] == "project"
-            return {"id": "project", "defaultModelSelection": None}
+            return {"id": "project", "code": "project-code", "defaultModelSelection": None}
         if name == "t3_thread_launch":
             assert args["projectId"] == "project"
             assert "modelSelection" not in args and "workspaceStrategy" not in args
@@ -149,14 +168,14 @@ class Fixture(BaseHTTPRequestHandler):
                 assert "Verify the fixture" in args["message"]
             else:
                 assert args["clientRequestId"] == "flock-action-0123"
-                assert args["message"].startswith("[Flock action flock-action-0123]\n\n  preserve")
+                assert args["message"].count("[Flock action") == 1
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send" and args["mode"] == "steer":
             assert scenario in ("running", "resumed") and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-turn-7-2"
-            return {"threadId": "thread", "runId": "continued" if scenario == "resumed" else "root",
+            return {"threadId": "thread", "runId": state.get("steerReply") or ("continued" if scenario == "resumed" else "root"),
                     "delivery": "steered"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
@@ -178,7 +197,7 @@ class Fixture(BaseHTTPRequestHandler):
             if scenario == "resumed":
                 return {"threadId": "thread", "runId": "continued", "timedOut": True, "status": "running"}
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
-            timed_out = active or scenario in ("settling", "manual-active")
+            timed_out = active or scenario in ("settling", "settling-input", "manual-active")
             reply = {"threadId": "thread", "runId": "root", "timedOut": timed_out,
                      "status": "running" if scenario == "running" else "waiting" if active else "completed"}
             if not timed_out and args["untilDelegatedWorkSettled"]:
@@ -188,6 +207,7 @@ class Fixture(BaseHTTPRequestHandler):
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
             return {"threadId": "thread", "runId": "root", "status": "interrupt_requested"}
         if name == "t3_pending_request":
+            assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
             if action == "list":
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
@@ -204,7 +224,7 @@ class Fixture(BaseHTTPRequestHandler):
         thread_id = args["threadId"]
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
-        count = 1 if scenario in ("question", "ambiguous", "approval", "race") else 0
+        count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
                                              "pendingRequestCount": count}
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]

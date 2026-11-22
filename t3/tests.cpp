@@ -33,6 +33,17 @@ int main(int argc, char** argv) {
                 fixture({{"authorization", authorization}});
             });
         };
+        for (const auto& [stage, code] : std::map<std::string, std::string>{
+                 {"discovery", "invalid_resource"}, {"registration", "invalid_client_metadata"}, {"token", "invalid_grant"}}) {
+            fixture({{"oauthFailure", stage}});
+            bool diagnosed = false;
+            try { signIn("env-1"); }
+            catch (const std::runtime_error& error) {
+                diagnosed = std::string(error.what()).find(stage + " failed (HTTP 400): " + code) != std::string::npos;
+            }
+            check(diagnosed, "OAuth failure identifies stage, HTTP status and error");
+        }
+        fixture({{"oauthFailure", false}});
         signIn("env-1");
         auto ownerOnly = [](const std::filesystem::path& path) {
             struct stat st{};
@@ -50,6 +61,14 @@ int main(int argc, char** argv) {
         launch.instruction = "  preserve instruction whitespace and content  ";
         launch.authGeneration = adapter->authGeneration(launch.environmentId, launch.config);
         check(!launch.authGeneration.empty() && !adapter->preflight(launch), "valid credential preflight");
+        for (const auto& [mode, detail] : std::map<std::string, std::string>{
+                 {"rpc", "T3 JSON-RPC error -32602: Invalid params"}, {"tool", "T3 rejected the operation"}}) {
+            fixture({{"projectError", mode}});
+            auto error = adapter->preflight(launch);
+            check(error && error->kind == Delivery::Kind::Unknown && error->detail == detail,
+                  "JSON-RPC and plain-text MCP tool failures remain distinguishable");
+        }
+        fixture({{"projectError", false}});
         auto checkPreflight = [&](const Command& command, Delivery::Kind kind, std::string_view reason) {
             const auto failure = adapter->preflight(command);
             check(failure && failure->kind == kind, reason);
@@ -83,8 +102,8 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", false}});
         const auto launches = effects("t3_thread_launch");
         check(launches.size() == 1, "launch reconciliation creates no additional T3 threads");
-        check(launches.at(0).at("message").get<std::string>().find(launch.instruction) != std::string::npos,
-              "T3 receives the complete original instruction with its whitespace");
+        check(launches.at(0).at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
+              "T3 receives the original launch instruction followed by one canonical marker");
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
@@ -125,9 +144,19 @@ int main(int argc, char** argv) {
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
+        auto badConfig = launch.config;
+        badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
+        observation = adapter->observe("env-1", badConfig, run);
+        check(observation.kind == Observation::Kind::Unavailable && observation.status == "settings",
+              "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
+        fixture({{"scenario", "settling-input"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::ExternalInput &&
+              observation.question.requestId.empty() && observation.question.fields.empty(),
+              "pending input during delegated settlement is handed off to T3");
         const auto checkResult = [&](const char* scenario, bool ownsLater) {
             fixture({{"scenario", scenario}});
             const auto observed = adapter->observe("env-1", launch.config, run);
@@ -147,7 +176,7 @@ int main(int argc, char** argv) {
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";
         follow.target = run;
-        follow.instruction = std::string(700, 'x');
+        follow.instruction = std::string(700, 'x') + "\n\n[Flock action ID: " + follow.actionId + "]";
         for (const auto* scenario : {"manual-active", "server-input-result"}) {
             fixture({{"scenario", scenario}});
             check(adapter->send(follow).kind == Delivery::Kind::NotAccepted,
@@ -163,7 +192,7 @@ int main(int argc, char** argv) {
               delivery.run.runId == "follow", "reconciliation recovers the follow-up from paginated history");
         const auto followUps = effects("t3_thread_send");
         check(followUps.size() == 1, "follow-up reconciliation does not send another queued message");
-        check(followUps.at(0).at("message").get<std::string>().find(follow.instruction) != std::string::npos,
+        check(followUps.at(0).at("message") == follow.instruction,
               "T3 receives all of the follow-up instruction");
 
         ReadRequest read;
@@ -244,7 +273,16 @@ int main(int argc, char** argv) {
               steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
                                      {"clientRequestId","flock-turn-7-2"}},
               "a note reaches the running Run through T3 steer without starting another Run");
-        fixture({{"scenario", "resumed"}});
+        fixture({{"steerReply", "other-run"}});
+        delivery = adapter->send(note);
+        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
+              delivery.detail.find("other-run") != std::string::npos, "steer Run race stays uncertain");
+        const auto reads = effects("t3_thread_read").size();
+        const auto lists = effects("t3_thread_list").size();
+        check(adapter->reconcile(note).kind == Delivery::Kind::Unknown &&
+              effects("t3_thread_read").size() == reads && effects("t3_thread_list").size() == lists,
+              "steer reconciliation never scans history");
+        fixture({{"scenario", "resumed"}, {"steerReply", false}});
         delivery = adapter->send(note);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "continued",
               "a note reaches T3's restart continuation of the assigned Run");

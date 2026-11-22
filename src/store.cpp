@@ -48,7 +48,8 @@ std::string bounded(std::string_view text, std::size_t bytes) {
     return std::string(text.substr(0, bytes));
 }
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction) {
-    return "[Flock action " + actionId + "]\n\n" + instruction + "\n\n[/Flock action]";
+    const auto marker = "\n\n[Flock action ID: " + actionId + "]";
+    return instruction.ends_with(marker) ? instruction : instruction + marker;
 }
 
 std::string field(const Json& j, std::string_view key) {
