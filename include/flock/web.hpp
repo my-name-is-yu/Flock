@@ -12,14 +12,16 @@ struct WebCallbacks {
     std::function<Json()> bots;
     IntakeResolver intake;
     // Optional Bot profile management callbacks.
-    std::function<Json(const Json& profile, const std::optional<AvatarImage>& image)> createBot;
-    std::function<Json(std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)> updateBot;
-    std::function<std::optional<AvatarImage>(std::string_view botId)> botAvatar;
+    std::function<Json(const Json& profile, const std::optional<AvatarImage>& image)> createBot = {};
+    std::function<Json(std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)> updateBot = {};
+    std::function<std::optional<AvatarImage>(std::string_view botId)> botAvatar = {};
     std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
     std::function<Person(std::string_view authorization)> authenticate = {};
     ApplyBotChange applyBotChange = {};
+    std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};
 };
-std::function<Person(std::string_view)> webIdentities(const std::filesystem::path&);
+void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
+void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);
 class WebServer {
 public:
     virtual ~WebServer() = default;

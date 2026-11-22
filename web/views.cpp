@@ -176,6 +176,12 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
+        if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
+            copyFields(details["channel"] = Json::object(),*channel,{"channelKind","workspaceId","threadRef","externalMessageId"});
+        for (const auto* key : {"attachments","artifacts"}) {
+            const auto items = data.find(key);
+            if (items != data.end() && items->is_array()) details[key] = *items;
+        }
         if (const auto actions = data.find("actions"); actions != data.end() && actions->is_array()) {
             details["actions"] = Json::array();
             for (const auto& action : *actions) {

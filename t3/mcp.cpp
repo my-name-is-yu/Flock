@@ -244,9 +244,15 @@ static Failure toolFailure(const Json& payload) {
     if (code == "capability_denied" || code == "thread_credential_required" ||
         code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
         return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
+    if (code == "thread_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
+        (code == "invalid_request" && message == "The thread was not found."))
+        return Failure(Failure::Kind::Tool, "T3 history was not found", Failure::Reason::HistoryNotFound);
+    if (code == "project_not_found" || (code == "invalid_request" && message == "The project was not found."))
+        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
+                       Failure::Reason::ProjectNotFound);
     if (code == "model_unavailable" || code == "provider_unavailable" ||
         (code == "invalid_request" && (message.starts_with("Pass modelSelection:") ||
-         message == "The project was not found." || message.find("No thread was created.") != std::string::npos)))
+         message.find("No thread was created.") != std::string::npos)))
         return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
                        Failure::Reason::WorkSettings);
     if (code == "invalid_request" && (message == "The pending user-input request was not found." ||
@@ -270,5 +276,26 @@ Json Client::call(std::string_view tool, Json arguments) {
     if (isError) throw toolFailure(data);
     if (!data.is_object()) invalidResponse();
     return data;
+}
+
+Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars,
+                Json args, int runLimit) {
+    args.update(Json{{"threadId",threadId},{"view",view},{"limit",limit},{"maxCharsPerItem",chars},{"runLimit",runLimit}});
+    auto page = client.call("t3_thread_read",std::move(args));
+    if (str(member(page,"thread"),"threadId") != threadId || array(page,"items").size() > limit)
+        invalidResponse();
+    return page;
+}
+
+void advancePosition(const Json& item, Id& after) {
+    const auto next = position(member(item,"position"));
+    if (next <= after) invalidResponse();
+    after = next;
+}
+
+bool moreHistory(const Json& page, Id after, Id start) {
+    if (!boolean(page,"hasMore")) return false;
+    if (after <= start || position(member(page,"nextPosition")) != after) invalidResponse();
+    return true;
 }
 }

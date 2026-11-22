@@ -1,6 +1,6 @@
 #include "http_fixture.hpp"
 
-namespace web_test {
+namespace flockv0::http_test {
 void boardInboxEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner",true};

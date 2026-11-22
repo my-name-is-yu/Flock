@@ -125,6 +125,10 @@ CREATE TABLE IF NOT EXISTS runs(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL, link TEXT NOT NULL,
   UNIQUE(environment_id,thread_id,run_id));
 CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
+CREATE TABLE IF NOT EXISTS session_read_refs(
+  ref TEXT PRIMARY KEY, bot TEXT NOT NULL, kind INTEGER NOT NULL,
+  environment TEXT NOT NULL, thread TEXT NOT NULL, payload TEXT NOT NULL,
+  UNIQUE(bot,kind,environment,thread,payload));
 CREATE TABLE IF NOT EXISTS peer_exchanges(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
   sender_task INTEGER NOT NULL REFERENCES tasks(id),
@@ -171,6 +175,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         initializeAccessSchema();
         migrateConversation();
+        initializeChannelSchema();
+        initializeLocalMachineSchema();
         migrateModelBudget();
         initializeBoardInboxSchema();
         exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
@@ -242,7 +248,9 @@ Json Store::Impl::queueBlocker(Id id) const {
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
-    return last();
+    const auto entry = last();
+    queueChannelTaskUpdate(id,entry,kind,data);
+    return entry;
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
@@ -741,7 +749,12 @@ LEFT JOIN waits w ON page.kind='user_answer'
 WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
         {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(journalRow(rows));
+    while (rows.next()) {
+        auto event = journalRow(rows);
+        if (event["kind"] == "conversation_message")
+            event["data"].update(p_->channelContext(rows.number(0),bot));
+        result.push_back(std::move(event));
+    }
     std::reverse(result.begin(),result.end());
     return result;
 }

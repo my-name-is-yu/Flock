@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,8 +12,8 @@
 #include <set>
 
 using namespace flockv0;
+using namespace flockv0::http_test;
 namespace {
-using namespace web_test;
 
 void pageAssets(Browser& browser, const std::string& html) {
     const std::regex tags(R"(<(script|link)\b[^>]*>)");
@@ -812,11 +813,11 @@ void accessEndpoints(const std::filesystem::path& path) {
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
-    cb.authenticate = webIdentities(file);
+    configureWebIdentities(store,file,cb);
     const auto link = path.parent_path()/"identity-link";
     std::filesystem::create_symlink(file,link);
     bool rejected = false;
-    try { webIdentities(link); } catch (const Conflict&) { rejected = true; }
+    try { configureWebIdentities(store,link,cb); } catch (const Conflict&) { rejected = true; }
     check(rejected,"symlink identity file accepted");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
@@ -862,6 +863,7 @@ int main() {
         peerConversation(directory.path / "peer-conversations.db");
         accessEndpoints(directory.path / "access.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
+        channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

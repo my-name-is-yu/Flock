@@ -7,8 +7,7 @@
 #include <filesystem>
 #include <map>
 
-namespace web_test {
-using namespace flockv0;
+namespace flockv0::http_test {
 
 inline constexpr auto privateValue = "private-token-value";
 
@@ -114,5 +113,6 @@ public:
 
 inline void tick(Runtime& runtime, int count) { for (int i = 0; i < count; ++i) runtime.tick(); }
 
-void boardInboxEndpoints(const std::filesystem::path& path);
+void boardInboxEndpoints(const std::filesystem::path&);
+void channelEndpoints(const std::filesystem::path&);
 }

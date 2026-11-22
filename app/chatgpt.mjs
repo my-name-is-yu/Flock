@@ -10,6 +10,7 @@ const directScope = "chatgpt.tokens.use.direct";
 const scopes = `openid profile email offline_access resource.invoke ${directScope}`;
 const callbackPath = "/auth/callback";
 const maxResponse = 4 * 1024 * 1024;
+const maxRequest = 8 * 1024 * 1024;
 const random = () => randomBytes(32).toString("base64url");
 const [operation, directory, inheritedLock] = process.argv.slice(2);
 const lockDescriptor = Number(inheritedLock);
@@ -431,9 +432,11 @@ async function infer(payload) {
 try {
   if (!locked) throw new Failure("Flock's ChatGPT transport requires an inherited credential lock");
   let payload = "";
+  let requestBytes = 0;
   for await (const chunk of process.stdin.setEncoding("utf8")) {
+    requestBytes += Buffer.byteLength(chunk);
+    if (requestBytes > maxRequest) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
     payload += chunk;
-    if (payload.length > maxResponse) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
   }
   const input = JSON.parse(payload);
   let result;

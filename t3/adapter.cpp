@@ -10,7 +10,7 @@ namespace t3detail {
 namespace {
 using Outcome = Delivery::Kind;
 using Observed = Observation::Kind;
-using Position = std::int64_t;
+using Position = Id;
 using Clock = std::chrono::steady_clock;
 constexpr int ExcerptChars = 2730; // T3 uses UTF-16 offsets. 2730 code units occupy at most 8190 UTF-8 bytes.
 constexpr int PageSize = 30;
@@ -50,31 +50,6 @@ bool active(std::string_view status) {
 
 bool hasRun(const RunRef& run) { return !run.threadId.empty() && !run.runId.empty(); }
 
-const Json& member(const Json& object, const char* key) {
-    const auto field = object.find(key);
-    if (field == object.end()) invalidResponse();
-    return *field;
-}
-
-const Json& array(const Json& object, const char* key) {
-    const auto& field = member(object, key);
-    if (!field.is_array()) invalidResponse();
-    return field;
-}
-
-bool boolean(const Json& object, const char* key) {
-    const auto& field = member(object, key);
-    if (!field.is_boolean()) invalidResponse();
-    return field.get<bool>();
-}
-
-Position position(const Json& value) {
-    if (!value.is_number_integer()) invalidResponse();
-    const auto number = value.get<Position>();
-    if (number < 0 || number > 9007199254740991) invalidResponse();
-    return number;
-}
-
 std::optional<Position> cursor(const Json& response, const char* key) {
     const auto& value = member(response, key);
     return value.is_null() ? std::nullopt : std::optional(position(value));
@@ -84,7 +59,7 @@ Position readCursor(const std::string& text) {
     if (text.empty()) return -1;
     Position parsed = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
-    if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > 9007199254740991)
+    if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > maxHistoryPosition)
         throw Failure(Failure::Kind::Settings, "Invalid T3 history cursor");
     return parsed;
 }
@@ -96,18 +71,11 @@ const Json& detail(const Json& response, const std::string& threadId) {
 }
 
 Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
-    auto page = client.call(ThreadRead, {{"threadId", threadId}, {"view", "messages"},
-                                         {"limit", 1}, {"maxCharsPerItem", 32}, {"runLimit", runLimit}});
-    detail(page, threadId);
-    return page;
-}
-
-bool local(const Json& item, const std::string& threadId) {
-    return str(item, "sourceThreadId") == threadId && str(item, "visibility") == "local";
+    return readThread(client,threadId,"messages",1,32,Json::object(),runLimit);
 }
 
 bool fromRun(const Json& item, const RunRef& run) {
-    return local(item, run.threadId) && str(item, "runId") == run.runId;
+    return localItem(item, run.threadId) && str(item, "runId") == run.runId;
 }
 
 template<typename Visit>
@@ -115,19 +83,13 @@ bool walkThreadHistoryForward(Client& client, Scan& scan, const std::string& thr
           int maxChars, Position after, Visit visit) {
     for (;;) {
         scan.step();
-        const auto page = client.call(ThreadRead, {{"threadId", threadId}, {"view", view}, {"limit", PageSize},
-            {"runLimit", 1}, {"maxCharsPerItem", maxChars}, {"afterPosition", after}});
-        detail(page, threadId);
-        const auto& items = array(page, "items");
         const auto start = after;
-        for (const auto& item : items) {
-            const auto next = position(member(item, "position"));
-            if (next <= after) invalidResponse();
-            after = next;
+        const auto page = readThread(client,threadId,view,PageSize,maxChars,{{"afterPosition",after}});
+        for (const auto& item : array(page,"items")) {
+            advancePosition(item,after);
             if (!visit(item)) return false;
         }
-        if (!boolean(page, "hasMore")) return true;
-        if (after <= start || cursor(page, "nextPosition") != after) invalidResponse();
+        if (!moreHistory(page,after,start)) return true;
     }
 }
 
@@ -146,10 +108,8 @@ TextPage itemText(const Json& item, std::size_t offset = 0) {
 
 Json readItem(Client& client, const std::string& threadId, std::string_view view,
               const std::string& itemId, std::size_t offset, int chars = ExcerptChars) {
-    if (itemId.empty() || offset > 9007199254740991ULL) invalidResponse();
-    const auto response = client.call(ThreadRead, {{"threadId", threadId}, {"view", view}, {"limit", 1},
-        {"runLimit", 1}, {"maxCharsPerItem", chars}, {"itemId", itemId}, {"textOffset", offset}});
-    detail(response, threadId);
+    if (itemId.empty() || offset > maxHistoryPosition) invalidResponse();
+    const auto response = readThread(client,threadId,view,1,chars,{{"itemId",itemId},{"textOffset",offset}});
     const auto& items = array(response, "items");
     if (items.size() != 1 || str(items.front(), "itemId") != itemId) invalidResponse();
     return items.front();
@@ -249,7 +209,7 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
     std::map<std::string,DelegatedChild> children;
     Scan scan;
     const bool complete = walkThreadHistoryForward(client,scan,requested.threadId,"activity",700,-1,[&](const Json& item) {
-        if (!local(item,requested.threadId)) return true;
+        if (!localItem(item,requested.threadId)) return true;
         const auto run = str(item,"runId");
         const auto type = str(item,"type");
         if (type == "subagent") {
@@ -434,7 +394,8 @@ Delivery failureDelivery(const Failure& failure) {
 
 Delivery workReply(const Failure& failure) {
     auto reply = failureDelivery(failure);
-    reply.definitelyUnsent = failure.kind == Failure::Kind::Auth || failure.reason == Failure::Reason::WorkSettings;
+    reply.definitelyUnsent = failure.kind == Failure::Kind::Auth || failure.reason == Failure::Reason::WorkSettings ||
+                             failure.reason == Failure::Reason::ProjectNotFound;
     return reply;
 }
 
@@ -486,7 +447,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
-            if (str(item, "type") != "user_message" || !local(item, threadId)) return true;
+            if (str(item, "type") != "user_message" || !localItem(item, threadId)) return true;
             const auto text = itemText(item);
             const bool possible = text.more ? expected.starts_with(text.text) : expected == text.text;
             if (possible && str(item, "createdBy") == "agent" && str(item, "creationSource") == "mcp" &&
@@ -820,6 +781,23 @@ public:
             return true;
         });
         return excerpt;
+    }
+
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
+        return t3detail::sessionMetadata(directory_,target,includeMessages);
+    }
+    std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
+        return t3detail::sessionEvents(directory_,target,filter);
+    }
+    std::optional<SessionEvent> sessionEvent(const SessionTarget& target, std::string_view id) override {
+        return t3detail::sessionEvent(directory_,target,id);
+    }
+    std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
+        return t3detail::sessionCounts(directory_,target);
+    }
+    std::optional<SessionAttachment> sessionAttachment(const SessionTarget& target, std::string_view item,
+                                                       std::string_view attachment) override {
+        return t3detail::sessionAttachment(directory_,target,item,attachment);
     }
 
 private:
