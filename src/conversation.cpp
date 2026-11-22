@@ -73,8 +73,6 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     return revision;
 }
 
-// True while a message of this Bot has not been read yet. A turn paused for a model call approval does not hold
-// completion: it may wait indefinitely, and once approved it sees the tasks as they are then.
 bool Store::Impl::conversationPending(std::string_view bot) const {
     return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
                  " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();

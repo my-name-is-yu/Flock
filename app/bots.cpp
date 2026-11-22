@@ -170,7 +170,6 @@ void saveProfile(const std::filesystem::path& dir, Json& config, const AvatarIma
         writeAtomic(target,profileText(config));
         return;
     }
-    // The config rename commits the image. Leave the previous image readable until then.
     for (unsigned index = 0; ; ++index) {
         const auto name = upload->storageFilename(index);
         if (name == previousFile) continue;
@@ -382,7 +381,7 @@ Bot configuredBot(std::string_view id, const Json& config) {
     return bot;
 }
 
-} // namespace
+}
 
 Bot Bots::get(std::string_view id) const {
     return configuredBot(id,readBotConfig(path(id) / "config.json"));

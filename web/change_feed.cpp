@@ -20,7 +20,6 @@ ChangeFeed::~ChangeFeed() { stop(); }
 
 std::optional<ChangeFeed::Cursor> ChangeFeed::subscribe(const Scope& view) {
     std::lock_guard lock(mutex_);
-    // Each stream holds an HTTP worker. Leave capacity for ordinary requests.
     constexpr std::size_t maxSubscribers = 3;
     if (stopping_ || subscribers_ >= maxSubscribers) return std::nullopt;
     Cursor cursor{{BotList{},0},{view,0}};
@@ -95,7 +94,6 @@ std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes
         item->second.snapshot = std::move(snapshot);
         item->second.revision = ++revision_;
     }
-    // An older message can change delivery status without changing the latest page.
     for (const auto& [bot,ids] : changes.messages) {
         const auto item = watched_.find(BotView{bot});
         if (item != watched_.end() && item->second.revision <= previousRevision)

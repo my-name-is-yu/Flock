@@ -876,7 +876,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto fixedPromptBytes = sessionPrompt(action,actionTag).size();
             const auto limit = fixedPromptBytes >= maxSessionPromptBytes ? 0 :
                 maxSessionPromptBytes - fixedPromptBytes;
-            // Fit current directions first. Deferred directions stay pending until a later command accepts them.
             const auto goalBytes = goal.empty() || instruction.find(goal) != instruction.npos ? 0 :
                 intentHeading.size() + goal.size();
             const auto criteriaBytes = criteria.empty() || instruction.find(criteria) != instruction.npos ? 0 :
@@ -893,7 +892,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             std::size_t historyBytes = 0;
             for (const auto& item : earlier) historyBytes += item.at("text").get_ref<const std::string&>().size() + 2;
             if (historyBytes + references.size() > available) {
-                // Only reclaim space used by real reference labels and excerpts.
                 const auto originalReferenceBytes = references.size();
                 const auto contextBase = instruction;
                 earlier = db.sessionInstructions(task,goal,pending,
@@ -1198,14 +1196,12 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         });
     }
 
-    // An unfinished conversation turn can still change any task of its Bot. Call alongside the closing write.
     bool deferUntilTurnsFinish(const Json& current, Id eventId, const Decision& decision) {
         if (!db.conversationPending(field(current,"botId"))) return false;
         auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,current["id"]});
         if (!row.next()) return true;
         auto data = row.json(0);
         data["_flockDeferredCompletion"] = true;
-        // Preserve the task generation and reuse the decision if the turn leaves the task unchanged.
         data["_flockSavedCompletion"] = {{"generation",current["generation"]},{"tool",decision.tool},
             {"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
         db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,current["id"]});
@@ -1269,7 +1265,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 (!present(text) && !(text.empty() && args.value("forwardUserMessage",false))))
                 throw Conflict("A Bot message requires text or a forwarded user message");
             if (tool == "reply_to_bot") {
-                // Check unfinished turns in the same transaction that closes the exchange.
                 const auto kind = field(args,"kind");
                 std::lock_guard lock(db.mutex);
                 Transaction transaction(db.db);

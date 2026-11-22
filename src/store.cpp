@@ -185,7 +185,6 @@ void Store::Impl::save(Json& task) {
 }
 
 namespace {
-// Rank the whole queue so a task's owner can be off-page or belong to another Bot.
 // CROSS JOIN visits the requested IDs first. An empty request set never opens the queue.
 const std::string queueBlockers = R"SQL(
 queue AS (
@@ -350,7 +349,6 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     std::lock_guard lock(mutex);
     std::map<std::pair<Id,int>,Json> byMessage;
     std::size_t sourceBytes = 8192;
-    // A live move overrides another destination. On replay, only its work revision can still apply.
     const auto workKey = [](const Json& item) -> std::string {
         if (item.contains("doneWhen")) return "criteria";
         if (item.contains("intent")) return "intent";
@@ -360,7 +358,6 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
     for (const auto& item : pending) replaced.insert(workKey(item));
     const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
 
-    // Newest first, so a later change supersedes earlier directions with the same replacement key.
     const auto remember = [&](Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
         const bool mixedRouteAndWork = item.contains("environmentId") &&
             (item.contains("intent") || item.contains("doneWhen"));
@@ -723,7 +720,6 @@ std::pair<Id,Json> Store::sessionChangesSince(std::string_view bot, std::optiona
     const auto through = newest.number(0);
     auto tasks = Json::array();
     if (after && *after < through) {
-        // Start with the new journal entries, even for a Bot with many historical tasks.
         auto rows = p_->query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
 WHERE j.kind='run_started' AND j.id>? AND j.id<=? AND t.bot_id=?
@@ -776,7 +772,6 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
                 AND json_extract(data,'$.messageId')=+m.id
               )
-              -- min() requires every instruction to be delivered and yields NULL for an ordinary message.
               SELECT min(i.kind='instruction_steered' OR EXISTS (
                 SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
                 AND d.task_id=i.task_id AND d.step=i.step

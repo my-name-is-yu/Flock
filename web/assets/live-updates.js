@@ -1,7 +1,6 @@
 const pollDelay = 2500;
 const streamTimeout = 6000;
 
-// Each endpoint gets its own queue. Changes during a read need just one more read.
 export function coalescedRefresh(refresh) {
   let last = Promise.resolve();
   let pending;

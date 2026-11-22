@@ -1,5 +1,3 @@
-// Opt-in evaluation of conversation turns with a live model. It is not part of ctest.
-// Usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]
 #include "flock/core.hpp"
 #include "model.hpp"
 
@@ -25,7 +23,6 @@ struct Directory {
     ~Directory() { std::filesystem::remove_all(path); }
 };
 
-// The conversation uses the live model. Task decisions stay scripted so each scenario starts from known state.
 struct Mixed : Model {
     Model& live;
     std::map<std::string,Json> questions;
@@ -131,7 +128,6 @@ std::vector<Json> events(Scene& s, Id task, std::string_view kind) {
     return found;
 }
 
-// Everything the turn handed to the task: queued or steered instructions, plus any changed intent or criteria.
 std::string delivered(Scene& s, Id task, const Json& reply) {
     std::string text;
     for (const auto* kind : {"instruction_accepted","instruction_steered"})
@@ -146,7 +142,6 @@ bool stopped(Scene& s, Id task) {
     return state == "cancelled" || state == "cancelling" || !events(s,task,"cancel_requested").empty();
 }
 
-// A correct action followed by a cancellation in the same turn is still wrong.
 std::string untouched(Scene& s, const Json& reply, std::initializer_list<Id> tasks) {
     if (count(reply.at("actions"),"cancel_task")) return "the turn also cancelled work";
     for (const auto task : tasks)
@@ -190,7 +185,6 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         s.task("デスクトップ版のログイン画面を修正","desktop");
         const auto reply = s.send("その作業をキャンセルして");
         if (!reply.at("actions").empty()) return "work changed before the user identified a target";
-        // The first reply is free text. Score what happens when the user identifies the target.
         const auto followUp = s.send("モバイル版のほうです",reply.at("messageId").get<Id>());
         const auto& actions = followUp.at("actions");
         return actions.size() == 1 && count(actions,"cancel_task",mobile) == 1

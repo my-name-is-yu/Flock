@@ -16,7 +16,6 @@ export async function refreshEventHistory(history, latest, readOlder, isCurrent)
   }
 
   const changed = new Set(latest.changedMessageIds);
-  // Approving a paused turn reopens the original message and closes its budget reply in place.
   for (const event of history.events.values()) {
     if (event.kind === 'conversation_reply' && event.data.route === 'model_budget' && event.data.status === 'needs_you') {
       changed.add(event.id);
@@ -31,7 +30,6 @@ export async function refreshEventHistory(history, latest, readOlder, isCurrent)
   }
   if (!isCurrent()) return;
 
-  // Commit only after all reads succeed. Keep pages manually loaded during the refresh.
   history.olderBefore = history.newestEvent == null ? before : Math.min(history.olderBefore, before);
   for (const [id, event] of updates) history.events.set(id, event);
   history.newestEvent = latest.events.at(-1)?.id ?? history.newestEvent ?? 0;

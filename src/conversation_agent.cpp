@@ -116,7 +116,6 @@ Message Store::Impl::loadTurnMessage(Id id) const {
     if (!row.next()) throw Conflict("Conversation message is missing");
     Message message{id,row.number(0),row.string(1),row.string(2),row.json(3)};
     if (!message.replyTo || message.replyTo >= id) return message;
-    // Each Bot reply belongs to one turn. Follow only the explicit, earlier target of that user's message.
     auto anchor = query(R"SQL(
 WITH RECURSIVE targets(id) AS (
   VALUES(?)
@@ -700,7 +699,6 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND effect IS NOT NULL",
                                    {id,step});
                 if (saved.next()) {
-                    // The earlier attempt may have reached T3 before the restart. Report it instead of sending again.
                     exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=? AND result IS NULL",
                          {Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},{"delivery","unknown"},
                                {"error","Flock restarted while sending this, so T3 may have received it. "
@@ -722,7 +720,6 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             const auto outcome = performSessionEffect(t3,effect);
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            // Record what T3 did even if an older turn became runnable meanwhile.
             if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step}).next())
                 return true;
             if (outcome.value("ok",false)) {

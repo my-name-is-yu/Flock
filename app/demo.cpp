@@ -27,7 +27,6 @@ class DemoModel final : public Model {
             }
             if (reply.is_object() && reply.value("kind","") == "result")
                 return {"read_result",{{"messageId",reply["messageId"]}},"The user asked about a demo result."};
-            // A reply to the Bot's explanation of a result asks about that same result.
             if (reply.is_object() && reply.value("kind","") == "bot_message") {
                 const auto source = reply.value("inReplyTo",Json::object()).value("replyToMessageId",Json(nullptr));
                 if (!source.is_null())

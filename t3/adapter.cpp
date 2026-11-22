@@ -225,8 +225,6 @@ bool consumeCompletion(const CompletionNotice& notice, std::map<std::string,Dele
     return true;
 }
 
-// T3 wait reports thread-wide results. Only a chain of completion notifications
-// from children of already owned Runs can transfer ownership to a later Run.
 bool ownsResult(Client& client, const RunRef& requested, const std::string& effectiveRunId,
                 const std::string& resultRunId) {
     if (resultRunId == effectiveRunId || resultRunId == requested.runId) return true;
@@ -585,9 +583,7 @@ bool followUpReady(Client& client, const Command& command) {
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
 
-// Delivers a note into the assigned Run while it is still running. It never starts another Run.
 Delivery steer(Client& client, const Command& command, bool& invoked) {
-    // Like interrupt, an explicit wait resolves T3's own restart continuation of the assigned Run.
     const auto current = wait(client, command.target, false, 1);
     const auto effective = str(current, "runId");
     const auto head = threadHead(client, command.target.threadId);

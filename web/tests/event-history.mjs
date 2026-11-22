@@ -34,7 +34,6 @@ assert.equal(history.newestEvent, 5);
 assert.equal(history.olderBefore, 3);
 
 await refreshEventHistory(history, latest, before => {
-  // An earlier-history request finishes while reconnect is reading the missing pages.
   if (before === 7) {
     history.events.set(1, { id: 1 });
     history.olderBefore = 0;

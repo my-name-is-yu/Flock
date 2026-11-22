@@ -739,7 +739,6 @@ async function copyMessage(control, text) {
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  // A choice is a complete answer to this question, so it goes to the task without a conversation turn.
   for (const choice of task.wait.choices ?? []) {
     const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
       if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
@@ -1584,7 +1583,6 @@ function render(scroll) {
 
 function mergeSessionTasks(context, tasks) {
   for (const task of tasks) {
-    // Runs are append-only. A delayed history page must not hide a newer Session.
     if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
       context.loadedSessions.set(task.id, task);
   }
@@ -1668,7 +1666,6 @@ const refreshBots = coalescedRefresh(async () => {
     retrySync();
   }
 });
-// Serialize manual pages with refreshes of the same Bot so a late page cannot restore stale badges.
 function readTimeline(context, read) {
   const next = (context.pageRead ?? Promise.resolve()).then(read, read);
   context.pageRead = next;
