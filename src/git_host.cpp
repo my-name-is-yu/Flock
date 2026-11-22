@@ -283,7 +283,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
             const auto owner = webhook.at("taskId").get<Id>();
             if ((call.args.contains("taskId") && call.args.at("taskId") != owner) ||
                 field(call.args,"host") != field(webhook,"host") || field(call.args,"repo") != field(webhook,"repo") ||
-                !gitNotificationToolAllowed(call.tool,webhook,&call.args))
+                !gitNotificationToolAllowed(call,webhook))
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }

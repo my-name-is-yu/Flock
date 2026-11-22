@@ -53,7 +53,7 @@ private:
                 std::vector<std::string> expected{"reply","git_pr_status"};
                 if (gitEvent.at("headSha") != "") expected.push_back("git_commit_status");
                 if (gitEvent.at("jobId") != 0) expected.push_back("git_read_ci_logs");
-                check(std::ranges::is_permutation(input.tools,expected),"Webhook supplied tools outside its watched targets");
+                check(input.tools == expected,"Webhook supplied unexpected tools or changed their order");
                 if (gitEvent.at("jobId") == 81)
                     return {"git_read_ci_logs",{{"host",gitEvent.at("host")},{"repo",gitEvent.at("repo")},
                         {"jobId",gitEvent.at("jobId")},{"maxBytes",32}},{}};

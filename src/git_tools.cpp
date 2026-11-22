@@ -1,6 +1,7 @@
 #include "flock/git_host.hpp"
 
-#include <map>
+#include <algorithm>
+#include <stdexcept>
 
 namespace flockv0 {
 namespace {
@@ -23,8 +24,8 @@ struct Tool {
     const char* notificationField = nullptr;
 };
 
-const std::map<std::string_view,Tool>& specs() {
-    static const std::map<std::string_view,Tool> tools{
+const std::vector<std::pair<std::string_view,Tool>>& specs() {
+    static const std::vector<std::pair<std::string_view,Tool>> tools{
         {"git_find_repos",{"Find repositories with a repository:read grant on the connected host.",
             "read",{{"query","string","Optional case-insensitive substring of owner/repo.",false}}}},
         {"git_repo_info",{"Read repository details using repository:read.","read",{}}},
@@ -37,6 +38,7 @@ const std::map<std::string_view,Tool>& specs() {
             "pr",{{"prNumber","integer","Exact PR number."},{"title","string","New title.",false},
              {"body","string","New description.",false},{"baseRef","string","New base branch.",false},
              {"state","string","New PR state.",false,{{"open"},{"closed"}}}}}},
+        // Notification tools are presented in declaration order.
         {"git_pr_status",{"Read PR state and head commit using repository:read.",
             "read",{{"prNumber","integer","Exact PR number."}},"prNumber"}},
         {"git_commit_status",{"Read commit statuses and checks using repository:read.",
@@ -66,24 +68,38 @@ const std::map<std::string_view,Tool>& specs() {
     };
     return tools;
 }
+
+const Tool* findSpec(std::string_view name) {
+    const auto& tools = specs();
+    const auto tool = std::ranges::find_if(tools,[&](const auto& entry) { return entry.first == name; });
+    return tool != tools.end() ? &tool->second : nullptr;
+}
+
+const Json* notificationTarget(const Tool& spec, const Json& event) {
+    if (spec.operation != "read" || !spec.notificationArgument) return nullptr;
+    const auto target = event.find(spec.notificationField ? spec.notificationField : spec.notificationArgument);
+    if (target == event.end()) return nullptr;
+    if (target->is_string() ? *target == "" : !target->is_number_integer() || *target <= 0) return nullptr;
+    return &*target;
+}
 }
 
 const std::vector<std::string>& gitTools() {
     static const auto names = [] {
         std::vector<std::string> result;
         for (const auto& [name,spec] : specs()) result.emplace_back(name);
+        std::ranges::sort(result);
         return result;
     }();
     return names;
 }
-bool isGitTool(std::string_view tool) { return specs().contains(tool); }
+bool isGitTool(std::string_view tool) { return findSpec(tool) != nullptr; }
 
 std::string_view gitOperation(const Decision& call) {
-    const auto tool = specs().find(call.tool);
-    if (tool == specs().end()) return {};
-    const auto& spec = tool->second;
-    if (!spec.operation.empty()) return spec.operation;
-    for (const auto& param : spec.params) {
+    const auto* spec = findSpec(call.tool);
+    if (!spec) return {};
+    if (!spec->operation.empty()) return spec->operation;
+    for (const auto& param : spec->params) {
         const auto argument = call.args.find(param.name);
         if (argument == call.args.end()) continue;
         for (const auto& choice : param.choices)
@@ -92,21 +108,22 @@ std::string_view gitOperation(const Decision& call) {
     return {};
 }
 
-bool gitNotificationToolAllowed(std::string_view name, const Json& event, const Json* args) {
-    const auto tool = specs().find(name);
-    if (tool == specs().end()) return false;
-    const auto& spec = tool->second;
-    if (spec.operation != "read" || !spec.notificationArgument) return false;
-    const auto target = event.find(spec.notificationField ? spec.notificationField : spec.notificationArgument);
-    if (target == event.end()) return false;
-    if (target->is_string() ? *target == "" : !target->is_number_integer() || *target <= 0) return false;
-    if (!args) return true;
-    const auto argument = args->find(spec.notificationArgument);
-    return argument != args->end() && *argument == *target;
+void appendGitNotificationTools(const Json& event, std::vector<std::string>& tools) {
+    for (const auto& [name,spec] : specs())
+        if (notificationTarget(spec,event)) tools.emplace_back(name);
+}
+
+bool gitNotificationToolAllowed(const Decision& call, const Json& event) {
+    const auto* spec = findSpec(call.tool);
+    const auto* target = spec ? notificationTarget(*spec,event) : nullptr;
+    if (!target) return false;
+    const auto argument = call.args.find(spec->notificationArgument);
+    return argument != call.args.end() && *argument == *target;
 }
 
 Json gitToolSchema(std::string_view name, bool conversation) {
-    const auto& spec = specs().at(name);
+    const auto* spec = findSpec(name);
+    if (!spec) throw std::out_of_range("Unknown Git tool");
     Json properties{{"host",{{"type","string"},{"description","Connected Git host, for example github.com."}}},
                     {"reason",{{"type","string"},{"description","Evidence and reason for the action."}}}};
     Json required = {"host","reason"};
@@ -117,8 +134,8 @@ Json gitToolSchema(std::string_view name, bool conversation) {
             properties["taskId"] = {{"type","integer"},{"minimum",1},{"description","Task owned by this Bot. Required for mutations."}};
     }
     const auto taskIdPosition = required.size();
-    bool mayRead = spec.operation == "read";
-    for (const auto& param : spec.params) {
+    bool mayRead = spec->operation == "read";
+    for (const auto& param : spec->params) {
         Json property{{"type",param.type},{"description",param.description}};
         if (property["type"] == "integer") property["minimum"] = 1;
         if (property["type"] == "array") property["items"] = {{"type","string"}};
@@ -132,7 +149,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
     if (properties.contains("taskId") && !mayRead) required.insert(required.begin() + taskIdPosition,"taskId");
     if (name == "git_read_ci_logs") properties["maxBytes"]["maximum"] = 16384;
     if (name == "git_manage_issue") properties["page"]["maximum"] = 10000;
-    return {{"type","function"},{"name",name},{"description",spec.description},{"strict",false},
+    return {{"type","function"},{"name",name},{"description",spec->description},{"strict",false},
         {"parameters",{{"type","object"},{"properties",properties},{"required",required},{"additionalProperties",false}}}};
 }
 }
