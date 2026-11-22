@@ -308,8 +308,11 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
-                    if (req.path == "/api/view") json(res,200,store_.access().redactSecrets(id,web::botView(store_,*bot)));
-                    else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
+                    if (req.path == "/api/view") {
+                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot));
+                        view["bot"]["id"] = id;
+                        json(res,200,view);
+                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
@@ -405,12 +408,12 @@ private:
                 if (store_.access().redactSecrets(botId,parsed.profile) != parsed.profile)
                     return error(res,400,"invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
-                return json(res,200,store_.access().redactSecrets(botId,web::botSettings(saved)));
+                return json(res,200,redactBot(botId,web::botSettings(saved)));
             }
             if (!web::person(callbacks_,req).adminRoot) return error(res,403,"access_denied");
             auto parsed = parseBotProfile(body,true,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
-            return json(res,201,store_.access().redactSecrets(web::field(created,"id"),web::botSettings(created)));
+            return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
@@ -418,8 +421,13 @@ private:
     Json bots() const {
         auto list = callbacks_.bots();
         if (!list.is_array()) throw std::runtime_error("Bot descriptors must be an array");
-        for (auto& bot : list) bot = store_.access().redactSecrets(web::field(bot,"id"),bot);
         return list;
+    }
+
+    Json redactBot(std::string_view id, const Json& view) const {
+        auto bot = store_.access().redactSecrets(id,view);
+        bot["id"] = id;
+        return bot;
     }
 
     Json findBot(std::string_view id) const {
@@ -456,10 +464,10 @@ private:
                 if (id != peer && store_.access().permitsPerson(person,peer,Role::view)) connections[id].insert(peer);
         }
         for (auto& bot : list) {
-            auto& entries = bot["peers"] = Json::array();
             const auto id = web::field(bot,"id");
+            bot = redactBot(id,bot);
+            auto& entries = bot["peers"] = Json::array();
             for (const auto& peer : connections[id]) entries.push_back({{"id",peer}});
-            bot = store_.access().redactSecrets(id,bot);
         }
         return list;
     }

@@ -687,7 +687,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
                            access.permits(cmd.ownerBotId,{"environment",cmd.environmentId,"launch"},true);
                 };
-                const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in /settings/"+cmd.ownerBotId+"/environment",true};
+                const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in Access Settings (/settings/" +
+                    cmd.ownerBotId + "/environment) or use 'flock access grant BOT environment ENVIRONMENT_ID launch'.",true};
                 if (!launchAllowed()) {
                     applyDelivery(id,action,denied);
                     return;

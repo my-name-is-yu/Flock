@@ -4,7 +4,7 @@ Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it 
 
 ## Build
 
-You need a C++20 compiler, CMake 3.24 or later, and the SQLite, libcurl, and OpenSSL development libraries. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
+You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, and OpenSSL. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
 
 ```sh
 cmake -S . -B build
@@ -64,7 +64,7 @@ Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to us
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. Additional instructions for an active task are saved for its next safe point, or the Bot can pass a note to the running Session right away. Asking the Bot to implement a completed result starts a new task linked to that result.
 
-To try Flock without signing in, configure a Bot in a test state directory and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
+To try Flock without signing in, follow the [offline demo setup](app/README.md#offline-demo) to configure a Bot, grant launch access, and use `run --fixed`. Two Bots with different `projectId` values can work independently. Run `flock submit release 'ask:Which branch should I use?'` to try a request that waits for input before the first delegation.
 
 ```sh
 build/app/flock --help

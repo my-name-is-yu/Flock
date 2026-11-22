@@ -84,9 +84,27 @@ build/app/flock history TASK_ID
 build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 ```
 
-For an offline demonstration, use a separate Flock home and start
-`flock run --fixed`, with `--no-web` if the build omits Web support. A request
-starting with `ask:` produces a demo Bot question, and replying lets the
+## Offline demo
+
+For an offline demonstration, set `FLOCK_HOME` to a separate directory and
+configure the `release` Bot there. Replace `ENVIRONMENT_ID` with the value of
+`environmentId` in its `config.json`. Grant launch access before submitting a
+task, then start the demo runtime.
+
+```sh
+build/app/flock access grant release environment ENVIRONMENT_ID launch
+build/app/flock run --fixed --no-web
+```
+
+In a second terminal using the same Flock home, submit a task.
+
+```sh
+build/app/flock submit release "Check the upcoming release"
+```
+
+Use `flock access list release` to see its grants and `flock access revoke
+release environment ENVIRONMENT_ID launch` to remove this grant. A request
+starting with `ask:` produces a demo Bot question. Answering it lets the
 fixture Session run to completion.
 
 ## Model call allowance

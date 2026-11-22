@@ -346,6 +346,21 @@ void exercise(const std::filesystem::path& path) {
     access.request("review",{"repository","github.com/org/after-restart","read"});
 }
 
+void protectedInputSource(const std::filesystem::path& path) {
+    Store store(path);
+    auto access = store.access();
+    const SecretRef ref{"report-credential"};
+    const auto routing = intake("report","Prepare the report","question");
+    const auto request = access.requestSecret("report",ref);
+    const auto source = store.receive(owner,routing,"secret","First request").at("messageId").get<Id>();
+    const auto repeat = store.receive(owner,routing,"repeat","Repeated request").at("messageId").get<Id>();
+    check(access.requestSecret("report",ref,source) == request &&
+          access.requestSecret("report",ref,repeat) == request,"repeated protected input changed its request ID");
+    const auto inbox = store.inbox(owner,"report");
+    check(inbox.size() == 1 && inbox.at(0).at("itemId") == request &&
+          inbox.at(0).at("request") == "First request","protected input lost its first conversation source");
+}
+
 void chatDecision(const std::filesystem::path& path) {
     Store store(path);
     auto access = store.access();
@@ -387,6 +402,7 @@ int main() {
         Directory directory;
         const auto path = directory.path/"state.db";
         exercise(path);
+        protectedInputSource(directory.path/"protected-input.db");
         chatDecision(directory.path/"chat.db");
         Store restarted(path);
         const auto history = restarted.decisionHistory(alice);

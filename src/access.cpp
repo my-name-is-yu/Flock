@@ -83,6 +83,7 @@ CREATE TRIGGER IF NOT EXISTS access_requested AFTER INSERT ON grant_requests BEG
 END;
 CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
  status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
+CREATE UNIQUE INDEX IF NOT EXISTS pending_secret ON protected_inputs(bot,name) WHERE status='pending';
 CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
 CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
  request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
@@ -341,9 +342,17 @@ Id Access::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMe
     if (!validBotId(bot) || !ref.valid()) throw Conflict("Invalid Bot or secret reference");
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({bot,ref.name});
-    db_.exec("INSERT INTO protected_inputs(bot,name,file,source_message_id) VALUES(?,?,?,?)",
-             {bot,ref.name,actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
-    return db_.last();
+    auto row = db_.query(R"SQL(
+INSERT INTO protected_inputs(bot,name,file,source_message_id)
+ SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE bot=?1 AND name=?2 AND status='fulfilled')
+ ON CONFLICT(bot,name) WHERE status='pending' DO UPDATE
+ SET source_message_id=coalesce(protected_inputs.source_message_id,excluded.source_message_id)
+ RETURNING id
+)SQL",{bot,ref.name,actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
+    if (!row.next()) throw Conflict("Protected input unavailable");
+    const auto id = row.number(0);
+    row.next();
+    return id;
 }
 
 void Access::submitSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
@@ -355,12 +364,16 @@ void Access::submitSecret(const Person& actor, std::string_view bot, Id request,
 
 void Access::fulfillSecret(const Person& actor, std::string_view bot, Id request, std::string_view value) {
     if (!permitsPerson(actor,bot,Role::admin)) throw DecisionDenied{};
-    auto row = db_.query("SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM protected_inputs filled WHERE filled.name=p.name AND filled.status='fulfilled')",{bot,request});
+    auto row = db_.query(R"SQL(
+SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pending'
+ AND NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=p.name AND status='fulfilled')
+)SQL",{bot,request});
     if (!row.next()) throw DecisionUnavailable{};
-    if (!holds(actor,{"secret",row.string(1),"use"})) throw DecisionDenied{};
-    if (value.empty() || row.string(1).find(value)!=std::string::npos) throw Conflict("Invalid protected value");
+    const auto name = row.string(1);
+    if (!holds(actor,{"secret",name,"use"})) throw DecisionDenied{};
+    if (value.empty() || name.find(value)!=name.npos || bot.find(value)!=bot.npos) throw Conflict("Invalid protected value");
     db_.redactor(bot).requirePublic(actor.id);
-    audit(actor,bot,"supply_secret",{{"requestId",request},{"resourceKind","secret"},{"resourceId",row.string(1)}});
+    audit(actor,bot,"supply_secret",{{"requestId",request},{"resourceKind","secret"},{"resourceId",name}});
     db_.recordInboxDecision(actor,{std::string(bot),InboxKind::protected_input,request,0,0,0,0},"supply");
     db_.exec("UPDATE protected_inputs SET status='fulfilled' WHERE id=?",{request});
     db_.secrets.insert({row.string(0)},value);

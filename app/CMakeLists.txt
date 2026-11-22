@@ -24,6 +24,9 @@ if(BUILD_TESTING)
   add_test(NAME flock_app COMMAND flock_app_tests)
   find_program(FLOCK_NODE_EXECUTABLE node)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_app_headless_access
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/headless-access.mjs" "$<TARGET_FILE:flock>")
+    set_tests_properties(flock_app_headless_access PROPERTIES TIMEOUT 20)
     add_test(NAME flock_app_login
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/login.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_login PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
