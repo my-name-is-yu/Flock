@@ -155,6 +155,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         migrateAccess();
         migrateConversation();
+        migrateChannels();
+        migrateLocalMachines();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
@@ -577,7 +579,18 @@ LEFT JOIN waits w ON page.kind='user_answer'
 WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
         {bot,bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(journalRow(rows));
+    while (rows.next()) {
+        auto event = journalRow(rows);
+        if (event["kind"] == "conversation_message") {
+            auto context = p_->channelContext(rows.number(0),bot);
+            if (context.contains("channel")) {
+                context["channel"].erase("sentMessages");
+                context["channel"].erase("capabilities");
+            }
+            event["data"].update(context);
+        }
+        result.push_back(std::move(event));
+    }
     std::reverse(result.begin(),result.end());
     return result;
 }

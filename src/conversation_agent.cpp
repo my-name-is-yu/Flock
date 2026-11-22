@@ -19,6 +19,10 @@ struct conversation::Message {
 namespace {
 using conversation::Message;
 
+const std::vector<std::string> channelTools{"channel_edit_message","channel_react","channel_send_attachment",
+    "publish_artifact","read_channel_attachment"};
+const std::vector<std::string> localTools{"request_local_machine_connection","run_local_machine_operation"};
+
 constexpr int activeTaskLimit = 12;
 constexpr int terminalTaskLimit = 8;
 constexpr int historyLimit = 24;
@@ -185,6 +189,9 @@ ORDER BY id DESC LIMIT 1
         Json view = {{"taskId",taskId},{"request",bounded(field(task,"request"),800)},
                      {"environmentId",field(task,"environmentId")}};
         view.update(taskState(task,message.id));
+        if (!localMachines.empty() && task.value("activeRun",Json()).is_object())
+            view["activeSession"] = {{"threadId",field(task.at("activeRun"),"threadId")},
+                                     {"runId",field(task.at("activeRun"),"runId")}};
         if (task.contains("sourceTaskId")) view["sourceTaskId"] = task.at("sourceTaskId");
         if (auto result = latestResult(taskId); !result.is_null()) view["latestResult"] = std::move(result);
         tasks.push_back(std::move(view));
@@ -299,17 +306,29 @@ ORDER BY j.id DESC LIMIT ?
         }
     }
 
+    const auto channel = channelContext(message.id,message.bot);
     Json turn = Json::array();
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
                        " AND result IS NOT NULL ORDER BY step",{message.id,step});
     while (steps.next()) {
         const auto decision = steps.json(0);
-        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
+        auto args = decision.at("args");
+        if (args.is_object() && decision["tool"] == "channel_send_attachment") args.erase("contentBase64");
+        if (args.is_object() && decision["tool"] == "publish_artifact") args.erase("html");
+        auto result = channelToolStatus(steps.json(1));
+        if (decision["tool"] == "read_channel_attachment" && !channel.contains("attachments"))
+            result = {{"ok",false},{"error","Channel attachment permission is no longer granted"}};
+        turn.push_back({{"tool",decision.at("tool")},{"args",std::move(args)},{"result",std::move(result)}});
     }
-    return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
-            {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
-            {"history",std::move(history)}};
+    Json event{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
+               {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
+    event.update(channel);
+    Json machines = Json::array();
+    for (const auto& [id,machine] : localMachines)
+        if (Access(const_cast<Impl&>(*this)).permitsPerson({std::string(machine->owner()),false},message.bot,Role::decide))
+            machines.push_back(id);
+    return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)},
+                     {"localMachines",std::move(machines)}}},{"event",std::move(event)},{"history",std::move(history)}};
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision) {
@@ -318,6 +337,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     const auto& tool = decision.tool;
     const auto& bot = message.bot;
     const auto& routing = message.routing;
+    if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;
+    if (auto result = localMachineTool(bot,decision); !result.is_null()) return result;
     if (auto result = accessTool(bot,routing,decision); !result.is_null()) {
         result["ok"] = true;
         return result;
@@ -536,10 +557,12 @@ Json performSessionEffect(T3& t3, const Json& effect) {
 void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route) {
     Json actions = Json::array();
     std::set<Id> touched;
+    Json artifacts = Json::array();
     auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND result IS NOT NULL"
                        " ORDER BY step",{message.id});
     while (steps.next()) {
         const auto result = steps.json(1);
+        if (result.contains("artifact")) artifacts.push_back(result.at("artifact"));
         if (!result.value("ok",false) || !result.contains("effect")) continue;
         actions.push_back({{"tool",steps.json(0).at("tool")},{"taskId",result.at("taskId")},{"effect",result.at("effect")}});
         touched.insert(result.at("taskId").get<Id>());
@@ -559,7 +582,9 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     const auto reply = last();
     Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",redactor(message.bot).text(text)},{"route",route},
                  {"status",status},{"actions",actions}};
-    if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = suggestions;
+    if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = redactor(message.bot).payload(suggestions);
+    if (!artifacts.empty()) data["artifacts"] = std::move(artifacts);
+    queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=?,data=? WHERE id=?",{linked,Json{{"status",status}},message.id});
     exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
@@ -571,10 +596,11 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_reply','{}',?)",
          {unixTime(),message.bot});
     const auto reply = last();
-    exec("UPDATE journal SET data=? WHERE id=?",
-         {Json{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
-               {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
-                          : "The model call limit is exhausted. Approve one more model call to continue."}},reply});
+    const Json data{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
+                    {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
+                               : "The model call limit is exhausted. Approve one more model call to continue."}};
+    exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
+    queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=json_object('status','needs_you') WHERE id=?",{message.id});
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
@@ -611,6 +637,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
+        deliverChannels();
         std::optional<Decision> decision;
         {
             std::lock_guard lock(mutex);
@@ -635,7 +662,12 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 if (!turnMessage(id)) return true;
                 const auto context = turnInput(*message,step);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
-                         .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
+                         .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config"),
+                         .images = channelImages(id,message->bot)};
+                if (input.event.contains("channel"))
+                    input.tools.insert(input.tools.end(),channelTools.begin(),channelTools.end());
+                if (!input.task.at("localMachines").empty())
+                    input.tools.insert(input.tools.end(),localTools.begin(),localTools.end());
                 auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
                                       " AND reserved_attempt IS NOT NULL",{id});
                 if (reserved.next()) {

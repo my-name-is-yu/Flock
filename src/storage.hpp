@@ -1,5 +1,6 @@
 #pragma once
-#include "flock/access.hpp"
+#include "flock/channels.hpp"
+#include <map>
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -59,7 +60,24 @@ struct Store::Impl {
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
+    std::map<ChannelKind,std::shared_ptr<ChannelConnector>> channels;
+    std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
+    std::string artifactOrigin;
+    std::mutex deliveryMutex;
     void migrateAccess();
+    void migrateChannels();
+    void migrateLocalMachines();
+    void saveChannelMessage(Id, const VerifiedChannelMessage&, bool replay);
+    Json channelContext(Id, std::string_view bot) const;
+    Json channelImages(Id, std::string_view bot) const;
+    Json channelTool(Id, std::string_view bot, const Decision&);
+    void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
+    Json localMachineTool(std::string_view bot, const Decision&);
+    void queueChannelReply(Id source, Id reply, const Json&);
+    void deliverChannels();
+    Json channelToolStatus(Json) const;
+    bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view person,
+                        std::string_view operation) const;
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);

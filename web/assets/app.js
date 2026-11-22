@@ -831,6 +831,21 @@ function eventCard(event, context, place) {
       extras.push(note);
     }
   }
+  for (const file of data.attachments ?? []) {
+    const link = node('a', 'button', file.name);
+    link.href = '/api/channels/attachments/' + encodeURIComponent(file.id);
+    link.download = file.name;
+    extras.push(link);
+  }
+  for (const artifact of data.artifacts ?? []) {
+    const preview = new URL(artifact.url, location.origin);
+    if (!preview.pathname.startsWith('/api/artifacts/')) continue;
+    const link = node('a', 'button', artifact.title);
+    link.href = preview.pathname;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    extras.push(link);
+  }
   if (copy) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);

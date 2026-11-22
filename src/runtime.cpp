@@ -113,6 +113,7 @@ struct Runtime::Impl {
     T3& t3;
     NotesLoader notes;
     RuntimeOptions options;
+    std::future<void> channelWorker;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
@@ -137,6 +138,7 @@ struct Runtime::Impl {
     ~Impl() {
         conversationWorkers.clear();
         workers.clear();
+        if (channelWorker.valid()) channelWorker.wait();
         close(lockFd);
     }
 
@@ -1508,11 +1510,13 @@ Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeO
     : p_(std::make_unique<Impl>(store,model,t3,std::move(notes),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
+    p_->db.deliverChannels();
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
         if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
     }
+    p_->db.deliverChannels();
 }
 void Runtime::tick() {
     runConversations();
@@ -1530,6 +1534,11 @@ void Runtime::tickConcurrent() {
     };
     collect(p_->conversationWorkers);
     collect(p_->workers);
+    if (!p_->channelWorker.valid() ||
+        p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        if (p_->channelWorker.valid()) p_->channelWorker.get();
+        p_->channelWorker = std::async(std::launch::async,[db = &p_->db] { db->deliverChannels(); });
+    }
     constexpr auto maxConversationWorkers = 4u;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {
         for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {

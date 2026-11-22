@@ -49,6 +49,7 @@ struct ModelInput {
     std::string feedback;
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
+    Json images = Json::array();
 
 };
 struct ModelError : std::runtime_error {
@@ -119,6 +120,12 @@ public:
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
+class ChannelConnector;
+class LocalMachine;
+enum class ChannelKind;
+struct Person;
+struct ChannelResource;
+struct VerifiedChannelMessage;
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -154,9 +161,21 @@ public:
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
     std::vector<std::string> peerPartners(std::string_view bot) const;
+    void connectChannel(std::shared_ptr<ChannelConnector>);
+    void artifactBaseUrl(std::string url);
+    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event,
+                        const std::function<Intake(std::string_view, std::string_view)>& routing);
+    std::optional<ChannelResource> artifact(std::string_view id) const;
+    std::optional<ChannelResource> attachment(const Person&, Id id) const;
+    void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
+    Json localConnections(const Person&) const;
+    void decideLocalConnection(const Person&, Id id, bool approve);
+    void disconnectLocalConnection(const Person&, Id id);
     const std::filesystem::path& path() const;
 
 private:
+    Json receive(const Intake&, std::string_view clientMessageId, std::string_view text,
+                 Id replyToMessageId, const VerifiedChannelMessage*);
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;

@@ -98,3 +98,63 @@ resolving additional scoped resources. The transport must establish the calling 
 A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
 adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
 External adapters must call these checks for each protected operation.
+
+### Slack, iMessage, and local machines
+
+Set `FLOCK_CHANNEL_BRIDGES_FILE` to a host-controlled JSON file before starting
+`flock run`. Each channel workspace points to a provider bridge on
+`127.0.0.1` and links provider sender IDs to Flock identities and Bots.
+
+```json
+{
+  "slack": {
+    "T123": {
+      "bridgePort": 3410,
+      "credentialEnv": "SLACK_BRIDGE_KEY",
+      "senders": {"U123": {"personId": "alice", "botId": "release"}}
+    }
+  },
+  "imessage": {
+    "messages-on-mac": {
+      "bridgePort": 3411,
+      "credentialEnv": "IMESSAGE_BRIDGE_KEY",
+      "senders": {"linked-sender": {"personId": "alice", "botId": "release"}}
+    }
+  },
+  "artifactBaseUrl": "https://previews.example.com",
+  "localMachines": {"laptop": "alice"}
+}
+```
+
+Use a separate random bearer credential of at least 32 characters for each
+workspace. Configure Flock Web identities and grant each linked person the
+Bot's `decide` role. Grant the Bot `use` and `read` on the `service` resource
+identified by `["slack","T123"]` or `["imessage","messages-on-mac"]`.
+
+The provider bridge authenticates native events and retrieves attachment
+bytes. It sends normalized JSON with `workspaceId`, `threadRef`,
+`externalMessageId`, `senderId`, `text`, and optional `attachments` to
+`POST /api/channels/slack/events` or `POST /api/channels/imessage/events`.
+Each attachment has `name`, `mimeType`, and `contentBase64`. Use the workspace
+bearer credential. Keep the same external message and thread identifiers for
+retries. A Slack thread reference must identify both the channel and the thread.
+
+Flock calls the bridge's `POST /deliver` with `idempotencyKey`, `origin`,
+`operation`, and `payload`. `POST /reconcile` receives the same key and
+origin. The bridge persists the delivery identity and returns JSON with
+`state` set to `accepted`, `unknown`, `not_sent`, or `rejected`.
+Include the provider's `externalMessageId` for an accepted post. Return
+`not_sent` only with definitive evidence that a send has no provider effect.
+This allows Flock to retry with the same key. The bridge should apply
+`suggestions` from the reply payload using the channel's available controls
+or plain text.
+
+Expose only the artifact preview path at the optional HTTPS
+`artifactBaseUrl` if recipients need it remotely. Published links contain
+random access tokens and serve sandboxed HTML.
+
+Local machine entries name the Flock host and its owner. The owner can review
+requests under **Bot access settings → Local machine connections**. Each
+approval lists exact absolute paths for `read_file` or `list_directory`
+within one active Session. The host adapter opens paths without following
+symlinks. Reusable execution environments are configured through Bot settings.

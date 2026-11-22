@@ -23,6 +23,7 @@ struct WebCallbacks {
     std::function<Person(std::string_view authorization)> authenticate = {};
     ApplyBotChange applyBotChange = {};
 };
+void configureChannelBridges(Store&, const std::filesystem::path&);
 std::function<Person(std::string_view)> webIdentities(const std::filesystem::path&);
 class WebServer {
 public:

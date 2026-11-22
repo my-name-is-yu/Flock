@@ -184,6 +184,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
 #ifdef FLOCK_WITH_WEB
+    if (const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE")) configureChannelBridges(store,bridges);
     std::unique_ptr<WebServer> server;
     if (web) {
         const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");

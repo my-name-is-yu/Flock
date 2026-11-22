@@ -10,6 +10,7 @@ const directScope = "chatgpt.tokens.use.direct";
 const scopes = `openid profile email offline_access resource.invoke ${directScope}`;
 const callbackPath = "/auth/callback";
 const maxResponse = 4 * 1024 * 1024;
+const maxRequest = 8 * 1024 * 1024;
 const random = () => randomBytes(32).toString("base64url");
 const [operation, directory, inheritedLock] = process.argv.slice(2);
 const lockDescriptor = Number(inheritedLock);
@@ -426,7 +427,7 @@ try {
   let payload = "";
   for await (const chunk of process.stdin.setEncoding("utf8")) {
     payload += chunk;
-    if (payload.length > maxResponse) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
+    if (payload.length > maxRequest) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
   }
   const input = JSON.parse(payload);
   let result;

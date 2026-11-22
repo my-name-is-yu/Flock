@@ -2,6 +2,7 @@
 #include "embedded_assets.hpp"
 #include "views.hpp"
 #include "access_routes.hpp"
+#include "channel_routes.hpp"
 
 #include <httplib.h>
 
@@ -272,6 +273,7 @@ public:
             error(res,404,"settings_not_found");
         });
         web::accessRoutes(server_,store_,callbacks_);
+        web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });
@@ -350,6 +352,8 @@ private:
             error(res,403,"invalid_host");
             return HandlerResult::Handled;
         }
+        if ((req.method == "GET" || req.method == "HEAD") && web::artifactPreview(req.path))
+            return HandlerResult::Unhandled;
         const auto origin = req.get_header_value("Origin");
         const auto origins = req.get_header_value_count("Origin");
         const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
@@ -357,6 +361,13 @@ private:
         if ((origins != 0 && !sameOrigin) || (req.has_header("Sec-Fetch-Site") &&
             (req.get_header_value_count("Sec-Fetch-Site") != 1 || (fetchSite != "same-origin" && fetchSite != "none")))) {
             error(res,403,"invalid_origin");
+            return HandlerResult::Handled;
+        }
+        if (req.method == "POST" && web::channelWebhook(req.path)) {
+            if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
+            else if (req.get_header_value_count("Content-Type") != 1 ||
+                     req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
+            else return HandlerResult::Unhandled;
             return HandlerResult::Handled;
         }
         if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {

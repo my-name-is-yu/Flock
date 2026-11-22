@@ -80,6 +80,7 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
                                    std::string_view text, Id replyTo) const {
     std::lock_guard lock(p_->mutex);
+    if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
     auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
                          {bot,clientId});
     if (!row.next()) return std::nullopt;
@@ -87,14 +88,22 @@ std::optional<Json> Store::receipt(std::string_view bot, std::string_view client
 }
 
 Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
-    if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
+    return receive(routing,clientId,text,replyTo,nullptr);
+}
+
+Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                    const VerifiedChannelMessage* channel) {
+    if ((!channel && clientId.starts_with("channel:")) || routing.botId.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
         throw Conflict("Bot, client message ID and nonempty text are required");
     Json receipt;
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
+                             {routing.botId,clientId});
+        std::optional<Json> existing;
+        if (row.next()) existing = receiptRow(row,p_->redactor(routing.botId).text(std::string(text)),replyTo);
         if (existing) receipt = *existing;
         else {
             modelCallLimit(routing.config);
@@ -111,6 +120,7 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
+        if (channel) p_->saveChannelMessage(receipt.at("messageId"),*channel,existing.has_value());
         transaction.commit();
     }
     return receipt;
