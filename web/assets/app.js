@@ -879,11 +879,13 @@ function backToLatest() {
 function updateFindOverlap() {
   const scroller = elements.conversation;
   const overlap = findPanel.hidden ? 0 : findPanel.getBoundingClientRect().bottom - scroller.getBoundingClientRect().top;
-  const inset = `${overlap}px`;
-  if (scroller.style.getPropertyValue('--find-overlap') !== inset) {
-    const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 4;
-    scroller.style.setProperty('--find-overlap', inset);
+  const previousOverlap = parseFloat(scroller.style.getPropertyValue('--find-overlap')) || 0;
+  if (previousOverlap !== overlap) {
+    const top = scroller.scrollTop;
+    const atBottom = scroller.scrollHeight - top - scroller.clientHeight <= 4;
+    scroller.style.setProperty('--find-overlap', `${overlap}px`);
     if (atBottom && !view?.source) scroller.scrollTop = scroller.scrollHeight;
+    else scroller.scrollTop = top + overlap - previousOverlap;
   }
   return overlap;
 }
