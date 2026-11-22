@@ -755,7 +755,7 @@ ORDER BY j.id DESC LIMIT 1
     return row.next() ? journalRow(row) : Json(nullptr);
 }
 
-Json Store::conversation(std::string_view bot, Id before, unsigned limit) const {
+Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT page.id,page.task_id,page.time,page.kind,
@@ -803,8 +803,11 @@ FROM (
 ) AS page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
-WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
-        {bot,bot,before,before,std::clamp(limit,1u,200u)});
+WHERE (?=0 OR page.id<?)
+  AND (?=0 OR page.kind IN ('conversation_reply','report','completed')
+       OR (page.kind='waiting' AND json_extract(page.data,'$.reason')='user_question'))
+ORDER BY page.id DESC LIMIT ?)SQL",
+        {bot,bot,before,before,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);

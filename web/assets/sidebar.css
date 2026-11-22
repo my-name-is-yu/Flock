@@ -9,6 +9,8 @@
 .nav-section { padding-bottom: var(--space-4); }
 .nav-section + .nav-section { padding-top: var(--space-3); }
 .bot-activity { border-top: 1px solid var(--hairline); margin-top: var(--space-2); padding-top: var(--space-4); }
+/* Nothing to show for this Bot: drop the panel rather than list empty sections. */
+.bot-activity:not(:has(.nav-section:not([hidden]))) { display: none; }
 .activity-scope { display: flex; align-items: center; gap: .5rem; min-width: 0; margin: 0 .55rem var(--space-3); font-size: var(--text-sm); font-weight: 600; }
 .activity-scope .avatar { width: 1.25rem; height: 1.25rem; }
 .activity-scope-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -52,12 +54,16 @@
 .bot-row { position: relative; display: flex; min-width: 0; align-items: center; border-radius: var(--radius-md); }
 .bot-row:hover { background: var(--hover); }
 .bot-row.selected { background: var(--selected); }
-.bot-select { display: flex; flex: 1; min-width: 0; align-items: center; gap: .75rem; text-align: left; background: none; border: 0; border-radius: var(--radius-md); padding: .5rem .55rem; }
+.bot-select { display: flex; flex: 1; min-width: 0; align-items: center; gap: .75rem; text-align: left; background: none; border: 0; border-radius: var(--radius-md); padding: .5rem .55rem .5rem .85rem; }
 .bot-row .avatar { width: 2.6rem; height: 2.6rem; }
 .bot-text { flex: 1; min-width: 0; display: grid; gap: .1rem; }
 .bot-name { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: .875rem; font-weight: 600; }
 .bot-name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .presence-dot { width: .4rem; height: .4rem; border-radius: 50%; flex: none; background: var(--warning); }
+.unread-dot { width: .45rem; height: .45rem; border-radius: var(--radius-full); background: var(--accent); }
+.row-unread { position: absolute; inset-inline-start: .2rem; top: 50%; translate: 0 -50%; }
+.pin-unread { position: absolute; inset-inline-start: -.25rem; top: -.2rem; }
+.unread :is(.bot-name-text, .bot-preview, .pin-name) { color: var(--text); font-weight: 700; }
 .bot-preview { font-size: var(--text-xs); line-height: 1.35; min-height: 1em; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .working-dots { display: inline-flex; gap: 2px; margin-right: .4rem; vertical-align: middle; color: var(--success); }
 .working-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: working-dot 1.2s ease-in-out infinite; }

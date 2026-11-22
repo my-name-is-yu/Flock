@@ -220,7 +220,6 @@ public:
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
                         const Json& event, Seconds now);
-    Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
@@ -257,7 +256,9 @@ public:
     // Latest completion or Session report for the Task's current revision.
     Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
-    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
+    enum class ConversationEvents { all, incoming };
+    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,
+                      ConversationEvents events = ConversationEvents::all) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
     std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;
