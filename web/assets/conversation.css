@@ -255,6 +255,11 @@
   width: fit-content; max-width: calc(100% - 2rem); margin: .5rem auto; padding: .4rem .85rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-md);
   background: var(--raised); color: var(--danger); font-size: var(--text-sm);
+  animation: source-error-in .18s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes source-error-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
 }
 /* Keep the last opened message clear of the floating Jump to latest control. */
 .viewing-source .timeline { padding-block-end: var(--jump-to-latest-space); }
@@ -302,7 +307,7 @@
 .msg.user .bubble ::selection { background: rgb(255 255 255 / .3); }
 .event-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
 .message-attachments { margin-top: .3rem; font-size: var(--text-sm); }
-.channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; }
+.channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; border-radius: var(--radius-md); }
 .read-only-choices { margin-block: .35rem 0; padding-inline-start: 1.2rem; color: var(--text-2); font-size: var(--text-sm); }
 .event-reason { margin-top: .4rem; color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .glyph { display: inline-grid; place-items: center; }
@@ -312,9 +317,17 @@
 .kind-icon.result-success { color: var(--success); }
 .kind-icon.result-failed { color: var(--danger); }
 .kind-icon.result-interrupted { color: var(--warning); }
-.run-link { display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .3rem; vertical-align: -.35em; border-radius: var(--radius-sm); color: var(--text-3); }
+.run-link {
+  display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .3rem;
+  vertical-align: -.35em; border-radius: var(--radius-sm); color: var(--text-3);
+  transition: background-color .14s ease, color .14s ease, transform .14s cubic-bezier(0.23, 1, 0.32, 1);
+}
 .run-link:hover { color: var(--accent); background: var(--hover); }
-.run-link .glyph svg { width: .95rem; height: .95rem; }
+.run-link:active { transform: scale(.9); }
+.run-link .glyph svg { width: .95rem; height: .95rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1); }
+@media (hover: hover) and (pointer: fine) {
+  .run-link:hover .glyph svg { transform: translate(1px, -1px); }
+}
 
 .msg-actions { display: flex; align-items: center; gap: .05rem; align-self: center; opacity: 0; transition: opacity .15s ease; }
 .msg.user .msg-actions { flex-direction: row-reverse; }
@@ -424,7 +437,9 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .typing span { animation: none; opacity: .55; }
-  .msg-time, .msg-actions { transition: none; }
+  .conversation-source-error:not(:empty) { animation: none; }
+  .msg-time, .msg-actions, .run-link, .run-link .glyph svg { transition: none; }
+  .run-link:active, .run-link:hover .glyph svg { transform: none; }
 }
 
 @media (hover: none), (pointer: coarse) {

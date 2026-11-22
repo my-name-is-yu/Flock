@@ -50,6 +50,12 @@
   border-radius: var(--radius-md);
   background: var(--field);
   font-size: 1rem;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.find-bar input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--focus) 55%, var(--hairline));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
 }
 .find-bar input::placeholder { color: var(--text-3); }
 .find-bar .icon-button { flex: none; }
