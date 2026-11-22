@@ -92,7 +92,7 @@ public:
     void changeNeverRule(const Person&, Action, std::string_view target, bool add);
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
-    Json administration(const Person&, std::string_view bot) const;
+    Json botSettings(const Person&, std::string_view bot) const;
     void executeSessionResource(std::string_view environment, const RunRef&, const Resource&,
                                 const std::function<bool()>& upstreamPermits,
                                 const std::function<void(Id ownerTask)>& execute) const;

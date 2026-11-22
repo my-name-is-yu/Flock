@@ -18,7 +18,7 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp access_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
+add_library(flock_web server.cpp settings_routes.cpp board_inbox_routes.cpp memory_automation_routes.cpp git_routes.cpp identity.cpp views.cpp change_feed.cpp
                       channel_routes.cpp channel_bridge.cpp session_handoff_routes.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")

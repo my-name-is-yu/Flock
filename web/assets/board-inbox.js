@@ -769,9 +769,7 @@ export function mountBoardInbox({
       epoch++;
       if (isCurrent()) message.textContent = '';
       apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
-      onAccepted(item, response.status === 'approved'
-        ? 'Decision saved. Apply the Bot change in Access settings.'
-        : 'Decision saved.');
+      onAccepted(item, 'Decision saved.');
       void refresh();
     } catch (error) {
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {

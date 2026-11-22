@@ -224,7 +224,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     if (!event.contains("gitResults")) return;
 
     const auto scrub = sharedRedactor();
-    const Policy access(*this);
+    const Policy policy(*this);
     std::set<Id> authorized;
     for (const auto& [id,read] : requested) {
         const auto& [source,result] = read;
@@ -232,11 +232,11 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
         try {
             if (source.tool == "git_find_repos") {
                 if (!std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
-                    return repositoryAccess(access,host,context,{std::string(host.name()),repo.get<std::string>()},"read");
+                    return repositoryAccess(policy,host,context,{std::string(host.name()),repo.get<std::string>()},"read");
                 })) continue;
             } else {
                 const auto repo = GitRepository::parse(host.name(),field(source.args,"repo"));
-                if (!repositoryAccess(access,host,context,repo,"read",&source)) continue;
+                if (!repositoryAccess(policy,host,context,repo,"read",&source)) continue;
             }
             authorized.insert(id);
         } catch (const StorageError&) {
@@ -248,7 +248,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     std::lock_guard lock(mutex);
     Transaction projection(db,Transaction::Mode::read);
     const auto localReadAllowed = [&](std::string_view repo) {
-        return access.allows(context.botId,Action::repository_read,GitRepository::parse(host.name(),repo).resource());
+        return policy.allows(context.botId,Action::repository_read,GitRepository::parse(host.name(),repo).resource());
     };
     for (auto& entry : event.at("gitResults")) {
         if (!entry.contains("readId")) continue;
@@ -298,9 +298,9 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             if (previous.next()) return {{"readId",previous.number(0)}};
         }
     }
-    const Policy access(*this);
+    const Policy policy(*this);
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
-        return repositoryAccess(access,host,context,repository,required);
+        return repositoryAccess(policy,host,context,repository,required);
     };
     if (decision.tool == "git_find_repos") {
         const auto [candidates,more] = host.repositories(context,lower(field(args,"query")));
@@ -416,7 +416,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             events.next();
             eventCursor = events.number(0);
         }
-        if (access.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
+        if (policy.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
             throw Conflict("Repository access denied");
         exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)",{taskId,key,dedupe});
         journal(taskId,"git_mutation",sharedRedactor().record(gitJournal(context,decision.tool,repo,

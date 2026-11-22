@@ -201,9 +201,9 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     std::string url;
     const bool link = decision == "link_pr";
     if (link) {
-        const Policy access(*this);
-        if (access.forbidden(item.botId,Action::repository_pr,base.resource()) ||
-            (head != base && !access.allows(item.botId,Action::repository_read,head.resource())))
+        const Policy policy(*this);
+        if (policy.forbidden(item.botId,Action::repository_pr,base.resource()) ||
+            (head != base && !policy.allows(item.botId,Action::repository_read,head.resource())))
             throw DecisionDenied{};
         const auto candidates = row.json(7);
         const auto selected = data.find("prNumber");

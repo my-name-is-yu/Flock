@@ -60,7 +60,7 @@ struct RunningAdapter : Adapter {
 
 void runningSessions(const std::filesystem::path& path) {
     Store store(path);
-    auto access = store.policy();
+    auto policy = store.policy();
     WorkModel model;
     RunningAdapter adapter;
     RuntimeOptions options;
@@ -75,7 +75,7 @@ void runningSessions(const std::filesystem::path& path) {
     check(adapter.running.size()==2,"peer and sender did not launch under distinct owners");
     std::vector<std::string> completed;
     auto read = [&](const std::string& bot, bool upstream = true) {
-        access.executeSessionResource("env",adapter.running.at(bot),readRepo,[&]{ return upstream; },[&](Id task){
+        policy.executeSessionResource("env",adapter.running.at(bot),readRepo,[&]{ return upstream; },[&](Id task){
             check(store.task(task).at("botId")==bot,"execution callback received the wrong owner");
             completed.push_back(bot);
         });
@@ -85,7 +85,7 @@ void runningSessions(const std::filesystem::path& path) {
     denied([&]{read("Reviewer",false);});
     Store authority(path);
     denied([&] {
-        access.executeSessionResource("env",adapter.running.at("Ernest"),readRepo,[&] {
+        policy.executeSessionResource("env",adapter.running.at("Ernest"),readRepo,[&] {
             authority.policy().changeNeverRule(owner,readRepo.action,readRepo.target,true);
             return true;
         },[&](Id){ completed.push_back("denied"); });
@@ -143,8 +143,8 @@ void freshLaunch(const std::filesystem::path& path) {
 void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(!std::filesystem::exists(path),"secret schema fixture must start with a fresh database");
     Store left(path), right(path);
-    auto access = left.policy();
-    check(access.administration(owner,"Ernest").at("secretInputs").empty(),"fresh protected input table is not empty");
+    auto policy = left.policy();
+    check(policy.botSettings(owner,"Ernest").at("secretInputs").empty(),"fresh protected input table is not empty");
     const SecretRef ref{"fixture-token"};
     std::barrier start(2);
     auto request = [&](Store& store) {
@@ -155,17 +155,17 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
     const auto id = request(left);
     check(id == other.get(),"repeated secret request returned a different ID");
     check(right.policy().requestSecret("Reviewer",ref) != id,"pending secret uniqueness crossed Bot boundaries");
-    denied([&]{ access.submitSecret(owner,"Ernest",id,"nest"); });
-    access.submitSecret(owner,"Ernest",id,credential);
-    check(access.administration(owner,"Ernest").at("secretInputs") ==
+    denied([&]{ policy.submitSecret(owner,"Ernest",id,"nest"); });
+    policy.submitSecret(owner,"Ernest",id,credential);
+    check(policy.botSettings(owner,"Ernest").at("secretInputs") ==
           Json::array({{{"id",id},{"name",ref.name},{"status","fulfilled"}}}),"duplicate request remained after fulfillment");
-    denied([&]{ access.requestSecret("Ernest",ref); });
+    denied([&]{ policy.requestSecret("Ernest",ref); });
 }
 
 void exercise(const std::filesystem::path& dir) {
     auto path=dir/"state.db";
     Store store(path);
-    auto access=store.policy();
+    auto policy=store.policy();
     Intake ernest{"Ernest","read","env","project"}, reviewer{"Reviewer","review","env","project"};
     auto child=store.submit(ernest), peerChild=store.submit(reviewer);
     ToolModel model;
@@ -188,78 +188,80 @@ void exercise(const std::filesystem::path& dir) {
     auto connections=turn("list_connections");
     check(connections.find("github")!=std::string::npos && connections.find("docs")!=std::string::npos,"connection metadata");
     check(turn("request_secret_input",{{"name","repo-token"}}).find("pending")!=std::string::npos,"protected input request");
-    auto metadata=access.administration(owner,"Ernest");
+    auto metadata=policy.botSettings(owner,"Ernest");
     Id input=metadata.at("secretInputs").at(0).at("id");
     check(turn("submit_secret",{{"requestId",input},{"value","text-supplied-value"}}).find("Tool unavailable") !=
               std::string::npos && store.decisionHistory(owner).empty(),
           "A Bot response fulfilled a protected decision");
-    denied([&]{access.submitSecret(viewer,"Ernest",input,credential);});
-    access.submitSecret(owner,"Ernest",input,credential);
-    denied([&]{ access.requestSecret("Ernest",{"../outside"}); });
-    denied([&]{ access.submitSecret(admin,"Ernest",access.requestSecret("Ernest",{"other"}),"other-value"); });
+    denied([&]{policy.submitSecret(viewer,"Ernest",input,credential);});
+    policy.submitSecret(owner,"Ernest",input,credential);
+    denied([&]{ policy.requestSecret("Ernest",{"../outside"}); });
+    denied([&]{ policy.submitSecret(admin,"Ernest",policy.requestSecret("Ernest",{"other"}),"other-value"); });
     const Json sensitiveFields{{"kind",credential},{"status",credential},{"secret",credential}};
-    check(access.redactSecrets("Ernest",sensitiveFields).dump().find(credential)==std::string::npos,
+    check(policy.redactSecrets("Ernest",sensitiveFields).dump().find(credential)==std::string::npos,
           "external field mistaken for a trusted protocol tag");
     const auto vaultFile = std::filesystem::directory_iterator(dir/"secrets")->path();
     struct stat st{};
     check(!stat((dir/"secrets").c_str(),&st) && (st.st_mode&0777)==0700,"directory permissions");
     check(!stat(vaultFile.c_str(),&st) && (st.st_mode&0777)==0600,"secret permissions");
     check(turn("list_secrets",Json::object(),credential).find("repo-token")!=std::string::npos,"names unavailable");
-    access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"resolution");});
-    access.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"shared resolution");});
-    access.changeNeverRule(owner,Action::secret_use,"repo-*",true);
-    denied([&]{access.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
-    access.changeNeverRule(owner,Action::secret_use,"repo-*",false);
+    policy.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"resolution");});
+    policy.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto v){check(v==credential,"shared resolution");});
+    policy.changeNeverRule(owner,Action::secret_use,"repo-*",true);
+    denied([&]{policy.useSecret(peerChild,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
+    policy.changeNeverRule(owner,Action::secret_use,"repo-*",false);
     try {
-        access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){throw Conflict(std::string(v));});
+        policy.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto v){throw Conflict(std::string(v));});
         throw std::runtime_error("adapter exception disappeared");
     }
     catch(const Conflict& e){check(std::string(e.what()).find(credential)==std::string::npos,"adapter error leaked");}
-    access.changeNeverRule(owner,Action::environment_launch,"env",true);
-    check(turn("check_environment_readiness",{{"environmentId","env"}}).find("/settings/Ernest")!=std::string::npos,"missing setup link");
-    access.changeNeverRule(owner,Action::environment_launch,"env",false);
+    policy.changeNeverRule(owner,Action::environment_launch,"env",true);
+    const auto readiness = turn("check_environment_readiness",{{"environmentId","env"}});
+    check(readiness.find("/settings") != std::string::npos && readiness.find("/settings/Ernest") == std::string::npos,
+          "Readiness did not link to Flock settings");
+    policy.changeNeverRule(owner,Action::environment_launch,"env",false);
     check(turn("check_environment_readiness",{{"environmentId","env"}}).find("\"ready\":true")!=std::string::npos,"readiness");
     t3.connected = false;
     check(turn("check_environment_readiness").find("T3 sign-in")!=std::string::npos,"OAuth denial");
     t3.connected = true;
-    access.changeNeverRule(owner,Action::environment_configure,"env",true);
+    policy.changeNeverRule(owner,Action::environment_configure,"env",true);
     check(turn("update_bot_settings",{{"environmentId","env"},{"runTimeoutSeconds",123}}).find("configure access required")!=std::string::npos,
-          "settings mutation accepted without a grant");
-    access.changeNeverRule(owner,Action::environment_configure,"env",false);
+          "settings mutation bypassed the Never rule");
+    policy.changeNeverRule(owner,Action::environment_configure,"env",false);
     turn("update_bot_settings",{{"environmentId","env"},{"runTimeoutSeconds",123}});
     check(turn("list_connections").find("\"runTimeoutSeconds\":123")!=std::string::npos,"settings not effective");
     for (auto op : {"create_bot","rename_bot"})
         check(turn("request_bot_change",{{"operation",op},{"targetBotId","Target"},{"name","New"}})
                   .find("\"status\":\"applied\"") != std::string::npos,"Full did not apply a Bot change");
     check(applied.size() == 2 && store.inbox(owner).size() == 1,"Full queued a Bot change for review");
-    denied([&]{access.applyBotChange("Ernest",Person{"member",false},"rename_bot","Target","Hijacked",0,0,
+    denied([&]{policy.applyBotChange("Ernest",Person{"member",false},"rename_bot","Target","Hijacked",0,0,
                                       options.applyBotChange);});
     check(applied.size() == 2,"a non-owner renamed another person's Bot");
-    access.changeNeverRule(owner,Action::bot_rename,"Target",true);
+    policy.changeNeverRule(owner,Action::bot_rename,"Target",true);
     check(turn("request_bot_change",{{"operation","rename_bot"},{"targetBotId","Target"},{"name","Denied"}})
               .find("denied by policy") != std::string::npos && applied.size() == 2,"Never allowed a Bot change");
     check(store.conversation("Ernest").dump().find(credential)==std::string::npos &&
-          access.administration(owner,"Ernest").dump().find(credential)==std::string::npos,"value in conversation or audit");
+          policy.botSettings(owner,"Ernest").dump().find(credential)==std::string::npos,"value in conversation or audit");
     check(chmod(vaultFile.c_str(),0644)==0,"fixture mode");
-    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
+    denied([&]{policy.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     check(chmod(vaultFile.c_str(),0600)==0,"restore fixture mode");
     auto linkTarget = dir/"outside";
     std::filesystem::rename(vaultFile,linkTarget);
     std::filesystem::create_symlink(linkTarget,vaultFile);
-    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
+    denied([&]{policy.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     std::filesystem::remove(vaultFile);
     std::filesystem::rename(linkTarget,vaultFile);
     std::filesystem::rename(dir/"secrets",dir/"original-vault");
     std::filesystem::create_directory_symlink(dir/"original-vault",dir/"secrets");
-    denied([&]{access.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
+    denied([&]{policy.useSecret(child,{"repo-token"},"repo-token","fixture-read",true,[](auto){});});
     std::filesystem::remove(dir/"secrets");
     std::filesystem::rename(dir/"original-vault",dir/"secrets");
     model.next={"list_secrets",Json::object(),"list"};
     store.receive(localOwner,reviewer,"peer-names","show names",0);
     runtime.runConversations();
     check(model.result.at("turn").at(0).at("result").at("names") == Json::array({"repo-token"}),"shared secret names unavailable");
-    check(access.redactSecrets("Reviewer",Json(credential))=="[redacted]" &&
-          access.redactSecrets("Ernest",Json(credential))=="[redacted]","redaction crossed Bot authority");
+    check(policy.redactSecrets("Reviewer",Json(credential))=="[redacted]" &&
+          policy.redactSecrets("Ernest",Json(credential))=="[redacted]","redaction crossed Bot authority");
     for (auto suffix:{"","-wal"}) {
         std::ifstream file(path.string()+suffix,std::ios::binary);
         std::string content((std::istreambuf_iterator<char>(file)),{});

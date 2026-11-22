@@ -1,5 +1,6 @@
-#include "access_routes.hpp"
+#include "settings_routes.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/t3_connection.hpp"
 
 namespace flockv0::web {
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
@@ -15,17 +16,26 @@ void reply(httplib::Response& res, int status, const Json& value) {
 }
 }
 
-void accessRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
-    server.Get("/api/access",[&](const httplib::Request& req, httplib::Response& res) {
+void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
+    server.Get("/api/settings",[&](const httplib::Request& req, httplib::Response& res) {
+        const auto actor = person(callbacks,req);
+        auto policy = store.policy();
+        const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
+        reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
+                       {"canManagePolicy",policy.allows(actor,Action::rules_manage,"installation")},
+                       {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
+                                        : Json(nullptr)}});
+    });
+    server.Get("/api/bot-settings",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.get_param_value_count("bot") != 1 || req.get_param_value("bot").empty())
             return reply(res,400,{{"error","invalid_bot"}});
         try {
-            auto view = store.policy().administration(person(callbacks,req),req.get_param_value("bot"));
+            auto view = store.policy().botSettings(person(callbacks,req),req.get_param_value("bot"));
             view["canManageMembers"] = view.at("canManage").get<bool>() && bool(callbacks.authenticate);
             reply(res,200,view);
         } catch (const Conflict&) { reply(res,403,{{"error","access_denied"}}); }
     });
-    server.Post(R"(/api/access/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
+    server.Post(R"(/api/settings/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
         try {
             const auto args = Json::parse(req.body);
@@ -44,7 +54,7 @@ void accessRoutes(httplib::Server& server, Store& store, const WebCallbacks& cal
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
         catch (const Conflict&) { reply(res,400,{{"error","invalid_input"}}); }
     });
-    server.Post(R"(/api/access/(members|secret))",[&](const httplib::Request& req, httplib::Response& res) {
+    server.Post(R"(/api/bot-settings/(members|secret))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 128 * 1024) return reply(res,413,{{"error","payload_too_large"}});
         try {
             const auto args = Json::parse(req.body);

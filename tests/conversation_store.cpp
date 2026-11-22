@@ -292,8 +292,8 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const std::string marker = "protected-top-level-key-fixture";
-    auto access = store.policy();
-    access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),marker);
+    auto policy = store.policy();
+    policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",{"fixture"}),marker);
     Json observed;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         observed = turn(input);
@@ -313,8 +313,8 @@ void rejectedSessionReadStillAllowsAnOrdinaryReply() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    auto access = store.policy();
-    access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),"text");
+    auto policy = store.policy();
+    policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",{"fixture"}),"text");
     bool rejected = false;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
         const auto steps = turn(input);

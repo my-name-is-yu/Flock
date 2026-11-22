@@ -4,7 +4,7 @@ textarea { box-sizing: border-box; width: 100%; font: inherit; padding: .3rem .5
 #handoff dl { display: grid; grid-template-columns: minmax(7rem, 12rem) minmax(0, 1fr); gap: .3rem 1rem }
 #handoff dt { color: GrayText }
 #handoff dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap }
-#handoff li, #connections li { overflow-wrap: anywhere }
+#handoff li { overflow-wrap: anywhere }
 #decision-text { white-space: pre-wrap; overflow-wrap: anywhere }
 #residual, #residual-work { margin: .5rem 0 }
 .handoff-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0 }

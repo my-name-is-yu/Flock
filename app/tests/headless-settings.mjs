@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 
 const executable = process.argv[2];
-const home = mkdtempSync(join(tmpdir(), "flock-headless-access-"));
+const home = mkdtempSync(join(tmpdir(), "flock-headless-settings-"));
 const cliArgs = ["--home", home];
 // Keep the fixture independent of the developer's Flock configuration.
 const env = Object.fromEntries(

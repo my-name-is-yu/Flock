@@ -866,8 +866,8 @@ void settledReportCanRecoverAfterRestart() {
     for (const bool available : {false,true}) {
         Fixture f;
         const std::string secret = "private-report-diagnostic";
-        auto access = f.store->policy();
-        access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"diagnostic"}),secret);
+        auto policy = f.store->policy();
+        policy.submitSecret(localOwner,"alpha",policy.requestSecret("alpha",{"diagnostic"}),secret);
         const auto id = f.submit();
         f.model.script = [&](const ModelInput& i) {
             if (i.event.at("kind") == "intake") return work();
@@ -1093,8 +1093,8 @@ void redactedHistoryPagination() {
     f.read = "on_demand";
     f.restart();
     const std::string secret = "fixture-history-secret";
-    auto access = f.store->policy();
-    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"history-token"}),secret);
+    auto policy = f.store->policy();
+    policy.submitSecret({"fixture",true},"alpha",policy.requestSecret("alpha",{"history-token"}),secret);
     f.t3.historyPages = {
         {"Token: " + secret,{},{},"history-item","7",64,true},
         {"Verified " + secret,{},{},"history-item",{},0,false},
@@ -1322,13 +1322,13 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     const auto secondBudget = f.wait(root,"budget");
     const auto paused = f.task(root);
     check(secondBudget != budget && paused["remaining"] == 0 && paused["additionalUsed"] == 4 &&
-          f.store->tasks("beta").size() == 4,"the approved direct T3 action also granted unapproved peer work");
+          f.store->tasks("beta").size() == 4,"the approved direct T3 action also authorized unapproved peer work");
     const auto& wait = paused.at("wait");
     check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
           wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
 }
 
-void peerCompletionKeepsEvidenceWithinTheReadGrant() {
+void peerCompletionRespectsSessionReadPolicy() {
     Fixture f;
     f.allowBeta();
     const auto sender = f.submit("Decide whether the PR can ship");
@@ -1352,7 +1352,7 @@ void peerCompletionKeepsEvidenceWithinTheReadGrant() {
     const auto completion = f.store->latestTaskResult(sender).at("data");
     check(completion.at("dependency").at("taskId") == recipient &&
           completion.at("evidenceRefs").empty() && !completion.contains("source"),
-          "completion exposed peer Run provenance outside its Session read grant");
+          "completion exposed peer Run provenance despite a Never rule");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
@@ -1854,7 +1854,7 @@ void consultationRepliesAfterUserInstructions() {
 void peerConsultationAndPermission() {
     Fixture f;
     f.allowBeta();
-    const auto denied = f.submit("Consult a Bot outside the configured grants");
+    const auto denied = f.submit("Consult a Bot outside the configured peers");
     int deniedAttempts = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
         check(hasTool(input,"send_bot_message"),"permit validation was not tested with an available send tool");
@@ -1874,7 +1874,7 @@ void peerConsultationAndPermission() {
         if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
         if (input.event["kind"] == "bot_request") {
             check(!hasTool(input,"delegate") && !hasTool(input,"send_bot_message"),
-                  "consultation inherited T3 work permissions or a reverse grant");
+                  "consultation inherited T3 work permissions or reverse peer permission");
             return botReply("result","Require a verified PR");
         }
         check(input.event["kind"] == "bot_result" && input.event["text"] == "Require a verified PR",
@@ -2524,9 +2524,9 @@ void specialistAdmission(SpecialistMode mode) {
             return f.peers.at(std::string(bot));
         });
     };
-    auto access = f.store->policy();
+    auto policy = f.store->policy();
     if (!person.adminRoot) {
-        access.setMember(localOwner,"alpha",person.id,true);
+        policy.setMember(localOwner,"alpha",person.id,true);
     }
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
                         mode==SpecialistMode::NestedWorkflowPause;
@@ -2561,7 +2561,7 @@ void specialistAdmission(SpecialistMode mode) {
         session.pin = pin;
         f.model.script = [](const ModelInput& input) -> Decision {
             check(hasTool(input,"delegate_specialist") && input.event.at("specialists").at(0).at("botId")=="beta",
-                  "coordination did not offer the specialist without an environment grant");
+                  "coordination did not offer the specialist in Full mode");
             return {"wait_for_root",Json::object(),""};
         };
         handoffs().step(person,channel,f.model,[](std::string_view bot,std::string_view) {
@@ -2588,7 +2588,7 @@ void specialistAdmission(SpecialistMode mode) {
         f.t3.onPreflight = [&] {
             T3Connections connections(*f.store);
             if (mode==SpecialistMode::PolicyRevoked)
-                access.changeNeverRule(localOwner,Action::t3_coordinate,target.environmentId,true);
+                policy.changeNeverRule(localOwner,Action::t3_coordinate,target.environmentId,true);
             else connections.disconnect(target.environmentId);
         };
         f.reach(first.recipientTaskId,"completed");
@@ -3239,13 +3239,13 @@ void prefillInFull() {
     Fixture f;
     f.read = "prefill";
     f.restart();
-    auto access = f.store->policy();
+    auto policy = f.store->policy();
     for (const auto& [name,token] : std::map<std::string,std::string>{{"first","result"},{"second","complete"}}) {
-        auto request = access.requestSecret("alpha",{name});
-        access.submitSecret({"fixture",true},"alpha",request,token);
+        auto request = policy.requestSecret("alpha",{name});
+        policy.submitSecret({"fixture",true},"alpha",request,token);
     }
     const std::string hidden = "fixture-hidden-question";
-    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"question-token"}),hidden);
+    policy.submitSecret({"fixture",true},"alpha",policy.requestSecret("alpha",{"question-token"}),hidden);
     const auto id = f.submit();
     f.model.script = [&](const ModelInput& in) {
         if (in.event.at("kind")=="intake") return work();
@@ -3295,7 +3295,7 @@ int main() {
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
-            {"Peer completion evidence follows the Session read grant",peerCompletionKeepsEvidenceWithinTheReadGrant},
+            {"Peer completion evidence follows the Session read policy",peerCompletionRespectsSessionReadPolicy},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
             {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
@@ -3327,13 +3327,13 @@ int main() {
             {"pinned specialist admission in Full mode",[] { specialistAdmission(SpecialistMode::Single); }},
             {"Never rule blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::PolicyRevoked); }},
             {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
-            {"ordinary launch still needs a grant with a full connection",[] {
+            {"Never blocks ordinary launch with a T3 connection",[] {
                 Fixture f;
                 f.store->policy().changeNeverRule(localOwner,Action::environment_launch,"e",true);
                 T3Connections(*f.store).connect("e",localOwner.id,4173);
                 f.model.script = [](const ModelInput&) { return work(); };
                 f.wait(f.submit(),"settings");
-                check(f.t3.launches==0,"the connector granted an ordinary Bot launch");
+                check(f.t3.launches==0,"the connector allowed a blocked Bot launch");
             }},
             {"direct specialist rejects missing findings",[] { specialistAdmission(SpecialistMode::MissingFindings); }},
             {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},

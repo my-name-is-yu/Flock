@@ -1,7 +1,6 @@
-const [, , botId, section] = location.pathname.split('/').map(decodeURIComponent);
+const [, , botId] = location.pathname.split('/').map(decodeURIComponent);
 const $ = (id) => document.getElementById(id);
 $('back').href = '/?' + new URLSearchParams({bot: botId});
-// Like an iOS back button, name the screen this page returns to: the Bot whose access is shown.
 fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
   $('back-label').textContent = bots.find(bot => bot.id === botId)?.name || botId;
 }).catch(() => { $('back-label').textContent = botId; });
@@ -13,22 +12,16 @@ function post(url, data) {
 }
 async function submit(path, data) {
   try {
-    const response = await post('/api/access/' + path, {botId, ...data});
+    const response = await post('/api/bot-settings/' + path, {botId, ...data});
     if (!response.ok) throw Error();
     await load();
     $('status').textContent = 'Saved.';
     return true;
   } catch {
-    $('status').textContent = 'Could not save this change. Check your access and refresh.';
+    $('status').textContent = 'Could not save this change.';
     return false;
   }
 }
-$('supervised').onchange = async (event) => {
-  const control = event.target;
-  control.disabled = true;
-  if (!await submit('mode', {mode: control.checked ? 'supervised' : 'full'})) control.checked = !control.checked;
-  control.disabled = false;
-};
 $('members').onsubmit = (event) => {
   event.preventDefault();
   void submit('members', {add:true, ...Object.fromEntries(new FormData(event.target))});
@@ -47,21 +40,11 @@ function button(row, label, action) {
   row.append(b);
 }
 async function load() {
-  const response = await fetch('/api/access?' + new URLSearchParams({bot:botId}));
+  const response = await fetch('/api/bot-settings?' + new URLSearchParams({bot:botId}));
   if (!response.ok) throw Error();
   const data = await response.json();
   $('administration').hidden = false;
-  $('mode').textContent = data.mode === 'supervised' ? 'Supervised' : 'Full';
-  $('mode').hidden = Boolean(data.canManagePolicy);
-  $('mode-control').hidden = !data.canManagePolicy;
-  $('supervised').checked = data.mode === 'supervised';
-  for (const id of ['inputs','rules','people']) $(id).replaceChildren();
-  if (data.rules.length === 0) row('rules', 'None');
-  const ruleLabels = {never:'Never', ask:'Ask first', allow:'Allow'};
-  for (const {kind, action, target} of data.rules) {
-    const item = row('rules', [ruleLabels[kind], action, target].join(' · '));
-    if (data.canManagePolicy) button(item, 'Remove', () => void submit('rule', {kind, action, target}));
-  }
+  for (const id of ['inputs','people']) $(id).replaceChildren();
   for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
     const item = row('inputs',request.name);
     const input = document.createElement('input');
@@ -118,5 +101,5 @@ async function loadMachines() {
 }
 const [machines, admin] = await Promise.allSettled([loadMachines(), load()]);
 if (machines.status === 'rejected') $('status').textContent = 'Could not load local machine connections.';
-else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Bot access is required.';
-document.getElementById(location.hash.slice(1) || section)?.scrollIntoView();
+else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Could not load Bot settings.';
+document.getElementById(location.hash.slice(1))?.scrollIntoView();

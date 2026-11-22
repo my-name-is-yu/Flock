@@ -70,8 +70,8 @@ Json scopedResult(Json result, Json sessions = Json::array()) {
 
 class Store::Impl::SessionEvidence {
 public:
-    SessionEvidence(Store::Impl& store, Policy& access, std::string_view bot, std::string_view channelScope, T3& t3)
-        : store_(store), access_(access), bot_(bot), channelScope_(channelScope), t3_(t3) {}
+    SessionEvidence(Store::Impl& store, Policy& policy, std::string_view bot, std::string_view channelScope, T3& t3)
+        : store_(store), policy_(policy), bot_(bot), channelScope_(channelScope), t3_(t3) {}
 
     Json search(const Json& args, const Json& routing) {
         const Filters filters(args);
@@ -182,7 +182,7 @@ public:
         const auto session = resolve(reference(call.args,"sessionRef"),RefKind::session);
         if (!session || !inChannelScope(session->target)) return ApprovalGate::allow;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
-        if (access_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
+        if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
         const auto key = "turn/" + std::to_string(message.id) + "/" + std::to_string(step);
         const auto gate = store_.approveAction(store_.policyOrigin(message),resource,key,
                                                Json::array({call.tool,call.args}),store_.policyClock());
@@ -278,7 +278,7 @@ private:
         TextMatch match;
     };
     Store::Impl& store_;
-    Policy& access_;
+    Policy& policy_;
     std::string_view bot_;
     std::string_view channelScope_;
     T3& t3_;
@@ -298,8 +298,8 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
     bool permitted(const SessionTarget& target, bool dispatched = false) const {
         if (!inChannelScope(target)) return false;
         const auto resource = Resource::sessionRead(target.environmentId,target.threadId);
-        if (dispatched || (approved_ && target == *approved_)) return !access_.forbidden(bot_,resource.action,resource.target);
-        return access_.allows(bot_,resource);
+        if (dispatched || (approved_ && target == *approved_)) return !policy_.forbidden(bot_,resource.action,resource.target);
+        return policy_.allows(bot_,resource);
     }
 
     bool readable(const SessionTarget& target, SessionReadDeadline deadline = {}) const {
@@ -344,7 +344,7 @@ ORDER BY r.environment_id,r.thread_id LIMIT ?4
                 environments.insert(id.get<std::string>());
             const auto deadline = Clock::now()+searchTimeLimit;
             for (const auto& id : environments) {
-                if (id < after.environmentId || !access_.allows(bot_,Action::environment_inspect,id)) continue;
+                if (id < after.environmentId || !policy_.allows(bot_,Action::environment_inspect,id)) continue;
                 if (Clock::now() >= deadline) { truncated = true; break; }
                 try {
                     auto [threads,more] = t3_.projectSessions(id,project,deadline);
@@ -508,8 +508,8 @@ ORDER BY r.environment_id,r.thread_id LIMIT ?4
 };
 
 Json Store::Impl::sessionReadTool(const conversation::Message& message, int step, const Decision& decision, T3& t3) {
-    Policy access(*this);
-    SessionEvidence evidence(*this,access,message.bot,message.channelScope,t3);
+    Policy policy(*this);
+    SessionEvidence evidence(*this,policy,message.bot,message.channelScope,t3);
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
         if (decision.tool == "flock_session_search") return evidence.search(decision.args,message.routing);
@@ -529,7 +529,7 @@ Json Store::Impl::sessionReadTool(const conversation::Message& message, int step
 }
 
 void Store::Impl::authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3& t3) {
-    Policy access(*this);
-    SessionEvidence(*this,access,bot,channelScope,t3).authorizeHistory(steps);
+    Policy policy(*this);
+    SessionEvidence(*this,policy,bot,channelScope,t3).authorizeHistory(steps);
 }
 }

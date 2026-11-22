@@ -80,9 +80,10 @@ ends the local coordination. Already-dispatched messages may still reach T3,
 and admitted specialist work may still finish. The handoff view shows the
 queued or unresolved messages and admitted work separately from local state.
 
-## Access and credentials
+## Flock settings
 
-**Access and credentials** shows the current installation mode and rules.
+**Flock settings** shows the installation mode, rules, and the read-only T3
+connection details for the person who connected T3 and installation roots.
 Installation roots can toggle **Supervised** and remove rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
@@ -93,18 +94,26 @@ a conversation message. **Allow once** resumes that action. **Always allow**
 also saves an exact Allow rule. **Deny** blocks another attempt from that
 request. The requester or installation root answers the card. Background
 cards expire after 30 minutes and then offer **Always allow next time**.
-Cards prompted by a person's message stay open. Changing modes closes
-pending approvals for the prior mode.
+Cards prompted by a person's message stay open, including messages from a
+linked Slack or iMessage sender. The approval is answered in Flock. Changing
+modes closes pending approvals for the prior mode.
+
+`GET /api/settings` returns the mode, rules, and T3 connection details.
+`POST /api/settings/mode` takes `mode` and `POST /api/settings/rule` removes a rule by
+`kind`, `action`, and `target`. Both require an installation root.
+
+## Bot settings
+
+**Sharing and connections** contains shared members, pending protected inputs,
+and local machine connections for the Bot.
 
 The creator owns the Bot. A root identity can manage all Bots. Shared members
 can view and talk to their Bot and answer its Decision Inbox items. With Web
 identities configured, the owner manages members in Bot settings.
 
-`GET /api/access?bot=ID` returns settings visible to that person.
-`POST /api/access/members` takes `botId`, `person` and boolean `add`.
-`POST /api/access/mode` takes `mode` and `POST /api/access/rule` removes a rule by
-`kind`, `action`, and `target`. Both require an installation root.
-`POST /api/access/secret` accepts `botId`, `requestId` and `value`.
+`GET /api/bot-settings?bot=ID` returns settings visible to that person.
+`POST /api/bot-settings/members` takes `botId`, `person` and boolean `add`.
+`POST /api/bot-settings/secret` accepts `botId`, `requestId` and `value`.
 Mutations use the usual same-origin JSON headers. Fulfilled secret values
 stay inside adapters and follow the `secret.use` policy.
 

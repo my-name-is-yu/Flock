@@ -25,14 +25,13 @@ Seconds Store::Impl::environmentTimeout(std::string_view bot, std::string_view e
 }
 
 Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
-    Policy access(*this);
+    Policy policy(*this);
     const auto& config = routing.at("config");
     const auto environment = field(routing,"environmentId");
     auto id = args.contains("environmentId") ? argument(args,"environmentId") : environment;
-    auto settings = "/settings/"+std::string(bot)+"/environment";
-    auto failure = [&](std::string reason) -> Json {return {{"ready",false},{"reason",reason},{"settingsLink",settings}};};
+    auto failure = [&](std::string reason) -> Json {return {{"ready",false},{"reason",reason},{"settingsLink","/settings"}};};
     if (!environments(routing).contains(id) || field(routing,"projectId").empty()) return failure("Configure the environment and project");
-    if (access.forbidden(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
+    if (policy.forbidden(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
@@ -47,8 +46,8 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     return {{"ready",true}};
 }
 
-Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
-    Policy access(*this);
+Json Store::Impl::botSettingsTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
+    Policy policy(*this);
     const auto& tool = decision.tool;
     const auto& args = decision.args;
     const auto& config = routing.at("config");
@@ -56,19 +55,19 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
         auto rows = query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
         auto names = Json::array();
         while (rows.next())
-            if (!access.forbidden(bot,Action::secret_use,rows.string(0))) names.push_back(rows.string(0));
+            if (!policy.forbidden(bot,Action::secret_use,rows.string(0))) names.push_back(rows.string(0));
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
-        auto id = access.requestSecret(bot,{argument(args,"name")},sourceMessage);
-        return {{"requestId",id},{"status","pending"},{"settingsLink","/settings/"+std::string(bot)+"/secrets"}};
+        auto id = policy.requestSecret(bot,{argument(args,"name")},sourceMessage);
+        return {{"requestId",id},{"status","pending"},{"settingsLink","/settings/"+std::string(bot)+"#secrets"}};
     }
     if (tool == "list_connections") {
         Json result{{"environments",Json::array()},{"services",config.value("services",Json::array())},
                     {"mcpServers",config.value("mcpServers",Json::array())}};
         for (const auto& id : environments(routing)) {
             Json entry{{"environmentId",id}};
-            if (access.allows(bot,Action::environment_inspect,id))
+            if (policy.allows(bot,Action::environment_inspect,id))
                 entry["runTimeoutSeconds"] = environmentTimeout(bot,id,config);
             result["environments"].push_back(entry);
         }
@@ -76,7 +75,7 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
     }
     if (tool == "update_bot_settings") {
         const auto id = argument(args,"environmentId");
-        if (!environments(routing).contains(id) || access.forbidden(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
+        if (!environments(routing).contains(id) || policy.forbidden(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");
         const auto timeout = args.at("runTimeoutSeconds").get<Id>();
         if (timeout<1 || timeout>2147483647) throw Conflict("Invalid timeout");

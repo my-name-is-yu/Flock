@@ -113,8 +113,8 @@ ORDER BY review.id
 }
 
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
-    const Policy access(*this);
-    if (!bot.empty()) return access.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
+    const Policy policy(*this);
+    if (!bot.empty()) return policy.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
     auto rows = actor.adminRoot ? query(R"SQL(
 SELECT bot_id FROM tasks UNION SELECT bot_id FROM messages UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
 UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
@@ -122,7 +122,7 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
     std::vector<std::string> result;
     while (rows.next()) {
         auto id = rows.string(0);
-        if (access.allows(actor,Action::bot_view,id)) result.push_back(std::move(id));
+        if (policy.allows(actor,Action::bot_view,id)) result.push_back(std::move(id));
     }
     return result;
 }
@@ -131,7 +131,7 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(p_->mutex);
     p_->settlePolicyApprovals(p_->policyClock());
     Transaction snapshot(p_->db,Transaction::Mode::read);
-    const Policy access(*p_);
+    const Policy policy(*p_);
     auto result = Json::array();
     const auto visible = p_->visibleBoardBots(actor,bot);
     auto approvalBots = p_->query("SELECT DISTINCT bot FROM policy_approvals WHERE status IN ('pending','expired')"
@@ -143,7 +143,7 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
         for (auto& card : p_->policyApprovalCards(actor,id)) result.push_back(std::move(card));
     for (const auto& id : visible) {
         const auto scrub = p_->redactor(id);
-        const bool canDecide = access.allows(actor,Action::bot_decide,id);
+        const bool canDecide = policy.allows(actor,Action::bot_decide,id);
         const auto anchorTime = [&](Id anchor) -> Id {
             if (anchor <= 0) return 0;
             auto row = p_->query("SELECT time FROM journal WHERE id=?",{anchor});
@@ -158,7 +158,7 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
             if (const auto ts = createdAt > 0 ? createdAt : anchorTime(anchor); ts > 0) view["createdAt"] = ts;
             result.push_back(std::move(view));
         };
-        const auto addAccess = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
+        const auto addProtectedInput = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
                                    std::string prompt, Id message, Id createdAt = 0) {
             add({id,kind,requestId,0,0,0,0},{{"requestTitle",request.empty() ? std::string(label) : title(request)},
                 {"request",request},{"prompt",std::move(prompt)}},messageAnchor(*p_,id,message),createdAt);
@@ -199,7 +199,7 @@ AND NOT EXISTS (SELECT 1 FROM protected_inputs filled WHERE filled.name=p.name A
 ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
-            addAccess(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
+            addProtectedInput(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
         auto reviews = p_->query(R"SQL(
 SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
@@ -269,7 +269,7 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
     std::lock_guard lock(p_->mutex);
     p_->settlePolicyApprovals(p_->policyClock());
     Transaction transaction(p_->db);
-    auto access = this->policy();
+    auto policy = this->policy();
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind,decision))
         throw std::invalid_argument("Invalid inbox decision");
     const auto textInput = [&](std::string_view fieldName) {
@@ -284,9 +284,9 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
         p_->decidePolicyApproval(actor,item,decision);
     } else if (kind == protected_input) {
         if (item.waitId || item.taskId || item.targetRevision || item.targetGeneration) throw RequestChanged{};
-        access.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
+        policy.fulfillSecret(actor,item.botId,item.itemId,textInput("value"));
     } else if (kind == conversation_model_budget) {
-        if (!access.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
+        if (!policy.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
         auto paused = p_->query(R"SQL(
 SELECT t.pause_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
@@ -297,7 +297,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         p_->approveMessageModelCall(item.itemId,item.waitId);
         p_->recordInboxDecision(actor,item,decision);
     } else if (kind == pr_review || kind == pr_reconciliation) {
-        if (!access.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
+        if (!policy.allows(actor,Action::bot_decide,item.botId)) throw DecisionDenied{};
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);

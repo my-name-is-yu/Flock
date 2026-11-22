@@ -2,7 +2,7 @@
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
-#include "access_routes.hpp"
+#include "settings_routes.hpp"
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
@@ -155,10 +155,10 @@ bool localApprovalNavigation(const Request& req) {
         req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
         req.get_header_value("Sec-Fetch-Dest") != "document") return false;
     std::string_view path = req.path;
-    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    constexpr std::string_view prefix = "/settings/";
     if (!path.starts_with(prefix)) return false;
     path.remove_prefix(prefix.size());
-    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+    return validBotId(path);
 }
 
 class LoopbackServer final : public WebServer {
@@ -198,21 +198,15 @@ public:
             if (res.body.empty()) error(res,res.status,"http_error");
         });
         for (const auto& asset : web::assets) {
-            server_.Get(asset.path == "/index.html" ? "/" : std::string(asset.path),
+            const auto path = asset.path == "/index.html" ? "/" :
+                              asset.path == "/settings.html" ? "/settings" :
+                              asset.path == "/bot-settings.html" ? R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))" : asset.path;
+            server_.Get(std::string(path),
                 [asset](const Request&, Response& res) {
                     res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
                 });
         }
-        server_.Get(R"(/settings/([^/]+)/(secrets|environment|access))",[](const Request&, Response& res) {
-            for (const auto& asset : web::assets) {
-                if (asset.path == "/access.html") {
-                    res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
-                    return;
-                }
-            }
-            error(res,404,"settings_not_found");
-        });
-        web::accessRoutes(server_,store_,callbacks_);
+        web::settingsRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
@@ -321,9 +315,9 @@ private:
             (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
             return error(res,400,"invalid_subscription");
         const auto person = web::person(callbacks_,req);
-        auto access = store_.policy();
-        if ((!bot.empty() && !access.allows(person,Action::bot_view,bot)) ||
-            (!peer.empty() && !access.allows(person,Action::bot_view,peer)))
+        auto policy = store_.policy();
+        if ((!bot.empty() && !policy.allows(person,Action::bot_view,bot)) ||
+            (!peer.empty() && !policy.allows(person,Action::bot_view,peer)))
             return error(res,403,"access_denied");
         ChangeFeed::Target target = ChangeFeed::BotList{};
         if (!peer.empty()) target = ChangeFeed::DirectMessage{bot,peer};
@@ -471,12 +465,12 @@ private:
         return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{};
     }
 
-    bool grantsPeer(std::string_view bot, std::string_view peer) const {
+    bool hasPeerPermission(std::string_view bot, std::string_view peer) const {
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
     bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
-        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        if (configured && (hasPeerPermission(bot,peer) || hasPeerPermission(peer,bot))) return true;
         return store_.hasPeerExchange(bot,peer);
     }
 
@@ -497,20 +491,20 @@ private:
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
-        auto access = store_.policy();
-        if (!access.allows(person,Action::bot_view,dm.bot) ||
-            !access.allows(person,Action::bot_view,dm.peer)) return nullptr;
+        auto policy = store_.policy();
+        if (!policy.allows(person,Action::bot_view,dm.bot) ||
+            !policy.allows(person,Action::bot_view,dm.peer)) return nullptr;
         const auto known = bots();
         if (!botById(known,dm.bot) || !canReadPeer(dm.bot,dm.peer,botById(known,dm.peer) != nullptr))
             return nullptr;
-        return access.redactSecrets(dm.peer,access.redactSecrets(dm.bot,web::peerConversation(store_,dm.bot,dm.peer,0)));
+        return policy.redactSecrets(dm.peer,policy.redactSecrets(dm.bot,web::peerConversation(store_,dm.bot,dm.peer,0)));
     }
 
     Json botList(const Person& person) const {
         auto visible = bots();
-        auto access = store_.policy();
+        auto policy = store_.policy();
         visible.erase(std::remove_if(visible.begin(),visible.end(),[&](const Json& bot) {
-            return !access.allows(person,Action::bot_view,web::field(bot,"id"));
+            return !policy.allows(person,Action::bot_view,web::field(bot,"id"));
         }),visible.end());
         auto list = web::botList(store_,visible);
         if (list.empty()) return list;
@@ -526,8 +520,8 @@ private:
         std::map<std::string,std::set<std::string>> connections;
         for (const auto& [sender,recipient] : pairs) {
             if (sender == recipient) continue;
-            if (known.contains(sender) && access.allows(person,Action::bot_view,recipient)) connections[sender].insert(recipient);
-            if (known.contains(recipient) && access.allows(person,Action::bot_view,sender)) connections[recipient].insert(sender);
+            if (known.contains(sender) && policy.allows(person,Action::bot_view,recipient)) connections[sender].insert(recipient);
+            if (known.contains(recipient) && policy.allows(person,Action::bot_view,sender)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");

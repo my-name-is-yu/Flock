@@ -12,7 +12,7 @@ namespace git_fixture {
 using namespace flockv0;
 inline constexpr auto hostName = "github.com";
 inline constexpr auto repoName = "org/flock";
-inline constexpr auto repoGrant = "github.com/org/flock";
+inline constexpr auto repositoryTarget = "github.com/org/flock";
 inline const std::string sha(40,'a');
 
 inline void check(bool condition, std::string_view message) {

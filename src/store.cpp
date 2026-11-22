@@ -605,8 +605,8 @@ WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
 )SQL",{id,bot,actor.id,id,bot,actor.id});
         if (!origin.next()) throw DecisionDenied{};
         const auto participation = authorizeParticipation(actor,origin.number(0));
-        const auto* grant = std::get_if<CoordinationActivation>(&participation);
-        if (!grant || !grant->binding.request.allowDelegation) throw DecisionDenied{};
+        const auto* activation = std::get_if<CoordinationActivation>(&participation);
+        if (!activation || !activation->binding.request.allowDelegation) throw DecisionDenied{};
     }
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};

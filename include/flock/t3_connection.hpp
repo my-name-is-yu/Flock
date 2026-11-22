@@ -21,7 +21,7 @@ public:
     bool disconnect(std::string_view environment);
     void providerRemoved();
     std::optional<T3Connection> authenticate(std::string_view token) const;
-    std::optional<T3ConnectionSettings> settings(std::string_view person) const;
+    std::optional<T3ConnectionSettings> settings(std::string_view person, bool installationRoot = false) const;
     unsigned port() const;
     bool configured() const;
 

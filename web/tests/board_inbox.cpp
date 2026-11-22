@@ -4,9 +4,9 @@ namespace flockv0::http_test {
 void boardInboxEndpoints(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"owner",true};
-    auto access = store.policy();
-    access.setMember(owner,"release","reviewer",true);
-    access.setMember(owner,"release","reader",true);
+    auto policy = store.policy();
+    policy.setMember(owner,"release","reviewer",true);
+    policy.setMember(owner,"release","reader",true);
     const auto release = store.submit({"release","Draft notes","local-env","release"});
     store.submit({"triage","Private request","linked env","triage"});
     FixedModel model;
@@ -71,7 +71,7 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
           source.back().at("data").at("text") == inbox.at(0).at("prompt"),
           "view-only reader could not load the older question with its surrounding history");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage" + cursor),403);
-    access.setMember(owner,"release","reader",false);
+    policy.setMember(owner,"release","reader",false);
     check(browser.post("/api/inbox/decide",answer,403).at("error") == "access_denied" &&
           store.task(release) == before && store.history(release) == history,
           "denied Inbox decision advanced the request");

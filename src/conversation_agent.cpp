@@ -415,7 +415,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                 message.id,step,applyBotChange);
             return {{"ok",true},{"changeId",id},{"status","applied"}};
         }
-        auto result = accessTool(bot,message.id,routing,decision);
+        auto result = botSettingsTool(bot,message.id,routing,decision);
         if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
         if (result.is_null()) result = automationTool(bot,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");

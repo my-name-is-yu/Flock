@@ -67,7 +67,7 @@ Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to us
 In a T3 Thread, ask for a Bot by name or select `/skill:flock-<bot>` or
 `$flock-<bot>` in the provider's skill menu. Flock replies in that Thread.
 The connection supports one-off consultation and ongoing coordination under the installation policy.
-Use `--port PORT` to change the saved loopback port.
+Open **Flock settings** to see the connected environments and saved loopback port. Use `--port PORT` to change the port.
 See [Session handoffs](web/README.md#session-handoffs) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. Additional instructions for an active task are saved for its next safe point, or the Bot can pass a note to the running Session right away. Asking the Bot to implement a completed result starts a new task linked to that result.
@@ -90,7 +90,8 @@ The Bot normally evaluates the Session's final report. It can retry an unavailab
 
 The installation starts in **Full**. Bots can use configured resources unless
 a Never rule matches. Switch to **Supervised** to approve actions with external
-effects as they come up. Workspace isolation, upstream credentials, and Bot
+effects as they come up. Installation roots manage the mode and rules in **Flock settings**.
+Workspace isolation, upstream credentials, and Bot
 ownership apply in both modes.
 
 | Action | Supervised default |
@@ -100,7 +101,7 @@ ownership apply in both modes.
 | T3 Session launch or a send outside the originating Thread | Ask |
 | Bot creation or rename, schedule, reminder, or trigger changes | Ask |
 | Distinct destructive operations or secret use at a new destination | Ask |
-| MCP tool calls | Ask when the invocation has no read-only annotation available |
+| MCP tool calls | Allow when discovery returns `annotations.readOnlyHint: true` for the tool. Ask otherwise |
 | Reads, workspace work, and replies, reactions, edits, and attachments in the originating conversation | Allow |
 
 Targets match exactly or with a `*` glob. **Never** applies in both modes.
@@ -123,6 +124,10 @@ saves an exact rule. Deny blocks another attempt until a new message from a
 person. Work requested by a person stays open. Background approvals expire
 after 30 minutes and offer **Always allow next time** for future work. A
 card-requiring action without an eligible requester is recorded and denied.
+
+A message from a linked Flock person can start work that needs approval. Flock
+posts a waiting notice when replies are allowed in the channel. The requester or installation root
+answers in Flock. Channel messages cannot answer approvals or save rules.
 
 Session read and T3 send targets use compact JSON
 `["environment-id","thread-id"]`. Secret values stay inside adapters and
@@ -231,7 +236,7 @@ and proxy only its artifact preview path to Flock. Published links contain
 random access tokens, honor current workspace permission, and serve sandboxed HTML.
 
 Local machine entries name the Flock host and its owner. The owner can review
-requests under **Bot access settings → Local machine connections**. Open
+requests under **Sharing and connections → Local machine connections**. Open
 approval links in a browser on the Flock host, where Web listens on loopback. Each
 approval lists exact absolute paths for `read_file` or `list_directory`
 within one active Session. A trusted Session bridge authenticates the caller

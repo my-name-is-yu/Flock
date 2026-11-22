@@ -406,13 +406,13 @@ void peerConversation(const std::filesystem::path& path) {
         Browser browser(*server);
         check(browser.get(primary).at("messages") == history,"restarting lost the conversation");
         allowed = false;
-        check(browser.get(reverse).at("messages") == history,"removing a grant lost existing history");
+        check(browser.get(reverse).at("messages") == history,"removing a peer permission lost existing history");
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=broken"),403);
         Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=unknown"),404);
         const auto bots = browser.get("/api/bots");
         const auto triage = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "triage"; });
         check(triage != bots.end() && triage->at("peers") == Json::array({Json{{"id","release"}}}),
-              "the recipient lost its historical partner after the grant was removed");
+              "the recipient lost its historical partner after peer permission was removed");
         configured = false;
         check(browser.get(primary).at("messages") == history,"removing a peer's configuration lost history");
         const auto beforeFirst = std::to_string(history.front().at("id").get<Id>());
@@ -448,9 +448,9 @@ void peerConversationAnchor(const std::filesystem::path& path) {
         return credential == "Bearer reader" ? Person{"reader"} : Person{};
     };
     const Person owner{"fixture",true};
-    auto access = store.policy();
-    access.setMember(owner,"release","reader",true);
-    access.setMember(owner,"settings","reader",true);
+    auto policy = store.policy();
+    policy.setMember(owner,"release","reader",true);
+    policy.setMember(owner,"settings","reader",true);
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
@@ -470,7 +470,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
     const auto anchor = "&anchor=" + std::to_string(targetId);
     Browser::checked(browser.client.Get(primary + anchor),403);
-    access.setMember(owner,"triage","reader",true);
+    policy.setMember(owner,"triage","reader",true);
 
     const auto latest = browser.get(primary);
     check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
@@ -843,9 +843,9 @@ void eventStream(const std::filesystem::path& path) {
 void conversationPermissions(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"fixture",true};
-    auto access = store.policy();
-    access.setMember(owner,"release","reader",true);
-    access.setMember(owner,"release","decider",true);
+    auto policy = store.policy();
+    policy.setMember(owner,"release","reader",true);
+    policy.setMember(owner,"release","decider",true);
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
         if (credential == "Bearer reader") return Person{"reader"};
@@ -904,10 +904,10 @@ void conversationPermissions(const std::filesystem::path& path) {
     memberMessage["clientMessageId"] = "shared-member-message";
     reader.post("/api/messages",memberMessage,201);
     runtime.runConversations();
-    access.setMember(owner,"release","reader",false);
+    policy.setMember(owner,"release","reader",false);
     Browser::checked(reader.client.Get(viewPath),403);
     reader.post("/api/operations",answer,403);
-    access.setMember(owner,"release","reader",true);
+    policy.setMember(owner,"release","reader",true);
 
     decider.post("/api/operations",answer);
     const auto authorized = decider.post("/api/messages",message,201).at("messageId");
@@ -1201,7 +1201,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
     },404);
 }
-void accessEndpoints(const std::filesystem::path& path) {
+void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
@@ -1223,22 +1223,43 @@ void accessEndpoints(const std::filesystem::path& path) {
     check(rejected,"symlink identity file accepted");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
-    Browser::checked(browser.client.Get("/api/access?bot=release"),401);
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
-    Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
+    Browser::checked(browser.client.Get("/api/bot-settings?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
     crossOrigin.emplace("Origin","https://example.invalid");
     const Json share{{"botId","release"},{"person","alice"},{"add",true}};
-    Browser::checked(browser.client.Post("/api/access/members",crossOrigin,share.dump(),"application/json"),403);
+    Browser::checked(browser.client.Post("/api/bot-settings/members",crossOrigin,share.dump(),"application/json"),403);
     const auto secretRequest = store.policy().requestSecret("release",{"fixture-token"});
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
-    browser.post("/api/access/members",share);
-    const auto state = browser.get("/api/access?bot=release");
-    check(state.at("mode") == "full" && state.at("rules").size() == 1 &&
-          state.at("members") == Json::array({"alice"}),"policy settings view lost rules or membership");
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
+    browser.post("/api/bot-settings/members",share);
+    const auto state = browser.get("/api/bot-settings?bot=release");
+    check(state.at("members") == Json::array({"alice"}) &&
+          !state.contains("mode") && !state.contains("rules") && !state.contains("t3"),
+          "Bot settings exposed installation settings or lost membership");
+    const auto settings = browser.get("/api/settings");
+    check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
+          settings.at("rules").size() == 1 && !settings.contains("members"),"Flock settings lost the installation policy");
+    const auto settingsPage = browser.client.Get("/settings");
+    const auto botPage = browser.client.Get("/settings/release");
+    check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
+          botPage && botPage->status == 200 && botPage->body.find("Sharing and connections") != std::string::npos,
+          "Settings pages did not serve their own content");
+    browser.post("/api/settings/mode",{{"mode","supervised"}});
+    const auto rule = settings.at("rules").at(0);
+    const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")}};
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto sharedSettings = browser.get("/api/settings");
+    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false,
+          "Shared member did not get the read-only installation mode");
+    browser.post("/api/settings/mode",{{"mode","full"}},403);
+    browser.post("/api/settings/rule",removal,403);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/settings/rule",removal);
+    check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
@@ -1254,8 +1275,8 @@ void accessEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
     browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},201);
-    browser.post("/api/access/members",{{"botId","release"},{"person","owner"},{"add",false}},403);
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+    browser.post("/api/bot-settings/members",{{"botId","release"},{"person","owner"},{"add",false}},403);
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
 }
 
 } // namespace
@@ -1275,7 +1296,7 @@ int main() {
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
         peerConversationAnchor(directory.path / "peer-conversation-anchor.db");
-        accessEndpoints(directory.path / "access.db");
+        settingsEndpoints(directory.path / "settings.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");

@@ -1,5 +1,5 @@
 #include "board_inbox_routes.hpp"
-#include "access_routes.hpp"
+#include "settings_routes.hpp"
 #include "views.hpp"
 #include "flock/board_inbox.hpp"
 

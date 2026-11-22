@@ -475,7 +475,7 @@ void accessAndActions() {
         {"git_manage_issue",{{"action","update"},{"issueNumber",2},{"state","closed"},{"labels",Json::array()}}},
     };
     for (auto action : {Action::repository_pr,Action::repository_issues})
-        store.policy().changeNeverRule(localOwner,action,repoGrant,true);
+        store.policy().changeNeverRule(localOwner,action,repositoryTarget,true);
     auto readOnly = openArgs();
     readOnly["taskId"] = task;
     check(invoke(store,runtime,script,"read-is-not-pr","git_open_pr",readOnly).at("ok") == false &&
@@ -488,7 +488,7 @@ void accessAndActions() {
     check(deniedIssueUpdate.at("error") == "Repository access denied" && host->hostCalls == 0,
           "repository read or write allowed an issue update");
     for (auto action : {Action::repository_pr,Action::repository_issues})
-        store.policy().changeNeverRule(localOwner,action,repoGrant,false);
+        store.policy().changeNeverRule(localOwner,action,repositoryTarget,false);
     for (auto action : {Action::repository_read,Action::repository_write,Action::repository_pr,
                         Action::repository_issues,Action::repository_review})
         store.policy().changeNeverRule(localOwner,action,"github.com/*/private",true);
@@ -499,7 +499,7 @@ void accessAndActions() {
     int counter = 0;
     for (const auto& [tool,args] : commands) {
         const auto denied = invoke(store,runtime,script,"denied-" + std::to_string(++counter),tool,argsFor(args,"org/private"));
-        check(denied.at("ok") == false && denied.at("error") == "Repository access denied","ungranted repo reached Git host");
+        check(denied.at("ok") == false && denied.at("error") == "Repository access denied","blocked repo reached Git host");
     }
     check(host->hostCalls == 0 && host->createCalls == 0 && host->logCalls == 0,"denied call reached adapter");
     host->upstreamPermitted = false;
@@ -507,7 +507,7 @@ void accessAndActions() {
           host->hostCalls == 0,"upstream permission was ignored");
     host->upstreamPermitted = true;
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
-    check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
+    check(find.at("repos") == Json::array({repoName}),"repository discovery exposed blocked repositories");
     const auto tasklessIssueWrite = invoke(store,runtime,script,"taskless-issue-write","git_manage_issue",
         {{"host",hostName},{"repo",repoName},{"action","create"},{"title","Change"}});
     check(tasklessIssueWrite.at("error") == "Select an owned task for the Git mutation" && host->hostCalls == 0,
@@ -522,11 +522,11 @@ void accessAndActions() {
     auto cross = argsFor(openArgs("cross"),repoName);
     cross["headRepo"] = "fork/private";
     check(invoke(store,runtime,script,"cross-repo","git_open_pr",cross).at("ok") == false &&
-          host->createCalls == 0,"ungranted fork was used");
+          host->createCalls == 0,"blocked fork was used");
     for (const auto& [tool,args] : commands) {
-        const auto name = "granted-" + std::to_string(++counter);
+        const auto name = "allowed-" + std::to_string(++counter);
         const auto result = invoke(store,runtime,script,name,tool,argsFor(args,repoName));
-        check(result.at("ok") == true,"granted action failed: " + tool + " " + result.dump());
+        check(result.at("ok") == true,"allowed action failed: " + tool + " " + result.dump());
     }
     for (auto [label,args] : std::vector<std::pair<std::string,Json>>{
             {"create",{{"action","create"},{"title","Requires a task"}}},
@@ -701,7 +701,7 @@ void taskReadRecovery() {
     }
     Store store(path);
     const auto blockRead = [&](bool block) {
-        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,block);
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repositoryTarget,block);
     };
     int phase = 0;
     Id saved = 0;
@@ -801,9 +801,9 @@ void redaction() {
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
     store.protectGitCredential(credential);
-    auto access = store.policy();
-    const auto input = access.requestSecret("other",{"example"});
-    access.submitSecret(localOwner,"other",input,secret);
+    auto policy = store.policy();
+    const auto input = policy.requestSecret("other",{"example"});
+    policy.submitSecret(localOwner,"other",input,secret);
     const auto task = store.submit(intake());
     host->result["description"] = credential + " " + secret;
     host->result[credential] = secret;
@@ -899,18 +899,18 @@ void notificationBudgetAndRevocation() {
     check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos,"Approved model call did not resume");
 
     script.onNotification = [&] {
-        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,true);
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repositoryTarget,true);
     };
     const auto replies = historyCount(store,task,"conversation_reply");
     check(store.receiveGitWebhook({hostName,"revoked-turn",repoName,"comment","created",{1},sha,"An update",0}),
           "Could not enqueue new event");
     runtime.runConversations();
     check(script.notifications == 2 && historyCount(store,task,"conversation_reply") == replies,
-          "A queued notification posted a reply after grant revocation");
+          "A queued notification posted a reply after adding a Never rule");
     check(store.receiveGitWebhook({hostName,"revoked-event",repoName,"comment","created",{1},sha,"Another update",0}),
           "Could not enqueue event after revocation");
     runtime.runConversations();
-    check(historyCount(store,task,"git_webhook") == 2,"Revoked grant received another task event");
+    check(historyCount(store,task,"git_webhook") == 2,"A blocked repository received another task event");
 }
 
 void schemas() {

@@ -109,12 +109,12 @@ void boundedSessionSearch(T3& t3, const std::filesystem::path& database, const s
     conversation.blockSession("candidate-1128",true);
     const auto last = conversation.search(resume);
     check(last.at("sessions").size() == 1 && last.at("sessions").at(0).at("title") == "Staging failure C" &&
-          last.at("nextCursor").is_null(),"continuation used a revoked grant or missed the end of the search");
+          last.at("nextCursor").is_null(),"continuation included a blocked Session or missed the end of the search");
     conversation.blockSession("candidate-1128");
     const auto restored = conversation.search(resume);
     check(restored.at("sessions").size() == 2 && restored.at("sessions").at(0).at("title") == "Staging failure B" &&
           restored.at("sessions").at(1).at("title") == "Staging failure C" && restored.at("nextCursor").is_null(),
-          "continuation did not preserve order or see the live grant");
+          "continuation did not preserve order or reflect the current Session filter");
 }
 
 void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture) {

@@ -254,8 +254,8 @@ void inspectors(const std::filesystem::path& path) {
     store.receive({"fixture",true},routing,"b","Summarize");
     store.receive({"fixture",true},routing,"c","Release");
     runtime.runConversations();
-    auto access = store.policy();
-    access.submitSecret({"fixture",true},"release",access.requestSecret("release",{"inspector-token"}),model.credential);
+    auto policy = store.policy();
+    policy.submitSecret({"fixture",true},"release",policy.requestSecret("release",{"inspector-token"}),model.credential);
     const auto summaries = browser.get("/api/compactions?bot=release");
     const auto workflows = browser.get("/api/workflows?bot=release");
     const auto view = browser.get("/api/view?bot=release");
@@ -815,9 +815,9 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
         return Json{{"id",id},{"name",profile.at("name")}};
     };
     const Person owner{"owner",true};
-    auto access = store.policy();
-    access.setMember(owner,"staging-triage","alice",true);
-    const auto request = access.requestSecret("release",{"fixture-token"});
+    auto policy = store.policy();
+    policy.setMember(owner,"staging-triage","alice",true);
+    const auto request = policy.requestSecret("release",{"fixture-token"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
         return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
             .at("messageId").get<Id>();
@@ -828,7 +828,7 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
-    browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
     const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
     check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
 
@@ -956,7 +956,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     constexpr auto demoted = "Bearer fixture-demoted";
     constexpr auto removed = "Bearer fixture-removed";
     constexpr auto retained = "Bearer fixture-retained";
-    constexpr auto granted = "Bearer fixture-granted";
+    constexpr auto memberCredential = "Bearer fixture-member";
     constexpr auto alternate = "Bearer fixture-alternate";
     constexpr auto view = "/api/view?bot=release";
     const auto identities = path.string() + ".identities";
@@ -984,14 +984,14 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     };
     AuthorityModel model;
     FixedT3 t3;
-    Id demotedQueue, removedQueue, retainedQueue, grantedQueue, demotedPause, retainedPause, mixedQueue, trustedQueue, taskFromDemotedTurn;
+    Id demotedQueue, removedQueue, retainedQueue, memberQueue, demotedPause, retainedPause, mixedQueue, trustedQueue, taskFromDemotedTurn;
     Json pauses;
     {
         Store store(path);
         auto server = setup(store,Json::array({identity(demoted,localOwner.id,true),identity(removed,"removed",true),
-            identity(retained,"retained",true),identity(granted,"granted",true),identity(alternate,"mixed",true)}));
+            identity(retained,"retained",true),identity(memberCredential,"member",true),identity(alternate,"mixed",true)}));
         Browser browser(*server);
-        store.policy().setMember(localOwner,"release","granted",true);
+        store.policy().setMember(localOwner,"release","member",true);
         store.policy().setMember(localOwner,"release","removed",true);
         demotedPause = send(browser,demoted,"Paused demoted root");
         retainedPause = send(browser,retained,"Paused retained root");
@@ -1005,7 +1005,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         demotedQueue = send(browser,demoted,"Queued demoted root");
         removedQueue = send(browser,removed,"Queued removed root");
         retainedQueue = send(browser,retained,"Queued retained root");
-        grantedQueue = send(browser,granted,"Queued demoted root with decide grant");
+        memberQueue = send(browser,memberCredential,"Queued demoted root with Bot membership");
         mixedQueue = send(browser,alternate,"Queued mixed credential roles");
         trustedQueue = store.receive(localOwner,{"release","","local-env","release"},"local","Trusted local owner")
             .at("messageId");
@@ -1013,7 +1013,7 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     {
         Store store(path);
         auto server = setup(store,Json::array({identity(demoted,localOwner.id,false),identity(retained,"retained",true),
-            identity(granted,"granted",false),identity(alternate,"mixed",false),identity("Bearer fixture-other","mixed",true)}));
+            identity(memberCredential,"member",false),identity(alternate,"mixed",false),identity("Bearer fixture-other","mixed",true)}));
         Browser browser(*server);
         signIn(browser,retained);
         for (const auto& pause : pauses)
@@ -1032,10 +1032,10 @@ void queuedWebAuthority(const std::filesystem::path& path) {
         };
         for (auto id : {demotedQueue,removedQueue,mixedQueue,demotedPause})
             check(latestRoute(id) == "access","Queued or resumed message retained unavailable Web authority");
-        for (auto id : {retainedQueue,grantedQueue,trustedQueue,retainedPause})
+        for (auto id : {retainedQueue,memberQueue,trustedQueue,retainedPause})
             check(latestRoute(id) == "reply","A currently authorized queued or resumed message was denied");
         const std::vector<std::string> expected{"Paused retained root","Queued retained root","Queued retained root",
-            "Queued demoted root with decide grant","Queued demoted root with decide grant","Trusted local owner","Trusted local owner"};
+            "Queued demoted root with Bot membership","Queued demoted root with Bot membership","Trusted local owner","Trusted local owner"};
         check(model.inputs == expected && store.tasks().size() == 4 && page.at("pausedConversations").empty(),
               "Access changes delivered model context or ran work for a revoked actor");
         check(!model.leakedCredential && page.dump().find("Bearer fixture-") == std::string::npos,

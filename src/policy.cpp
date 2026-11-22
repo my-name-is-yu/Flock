@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation
  request_key TEXT UNIQUE NOT NULL,source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
+    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize policy schema");
 }
 
 
@@ -301,11 +301,11 @@ void Policy::setMember(const Person& actor, std::string_view bot, std::string_vi
     tx.commit();
 }
 
-Json Policy::administration(const Person& actor, std::string_view bot) const {
+Json Policy::botSettings(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(db_.mutex);
     if (!allows(actor,Action::bot_view,bot)) throw DecisionDenied{};
     const bool owner = allows(actor,Action::bot_settings,bot);
-    Json result{{"mode",mode()},{"rules",rules()},{"canManage",owner},{"canManagePolicy",actor.adminRoot},{"members",Json::array()},
+    Json result{{"canManage",owner},{"members",Json::array()},
                 {"secretInputs",Json::array()}};
     if (owner) {
         auto members = db_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person",{bot});

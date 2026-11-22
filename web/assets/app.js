@@ -2359,12 +2359,12 @@ function generalContent(bot) {
   rows.append(bot.cron.length
     ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
     : settingsRow('Recurring requests', 'None'));
-  const access = document.createElement('a');
-  access.className = 'settings-row';
-  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
-  access.append(node('span', 'settings-row-label', 'Access and credentials'));
-  access.insertAdjacentHTML('beforeend', chevron);
-  rows.append(access);
+  const settings = document.createElement('a');
+  settings.className = 'settings-row';
+  settings.href = '/settings/' + encodeURIComponent(bot.id);
+  settings.append(node('span', 'settings-row-label', 'Sharing and connections'));
+  settings.insertAdjacentHTML('beforeend', chevron);
+  rows.append(settings);
   if (!bot.soul) return [hero, rows];
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');

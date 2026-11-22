@@ -1,5 +1,5 @@
 #include "session_handoff_routes.hpp"
-#include "access_routes.hpp"
+#include "settings_routes.hpp"
 #include "flock/skill_export.hpp"
 
 #include <algorithm>
@@ -235,13 +235,6 @@ void sessionHandoffRoutes(httplib::Server& server, Store& store, const WebCallba
     server.Post("/mcp/flock",mcp);
     server.Get("/mcp/flock",mcp);
     server.Delete("/mcp/flock",mcp);
-    server.Get("/api/t3-connections",[&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
-        const auto actor = person(callbacks,req);
-        if (actor.id.empty()) return reply(res,401,{{"error","identity_required"}});
-        const auto connection = T3Connections(store).settings(actor.id);
-        reply(res,200,connection ? Json{{"environments",connection->environments}}
-                                 : Json{{"environments",Json::array()}});
-    });
     server.Get("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
         withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {
             auto list = Json::array();
