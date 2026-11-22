@@ -666,6 +666,23 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
           "the instructions were not both delivered");
 }
 
+void deliveryWaitsForEveryTarget() {
+    Fixture f;
+    const auto running = f.store->submit(f.routing("First measurement"));
+    const auto queued = f.store->submit(f.routing("Second measurement"));
+    f.reach(running,"running");
+    constexpr auto text = "Include CPU time in both measurements";
+    f.script(text,{note(running),send(queued)});
+    const Id message = f.receive("both-measurements",text).at("messageId");
+    check(f.t3.steered.size() == 1 && f.conversationMessage(message)["deliveredToT3"] == false,
+          "the first delivery marked the whole message as sent");
+    f.t3.finish(f.task(running).at("activeRun").at("runId").get<std::string>(),"First measurement complete");
+    f.reach(queued,"running");
+    check(f.t3.sent.back().instruction.find(text) != std::string::npos &&
+          f.conversationMessage(message)["deliveredToT3"] == true,
+          "the message was not marked as sent after the second delivery");
+}
+
 void unknownSendThenScopeChange() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1250,6 +1267,7 @@ int main() {
         resumeRestoresCancelledTaskDirections();
         appendWaitsForSafeBoundary();
         twoInstructionsFromOneMessageAreTrackedSeparately();
+        deliveryWaitsForEveryTarget();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();
         receivedRevisionPrecedesCompletion();
