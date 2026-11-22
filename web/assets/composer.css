@@ -33,6 +33,7 @@
 .composer textarea {
   grid-area: message; align-self: center; width: 100%;
   min-height: var(--composer-control-size); max-height: min(40vh, 18rem); overflow-y: auto;
+  max-height: min(calc(var(--keyboard-viewport-height, 100dvh) * .4), 18rem);
   resize: none; border: 0; background: transparent;
   padding-block: max(.35rem, calc((var(--composer-control-size) - 1.5em) / 2));
   padding-inline: .15rem 0;
@@ -97,7 +98,28 @@
     padding-right: max(.75rem, env(safe-area-inset-right));
     padding-bottom: max(.75rem, env(safe-area-inset-bottom));
   }
+}
+@media (max-width: 700px), (any-pointer: coarse) {
   .composer textarea { font-size: 16px; }
+}
+@container conversation-layout (max-height: 400px) {
+  /* Use the height left by the keyboard or browser window to leave room for history. */
+  .composer textarea { max-height: 20cqh; }
+  .screenshot-preview { height: 3.5rem; }
+}
+@media (any-pointer: coarse) {
+  @container conversation-layout (max-height: 220px) {
+    .composer-container {
+      display: flex;
+      flex-direction: column;
+      max-height: calc(100cqh - var(--header-height));
+      padding-block: .25rem;
+    }
+    .composer {
+      min-height: 0;
+      grid-template-rows: auto auto minmax(calc(var(--composer-control-size) + .3rem), auto) auto;
+    }
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .composer, .notice, .send { transition: none; }
