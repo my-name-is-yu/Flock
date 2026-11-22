@@ -1,7 +1,7 @@
 #pragma once
+#include "flock/access.hpp"
 
-#include "flock/core.hpp"
-#include "flock/web.hpp"
+#include "flock/bot_profile.hpp"
 
 #include <bitset>
 #include <mutex>
@@ -19,13 +19,13 @@ private:
 };
 
 struct Schedule {
-    std::string id, expression, timezone, request;
+    std::string id, request;
     Cron cron;
 };
 
 struct Bot {
     std::string id, name, environmentId, projectId;
-    Json settings = Json::object(), avatar;
+    Json settings = Json::object();
     std::vector<Schedule> schedules;
     std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;
@@ -36,6 +36,7 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
+    std::optional<Bot> scheduled(std::string_view id) const;
     BotNotes notes(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;
     Json cards() const;
@@ -43,7 +44,6 @@ public:
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
-    bool hasCron(std::string_view id) const;
 private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;

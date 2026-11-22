@@ -440,6 +440,31 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     check(store.receiveChannel(channel,"fixture-auth",answer,intake) == receipt,"Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
     rejects([&] { store.receiveChannel(channel,"fixture-auth",answer,intake); });
+
+    auto clarification = event("choice-thread","clarify-second","What happens if I say yes?");
+    clarification["replyToExternalMessageId"] = secondPost;
+    model.decideNext = [](const ModelInput&) { return reply("The Session continues. Shall it proceed?"); };
+    store.receiveChannel(channel,"fixture-auth",clarification,intake);
+    runtime.runConversations();
+    auto followup = event("choice-thread","answer-clarification","Yes");
+    followup["replyToExternalMessageId"] = transport->effects.back().at("externalMessageId");
+
+    bool followed = false;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& anchor = input.event.at("replyTo");
+        check(anchor.at("kind") == "bot_message" &&
+              anchor.at("inReplyTo").at("replyToMessageId") == second.at("wait").at("messageId"),
+              "Clarification reply lost the channel question it followed");
+        const auto& turn = input.event.at("turn");
+        if (turn.empty())
+            return {"answer_task_question",{{"taskId",second.at("id")},{"waitId",second.at("wait").at("id")},{"text","Yes"}},{}};
+        followed = turn.at(0).at("result").at("ok") == true;
+        return reply("Answer received.");
+    };
+    store.receiveChannel(channel,"fixture-auth",followup,intake);
+    runtime.runConversations();
+    check(followed && store.task(second.at("id")).at("state") != "waiting",
+          "Reply to a Bot clarification could not answer its original question");
 }
 
 void local(const std::filesystem::path& database, const std::string& path) {

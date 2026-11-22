@@ -4,6 +4,8 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. Retrying the same payload returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Tapping one of a task question's choices answers that question directly through `POST /api/operations` without a conversation turn; a written reply to the question goes through the Bot. The CLI `submit` command and `POST /api/requests` each create an explicit new Task.
 
+The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
+
 ## Dependencies
 
 - [cpp-httplib v0.67.0](https://github.com/yhirose/cpp-httplib/tree/v0.67.0) is pinned by release and SHA-256 in CMake.

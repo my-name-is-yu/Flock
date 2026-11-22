@@ -9,7 +9,6 @@
 #include "flock/web.hpp"
 #endif
 
-#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -90,6 +89,10 @@ std::filesystem::path homePath(Arguments& args) {
     throw Conflict("Set FLOCK_HOME or provide --home DIRECTORY");
 }
 
+Store openStore(const std::filesystem::path& home) {
+    return Store(home / "flock.sqlite3");
+}
+
 void print(const Json& value) {
     std::cout << value.dump(2,' ',false,Json::error_handler_t::replace) << '\n';
 }
@@ -145,7 +148,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
 volatile std::sig_atomic_t stopRequested = 0;
 void requestStop(int) { stopRequested = 1; }
 
-void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bots& bots) {
+void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
@@ -166,6 +169,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 #ifndef FLOCK_WITH_T3
     if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
 #endif
+    auto store = openStore(home);
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
@@ -177,8 +181,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
         model = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
-#else
-    (void)home;
 #endif
     const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
@@ -223,7 +225,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     }
 }
 
-void operate(Store& store, const Bots& bots, const std::string& operation, Arguments& args) {
+void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args,"task ID");
     Id wait = 0;
     Json details = Json::object();
@@ -238,25 +240,21 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
             else if (flag == "--question") details["questionId"] = args.pop("question ID");
             else throw Conflict("Unknown reconciliation option: " + flag);
         }
-        const auto status = store.task(task);
-        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
-            (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
-            const auto bot = bots.get(status["botId"].get<std::string>());
-            const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
-            const auto& environment = status.at("environmentId");
-            const bool allowed = environment == bot.environmentId ||
-                std::ranges::find(destinations,environment) != destinations.end();
-            if (!allowed || status["projectId"] != Json(bot.projectId))
-                throw Conflict("The project route changed. Cancel this task and submit a new request.");
-            details["session"] = bot.settings.value("session",Json::object());
-        }
     }
     args.end();
+
+    auto store = openStore(home);
+    if (operation == "reconcile") {
+        const auto status = store.task(task);
+        details = reconciliationData(status,wait,std::move(details),[&](std::string_view id, std::string_view request) {
+            return bots.get(id).intake(request);
+        });
+    }
     store.operate(task,wait,operation,details);
     print(store.task(task));
 }
 
-void taskCommand(Store& store, const std::string& command, Arguments& args) {
+void taskCommand(const std::filesystem::path& home, const std::string& command, Arguments& args) {
     Id task = 0, cursor = 0;
     unsigned limit = 50;
     std::string bot;
@@ -269,25 +267,29 @@ void taskCommand(Store& store, const std::string& command, Arguments& args) {
         else if (flag == "--limit") limit = static_cast<unsigned>(number(args,"limit",1,200));
         else throw Conflict("Unknown pagination option: " + flag);
     }
+    const auto store = openStore(home);
     if (command == "history") {
         if (!store.hasTask(task)) throw Conflict("Task does not exist");
         print(store.history(task,cursor,limit));
     } else print(store.tasks(bot,cursor,limit));
 }
 
-void accessCommand(Store& store, Arguments& args) {
+void accessCommand(const std::filesystem::path& home, Arguments& args) {
     const auto action = args.pop("access command (grant, revoke or list)");
     if (action != "grant" && action != "revoke" && action != "list")
         throw Conflict("Unknown access command: " + action);
     const auto bot = args.pop("Bot ID");
     if (!validBotId(bot)) throw Conflict("Invalid Bot ID");
-    auto access = store.access();
+    std::optional<Scope> scope;
     if (action != "list") {
-        const Scope scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
-        args.end();
-        if (!scope.valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
-        access.resourceGrant(Person{"local-cli",true},bot,scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
-    } else args.end();
+        scope = Scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
+        if (!scope->valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
+    }
+    args.end();
+    auto store = openStore(home);
+    auto access = store.access();
+    if (scope)
+        access.resourceGrant(Person{"local-cli",true},bot,*scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
     print(access.grants(bot));
 }
 
@@ -308,25 +310,23 @@ int runCli(Arguments& args) {
     if (command == "bots") {
         args.end();
         print(bots.cards());
-        return 0;
-    }
-    std::filesystem::create_directories(home);
-    Store store(home / "flock.sqlite3");
-    if (command == "run") daemon(args,home,store,bots);
-    else if (command == "access") accessCommand(store,args);
+    } else if (command == "run") daemon(args,home,bots);
+    else if (command == "access") accessCommand(home,args);
     else if (command == "submit") {
-        const auto bot = bots.get(args.pop("Bot ID"));
+        const auto botId = args.pop("Bot ID");
         const auto request = args.pop("request");
         args.end();
-        const auto id = store.submit(bot.intake(request));
+        const auto intake = bots.get(botId).intake(request);
+        auto store = openStore(home);
+        const auto id = store.submit(intake);
         print(store.task(id));
     } else if (command == "status") {
         const auto id = number(args,"task ID");
         args.end();
-        print(store.task(id));
-    } else if (command == "history" || command == "tasks") taskCommand(store,command,args);
+        print(openStore(home).task(id));
+    } else if (command == "history" || command == "tasks") taskCommand(home,command,args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" ||
-             command == "reconcile" || command == "cancel") operate(store,bots,command,args);
+             command == "reconcile" || command == "cancel") operate(home,bots,command,args);
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;
 }

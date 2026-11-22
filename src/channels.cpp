@@ -137,7 +137,7 @@ ChannelCapabilities channelCapabilities(ChannelKind kind) {
     return {true,kind == ChannelKind::slack,true,true,{"image/png","image/jpeg","image/webp","text/plain"},attachmentLimit};
 }
 
-void Store::Impl::migrateChannels() {
+void Store::Impl::initializeChannelSchema() {
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_messages(
       message_id INTEGER PRIMARY KEY REFERENCES messages(id),
       event_key TEXT NOT NULL UNIQUE, scope_key TEXT NOT NULL, origin TEXT NOT NULL,

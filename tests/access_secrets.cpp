@@ -144,9 +144,11 @@ void freshLaunch(const std::filesystem::path& path) {
           "pending launch permission reached T3");
 }
 
-void repeatedSecretRequests(const std::filesystem::path& path) {
+void freshPendingSecretRequests(const std::filesystem::path& path) {
+    check(!std::filesystem::exists(path),"secret schema fixture must start with a fresh database");
     Store left(path), right(path);
     auto access = left.access();
+    check(access.administration(owner,"Ernest").at("secretInputs").empty(),"fresh protected input table is not empty");
     const SecretRef ref{"fixture-token"};
     std::barrier start(2);
     auto request = [&](Store& store) {
@@ -156,6 +158,7 @@ void repeatedSecretRequests(const std::filesystem::path& path) {
     auto other = std::async(std::launch::async,request,std::ref(right));
     const auto id = request(left);
     check(id == other.get(),"repeated secret request returned a different ID");
+    check(right.access().requestSecret("Reviewer",ref) != id,"pending secret uniqueness crossed Bot boundaries");
     denied([&]{ access.submitSecret(owner,"Ernest",id,"nest"); });
     access.submitSecret(owner,"Ernest",id,credential);
     check(access.administration(owner,"Ernest").at("secretInputs") ==
@@ -292,7 +295,7 @@ int main() {
         concurrentApproval(directory/"race.db");
         freshLaunch(directory/"fresh.db");
         runningSessions(directory/"peers.db");
-        repeatedSecretRequests(directory/"secret-requests"/"state.db");
+        freshPendingSecretRequests(directory/"secret-requests"/"state.db");
         exercise(directory);
     }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(tmp);return 1;}

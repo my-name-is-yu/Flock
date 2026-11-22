@@ -107,7 +107,7 @@ std::shared_ptr<LocalMachine> hostLocalMachine(std::string owner) {
     return std::make_shared<HostLocalMachine>(std::move(owner));
 }
 
-void Store::Impl::migrateLocalMachines() {
+void Store::Impl::initializeLocalMachineSchema() {
     exec(R"SQL(CREATE TABLE IF NOT EXISTS local_machine_connections(
       id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id),
       environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, requested_run_id TEXT NOT NULL,

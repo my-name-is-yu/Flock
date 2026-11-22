@@ -110,6 +110,8 @@ void cronIntakeAndRestart() {
         fall.tick(utc(2026,11,1,7,0));
         const auto tasks = store.tasks();
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
+        check(tasks[0]["scheduleId"] == "fall" && tasks[0]["request"] == "Overlap",
+              "scheduled task lost its configured ID or request");
         check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
               tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
         check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
@@ -443,7 +445,7 @@ void responseContract() {
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
-        Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+        Json::array({"reason","instruction"}),"saved requested criteria must not require model authorship");
     check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
@@ -510,7 +512,10 @@ void responseContract() {
     input.images.clear();
     input.event = {{"kind","intake"}};
 
+    input.task.erase("requestedDoneWhen");
+    input.needsDoneWhen = true;
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
     const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
@@ -532,17 +537,19 @@ void responseContract() {
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
     const auto& reply = parameters(peerRequest,"reply_to_bot");
-    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","answer","result","failed"} &&
+    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","result","failed"} &&
         reply["required"].get<Names>() == Names{"reason","kind","text"},
         "peer replies must specify their kind and text");
     const auto& evidence = parameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
+    input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
     check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
+    input.canForwardUserMessage = true;
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
     const auto forwardRequest = responseRequest(input);
     const auto& forward = parameters(forwardRequest,"send_bot_message");
@@ -557,6 +564,13 @@ void responseContract() {
     const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
+    for (const auto* key : {"namespace","status"}) {
+        auto incomplete = call;
+        incomplete.erase(key);
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),completeRequest); },"missing provider qualifier");
+        incomplete[key] = nullptr;
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),completeRequest); },"null provider qualifier");
+    }
     rejects<ModelError>([&] { responseDecision(Json::array({call,call}),completeRequest); },"multiple tools accepted");
     rejects<ModelError>([&] { responseDecision(Json::array({call}),forwardRequest); },"state-invalid tool accepted");
     rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
@@ -568,9 +582,9 @@ public:
     Decision decide(const ModelInput& input) override {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
-            return {"follow_up",{{"instruction","Add the required test"}},"A regression test is missing."};
+            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
         }
-        return {"complete",{{"report","Existing tests passed"}},"The required existing tests passed."};
+        return {"complete",{{"report","All existing checks succeeded"}},"The required existing tests passed."};
     }
 };
 
@@ -759,13 +773,13 @@ void botProfilesAndAvatars() {
     const auto uploaded = bots.updateProfile("scout",{
         {"name","Scout Prime"},
         {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/png",pngBytes});
+    },AvatarImage{pngBytes});
     check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" &&
           !uploaded.at("avatar").at("version").get<std::string>().empty(),
           "uploaded PNG avatar metadata was not saved");
     const auto savedPng = bots.avatarImage("scout");
-    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+    check(savedPng && savedPng->format().contentType == "image/png" && savedPng->bytes() == pngBytes,
           "stored PNG bytes did not match upload");
 
     // Rename without re-uploading keeps the existing image.
@@ -781,13 +795,13 @@ void botProfilesAndAvatars() {
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
         {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/gif",gifBytes});
+    },AvatarImage{gifBytes});
     check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
           std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "replacing uploaded avatar did not clean up previous image file");
     const auto savedGif = bots.avatarImage("scout");
-    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+    check(savedGif && savedGif->format().contentType == "image/gif" && savedGif->bytes() == gifBytes,
           "replaced GIF bytes did not match");
 
     // Switching back to shape removes uploaded file.
@@ -799,13 +813,6 @@ void botProfilesAndAvatars() {
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "switching from upload to shape did not remove stored image file");
 
-    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
-    rejects<Conflict>([&] {
-        bots.updateProfile("scout",{
-            {"name","Scout"},
-            {"avatar",{{"kind","upload"}}},
-        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
-    },"SVG payload accepted as avatar image");
     rejects<Conflict>([&] {
         bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
     },"blank Bot name accepted");
@@ -821,8 +828,11 @@ void botProfilesAndAvatars() {
     });
     const auto loaded = bots.get("release");
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
-          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          loaded.projectId == "project-canonical",
           "editing profile altered existing Bot execution configuration");
+    check(std::ranges::any_of(bots.cards(),[](const Json& card) {
+        return card.at("id") == "release" && card.at("avatar").at("icon") == "compass";
+    }),"updated Bot card did not retain its icon");
 
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
@@ -837,7 +847,13 @@ void botProfilesAndAvatars() {
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
     });
-    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+    const auto customImage = pngBytes + "new upload";
+    bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",{{"kind","upload"}}}},AvatarImage{customImage});
+    const auto reopened = Bots(temp.path / "bots").avatarImage("custom");
+    std::ifstream spare(customDir / "avatar.png",std::ios::binary);
+    check(reopened && reopened->bytes() == customImage &&
+          std::string(std::istreambuf_iterator<char>(spare),{}) == pngBytes,
+          "upload failed to persist the new image and preserve the unrelated image");
 
     // A save that would exceed the config read limit fails before the file changes.
     const auto bigDir = temp.path / "bots" / "big";

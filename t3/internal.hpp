@@ -6,14 +6,19 @@
 
 namespace flockv0::t3detail {
 
+inline constexpr auto ProtocolVersion = "2025-06-18";
+inline Json initializeParams() {
+    return {{"protocolVersion", ProtocolVersion}, {"capabilities", Json::object()},
+            {"clientInfo", {{"name", "Flock"}, {"version", "0.1.0"}}}};
+}
+
 struct Failure : std::runtime_error {
-    enum class Kind { Auth, Settings, Wire, Tool };
+    enum class Kind { Auth, Settings, Wire, Rpc, Tool };
+    enum class Reason { Other, QuestionGone, WorkSettings };
     Kind kind;
-    std::string code;
-    std::string serverMessage;
-    explicit Failure(Kind category, std::string message, std::string toolCode = {}, std::string toolMessage = {})
-        : std::runtime_error(std::move(message)), kind(category), code(std::move(toolCode)),
-          serverMessage(std::move(toolMessage)) {}
+    Reason reason;
+    explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)
+        : std::runtime_error(std::move(message)), kind(category), reason(reason) {}
 };
 
 using Headers = std::map<std::string, std::string>;

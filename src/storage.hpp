@@ -21,13 +21,18 @@ private:
 };
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
+Json questionTarget(const Json&);
 std::string actionId();
+std::string taskIntent(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+
+enum class RequestJournal { record, skip };
 
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
+    bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
 struct TaskChange { std::string intent, doneWhen, environment; };
@@ -65,9 +70,8 @@ struct Store::Impl {
     std::vector<std::string> rootPeople;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
-    void migrateAccess();
-    void migrateChannels();
-    void migrateLocalMachines();
+    void initializeChannelSchema();
+    void initializeLocalMachineSchema();
     std::optional<Json> messageReceipt(std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
     bool channelMessageAuthorized(Id, std::string_view bot) const;
@@ -84,6 +88,7 @@ struct Store::Impl {
     Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<std::string>* images = nullptr) const;
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
+    void initializeAccessSchema();
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
@@ -95,6 +100,7 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
@@ -107,7 +113,10 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
-    std::optional<conversation::Message> turnMessage(Id messageId) const;
+    bool turnPending(Id messageId) const;
+    conversation::Message loadTurnMessage(Id messageId) const;
+    const char* questionAnswerError(const Json& task, const conversation::Message&) const;
+    Json taskState(const Json& task, const conversation::Message&) const;
     Json turnInput(const conversation::Message&, int step, std::vector<std::string>& images) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
@@ -121,12 +130,11 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
-    Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
-              const Json& source = nullptr);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
+              RequestJournal requestJournal = RequestJournal::record);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
+    bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -33,6 +34,10 @@ struct Intake {
     std::string scheduleId{};
     Seconds scheduledAt = 0;
 };
+using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
+// Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
+Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
+
 struct BotNotes { std::string soul, memory; };
 struct PeerBot { std::string name; Intake intake; };
 
@@ -49,8 +54,8 @@ struct ModelInput {
     std::string feedback;
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
+    bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<std::string> images{};
-
 };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object())
@@ -72,6 +77,10 @@ struct Question {
     std::string requestId;
     Json fields = Json::array();
 };
+// T3 trims ordinary input and labels without explicit values using JavaScript String.trim.
+std::string_view trimSessionQuestionText(std::string_view text);
+// Validate a model answer against the observed fields and encode it for Session submission.
+Json sessionQuestionAnswers(const Json& fields, const Json& answers);
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -80,6 +89,9 @@ struct Observation {
     bool settled = false; // True on Finished only after delegated work has settled.
     std::string detail;
 };
+inline constexpr std::size_t maxSessionPromptBytes = 120000;
+std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
+
 struct Command {
     std::string actionId, tool, environmentId, projectId, instruction, authGeneration;
     Json config = Json::object(), answers = Json::object();
@@ -152,7 +164,12 @@ public:
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
     Json activeTasks(std::string_view botId) const;
+    // Distinct active state and replanning combinations, grouped by Bot ID.
+    Json activeTaskStatesByBot() const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
+    // Journal position and tasks with a newly recorded Run since that position.
+    // On the initial read only the position is needed, before loading the first page.
+    std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // Latest completion or Session report for the Task's current revision.
     Json latestTaskResult(Id taskId) const;
@@ -160,11 +177,19 @@ public:
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
-    std::vector<std::string> peerPartners(std::string_view bot) const;
+    std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;
+    bool hasPeerExchange(std::string_view bot, std::string_view peer) const;
+    // A change hint for readers, covering writes on this connection and other connections.
+    std::pair<std::int64_t,std::int64_t> changeStamp() const;
+    struct ConversationChanges {
+        Id through;
+        std::map<std::string,std::vector<Id>> messages;
+    };
+    // Original messages affected by replies and instruction delivery since a journal cursor.
+    ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
     void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
-    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event,
-                        const std::function<Intake(std::string_view, std::string_view)>& routing);
+    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
