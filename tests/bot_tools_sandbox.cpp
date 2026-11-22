@@ -705,7 +705,8 @@ void mcpToolOutcomes(Fixture& f) {
     f.approve();
     expectUnknown(f.model.seen.at(0).at("result"),"numeric-content after restart");
 
-    for (const auto* name : {"missing-content","invalid-block","invalid-resource","invalid-structured-content","invalid-is-error"})
+    for (const auto* name : {"missing-content","invalid-block","invalid-resource","invalid-resource-mime-type",
+                             "invalid-annotations","invalid-structured-content","invalid-is-error"})
         expectUnknown(f.run(invoke(name)),name);
 
     const auto success = f.run(invoke("extension"));

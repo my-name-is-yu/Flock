@@ -11,10 +11,17 @@ TOOL_RESULTS = {
     "missing-content": {"structuredContent": {}},
     "invalid-block": {"content": [{"type": "text", "text": 42}]},
     "invalid-resource": {"content": [{"type": "resource", "resource": {"uri": "fixture://data"}}]},
+    "invalid-resource-mime-type": {
+        "content": [{"type": "resource", "resource": {"uri": "fixture://data", "text": "Ready", "mimeType": 42}}],
+    },
+    "invalid-annotations": {"content": [{"type": "text", "text": "Ready", "annotations": False}]},
     "invalid-structured-content": {"content": [], "structuredContent": []},
     "invalid-is-error": {"content": [], "isError": 1},
     "extension": {
-        "content": [{"type": "text", "text": "Tool evidence"}, {"type": "fixture-extension", "payload": 7}],
+        "content": [
+            {"type": "text", "text": "Tool evidence", "annotations": {"audience": ["assistant"]}},
+            {"type": "fixture-extension", "payload": 7, "annotations": False},
+        ],
         "structuredContent": {"count": 1},
     },
     "tool-failure": {"content": [{"type": "text", "text": "Tool failed"}], "isError": True},

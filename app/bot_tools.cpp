@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <curl/curl.h>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <sys/socket.h>
 
@@ -229,17 +230,48 @@ bool stringMember(const Json& object, const char* key) {
     return field != object.end() && field->is_string();
 }
 
+bool optionalMember(const Json& object, const char* key, auto valid) {
+    const auto field = object.find(key);
+    return field == object.end() || std::invoke(valid,*field);
+}
+
+bool stringArray(const Json& value) {
+    return value.is_array() && std::ranges::all_of(value,&Json::is_string);
+}
+
+bool validMcpAnnotations(const Json& value) {
+    return value.is_object() && optionalMember(value,"audience",stringArray) &&
+           optionalMember(value,"priority",&Json::is_number) && optionalMember(value,"lastModified",&Json::is_string);
+}
+
+bool validMcpIcons(const Json& value) {
+    return value.is_array() && std::ranges::all_of(value,[](const Json& icon) {
+        return stringMember(icon,"src") && optionalMember(icon,"mimeType",&Json::is_string) &&
+               optionalMember(icon,"sizes",stringArray) && optionalMember(icon,"theme",&Json::is_string);
+    });
+}
+
 bool validMcpContentBlock(const Json& block) {
     const auto type = block.find("type");
     if (type == block.end() || !type->is_string()) return false;
     const auto& name = type->get_ref<const std::string&>();
-    if (name == "text") return stringMember(block,"text");
-    if (name == "image" || name == "audio") return stringMember(block,"data") && stringMember(block,"mimeType");
-    if (name == "resource_link") return stringMember(block,"uri") && stringMember(block,"name");
+    const auto validMetadata = [&] {
+        return optionalMember(block,"annotations",validMcpAnnotations) && optionalMember(block,"_meta",&Json::is_object);
+    };
+    if (name == "text") return stringMember(block,"text") && validMetadata();
+    if (name == "image" || name == "audio")
+        return stringMember(block,"data") && stringMember(block,"mimeType") && validMetadata();
+    if (name == "resource_link")
+        return stringMember(block,"uri") && stringMember(block,"name") && validMetadata() &&
+               optionalMember(block,"title",&Json::is_string) && optionalMember(block,"description",&Json::is_string) &&
+               optionalMember(block,"mimeType",&Json::is_string) && optionalMember(block,"size",&Json::is_number) &&
+               optionalMember(block,"icons",validMcpIcons);
     if (name == "resource") {
         const auto resource = block.find("resource");
-        return resource != block.end() && stringMember(*resource,"uri") &&
-               (stringMember(*resource,"text") || stringMember(*resource,"blob"));
+        return resource != block.end() && stringMember(*resource,"uri") && validMetadata() &&
+               (resource->contains("text") || resource->contains("blob")) &&
+               optionalMember(*resource,"text",&Json::is_string) && optionalMember(*resource,"blob",&Json::is_string) &&
+               optionalMember(*resource,"mimeType",&Json::is_string) && optionalMember(*resource,"_meta",&Json::is_object);
     }
     // Forward unfamiliar block types as opaque data.
     return !name.empty();
@@ -247,9 +279,8 @@ bool validMcpContentBlock(const Json& block) {
 
 void validateMcpToolContent(const Json& result) {
     const auto content = result.find("content");
-    const auto structured = result.find("structuredContent");
     if (content == result.end() || !content->is_array() || !std::ranges::all_of(*content,validMcpContentBlock) ||
-        (structured != result.end() && !structured->is_object()))
+        !optionalMember(result,"structuredContent",&Json::is_object) || !optionalMember(result,"_meta",&Json::is_object))
         throw Conflict("Invalid MCP tool content");
 }
 
