@@ -1129,7 +1129,12 @@ function focusConversationMessage(target) {
   const bottom = viewport.bottom - returnSpace;
   const center = top + Math.max(0, (bottom - top - message.height) / 2);
   row.focus({ preventScroll: true });
-  scroller.scrollTop += message.top - center;
+  const nextTop = Math.max(0, scroller.scrollTop + message.top - center);
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: nextTop, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = nextTop;
+  }
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
@@ -1168,6 +1173,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     return;
   }
   elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  void target.offsetWidth;
   target.classList.add('conversation-source-target');
   focusConversationMessage(target);
   updateJumpToLatest();
@@ -2747,7 +2753,11 @@ elements['jump-to-latest'].addEventListener('click', () => {
     scroller.focus({ preventScroll: true });
     return;
   }
-  scroller.scrollTop = scroller.scrollHeight;
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
   updateJumpToLatest();
 });
 elements.conversation.addEventListener('keydown', (event) => {
