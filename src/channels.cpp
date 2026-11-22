@@ -294,13 +294,14 @@ bool Store::Impl::channelMessageAuthorized(Id id, std::string_view bot) const {
     return !row.next() || permitsChannel(bot,originFrom(row.json(0)),row.string(1),row.string(2),"use");
 }
 
-Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<ModelImage>* images) const {
+Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<ModelImage>* images, std::string_view viewer) const {
     auto row = query("SELECT c.origin,c.sender_id,c.person_id,c.scope_key FROM channel_messages c JOIN messages m ON m.id=c.message_id"
                      " WHERE c.message_id=? AND m.bot_id=?",{id,bot});
     if (!row.next()) return Json::object();
     const auto origin = originFrom(row.json(0));
     const auto sender = row.string(1), person = row.string(2);
     Json context{{"channel",origin.json()}};
+    if (!viewer.empty()) context["channel"]["fromViewer"] = viewer == person;
     if (!permitsChannel(bot,origin,sender,person,"use")) return context;
     const auto& caps = channels.at(origin.kind).capabilities;
     if (permitsChannel(bot,origin,sender,person,"read")) {
