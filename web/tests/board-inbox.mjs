@@ -10,6 +10,8 @@ async function exercise(mountBoardInbox) {
   const settled = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
   const dialog = byId('board-inbox');
   const filters = byId('work-view-status-label');
+  const bots = byId('work-view-bot');
+  const refresh = byId('work-view-refresh');
   const cards = byId('work-view-items');
   const message = byId('work-view-message');
   const text = '<img data-user-content> branch?';
@@ -17,24 +19,46 @@ async function exercise(mountBoardInbox) {
     targetRevision: 3, targetGeneration: 4 };
   const question = { ...target, botName: 'Release', requestTitle: 'Draft notes', request: 'Draft notes for main',
     prompt: text, choices: ['main'], canDecide: true };
-  const revised = { ...question, itemId: 5, waitId: 5, targetRevision: 6, targetGeneration: 7 };
+  const revised = { ...question, itemId: 5, waitId: 5, targetRevision: 6, targetGeneration: 7,
+    prompt: 'Which release branch should we use?', choices: ['release'] };
   const secret = { ...question, itemKind: 'protected_input', itemId: 3, requestTitle: 'Protected input' };
   const review = { ...question, itemKind: 'pr_review', itemId: 4, canDecide: false,
     prTitle: 'Review link', prUrl: 'data:text/plain,ignored' };
+  const docs = { ...question, botId: 'docs', botName: 'Docs', itemId: 6, waitId: 6, taskId: 2,
+    requestTitle: 'Publish docs', request: 'Publish docs', prompt: 'Which guide?', choices: [] };
+  const nextDocs = { ...docs, itemId: 7, waitId: 7, targetGeneration: 5, prompt: 'Which examples?' };
   const calls = [];
-  let decided = false;
+  let questions = [question, docs, secret, review];
+  let recordDocs;
+  const answer = () => cards.querySelector('textarea');
+  const type = (input, value) => {
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const filter = (bot) => {
+    bots.value = bot;
+    bots.dispatchEvent(new Event('change'));
+  };
   mountBoardInbox(async (path, data) => {
     calls.push([path, data]);
-    if (path === 'bots') return [{ id: 'release', name: 'Release' }];
+    if (path === 'bots') return [{ id: 'release', name: 'Release' }, { id: 'docs', name: 'Docs' }];
     if (path.startsWith('board')) return { tasks: [] };
     if (path === 'inbox/decide') {
-      if (data.waitId !== revised.waitId) throw new Error('request_changed');
-      decided = true;
+      if (data.waitId === docs.waitId) {
+        await new Promise((resolve) => { recordDocs = resolve; });
+        questions = questions.filter((item) => item !== docs);
+        return { accepted: true };
+      }
+      if (data.waitId === question.waitId) {
+        questions = [revised];
+        throw new Error('request_changed');
+      }
+      questions = [];
       return { accepted: true };
     }
     if (path === 'inbox/history') return { decisions: [] };
-    return { items: decided ? [] : calls.filter(([route]) => route === 'inbox').length === 1
-      ? [question, secret, review] : [revised] };
+    const bot = new URLSearchParams(path.split('?')[1]).get('bot');
+    return { items: questions.filter((item) => !bot || item.botId === bot) };
   });
 
   check(!dialog.open && message.getAttribute('role') === 'status', 'Missing closed dialog or live status');
@@ -42,7 +66,7 @@ async function exercise(mountBoardInbox) {
   await settled();
   check(dialog.open && byId(dialog.getAttribute('aria-labelledby')).textContent === 'Task board' && !filters.hidden,
     'The board lost its accessible title or status filter');
-  byId('work-view-bot').value = 'release';
+  bots.value = 'release';
   const status = byId('work-view-status');
   status.value = 'blocked';
   status.dispatchEvent(new Event('change'));
@@ -60,20 +84,66 @@ async function exercise(mountBoardInbox) {
   check(password?.labels[0].textContent === 'Protected value', 'The protected value is not a labeled password field');
   const form = cards.querySelector('form');
   form.querySelector('button[type=button]').click();
-  const answer = form.querySelector('textarea');
-  check(answer.value === 'main' && answer.labels[0].textContent === 'Answer', 'Choice did not fill the labeled answer');
-  form.querySelector('button[type=submit]').click();
+  check(answer().value === 'main' && answer().labels[0].textContent === 'Answer', 'Choice did not fill the labeled answer');
+  refresh.click();
   await settled();
-  const payload = calls.at(-1)[1];
-  check(Object.entries(target).every(([field, value]) => payload[field] === value) && payload.data.text === 'main',
+  check(answer().value === 'main', 'Refresh lost the selected answer');
+  const draft = 'Use main after the smoke tests pass.';
+  type(answer(), draft);
+  type(cards.querySelector('input[type=password]'), 'fixture secret');
+  filter('docs');
+  await settled();
+  check(answer().value === '', 'The Release draft appeared on the Docs card');
+  type(answer(), 'Publish the release checklist.');
+  byId('work-view-close').click();
+  await settled();
+  document.querySelector('[data-work-view="inbox"]').click();
+  await settled();
+  check(answer().value === draft && cards.querySelectorAll('textarea')[1].value === 'Publish the release checklist.',
+    'Filtering and reopening lost the answer drafts');
+  check(cards.querySelector('input[type=password]').value === '', 'The draft retained a protected value');
+
+  cards.querySelectorAll('textarea')[1].form.querySelector('button[type=submit]').click();
+  refresh.click();
+  await settled();
+  check(cards.querySelectorAll('textarea')[1].form.querySelector('button[type=submit]').disabled,
+    'Refreshing made an in-flight answer submit again');
+  answer().focus();
+  answer().setSelectionRange(4, 8);
+  recordDocs();
+  await settled();
+  check(answer().value === draft && !cards.textContent.includes(docs.prompt) && message.textContent.includes('Decision saved'),
+    'Saving the Docs answer lost the Release draft or left Docs pending');
+  check(document.activeElement === answer() && answer().selectionStart === 4 && answer().selectionEnd === 8,
+    'Saving the Docs answer moved focus or selection out of the Release editor');
+  questions = [question, nextDocs, secret, review];
+  refresh.click();
+  await settled();
+  check(cards.querySelectorAll('textarea')[1].value === '', 'The recorded Docs draft appeared on a new Docs question');
+
+  let send = answer().form.querySelector('button[type=submit]');
+  send.focus();
+  send.click();
+  await settled();
+  const payload = calls.filter(([route]) => route === 'inbox/decide').at(-1)[1];
+  check(Object.entries(target).every(([field, value]) => payload[field] === value) && payload.data.text === draft,
     'Decision submission changed the target or answer');
-  check(message.textContent.includes('The request changed') && answer.value === 'main' && !answer.disabled,
-    'Stale feedback did not preserve the draft and restore the controls');
-  byId('work-view-refresh').click();
+  send = answer().form.querySelector('button[type=submit]');
+  check(cards.textContent.includes(revised.prompt) && cards.textContent.includes('The question changed') && send.disabled,
+    'The updated question did not require review before reusing the draft');
+  check(document.activeElement === answer() && answer().value === draft && !answer().disabled,
+    'The changed request lost the draft or editor focus');
+  const reuse = [...answer().form.querySelectorAll('button')].find(({ textContent }) => textContent === 'Use draft for this question');
+  check(reuse && send.disabled, 'An unchanged old draft must still be reviewed');
+  const choice = [...answer().form.querySelectorAll('button')].find(({ textContent }) => textContent === 'release');
+  choice.click();
+  check(!send.disabled && !reuse.isConnected && answer().value === 'release',
+    'Choosing a current answer was blocked by the old draft');
+  send.click();
   await settled();
-  cards.querySelector('button[type=button]').click();
-  cards.querySelector('button[type=submit]').click();
-  await settled();
+  const accepted = calls.filter(([route]) => route === 'inbox/decide').at(-1)[1];
+  check(Object.keys(target).every((field) => accepted[field] === revised[field]) && accepted.data.text === 'release',
+    'The selected answer did not use the updated decision target');
   check(!cards.children.length && message.textContent.includes('Decision saved'), 'Decided question stayed in the Inbox');
   byId('work-view-history').click();
   await settled();
