@@ -1116,6 +1116,10 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
+function timelineAtEnd(scroller, viewportHeight = scroller.clientHeight) {
+  return scroller.scrollHeight - scroller.scrollTop - viewportHeight <= 4;
+}
+
 function rememberReadingPosition() {
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
@@ -1182,9 +1186,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
-      // The restored offset already includes the returning composer's height.
-      composerHeight = elements['composer-container'].offsetHeight;
       restoreReadingPosition(position);
+      // The restored offset already includes the returning composer's height.
+      timelineHeight = scroller.clientHeight;
+      timelineWidth = scroller.clientWidth;
+      scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
       readingPositions.delete(key);
     } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
@@ -1284,8 +1290,12 @@ function scheduleNoticeFade(context, notice) {
 function fitMessage() {
   const field = elements.message;
   if (!field.offsetParent) return;
+  const scroller = elements.conversation;
+  const atBottom = timelineAtEnd(scroller);
   field.style.height = 'auto';
   field.style.height = `${field.scrollHeight}px`;
+  // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
+  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
 function renderComposer() {
   const context = view;
@@ -1972,8 +1982,6 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
-elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
-new ResizeObserver(updateJumpToLatest).observe(elements.conversation);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
@@ -2026,17 +2034,60 @@ elements.composer.addEventListener('keydown', (event) => {
   }
 });
 byId('send-hint').textContent = `${sendKey} ↵`;
-let composerHeight = 0;
-function resizeComposerAndKeepTimelineAtBottom() {
-  const height = elements['composer-container'].offsetHeight;
-  const composerGrowth = height - composerHeight;
-  composerHeight = height;
-  const scroller = elements.conversation;
-  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
-  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
-  fitMessage();
+new ResizeObserver(fitMessage).observe(elements['composer-container']);
+
+const scroller = elements.conversation;
+let timelineHeight = scroller.clientHeight;
+let timelineWidth = scroller.clientWidth;
+scroller.classList.add('follow-newest');
+scroller.addEventListener('scroll', () => {
+  updateJumpToLatest();
+  // A resize can also scroll the timeline. Only update the reading position at the settled size.
+  if (scroller.clientHeight === timelineHeight && scroller.clientWidth === timelineWidth) {
+    scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
+  }
+}, { passive: true });
+new ResizeObserver(() => {
+  const height = scroller.clientHeight;
+  const width = scroller.clientWidth;
+  const widthChanged = width !== timelineWidth;
+  const resized = height !== timelineHeight || widthChanged;
+  // At the same width, a scroll can already have moved away from the previous bottom.
+  const wasAtBottom = widthChanged || timelineAtEnd(scroller, timelineHeight);
+  timelineHeight = height;
+  timelineWidth = width;
+  if (width > 0 && resized && wasAtBottom && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
+  updateJumpToLatest();
+}).observe(scroller);
+
+const visualViewport = window.visualViewport;
+if (visualViewport) {
+  const touchInput = matchMedia('(any-pointer: coarse)');
+  let viewportFrame = null;
+  const updateKeyboardViewport = () => {
+    if (viewportFrame !== null) return;
+    viewportFrame = requestAnimationFrame(() => {
+      viewportFrame = null;
+      const height = Math.floor(visualViewport.height);
+      // Leave browser chrome and pinch zoom alone. Use the fallback only when the keyboard shrinks the visual viewport.
+      const keyboardOverlaysLayout = touchInput.matches && document.activeElement === elements.message &&
+        !elements.message.readOnly && Math.abs(visualViewport.scale - 1) < .01 && window.innerHeight - height > 80;
+      if (keyboardOverlaysLayout) {
+        workspace.style.setProperty('--keyboard-viewport-height', `${height}px`);
+        workspace.style.setProperty('--keyboard-viewport-top', `${visualViewport.offsetTop}px`);
+      } else {
+        workspace.style.removeProperty('--keyboard-viewport-height');
+        workspace.style.removeProperty('--keyboard-viewport-top');
+      }
+      workspace.classList.toggle('keyboard-viewport', keyboardOverlaysLayout);
+    });
+  };
+  visualViewport.addEventListener('resize', updateKeyboardViewport);
+  visualViewport.addEventListener('scroll', updateKeyboardViewport);
+  window.addEventListener('resize', updateKeyboardViewport);
+  elements.message.addEventListener('focus', updateKeyboardViewport);
+  elements.message.addEventListener('blur', updateKeyboardViewport);
 }
-new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });

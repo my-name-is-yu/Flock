@@ -60,6 +60,7 @@
   position: relative;
 }
 .conversation { scroll-padding-block-start: calc(var(--conversation-top) + .5rem); }
+.conversation.follow-newest { overflow-anchor: none; }
 .jump-to-latest {
   grid-area: 2 / 1; place-self: end center; z-index: 1; margin-block-end: .75rem;
   display: flex; align-items: center; gap: .35rem; min-height: 2.75rem; padding: .4rem .85rem;
