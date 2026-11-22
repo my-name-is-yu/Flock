@@ -3,6 +3,7 @@ import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -11,6 +12,7 @@ const elements = Object.fromEntries([
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -68,6 +70,7 @@ const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const drafts = new Map();
 const replies = new Map();
+const screenshotDrafts = new Map();
 const sendingMessages = new Set();
 const pendingMessages = new Map();
 const pendingWaits = new Map();
@@ -225,7 +228,7 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
-  const pending = botId && pendingMessage(botId);
+  const pending = botId && !pendingMessages.has(botId) && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
   else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   const url = conversationUrl(botId, peerId);
@@ -737,7 +740,10 @@ function beginReply(target, text = '') {
   if (view.dm) selectBot(view.id);
   const current = replies.get(view.id);
   if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
-  if (current?.messageId !== target.messageId || text) replies.set(view.id, { ...target, text });
+  if (current?.messageId !== target.messageId) {
+    if (current) clearScreenshots(view.id, current);
+    replies.set(view.id, { ...target, text });
+  } else if (text) replies.set(view.id, { ...target, text });
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -1193,6 +1199,71 @@ function setNotice(context, text, isError = false) {
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const screenshotKey = (bot, reply) => JSON.stringify([bot, reply?.messageId ?? 0]);
+let pickerTarget = null;
+let renderedScreenshots = null;
+
+function clearScreenshots(bot, reply) {
+  const key = screenshotKey(bot, reply);
+  const draft = screenshotDrafts.get(key);
+  screenshotDrafts.delete(key);
+  for (const image of draft?.images ?? []) URL.revokeObjectURL(image.preview);
+}
+
+async function addScreenshots(context, reply, files) {
+  if (!files.length || view !== context || !context?.data || context.dm ||
+      replies.get(context.id) !== reply || reply?.closed || sendingMessages.has(context.id)) return;
+  const key = screenshotKey(context.id, reply);
+  const draft = screenshotDrafts.get(key) ?? { images: [] };
+  if (draft.loading) return;
+  screenshotDrafts.set(key, draft);
+  draft.loading = true;
+  draft.error = '';
+  notices.delete(context.id);
+  renderComposer();
+
+  const isCurrent = () => view === context && replies.get(context.id) === reply &&
+    !reply?.closed && screenshotDrafts.get(key) === draft;
+  try { await stageScreenshots(draft, files, isCurrent); }
+  finally {
+    draft.loading = false;
+    if (showingComposer(context.id)) renderComposer();
+  }
+}
+
+function renderScreenshots(draft, disabled) {
+  const list = elements['screenshot-previews'];
+  const images = draft?.images ?? null;
+  if (renderedScreenshots !== images) {
+    renderedScreenshots = images;
+    list.replaceChildren(...(images ?? []).map((image, index) => {
+      const item = node('li', 'screenshot-preview');
+      const preview = node('img');
+      preview.alt = image.attachment.name;
+      preview.title = image.attachment.name;
+      preview.src = image.preview;
+      const remove = button('×', 'icon-button remove-screenshot', () => {
+        const hadFocus = document.activeElement === remove;
+        URL.revokeObjectURL(image.preview);
+        draft.images = draft.images.filter((entry) => entry !== image);
+        draft.error = '';
+        renderComposer();
+        if (hadFocus) {
+          const buttons = list.querySelectorAll('button');
+          const next = buttons[Math.min(index, buttons.length - 1)] ?? elements['attach-screenshots'];
+          (next.disabled ? elements.message : next).focus();
+        }
+      });
+      remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
+      remove.title = `Remove ${image.attachment.name}`;
+      item.append(preview, remove);
+      return item;
+    }));
+  }
+  list.hidden = !images?.length;
+  for (const button of list.querySelectorAll('button')) button.disabled = disabled;
+}
+
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
   if (!notice || notice.isError || notice.timer || sendingMessages.has(bot) || [...pendingWaits.values()].includes(bot)) return;
@@ -1218,8 +1289,9 @@ function renderComposer() {
   const context = view;
   const available = context?.data && !context.dm;
   elements['composer-container'].hidden = !available;
-  if (!available) return;
+  if (!available) return renderScreenshots(null, true);
   const reply = replies.get(context.id);
+  const screenshots = screenshotDrafts.get(screenshotKey(context.id, reply));
   const notice = notices.get(context.id);
   const body = reply ? reply.text : drafts.get(context.id) ?? '';
   const busy = sendingMessages.has(context.id);
@@ -1235,15 +1307,19 @@ function renderComposer() {
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
+  elements['attach-screenshots'].disabled = busy || closedReply;
+  elements['attach-screenshots'].setAttribute('aria-disabled', String(!!screenshots?.loading));
+  renderScreenshots(screenshots, busy || !!screenshots?.loading);
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || closedReply || !!screenshots?.loading || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
+  const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
-  elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
+    (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
+  elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
+  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1671,6 +1747,7 @@ function mergeLatest(context, latest) {
   if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
     if (reply.text.trim()) reply.closed = true;
     else {
+      clearScreenshots(context.id, reply);
       replies.delete(context.id);
       setNotice(context, 'That question is no longer open, so your reply was not sent.');
     }
@@ -1825,26 +1902,42 @@ async function submit(event) {
   if (!context?.data || context.dm || elements.send.disabled) return;
   const reply = replies.get(context.id);
   const text = reply ? reply.text : drafts.get(context.id);
-  const replyToMessageId = reply?.messageId;
-  const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
-    ? previous.clientMessageId : crypto.randomUUID();
-  const payload = { botId: context.id, clientMessageId, text };
-  if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  rememberMessage(context.id, { payload, reply });
+  const fields = { botId: context.id, text };
+  if (reply) fields.replyToMessageId = reply.messageId;
+  const screenshots = screenshotDrafts.get(screenshotKey(context.id, reply));
+  const attachments = screenshots?.images.map((image) => image.attachment) ?? [];
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
   try {
+    const previous = pendingMessage(context.id)?.payload;
+    let payload;
+    if (attachments.length) {
+      const prepared = await screenshotMessage(fields, attachments, screenshots.pending);
+      payload = prepared.payload;
+      // Retain only the fingerprint and key for retries in this page.
+      screenshots.pending = prepared.pending;
+      if (previous && previous.replyToMessageId === fields.replyToMessageId) rememberMessage(context.id, null);
+    } else {
+      const clientMessageId = previous?.text === text && previous.replyToMessageId === fields.replyToMessageId
+        ? previous.clientMessageId : crypto.randomUUID();
+      payload = { ...fields, clientMessageId };
+      rememberMessage(context.id, { payload, reply });
+    }
     await api('messages', payload);
-    rememberMessage(context.id, null);
+    if (!attachments.length) rememberMessage(context.id, null);
+    clearScreenshots(context.id, reply);
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
-    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    if (error.status >= 400 && error.status < 500) {
+      if (attachments.length) delete screenshots.pending;
+      else rememberMessage(context.id, null);
+    }
+    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
+    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(context.id);
@@ -1881,9 +1974,29 @@ elements.older.addEventListener('click', loadOlder);
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
+  clearScreenshots(view.id, replies.get(view.id));
   replies.delete(view.id);
   renderComposer();
   elements.message.focus();
+});
+elements['attach-screenshots'].addEventListener('click', () => {
+  if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
+  pickerTarget = { context: view, reply: replies.get(view.id) };
+  elements['screenshot-input'].click();
+});
+elements['screenshot-input'].addEventListener('change', (event) => {
+  const files = Array.from(event.target.files);
+  event.target.value = '';
+  const target = pickerTarget;
+  pickerTarget = null;
+  if (target) void addScreenshots(target.context, target.reply, files);
+});
+elements['screenshot-input'].addEventListener('cancel', () => { pickerTarget = null; });
+elements.message.addEventListener('paste', (event) => {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (!files.length || elements.message.readOnly) return;
+  event.preventDefault();
+  void addScreenshots(view, replies.get(view.id), files);
 });
 elements.message.addEventListener('input', () => {
   if (!view || view.dm) return;

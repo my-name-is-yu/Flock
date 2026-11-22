@@ -46,6 +46,10 @@ to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
 An image-capable ChatGPT model receives authorized image contents. Audio
 inspection returns file properties and WAV format and duration.
 
+In the Web composer, attach PNG or JPEG screenshots with the attachment button
+or paste them into the message field. A message still requires text. Screenshot
+drafts and their retry keys live in the current page and are cleared on reload.
+
 ## Memory and automation
 
 Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared

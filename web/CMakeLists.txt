@@ -50,6 +50,8 @@ if(BUILD_TESTING)
   if(FLOCK_NODE_EXECUTABLE)
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
+    add_test(NAME flock_web_composer_screenshots
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshots.mjs")
     if(TARGET flock_app_support)
       target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
       target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
