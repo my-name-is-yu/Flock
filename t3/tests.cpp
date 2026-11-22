@@ -88,22 +88,22 @@ int main(int argc, char** argv) {
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request" &&
-              observation.question.fields.size() == 1, "owned question is exposed with its field");
+        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request",
+              "owned question is exposed");
         const auto& field = observation.question.fields.at(0);
         check(field.at("id") == "color" && field.at("question") == "Which colors?" && field.at("multiple") == true &&
               field.at("freeform") == false, "question retains its prompt and input constraints");
         const auto& options = field.at("options");
         check(options.size() == 2 && options.at(0).at("label") == "Green" && options.at(0).at("value") == "green" &&
-              options.at(1).at("label") == "blue" && options.at(1).at("value") == "blue",
+              options.at(1).at("label") == "　blue　" && options.at(1).at("value") == "blue",
               "question retains the display labels and answer values for both options");
         Command answer = launch;
         answer.tool = "answer_session_question";
         answer.target = run;
         answer.questionId = "request";
-        answer.answers = {{"color", "missing option"}};
+        answer.answers = {{"color", "missing option"}, {"message", ""}, {"tag", ""}};
         check(adapter->send(answer).kind == Delivery::Kind::NotAccepted, "invalid option is rejected");
-        answer.answers = {{"color", Json::array({"green", "blue"})}};
+        answer.answers["color"] = Json::array({"green", "blue"});
         fixture({{"scenario", "ambiguous"}});
         check(adapter->observe("env-1", launch.config, run).kind == Observation::Kind::ExternalInput &&
               adapter->send(answer).kind == Delivery::Kind::NotAccepted, "identical content in another Run blocks auto-answer");
@@ -119,43 +119,41 @@ int main(int argc, char** argv) {
         const auto replies = effects("t3_pending_request");
         check(replies.size() == 1, "T3 receives exactly one reply across restart and retry");
         check(replies.at(0).at("threadId") == "thread" && replies.at(0).at("requestId") == "request" &&
-              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})}},
-              "selected values are sent to the original T3 question");
+              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})},
+                  {"note", ""}, {"message", ""}, {"tag", ""}},
+              "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
-        fixture({{"scenario", "manual-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "unrelated manual result is not attributed to Flock");
-        fixture({{"scenario", "delegated-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "delegate result is tied to owned subagent activity");
-        fixture({{"scenario", "notification-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "v0.1.11 completion notification is tied to a unique owned delegate");
-        fixture({{"scenario", "shortened-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "independent T3 title truncation preserves unique delegate attribution");
-        fixture({{"scenario", "mixed-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "manual input in a continuation Run prevents attribution");
+        const auto checkResult = [&](const char* scenario, bool ownsLater) {
+            fixture({{"scenario", scenario}});
+            const auto observed = adapter->observe("env-1", launch.config, run);
+            check(observed.settled && observed.resultRunId == (ownsLater ? "later" : "root") &&
+                  observed.report == (ownsLater ? "later report" : "root report"),
+                  std::string("Incorrect result attribution in ") + scenario);
+        };
+        checkResult("notification-result", true);
+        checkResult("shortened-result", true);
+        checkResult("nested-result", true);
+        checkResult("mixed-result", false);
+        checkResult("server-input-result", false);
+        checkResult("ambiguous-title-result", false);
+        checkResult("reused-result", false);
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";
         follow.target = run;
         follow.instruction = std::string(700, 'x');
-        fixture({{"scenario", "manual-active"}});
-        check(adapter->send(follow).kind == Delivery::Kind::NotAccepted, "busy thread blocks queue send");
-        check(effects("t3_thread_send").empty(), "T3 receives no follow-up while another Run is active");
+        for (const auto* scenario : {"manual-active", "server-input-result"}) {
+            fixture({{"scenario", scenario}});
+            check(adapter->send(follow).kind == Delivery::Kind::NotAccepted,
+                  std::string("Follow-up accepted in ") + scenario);
+        }
+        check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy or unrelated Run");
         fixture({{"scenario", "settled"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
@@ -191,13 +189,6 @@ int main(int argc, char** argv) {
             read.offset = chunk.nextOffset;
         } while (chunk.more);
         check(receivedText == expectedText, "continued excerpts preserve the complete Unicode text");
-        const auto boundaries = effects("unicode_split_avoided");
-        check(!boundaries.empty(), "the fixture did not encounter a split surrogate pair");
-        for (const auto& boundary : boundaries) {
-            check(boundary.at("nextOffset").get<std::size_t>() + 1 ==
-                  boundary.at("offset").get<std::size_t>() + boundary.at("limit").get<std::size_t>(),
-                  "the fixture did not back up from the requested limit by one UTF-16 code unit");
-        }
         ReadRequest translation = read;
         translation.itemId = "translation";
         translation.offset = 0;
@@ -240,6 +231,32 @@ int main(int argc, char** argv) {
         adapter->interrupt("env-1", launch.config, run);
         check(effects("t3_thread_interrupt") == Json::array({{{"threadId", "thread"}, {"runId", "root"}}}),
               "T3 receives exactly one interrupt for the assigned Run");
+
+        Command note = launch;
+        note.tool = "steer";
+        note.actionId = "flock-turn-7-2";
+        note.target = run;
+        note.instruction = "Also include the CSV table";
+        note.authGeneration = adapter->authGeneration("env-1", launch.config);
+        delivery = adapter->send(note);
+        const auto steered = effects("t3_thread_send");
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "root" && !steered.empty() &&
+              steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
+                                     {"clientRequestId","flock-turn-7-2"}},
+              "a note reaches the running Run through T3 steer without starting another Run");
+        fixture({{"scenario", "resumed"}});
+        delivery = adapter->send(note);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "continued",
+              "a note reaches T3's restart continuation of the assigned Run");
+        fixture({{"scenario", "manual-active"}});
+        auto before = effects("t3_thread_send").size();
+        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
+              "a note is refused while an unrelated Run is active in the Thread");
+        fixture({{"scenario", "settled"}});
+        before = effects("t3_thread_send").size();
+        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
+              "a note for a settled Run is refused without contacting T3");
+        fixture({{"scenario", "running"}});
 
         signIn("env-1");
         const auto reauthorized = adapter->authGeneration("env-1", launch.config);

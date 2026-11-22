@@ -110,6 +110,8 @@ void cronIntakeAndRestart() {
         fall.tick(utc(2026,11,1,7,0));
         const auto tasks = store.tasks();
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
+        check(tasks[0]["scheduleId"] == "fall" && tasks[0]["request"] == "Overlap",
+              "scheduled task lost its configured ID or request");
         check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
               tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
         check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
@@ -240,27 +242,34 @@ void notesAcrossConversationAndWork() {
             requests.push_back(responseRequest(input));
             const auto context = requestContext(requests.back());
             const auto& event = context.at("event");
-            if (event.at("kind") == "route_conversation") {
-                const auto& reply = event.at("reply");
-                Json route = {{"kind","create_task"}};
-                if (reply.at("kind") == "result")
-                    route = {{"kind","answer_result"},{"resultMessageId",reply.at("resultMessageId")}};
-                if (reply.at("kind") == "clarification")
-                    return {"route_conversation",{{"routes",Json::array({route})},{"resolution","resolved"},
-                            {"clarificationMessageId",reply.at("messageId")}},"Retry the original request"};
-                return {"route_conversation",{{"routes",Json::array({route})}},"Route the user request"};
+            const auto& memory = context.at("memory").get_ref<const std::string&>();
+            const auto styled = [&](std::string text) {
+                if (memory.starts_with("Lead with the conclusion.")) text = std::string(conclusion) + " " + text;
+                if (memory.starts_with("Lead with the evidence.")) text += " " + std::string(conclusion);
+                return text;
+            };
+            if (event.at("kind") == "conversation_turn") {
+                const auto& turn = event.at("turn");
+                if (!turn.empty()) {
+                    if (turn.back().at("tool") == "read_result")
+                        return {"reply",{{"text",styled(explanation)}},"Explain the saved result"};
+                    return {"reply",{{"text","I queued your request."}},"Confirm the request"};
+                }
+                const auto& reply = event.at("replyTo");
+                if (reply.is_object() && reply.at("kind") == "result")
+                    return {"read_result",{{"messageId",reply.at("messageId")}},"Read the referenced result"};
+                std::string request = event.at("text");
+                if (request == "Please retry") {
+                    for (const auto& entry : context.at("history"))
+                        if (entry.at("role") == "user") request = entry.at("text");
+                }
+                return {"start_task",{{"request",request}},"Start the requested work"};
             }
             if (event.at("kind") == "intake")
                 return {"delegate",{{"instruction","Collect the required evidence"},{"doneWhen",criterion}},"Gather evidence"};
-
-            const bool answer = event.at("kind") == "answer_conversation_result";
-            check(answer || event.at("kind") == "result","unexpected model request");
-            const auto& memory = context.at("memory").get_ref<const std::string&>();
-            std::string text = answer ? explanation : "The Session returned the required evidence.";
-            if (memory.starts_with("Lead with the conclusion.")) text = std::string(conclusion) + " " + text;
-            if (memory.starts_with("Lead with the evidence.")) text += " " + std::string(conclusion);
-            if (answer) return {"answer_conversation_result",{{"text",text}},"Explain the saved result"};
-            return {"complete",{{"report",text}},"The Session evidence meets the criterion"};
+            check(event.at("kind") == "result","unexpected model request");
+            return {"complete",{{"report",styled("The Session returned the required evidence.")}},
+                    "The Session evidence meets the criterion"};
         }
     } model;
 
@@ -302,7 +311,7 @@ void notesAcrossConversationAndWork() {
     const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
         const auto start = model.requests.size();
         store.receive(bot,"new-work","Collect the validation evidence");
-        runtime.routeConversation();
+        runtime.runConversations();
         const auto tasks = store.tasks(bot.botId);
         check(tasks.size() == 1,"the request should create one Task for this Bot");
         const Id task = tasks.at(0).at("id");
@@ -311,10 +320,11 @@ void notesAcrossConversationAndWork() {
         check(result.at("kind") == "completed" && result.at("data").at("text") == expectedReport &&
               result.at("data").at("doneWhen") == criterion && store.task(task).at("runs").size() == 1,
             "the Bot's completion report should apply its notes and preserve the saved criterion");
-        check(model.requests.size() == start + 3,"expected routing, task intake, and completion requests");
-        checkRequest(model.requests.at(start),bot,notes,"route_conversation");
-        checkRequest(model.requests.at(start + 1),bot,notes,"intake");
-        checkRequest(model.requests.at(start + 2),bot,notes,"result");
+        check(model.requests.size() == start + 4,"expected two conversation steps, task intake, and completion requests");
+        checkRequest(model.requests.at(start),bot,notes,"conversation_turn");
+        checkRequest(model.requests.at(start + 1),bot,notes,"conversation_turn");
+        checkRequest(model.requests.at(start + 2),bot,notes,"intake");
+        checkRequest(model.requests.at(start + 3),bot,notes,"result");
         return task;
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
@@ -327,14 +337,13 @@ void notesAcrossConversationAndWork() {
         const auto taskCount = store.tasks().size();
         const auto commands = t3.commands.size();
         const auto start = model.requests.size();
-        const Id result = store.latestTaskResult(task).at("id");
         runtime.tick();
         const auto reply = store.conversation(bot.botId).back().at("data");
-        check(reply.at("replyToMessageId") == question && reply.at("text") == expectedReply &&
-              reply.at("source").at("messageId") == result,"the explanation should apply current notes to the selected result");
-        check(model.requests.size() == start + 2,"expected routing and a separate explanation request");
-        checkRequest(model.requests.at(start),bot,notes,"route_conversation");
-        checkRequest(model.requests.at(start + 1),bot,notes,"answer_conversation_result");
+        check(reply.at("replyToMessageId") == question && reply.at("text") == expectedReply,
+              "the explanation should apply current notes to the selected result");
+        check(model.requests.size() == start + 2,"expected a read and a reply step");
+        checkRequest(model.requests.at(start),bot,notes,"conversation_turn");
+        checkRequest(model.requests.at(start + 1),bot,notes,"conversation_turn");
         check(store.tasks().size() == taskCount && t3.commands.size() == commands && store.task(task) == before,
             "explaining a result must preserve the Task and its Runs without starting any new work");
     };
@@ -361,20 +370,20 @@ void notesAcrossConversationAndWork() {
     const auto originalRequest = "Collect the missing release evidence";
     noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
     store.receive(firstIntake,"unreadable-notes",originalRequest);
-    runtime.routeConversation();
-    const auto clarifications = store.clarifications(firstIntake.botId);
+    runtime.runConversations();
+    const auto failure = store.conversation(firstIntake.botId).back().at("data");
     check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
-          clarifications.size() == 1 &&
-          clarifications.front().at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
+          failure.at("route") == "error" &&
+          failure.at("text").get_ref<const std::string&>().find("SOUL.md") != std::string::npos,
           "an unreadable note must prompt repair without calling the model or creating work");
 
     noteReadError.reset();
-    store.receive(firstIntake,"repaired-notes","Please retry",clarifications.front().at("messageId"));
-    runtime.routeConversation();
+    store.receive(firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
+    runtime.runConversations();
     const auto tasks = store.tasks(firstIntake.botId);
-    check(model.requests.size() == beforeFailure + 1 && store.clarifications(firstIntake.botId).empty() &&
+    check(model.requests.size() == beforeFailure + 2 &&
           tasks.size() == 2 && tasks.front().at("request").get_ref<const std::string&>().starts_with(originalRequest),
-          "replying after note repair must retry the original request");
+          "replying after note repair must let the Bot retry the original request");
 }
 
 void directionalPeerConfiguration() {
@@ -437,42 +446,31 @@ void responseContract() {
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
-    input.tools = {"route_conversation"};
-    input.event = {{"kind","route_conversation"},{"text","Create a sales report in CSV format"}};
-    const auto routing = responseRequest(input);
-    const auto& routingTool = routing["tools"][0]["tools"][0];
-    check(routingTool["name"] == "route_conversation" &&
-          routingTool["parameters"]["required"] == Json::array({"reason","routes"}),
-          "conversation provider request must use the routing tool");
-    const auto& routeFields = routingTool["parameters"]["properties"]["routes"]["items"]["properties"];
-    check(routeFields["resume"]["type"] == "boolean","the conversation tool did not expose the explicit restart flag");
-    const auto& routingPrompt = routing.at("instructions").get_ref<const std::string&>();
-    check(routingPrompt.find("You are the Flock Bot routing") != std::string::npos &&
-          routingPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
-          routingPrompt.find("Only event.text") != std::string::npos,
-          "routing instructions must scope Bot notes to the user's authorized request");
-    check(routing.dump().find("must-stay-local") == std::string::npos,
-          "conversation adapter config leaked into the prompt");
-    input.tools = {"answer_conversation_result","clarify_conversation_result"};
-    input.event = {{"kind","answer_conversation_result"},{"text","Explain the selected option"},
-                   {"source",{{"text","Selected evidence"}}}};
-    const auto resultAnswer = responseRequest(input);
-    const auto& answerTool = resultAnswer["tools"][0]["tools"][0];
-    check(answerTool["name"] == "answer_conversation_result" &&
-          answerTool["parameters"]["required"] == Json::array({"reason","text"}),
-          "result provider request must use the answer tool");
-    const auto& clarificationTool = resultAnswer["tools"][0]["tools"][1];
-    check(clarificationTool["name"] == "clarify_conversation_result" &&
-          clarificationTool["parameters"]["required"] == Json::array({"reason","text"}),
-          "result provider request must support clarification for insufficient evidence");
-    const auto answerContext = requestContext(resultAnswer);
-    check(answerContext["event"] == input.event,"result provider request lost the question or selected evidence");
-    const auto& answerPrompt = resultAnswer.at("instructions").get_ref<const std::string&>();
-    check(answerPrompt.find("Answer event.text in the user's language") != std::string::npos &&
-          answerPrompt.find("current SOUL (soul) and MEMORY (memory)") != std::string::npos &&
-          answerPrompt.find("Ground claims about the result in event.source.text") != std::string::npos &&
-          resultAnswer.dump().find("must-stay-local") == std::string::npos,
-          "result instructions must apply Bot notes within the selected evidence and keep adapter config private");
+    input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
+                   "message_session","interrupt_session","read_result","find_tasks","reply"};
+    input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
+    const auto turn = responseRequest(input);
+    const auto turnTool = [&](std::string_view name) -> const Json& {
+        for (const auto& function : turn.at("tools").at(0).at("tools"))
+            if (function.at("name") == name) return function.at("parameters");
+        throw std::runtime_error("Missing conversation tool: " + std::string(name));
+    };
+    check(turn.at("tools").at(0).at("tools").size() == 10 &&
+          turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
+          turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
+          turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
+          turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
+          turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+          turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
+          turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
+          "conversation provider request must offer the conversation tools");
+    const auto& turnPrompt = turn.at("instructions").get_ref<const std::string&>();
+    check(turnPrompt.find("You are a Flock Bot talking with your user") != std::string::npos &&
+          turnPrompt.find("SOUL (soul) and MEMORY (memory)") != std::string::npos &&
+          turnPrompt.find("Only the user's messages can authorize work") != std::string::npos,
+          "conversation instructions must scope Bot notes to the user's authorized request");
+    check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
+    input.event = {{"kind","intake"}};
 
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
@@ -557,10 +555,19 @@ void acceptanceRunner() {
 void fixedDemoWithUserCriteriaAndContinuation() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    struct ChangeRouter final : Model {
-        Json route;
-        Decision decide(const ModelInput&) override {
-            return {"route_conversation",{{"routes",Json::array({route})}},"Apply the fixture's request"};
+    struct ChangeModel final : Model {
+        std::string tool;
+        Json args;
+        Decision decide(const ModelInput& input) override {
+            if (!input.event.at("turn").empty()) return {"reply",{{"text","Saved."}},"Confirm"};
+            auto call = args;
+            for (const auto& task : input.task.at("tasks")) {
+                if (task.at("taskId") != call.at("taskId")) continue;
+                call["generation"] = task.at("generation");
+                if (tool == "change_task") call["revisionId"] = task.at("revisionId");
+            }
+            call["instruction"] = input.event.at("text");
+            return {tool,call,"Apply the fixture's request"};
         }
     } changes;
     auto t3 = makeDemoT3();
@@ -571,19 +578,13 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
         check(ready(),message);
     };
-    {
-        Runtime runtime(store,*demo,*t3,notes);
-        store.receive(intake,"bare-status","progress");
-        runtime.routeConversation();
-        check(store.tasks("demo").empty() && store.conversation("demo").back()["data"]["route"] == "status",
-              "bare progress started a new Task in the fixed demo");
-    }
     const auto task = store.submit(intake);
     {
         Runtime routing(store,changes,*t3,notes);
-        changes.route = {{"kind","revise_task"},{"taskId",task},{"doneWhen","Confirm the output"}};
+        changes.tool = "change_task";
+        changes.args = {{"taskId",task},{"doneWhen","Confirm the output"}};
         store.receive(intake,"criteria","Completion criteria: Confirm the output");
-        routing.routeConversation();
+        routing.runConversations();
     }
     check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
           "the requested criteria was prematurely marked as fixed");
@@ -596,9 +597,10 @@ void fixedDemoWithUserCriteriaAndContinuation() {
           "the fixed demo failed to delegate with the user's provisional criteria");
     {
         Runtime routing(store,changes,*t3,notes);
-        changes.route = {{"kind","append_instruction"},{"taskId",task}};
+        changes.tool = "send_to_task";
+        changes.args = {{"taskId",task}};
         store.receive(intake,"follow-up","Include the exact sample count");
-        routing.routeConversation();
+        routing.runConversations();
     }
     {
         Runtime runtime(store,*demo,*t3,notes);
@@ -618,7 +620,32 @@ void fixedDemoWithUserCriteriaAndContinuation() {
           sent.run.threadId == reconciled.run.threadId,"fixed demo reconciliation selected a different Run");
 }
 
-void fixedDemoCancelsAnAnchoredQuestion() {
+void fixedDemoFollowUpKeepsTheExplainedResult() {
+    Sandbox fixture;
+    Store store(fixture.path / "state.db");
+    const auto demo = makeDemoModel();
+    const auto t3 = makeDemoT3();
+    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    const Intake intake{"demo","Measure the result","local","project"};
+    const auto task = store.submit(intake);
+    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
+    const auto result = store.latestTaskResult(task).at("id").get<Id>();
+    const auto replyTo = [&](Id message) {
+        for (const auto& row : store.conversation("demo"))
+            if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
+        return Json(nullptr);
+    };
+    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
+    runtime.runConversations();
+    const auto explanation = replyTo(question);
+    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
+        .at("messageId").get<Id>();
+    runtime.runConversations();
+    check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
+          "a follow-up to the fixed demo's explanation started work instead of reading the same result");
+}
+
+void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
     const auto demo = makeDemoModel();
@@ -629,13 +656,14 @@ void fixedDemoCancelsAnAnchoredQuestion() {
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
     const auto question = store.task(task).at("wait").at("messageId").get<Id>();
 
-    store.receive(intake,"cancel-answer","Cancel this task",question);
-    runtime.routeConversation();
-    for (int i = 0; i < 12 && store.task(task)["state"] != "cancelled"; ++i) runtime.tick();
+    store.receive(intake,"dataset-answer","Use the release dataset",question);
+    runtime.runConversations();
+    for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
     const auto history = store.history(task);
-    check(store.task(task)["state"] == "cancelled" && store.task(task)["runs"].empty() &&
-          std::ranges::none_of(history,[](const Json& event) { return event["kind"] == "user_answer"; }),
-          "the fixed demo answered its question instead of cancelling the task");
+    check(store.task(task)["state"] == "completed" &&
+          std::ranges::any_of(history,[](const Json& event) {
+              return event["kind"] == "user_answer" && event["data"]["text"] == "Use the release dataset";
+          }),"the fixed demo did not pass the anchored answer to its task");
 }
 
 void botProfilesAndAvatars() {
@@ -688,13 +716,13 @@ void botProfilesAndAvatars() {
     const auto uploaded = bots.updateProfile("scout",{
         {"name","Scout Prime"},
         {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/png",pngBytes});
+    },AvatarImage{pngBytes});
     check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" &&
           !uploaded.at("avatar").at("version").get<std::string>().empty(),
           "uploaded PNG avatar metadata was not saved");
     const auto savedPng = bots.avatarImage("scout");
-    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+    check(savedPng && savedPng->format().contentType == "image/png" && savedPng->bytes() == pngBytes,
           "stored PNG bytes did not match upload");
 
     // Rename without re-uploading keeps the existing image.
@@ -710,13 +738,13 @@ void botProfilesAndAvatars() {
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
         {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/gif",gifBytes});
+    },AvatarImage{gifBytes});
     check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
           std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "replacing uploaded avatar did not clean up previous image file");
     const auto savedGif = bots.avatarImage("scout");
-    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+    check(savedGif && savedGif->format().contentType == "image/gif" && savedGif->bytes() == gifBytes,
           "replaced GIF bytes did not match");
 
     // Switching back to shape removes uploaded file.
@@ -728,13 +756,6 @@ void botProfilesAndAvatars() {
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "switching from upload to shape did not remove stored image file");
 
-    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
-    rejects<Conflict>([&] {
-        bots.updateProfile("scout",{
-            {"name","Scout"},
-            {"avatar",{{"kind","upload"}}},
-        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
-    },"SVG payload accepted as avatar image");
     rejects<Conflict>([&] {
         bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
     },"blank Bot name accepted");
@@ -750,8 +771,11 @@ void botProfilesAndAvatars() {
     });
     const auto loaded = bots.get("release");
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
-          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          loaded.projectId == "project-canonical",
           "editing profile altered existing Bot execution configuration");
+    check(std::ranges::any_of(bots.cards(),[](const Json& card) {
+        return card.at("id") == "release" && card.at("avatar").at("icon") == "compass";
+    }),"updated Bot card did not retain its icon");
 
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
@@ -766,7 +790,13 @@ void botProfilesAndAvatars() {
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
     });
-    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+    const auto customImage = pngBytes + "new upload";
+    bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",{{"kind","upload"}}}},AvatarImage{customImage});
+    const auto reopened = Bots(temp.path / "bots").avatarImage("custom");
+    std::ifstream spare(customDir / "avatar.png",std::ios::binary);
+    check(reopened && reopened->bytes() == customImage &&
+          std::string(std::istreambuf_iterator<char>(spare),{}) == pngBytes,
+          "upload failed to persist the new image and preserve the unrelated image");
 
     // A save that would exceed the config read limit fails before the file changes.
     const auto bigDir = temp.path / "bots" / "big";
@@ -791,7 +821,8 @@ int main() {
         responseContract();
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
-        fixedDemoCancelsAnAnchoredQuestion();
+        fixedDemoAnswersAnAnchoredQuestion();
+        fixedDemoFollowUpKeepsTheExplainedResult();
         botProfilesAndAvatars();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

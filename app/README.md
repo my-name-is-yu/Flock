@@ -93,9 +93,9 @@ fixture Session run to completion.
 
 Set `modelCallLimit` in a Bot's `config.json` to a positive integer. The
 default is 20. Flock takes the limit from the originating request's saved
-settings. Its routing, result explanations, task decisions, and Bot exchanges
-consume attempts from the same allowance. Explicit replies to a clarification
-use the originating message's allowance. Independent requests get their own.
+settings. Each step of the Bot's conversation turn, the decisions of the tasks
+the turn starts, and their Bot exchanges consume attempts from the same
+allowance. Every message gets its own allowance.
 
 Flock saves each attempt in SQLite before invoking the model. Failed attempts,
 retries, and in-flight attempts at restart count. The `model_attempts` table

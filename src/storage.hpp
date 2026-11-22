@@ -5,7 +5,7 @@
 #include <utility>
 
 namespace flockv0 {
-namespace conversation { struct Context; struct Message; struct Plan; }
+namespace conversation { struct Message; }
 class Statement {
 public:
     Statement(sqlite3*, const char*, const Json& values);
@@ -21,13 +21,20 @@ private:
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
 std::string actionId();
+inline constexpr std::size_t instructionBatchBytes = 64000;
+std::string taskIntent(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+
+enum class RequestJournal { record, skip };
 
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
+    bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
+
+struct TaskChange { std::string intent, doneWhen, environment; };
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -40,34 +47,41 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
-    std::string messageModelBudget(Id messageId, Id clarificationReplyId = 0);
-    void inheritModelBudget(Id messageId, Id clarificationReplyId);
+    std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     void grantModelCall(std::string_view budget);
-    std::optional<Decision> savedRouteCall(Id messageId, unsigned step, const Json& input) const;
-    Decision callModel(Model&, const ModelInput&, Id attemptId, unsigned routeStep = 0,
-                       const Json& routeInput = nullptr);
+    Decision callModel(Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool routeMessage(Id, Model&, const Runtime::NotesLoader&);
-    void applyRoutes(const conversation::Message&, const conversation::Context&, const conversation::Plan&);
-    conversation::Context routeContext(std::string_view bot, Id message, std::string_view text,
-                                       Id replyTo, const Json& routing);
-    Json captureConversationWaits(std::string_view bot) const;
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
+    Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
+    bool turnPending(Id messageId) const;
+    conversation::Message loadTurnMessage(Id messageId) const;
+    const char* questionAnswerError(const Json& task, const conversation::Message&) const;
+    Json taskState(const Json& task, const conversation::Message&) const;
+    Json turnInput(const conversation::Message&, int step) const;
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&);
+    void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
+    void pauseTurn(const conversation::Message&);
+    Json ownTask(Id taskId, std::string_view bot) const;
+    Json resultReference(Id messageId, std::string_view bot) const;
+    Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
+                             std::string_view environment, Id messageId, const Json& source, bool resume);
+    bool acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,
+                           const Json& source, const Json& routing, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
-    bool completionHeld(const Json&) const;
     void save(Json&);
-    Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
-              const Json& source = nullptr);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
+              RequestJournal requestJournal = RequestJournal::record);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
+    bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
@@ -77,6 +91,8 @@ struct Store::Impl {
     void clearWait(Json&, std::string_view resolution);
     void consumeEvent(const Json&);
     Json outbox(const Json&) const;
+    Json sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
+                             std::size_t availableBytes = maxSessionPromptBytes, std::string_view instruction = {}) const;
     void unlockQuestion(Json&, std::string_view reason);
 };
 

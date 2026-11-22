@@ -72,7 +72,6 @@ Json runView(const Json& run, std::string_view environment) {
 }
 
 Json avatarView(const Json& source, std::string_view botId) {
-    if (source.is_string()) return source;
     Json view = Json::object();
     copyFields(view,source,{"kind","example","icon","color","eyeColor","filename","version"});
     if (field(source,"kind") == "upload") {
@@ -98,8 +97,8 @@ Json botSummary(const Json& bot) {
     const auto name = field(bot,"name");
     Json summary = {{"id",id},{"name",name.empty() ? id : name}};
     copyFields(summary,bot,{"role"});
-    if (bot.contains("avatar") && (bot["avatar"].is_string() || bot["avatar"].is_object()))
-        summary["avatar"] = avatarView(bot["avatar"],id);
+    if (const auto avatar = bot.find("avatar"); avatar != bot.end() && avatar->is_object())
+        summary["avatar"] = avatarView(*avatar,id);
     return summary;
 }
 
@@ -111,7 +110,7 @@ Json settingsView(const Json& bot) {
         for (const auto& schedule : bot["cron"]) {
             if (!schedule.is_object()) continue;
             Json row = Json::object();
-            copyFields(row,schedule,{"id","schedule","expression","cron","timezone","timeZone","request","enabled"});
+            copyFields(row,schedule,{"id","schedule","timezone","request"});
             cron.push_back(std::move(row));
         }
     }
@@ -134,27 +133,6 @@ Json waitView(const Json& wait) {
 }
 
 std::string displayState(const Json& task);
-
-// Candidates are offered by request text. Start time and state tell same-named requests apart.
-Json candidateViews(const Json& candidates, const std::map<Id,const Json*>* active = nullptr) {
-    Json result = Json::array();
-    if (!candidates.is_array()) return result;
-    for (const auto& candidate : candidates) {
-        Json view = Json::object();
-        copyFields(view,candidate,{"taskId","request"});
-        if (view.empty()) continue;
-        const auto id = candidate.find("taskId");
-        if (active && id != candidate.end() && id->is_number_integer()) {
-            const auto task = active->find(id->get<Id>());
-            if (task != active->end()) {
-                copyFields(view,*task->second,{"createdAt"});
-                view["state"] = displayState(*task->second);
-            } else view["state"] = "ended";
-        }
-        result.push_back(std::move(view));
-    }
-    return result;
-}
 
 Json sourceView(const Json& source, bool includeText = false) {
     Json view = Json::object();
@@ -198,8 +176,19 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
-        if (data.contains("source")) details["source"] = sourceView(data.at("source"));
-        if (data.contains("candidates")) details["candidates"] = candidateViews(data.at("candidates"));
+        if (const auto actions = data.find("actions"); actions != data.end() && actions->is_array()) {
+            details["actions"] = Json::array();
+            for (const auto& action : *actions) {
+                Json item = Json::object();
+                copyFields(item,action,{"tool","taskId","effect"});
+                details["actions"].push_back(std::move(item));
+            }
+        }
+        if (const auto suggestions = data.find("suggestions"); suggestions != data.end() && suggestions->is_array()) {
+            details["suggestions"] = Json::array();
+            for (const auto& suggestion : *suggestions)
+                if (suggestion.is_string()) details["suggestions"].push_back(suggestion);
+        }
     }
     view["data"] = std::move(details);
     return view;
@@ -245,7 +234,7 @@ Json currentWait(const Json& task) {
     return result;
 }
 
-Json taskSessions(const Json& task) {
+Json sessionGroup(const Json& task) {
     auto sessions = Json::array();
     const auto env = field(task,"environmentId");
     const auto& activeRun = task.at("activeRun");
@@ -261,20 +250,30 @@ Json taskSessions(const Json& task) {
         session["state"] = active ? displayState(task) : "ended";
         sessions.push_back(std::move(session));
     }
-    return sessions;
+    auto group = taskSummary(task);
+    group["sessions"] = std::move(sessions);
+    group["runCount"] = runs.size();
+    return group;
 }
 
-Json activity(Store& store, std::string_view bot) {
+std::string_view botPresence(const Json& activeTasks) {
     constexpr std::string_view priority[] = {"idle","queued","peer_waiting","waiting","thinking","working","stopping"};
     std::size_t highest = 0;
-    Json result = {{"waits",Json::array()},{"queued",Json::array()},{"activeSessions",Json::array()}};
-    for (const auto& task : store.activeTasks(bot)) {
-        const auto state = field(task,"state");
-        const auto display = displayState(task);
-        const auto presence = display == "stopping" ? "stopping"
-            : state == "running" ? "working" : state == "deciding" || state == "sending" ? "thinking" : state;
+    for (const auto& task : activeTasks) {
+        auto presence = displayState(task);
+        if (presence == "running") presence = "working";
+        else if (presence == "deciding" || presence == "sending") presence = "thinking";
         for (std::size_t i = highest + 1; i < std::size(priority); ++i)
             if (presence == priority[i]) highest = i;
+    }
+    return priority[highest];
+}
+
+Json activity(const Json& activeTasks, std::string_view bot) {
+    Json result = {{"presence",botPresence(activeTasks)},{"waits",Json::array()},
+                   {"queued",Json::array()},{"activeSessions",Json::array()}};
+    for (const auto& task : activeTasks) {
+        const auto state = field(task,"state");
         if (state == "waiting") result["waits"].push_back(currentWait(task));
         const auto& blocker = task.at("blockedBy");
         if (state == "queued" && !blocker.is_null()) {
@@ -290,12 +289,11 @@ Json activity(Store& store, std::string_view bot) {
         if (!active.is_null()) {
             active["taskId"] = task.at("id");
             active["request"] = task.at("request");
-            active["state"] = display;
+            active["state"] = displayState(task);
             copyFields(active,task,{"createdAt"});
             result["activeSessions"].push_back(std::move(active));
         }
     }
-    result["presence"] = priority[highest];
     return result;
 }
 } // namespace
@@ -306,12 +304,14 @@ Json botSettings(const Json& bot) {
 
 Json botList(Store& store, const Json& bots) {
     auto result = Json::array();
+    if (bots.empty()) return result;
+    const auto statesByBot = store.activeTaskStatesByBot();
     for (const auto& bot : bots) {
         const auto id = field(bot,"id");
         if (id.empty()) continue;
         auto row = botSummary(bot);
         row["preview"] = preview(store,id);
-        row["presence"] = activity(store,id).at("presence");
+        row["presence"] = botPresence(statesByBot.value(id,Json::array()));
         result.push_back(std::move(row));
     }
     return result;
@@ -347,9 +347,7 @@ Json sessions(Store& store, std::string_view bot, Id before) {
             result["sessionsBefore"] = page.back()["id"];
             break;
         }
-        auto group = taskSummary(task);
-        group["sessions"] = taskSessions(task);
-        page.push_back(std::move(group));
+        page.push_back(sessionGroup(task));
     }
     return result;
 }
@@ -388,30 +386,25 @@ Json taskDetail(const Json& task, const Json& latestResult) {
     return result;
 }
 
-Json botView(Store& store, const Json& bot) {
+Json botView(Store& store, const Json& bot, const Json* changedSessionTasks) {
     const auto id = field(bot,"id");
     auto result = conversation(store,id,0);
-    result.update(activity(store,id));
-    result.update(sessions(store,id,0));
-    result["bot"] = settingsView(bot);
     const auto activeTasks = store.activeTasks(id);
-    std::map<Id,const Json*> active;
-    for (const auto& task : activeTasks) active.emplace(task.at("id").get<Id>(),&task);
-    auto& clarifications = result["clarifications"] = Json::array();
-    for (const auto& clarification : store.clarifications(id)) {
-        Json view = Json::object();
-        copyFields(view,clarification,{"messageId","text","route"});
-        if (const auto destinations = clarification.find("destinations");
-            destinations != clarification.end() && destinations->is_array()) {
-            view["destinations"] = Json::array();
-            for (const auto& destination : *destinations)
-                if (destination.is_string()) view["destinations"].push_back(destination);
-        }
-        if (clarification.contains("candidates"))
-            view["candidates"] = candidateViews(clarification.at("candidates"),&active);
-        clarifications.push_back(std::move(view));
+    result.update(activity(activeTasks,id));
+    if (changedSessionTasks) {
+        auto& groups = result["sessionTasks"] = Json::array();
+        for (const auto& task : *changedSessionTasks) groups.push_back(sessionGroup(task));
+    } else {
+        result.update(sessions(store,id,0));
     }
-    if (!clarifications.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
+    result["bot"] = settingsView(bot);
+    auto& paused = result["pausedConversations"] = Json::array();
+    for (const auto& turn : store.pausedConversations(id)) {
+        Json view = Json::object();
+        copyFields(view,turn,{"messageId","text","route"});
+        paused.push_back(std::move(view));
+    }
+    if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
         result["presence"] = "waiting";
     return result;
 }

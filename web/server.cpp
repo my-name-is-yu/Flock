@@ -1,12 +1,11 @@
 #include "flock/web.hpp"
+#include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
 
 #include <httplib.h>
 
 #include <algorithm>
-#include <array>
-#include <cctype>
 #include <charconv>
 #include <limits>
 #include <map>
@@ -15,25 +14,13 @@
 
 namespace flockv0 {
 namespace {
+using web::ChangeFeed;
 using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t maxStandardPayload = 128 * 1024;
-constexpr std::size_t maxAvatarImageBytes = 5 * 1024 * 1024;
 constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
-constexpr std::array<std::string_view,7> allowedShapes = {
-    "mug", "sprout", "controller", "lightbulb", "chat", "watering-can", "barbell"
-};
-constexpr std::array<std::string_view,8> allowedIcons = {
-    "star", "orbit", "zap", "compass", "feather", "hexagon", "telescope", "sparkles"
-};
-constexpr std::array<std::string_view,4> allowedRoles = {
-    "reviewer", "builder", "researcher", "custom"
-};
-constexpr std::array<std::string_view,4> allowedImageTypes = {
-    "image/png", "image/jpeg", "image/webp", "image/gif"
-};
 enum class Mutation { Message, Request, Operation };
 
 void json(Response& res, int status, const Json& body) {
@@ -82,32 +69,6 @@ const Json* botById(const Json& bots, std::string_view id) {
     return bot == bots.end() ? nullptr : &*bot;
 }
 
-template <std::size_t N>
-bool inList(const std::array<std::string_view,N>& list, std::string_view value) {
-    return std::find(list.begin(),list.end(),value) != list.end();
-}
-
-std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(first,last - first + 1));
-}
-
-std::size_t utf8Codepoints(std::string_view text) {
-    std::size_t count = 0;
-    for (const unsigned char ch : text)
-        if ((ch & 0xC0) != 0x80) ++count;
-    return count;
-}
-
-bool validHexColor(std::string_view color) {
-    if ((color.size() != 4 && color.size() != 7) || color[0] != '#') return false;
-    return std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) {
-        return std::isxdigit(ch) != 0;
-    });
-}
-
 int base64Digit(unsigned char ch) {
     if (ch >= 'A' && ch <= 'Z') return ch - 'A';
     if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
@@ -145,61 +106,24 @@ std::string decodeBase64(std::string_view input, std::size_t maxBytes) {
     return out;
 }
 
-std::string detectImageType(std::string_view bytes) {
-    if (bytes.size() < 8 || bytes.size() > maxAvatarImageBytes) throw InputError("invalid_image");
-    const auto byte = [&](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
-    if (byte(0) == 0x89 && byte(1) == 'P' && byte(2) == 'N' && byte(3) == 'G' &&
-        byte(4) == 0x0D && byte(5) == 0x0A && byte(6) == 0x1A && byte(7) == 0x0A)
-        return "image/png";
-    if (byte(0) == 0xFF && byte(1) == 0xD8 && byte(2) == 0xFF) return "image/jpeg";
-    if (bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a")) return "image/gif";
-    if (bytes.size() >= 12 && bytes.substr(0,4) == "RIFF" && bytes.substr(8,4) == "WEBP")
-        return "image/webp";
-    throw InputError("invalid_image");
-}
-
 struct ParsedProfile {
     Json profile;
     std::optional<AvatarImage> image;
 };
 
-ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImageForUpload) {
-    const auto rawName = body.find("name");
-    if (rawName == body.end() || !rawName->is_string()) throw InputError("invalid_name");
-    const auto name = trim(rawName->get_ref<const std::string&>());
-    if (name.empty() || name.size() > 128 || utf8Codepoints(name) > 32 ||
-        std::any_of(name.begin(),name.end(),[](unsigned char ch) { return ch < 32 || ch == 127; }))
-        throw InputError("invalid_name");
-
-    Json profile = {{"name",name}};
-    if (allowRole && body.contains("role")) {
-        if (!body["role"].is_string() || !inList(allowedRoles,body["role"].get_ref<const std::string&>()))
+ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    Json profile = {{"name",validatedBotName(body)}};
+    if (creating && body.contains("role")) {
+        if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    const auto avatarIt = body.find("avatar");
     // Updates may omit the avatar to rename without touching the stored appearance.
-    if (avatarIt == body.end() && !allowRole) return {std::move(profile),std::nullopt};
-    if (avatarIt == body.end() || !avatarIt->is_object()) throw InputError("invalid_avatar");
-    const auto& source = *avatarIt;
-    const auto kind = web::field(source,"kind");
-    std::string color = "#69c9ac";
-    if (source.contains("color")) {
-        if (!source["color"].is_string() || !validHexColor(source["color"].get_ref<const std::string&>()))
-            throw InputError("invalid_avatar");
-        color = source["color"].get<std::string>();
-    }
+    if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
+    auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
-    if (kind == "shape") {
-        const auto example = web::field(source,"example");
-        if (!inList(allowedShapes,example)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","shape"},{"example",example},{"color",color}};
-    } else if (kind == "icon") {
-        const auto icon = web::field(source,"icon");
-        if (!inList(allowedIcons,icon)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","icon"},{"icon",icon},{"color",color}};
-    } else if (kind == "upload") {
-        Json avatar = {{"kind","upload"},{"color",color}};
+    if (avatar["kind"] == "upload") {
+        const auto& source = body.at("avatar");
         if (source.contains("filename")) {
             if (!source["filename"].is_string() || source["filename"].get_ref<const std::string&>().size() > 256)
                 throw InputError("invalid_avatar");
@@ -207,16 +131,12 @@ ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImag
         }
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
-            auto bytes = decodeBase64(source["imageData"].get_ref<const std::string&>(),maxAvatarImageBytes);
-            auto type = detectImageType(bytes);
-            image = AvatarImage{std::move(type),std::move(bytes)};
-        } else if (requireImageForUpload) {
+            image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),AvatarImage::maxBytes));
+        } else if (creating) {
             throw InputError("invalid_image");
         }
-        profile["avatar"] = std::move(avatar);
-    } else {
-        throw InputError("invalid_avatar");
     }
+    profile["avatar"] = std::move(avatar);
     return {std::move(profile),std::move(image)};
 }
 
@@ -245,7 +165,10 @@ Json operationData(const Json& body, std::string_view operation) {
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
-        : store_(store), callbacks_(std::move(callbacks)) {
+        : store_(store), callbacks_(std::move(callbacks)),
+          changes_(store,[this](const ChangeFeed::Scope& scope) {
+              return std::visit([this](const auto& target) { return snapshot(target); },scope);
+          }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
@@ -279,14 +202,14 @@ public:
         server_.Get("/api/bots",[this](const Request&, Response& res) {
             json(res,200,botList());
         });
+        server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
             if (!callbacks_.botAvatar) return error(res,404,"avatar_not_found");
             const auto image = callbacks_.botAvatar(id);
-            if (!image || !inList(allowedImageTypes,image->contentType) || image->bytes.empty())
-                return error(res,404,"avatar_not_found");
-            res.set_content(image->bytes.data(),image->bytes.size(),image->contentType);
+            if (!image) return error(res,404,"avatar_not_found");
+            res.set_content(image->bytes().data(),image->bytes().size(),std::string(image->format().contentType));
         });
         for (const auto path : {"/api/view","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
@@ -304,8 +227,21 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
-                    if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
-                    else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
+                    if (req.path == "/api/view") {
+                        const auto changesAfter = req.has_param("changesAfter")
+                            ? std::optional{queryId(req,"changesAfter",true)} : std::nullopt;
+                        const auto sessionsAfter = req.has_param("sessionsAfter")
+                            ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
+                        const auto changes = store_.conversationChangesSince(changesAfter,id);
+                        const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
+                        auto view = web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr);
+                        view["historyCursor"] = changes.through;
+                        view["changedMessageIds"] = Json::array();
+                        if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
+                            view["changedMessageIds"] = changed->second;
+                        view["sessionCursor"] = sessionThrough;
+                        json(res,200,view);
+                    } else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
                     else json(res,200,web::sessions(store_,id,before));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
@@ -335,12 +271,48 @@ public:
     }
 
     ~LoopbackServer() override {
+        changes_.stop();
         server_.stop();
         worker_.join();
     }
     unsigned port() const override { return port_; }
 
 private:
+    void changes(const Request& req, Response& res) {
+        const auto bot = req.get_param_value("bot");
+        const auto peer = req.get_param_value("peer");
+        if (req.get_param_value_count("bot") > 1 || req.get_param_value_count("peer") > 1 ||
+            bot.size() > 1024 || peer.size() > 1024 ||
+            (req.has_param("bot") && bot.empty()) ||
+            (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
+            return error(res,400,"invalid_subscription");
+        ChangeFeed::Scope target = ChangeFeed::BotList{};
+        if (!peer.empty()) target = ChangeFeed::DirectMessage{bot,peer};
+        else if (!bot.empty()) target = ChangeFeed::BotView{bot};
+        auto subscription = changes_.subscribe(target);
+        if (!subscription) return error(res,503,"event_stream_unavailable");
+        auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
+        res.set_chunked_content_provider("text/event-stream",
+            [this,cursor](std::size_t offset, httplib::DataSink& sink) {
+                if (!sink.is_writable()) return false;
+                if (offset == 0) {
+                    constexpr std::string_view ready = "retry: 2500\nevent: ready\ndata: {}\n\n";
+                    return sink.write(ready.data(),ready.size());
+                }
+                const auto update = changes_.next(*cursor);
+                if (!update) {
+                    sink.done();
+                    return true;
+                }
+                if (!sink.is_writable()) return false;
+                const auto event = update->empty()
+                    ? std::string("event: ping\ndata: {}\n\n")
+                    : "event: change\ndata: " + update->dump(-1,' ',false,Json::error_handler_t::replace) + "\n\n";
+                return sink.write(event.data(),event.size());
+            },
+            [this,cursor](bool) { changes_.release(*cursor); });
+    }
+
     HandlerResult guard(const Request& req, Response& res) const {
         const auto portSuffix = port_ == 80 ? std::string{} : ":" + std::to_string(port_);
         const auto host = req.get_header_value("Host");
@@ -390,14 +362,17 @@ private:
             if (update) {
                 const auto botId = requiredText(body,"botId",1024);
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
-                auto parsed = parseBotProfile(body,false,false);
+                auto parsed = parseBotProfile(body,false);
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
+                changes_.rescan();
                 return json(res,200,web::botSettings(saved));
             }
-            auto parsed = parseBotProfile(body,true,true);
+            auto parsed = parseBotProfile(body,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
+            changes_.rescan();
             return json(res,201,web::botSettings(created));
         } catch (const InputError& e) { error(res,400,e.what()); }
+        catch (const BotProfileError& e) { error(res,400,e.code); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
 
@@ -421,20 +396,42 @@ private:
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
+    bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
+        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        return store_.hasPeerExchange(bot,peer);
+    }
+
+    Json snapshot(const ChangeFeed::BotList&) const { return botList(); }
+
+    Json snapshot(const ChangeFeed::BotView& view) const {
+        const auto bot = findBot(view.bot);
+        return bot.is_null() ? Json(nullptr) : web::botView(store_,bot);
+    }
+
+    Json snapshot(const ChangeFeed::DirectMessage& dm) const {
+        const auto known = bots();
+        if (!botById(known,dm.bot) || !canReadPeer(dm.bot,dm.peer,botById(known,dm.peer) != nullptr))
+            return nullptr;
+        return web::peerConversation(store_,dm.bot,dm.peer,0);
+    }
+
     Json botList() const {
         auto list = web::botList(store_,bots());
+        if (list.empty()) return list;
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::set<std::string>> connections;
+        auto pairs = store_.peerExchangePairs();
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
-                if (id == peer || !known.contains(peer)) continue;
-                connections[id].insert(peer);
-                connections[peer].insert(id);
+                if (known.contains(peer)) pairs.emplace_back(id,peer);
             }
-            for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].insert(peer);
+        }
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& [sender,recipient] : pairs) {
+            if (sender == recipient) continue;
+            if (known.contains(sender)) connections[sender].insert(recipient);
+            if (known.contains(recipient)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
@@ -449,11 +446,8 @@ private:
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
         const bool configured = botById(known,peer) != nullptr;
-        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
-            const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end())
-                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        }
+        if (!canReadPeer(bot,peer,configured))
+            return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         json(res,200,web::peerConversation(store_,bot,peer,before));
     }
 
@@ -470,10 +464,8 @@ private:
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
-                const auto candidate = message && body.contains("candidateTaskId") ? bodyId(body,"candidateTaskId") : Id{};
-                if (candidate && !replyTo) throw InputError("invalid_candidate");
                 if (message) {
-                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo,candidate);
+                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
                     if (previous) return json(res,201,*previous);
                 }
                 Intake intake;
@@ -486,7 +478,7 @@ private:
                 intake.request = request;
                 intake.scheduleId.clear();
                 intake.scheduledAt = 0;
-                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo,candidate));
+                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);
@@ -498,8 +490,10 @@ private:
             }
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
-            const auto data = operationData(body,operation);
-            if (web::field(store_.task(id),"botId") != bot) return error(res,404,"task_not_found");
+            auto data = operationData(body,operation);
+            const auto task = store_.task(id);
+            if (web::field(task,"botId") != bot) return error(res,404,"task_not_found");
+            if (operation == "reconcile") data = reconciliationData(task,wait,std::move(data),callbacks_.intake);
             store_.operate(id,wait,operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
@@ -512,6 +506,7 @@ private:
 
     Store& store_;
     WebCallbacks callbacks_;
+    web::ChangeFeed changes_;
     httplib::Server server_;
     std::thread worker_;
     unsigned port_ = 0;

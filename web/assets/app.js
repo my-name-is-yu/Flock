@@ -1,4 +1,6 @@
-import { accentColor, showAvatar } from '/avatars.js';
+import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
+import { refreshEventHistory } from '/event-history.mjs';
+import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 
 const byId = (id) => document.getElementById(id);
@@ -7,7 +9,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'reply-choice', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -44,7 +46,6 @@ const errors = {
   intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
-  invalid_candidate: 'That choice is no longer available. Check the latest confirmation.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -70,12 +71,12 @@ const notices = new Map();
 const signatures = new Map();
 let bots = [];
 let listLoaded = false;
-let listGeneration = 0;
 let view = null;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
 
@@ -91,9 +92,21 @@ function button(text, className, click) {
   if (click) el.addEventListener('click', click);
   return el;
 }
+customElements.define('flock-avatar', class extends HTMLElement {
+  #handle;
+
+  connectedCallback() {
+    this.#handle = showAvatar(this, this.bot, { still: false });
+  }
+
+  disconnectedCallback() {
+    this.#handle?.destroy();
+  }
+});
+
 function avatar(bot, className = '') {
-  const host = node('span', `avatar ${className}`.trim());
-  showAvatar(host, bot);
+  const host = node('flock-avatar', `avatar ${className}`.trim());
+  host.bot = bot;
   return host;
 }
 function runHref(run) {
@@ -206,8 +219,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0,
-    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
+    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
   else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
@@ -219,7 +232,17 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   save('flock-selected-bot', botId);
   elements.conversation.scrollTop = 0;
   render('bottom');
-  if (view) void refreshView(view, 'bottom');
+  const context = view;
+  if (context) {
+    context.pageRead = Promise.resolve();
+    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
+    void context.refresh('bottom');
+    if (context.dm) {
+      context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
+      void context.dm.refresh('bottom');
+    }
+  }
+  subscribeToView();
 }
 function selectLocation() {
   const params = new URLSearchParams(location.search);
@@ -251,6 +274,7 @@ const sidebarIcons = {
 const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
+const sidebarEntries = new Map();
 
 let botDraft = null;
 function sidebarBots() {
@@ -276,37 +300,34 @@ function closeMenu(restore = true) {
   if (!botId) return;
   setMenu(null, restore ? `menu:${botId}` : null);
 }
-function togglePin(bot) {
-  if (pins.has(bot.id)) pins.delete(bot.id);
-  else pins.add(bot.id);
+function togglePin(botId) {
+  if (pins.has(botId)) pins.delete(botId);
+  else pins.add(botId);
   save('flock-pins', [...pins]);
-  setMenu(null, `menu:${bot.id}`);
+  setMenu(null, `menu:${botId}`);
 }
 let settingsReturnFocus = null;
 function openSettingsFromMenu(botId) {
   settingsReturnFocus = botId;
   openDetail({ kind: 'settings' });
 }
-function openBotSettings(bot) {
+function openBotSettings(botId) {
   menu = null;
-  if (view?.id !== bot.id) selectBot(bot.id);
+  if (view?.id !== botId) selectBot(botId);
   else renderBots();
-  if (view?.data) openSettingsFromMenu(bot.id);
-  else if (view) view.openSettingsOnLoad = bot.id;
+  if (view?.data) openSettingsFromMenu(botId);
+  else if (view) view.openSettingsOnLoad = botId;
 }
-function menuButton(bot) {
-  const toggle = button(null, 'row-menu', () => (menu === bot.id ? closeMenu() : setMenu(bot.id, 'first')));
+function menuButton(botId) {
+  const toggle = button(null, 'row-menu', () => (menu === botId ? closeMenu() : setMenu(botId, 'first')));
   toggle.innerHTML = sidebarIcons.more;
-  toggle.dataset.focus = `menu:${bot.id}`;
-  toggle.setAttribute('aria-label', `${bot.name} menu`);
+  toggle.dataset.focus = `menu:${botId}`;
   toggle.setAttribute('aria-haspopup', 'menu');
-  toggle.setAttribute('aria-expanded', menu === bot.id);
   toggle.addEventListener('keydown', (event) => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     event.preventDefault();
-    setMenu(bot.id, event.key === 'ArrowDown' ? 'first' : 'last');
+    setMenu(botId, event.key === 'ArrowDown' ? 'first' : 'last');
   });
-  if (menu === bot.id) toggle.setAttribute('aria-controls', 'bot-menu');
   return toggle;
 }
 function menuPopover(bot) {
@@ -315,8 +336,8 @@ function menuPopover(bot) {
   list.setAttribute('role', 'menu');
   list.setAttribute('aria-label', `${bot.name} menu`);
   const actions = [
-    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot)],
-    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot)],
+    [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot.id)],
+    ['Open settings', sidebarIcons.settings, () => openBotSettings(bot.id)],
   ];
   actions.forEach(([label, icon, run], index) => {
     const item = button(null, null, run);
@@ -342,60 +363,109 @@ function menuPopover(bot) {
   });
   return list;
 }
-function presenceText(bot) {
-  return activePresence.has(bot.presence) ? node('span', 'sr-only', stateLabels[bot.presence]) : null;
-}
-function botRow(bot) {
-  const row = node('div', 'bot-row');
-  const active = view?.id === bot.id;
-  row.classList.toggle('selected', active);
-  row.classList.toggle('menu-open', menu === bot.id);
-  const select = button(null, 'bot-select', () => selectBot(bot.id));
-  select.dataset.focus = `bot:${bot.id}`;
-  if (active) select.setAttribute('aria-current', 'true');
+function createSidebarEntry(botId) {
+  const row = node('div');
+  const select = button(null, '', () => selectBot(botId));
+  select.dataset.focus = `bot:${botId}`;
+  const face = node('span');
+  const avatarHost = node('span', 'avatar');
+  const pinPresence = node('span');
+  face.append(avatarHost, pinPresence);
+
   const name = node('span', 'bot-name');
-  name.append(node('span', 'bot-name-text', bot.name));
-  if (bot.presence === 'waiting') name.append(node('span', 'presence-dot'));
+  const nameText = node('span', 'bot-name-text');
+  const presenceDot = node('span', 'presence-dot');
+  name.append(nameText, presenceDot);
   const preview = node('span', 'bot-preview');
-  if (busyPresence.has(bot.presence)) {
-    const dots = node('span', 'working-dots');
-    dots.setAttribute('aria-hidden', 'true');
-    dots.append(node('i'), node('i'), node('i'));
-    preview.append(dots);
-  }
-  preview.append(bot.preview || 'No conversation yet');
+  const dots = node('span', 'working-dots');
+  dots.setAttribute('aria-hidden', 'true');
+  dots.append(node('i'), node('i'), node('i'));
+  const previewText = document.createTextNode('');
+  preview.append(dots, previewText);
   const text = node('span', 'bot-text');
   text.append(name, preview);
-  select.append(avatar(bot, 'bot-avatar'), text);
-  const status = presenceText(bot);
-  if (status) select.append(status);
-  row.append(select, menuButton(bot));
-  if (menu === bot.id) row.append(menuPopover(bot));
-  return row;
-}
-function pinTile(bot, index) {
-  const tile = node('div', 'pin-tile');
-  const active = view?.id === bot.id;
-  tile.classList.toggle('selected', active);
-  tile.classList.toggle('menu-open', menu === bot.id);
-  const select = button(null, 'pin', () => selectBot(bot.id));
-  select.dataset.focus = `bot:${bot.id}`;
-  if (active) select.setAttribute('aria-current', 'true');
-  const shortcut = index < 9 ? index + 1 : null;
-  if (shortcut) select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
-  const face = node('span', 'pin-face');
-  face.append(avatar(bot, 'pin-avatar'));
-  if (activePresence.has(bot.presence)) face.append(node('span', `pin-presence ${bot.presence}`));
-  select.append(face, node('span', 'pin-name', bot.name));
-  const status = presenceText(bot);
-  if (status) select.append(status);
+
+  const pinName = node('span', 'pin-name');
+  const status = node('span', 'sr-only');
+  select.append(face, text, pinName, status);
   const tooltip = node('span', 'pin-tooltip');
   tooltip.setAttribute('aria-hidden', 'true');
-  tooltip.append(node('span', null, bot.name));
-  if (shortcut) tooltip.append(node('kbd', null, `⌥⇧${shortcut}`));
-  tile.append(select, tooltip, menuButton(bot));
-  if (menu === bot.id) tile.append(menuPopover(bot));
-  return tile;
+  const tooltipName = node('span');
+  const shortcutLabel = node('kbd');
+  tooltip.append(tooltipName, shortcutLabel);
+  const toggle = menuButton(botId);
+  row.append(select, tooltip, toggle);
+
+  let previousBot;
+  let avatarHandle;
+  let popover;
+  return {
+    row,
+    update(bot, pinIndex) {
+      const pinned = pinIndex >= 0;
+      const active = view?.id === botId;
+      const expanded = menu === botId;
+      row.className = pinned ? 'pin-tile' : 'bot-row';
+      row.classList.toggle('selected', active);
+      row.classList.toggle('menu-open', expanded);
+      select.className = pinned ? 'pin' : 'bot-select';
+      if (active) select.setAttribute('aria-current', 'true');
+      else select.removeAttribute('aria-current');
+
+      face.className = pinned ? 'pin-face' : '';
+      avatarHost.classList.toggle('pin-avatar', pinned);
+      avatarHost.classList.toggle('bot-avatar', !pinned);
+      tooltip.hidden = pinName.hidden = !pinned;
+      text.hidden = pinned;
+      const shortcut = pinned && pinIndex < 9 ? pinIndex + 1 : null;
+      shortcutLabel.hidden = shortcut === null;
+      if (shortcut) {
+        shortcutLabel.textContent = `⌥⇧${shortcut}`;
+        select.setAttribute('aria-keyshortcuts', `Alt+Shift+${shortcut}`);
+      } else select.removeAttribute('aria-keyshortcuts');
+
+      if (previousBot?.name !== bot.name) {
+        nameText.textContent = pinName.textContent = tooltipName.textContent = bot.name;
+        toggle.setAttribute('aria-label', `${bot.name} menu`);
+        popover?.setAttribute('aria-label', `${bot.name} menu`);
+      }
+      if (!previousBot || previousBot.preview !== bot.preview) {
+        previewText.data = bot.preview || 'No conversation yet';
+      }
+      const hasPresence = activePresence.has(bot.presence);
+      presenceDot.hidden = bot.presence !== 'waiting';
+      dots.hidden = !busyPresence.has(bot.presence);
+      pinPresence.hidden = !pinned || !hasPresence;
+      pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
+      status.hidden = !hasPresence;
+      if (hasPresence && previousBot?.presence !== bot.presence) status.textContent = stateLabels[bot.presence];
+
+      toggle.setAttribute('aria-expanded', expanded);
+      if (expanded) {
+        toggle.setAttribute('aria-controls', 'bot-menu');
+        if (!popover) {
+          popover = menuPopover(bot);
+          row.append(popover);
+        }
+      } else if (popover) {
+        toggle.removeAttribute('aria-controls');
+        popover.remove();
+        popover = null;
+      }
+      if (!previousBot || JSON.stringify(previousBot.avatar) !== JSON.stringify(bot.avatar)) {
+        avatarHandle?.destroy();
+        avatarHandle = showAvatar(avatarHost, bot, { still: false, state: presenceMotion(bot.presence) });
+      } else if (previousBot.presence !== bot.presence) {
+        const nextMotion = presenceMotion(bot.presence);
+        if (presenceMotion(previousBot.presence) !== nextMotion) avatarHandle?.update({ state: nextMotion });
+      }
+      previousBot = bot;
+    },
+    destroy() {
+      avatarHandle?.destroy();
+      row.remove();
+    },
+  };
 }
 function skeletonRows(count, className = 'skeleton-row') {
   return Array.from({ length: count }, () => {
@@ -421,6 +491,19 @@ function draftRow(draft) {
   row.append(select);
   return row;
 }
+
+function placeSidebarRows(container, rows) {
+  const wanted = new Set(rows);
+  for (const child of [...container.children]) {
+    if (!wanted.has(child)) child.remove();
+  }
+  let next = container.firstElementChild;
+  for (const row of rows) {
+    if (row === next) next = next.nextElementSibling;
+    else container.insertBefore(row, next);
+  }
+}
+
 function renderBots() {
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
@@ -428,15 +511,29 @@ function renderBots() {
   const pinned = pinnedBotsInShortcutOrder(source);
   const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
   const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
-  elements.pinned.replaceChildren(...pinned.map(pinTile));
+  const activeIds = new Set(source.map((bot) => bot.id));
+  for (const [id, entry] of sidebarEntries) {
+    if (!activeIds.has(id)) {
+      entry.destroy();
+      sidebarEntries.delete(id);
+    }
+  }
+  for (const { id } of source) {
+    if (!sidebarEntries.has(id)) sidebarEntries.set(id, createSidebarEntry(id));
+  }
+  const rowFor = ({ id }) => sidebarEntries.get(id).row;
+  placeSidebarRows(elements.pinned, pinned.map(rowFor));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
-  list.replaceChildren(...unpinnedByPresence.map(botRow));
-  if (botDraft?.mode === 'create') list.prepend(draftRow(botDraft));
-  if (!listLoaded) list.append(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) list.append(node('p', 'activity-empty', 'No Bots configured'));
-  if (focusedSidebarKey) focusKey(focusedSidebarKey);
+  const rows = unpinnedByPresence.map(rowFor);
+  if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
+  if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
+  else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
+  placeSidebarRows(list, rows);
+  pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
+  unpinnedByPresence.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
 }
 
 const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
@@ -468,9 +565,10 @@ function renderHeader() {
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
-  if (bot && nextScopeKey !== scopeKey) {
-    showAvatar(elements['activity-scope-avatar'], bot);
-    elements['activity-scope-name'].textContent = bot.name;
+  if (nextScopeKey !== scopeKey) {
+    scopeAvatar?.destroy();
+    scopeAvatar = bot ? showAvatar(elements['activity-scope-avatar'], bot, { still: false }) : null;
+    if (bot) elements['activity-scope-name'].textContent = bot.name;
   }
   scopeKey = nextScopeKey;
   if (!bot || dm) {
@@ -481,15 +579,13 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
-  const avatarState = presence === 'peer_waiting' ? 'waiting' :
-    presence === 'stopping' ? 'thinking' : presence === 'queued' ? 'idle' : presence;
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, state: avatarState });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, followPointer: true });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
-  } else if (profile.dataset.presence !== presence) profileAvatar?.update({ state: avatarState });
+  }
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -526,10 +622,10 @@ function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
   const waits = data?.waits ?? [];
-  const clarifications = data?.clarifications ?? [];
-  if (changed('waits', view?.id, loading, waits, clarifications)) {
-    elements['wait-count'].textContent = waits.length + clarifications.length;
-    elements['wait-count'].hidden = !(waits.length + clarifications.length);
+  const paused = data?.pausedConversations ?? [];
+  if (changed('waits', view?.id, loading, waits, paused)) {
+    elements['wait-count'].textContent = waits.length + paused.length;
+    elements['wait-count'].hidden = !(waits.length + paused.length);
     elements['wait-list'].setAttribute('aria-busy', loading);
     const repeated = repeatedRequests(waits);
     const rows = waits.map((task) => {
@@ -544,13 +640,13 @@ function renderActivity() {
       });
       return row;
     });
-    for (const clarification of clarifications) {
-      const row = activityRow('button', 'wait-row', clarification.text, 'Clarification requested', 'waiting');
+    for (const turn of paused) {
+      const row = activityRow('button', 'wait-row', turn.text, waitLabel('model_budget'), 'waiting');
       row.type = 'button';
-      row.title = clarification.text;
+      row.title = turn.text;
       row.addEventListener('click', () => {
         openNavigation(false);
-        openDetail({ kind: 'clarification', messageId: clarification.messageId });
+        openDetail({ kind: 'paused', messageId: turn.messageId });
       });
       rows.push(row);
     }
@@ -558,13 +654,12 @@ function renderActivity() {
     if (loading) elements['wait-list'].append(...skeletonRows(1));
     else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
   }
-  const groups = new Map(view?.loadedSessions);
-  for (const task of data?.sessionTasks ?? []) groups.set(task.id, task);
+  const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
   const active = data?.activeSessions ?? [];
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (!changed('sessions', view?.id, loading, [...groups.values()], active)) return;
+  if (!changed('sessions', view?.id, loading, groups, active)) return;
   const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
   const activeKeys = new Set();
   const live = [];
@@ -575,7 +670,7 @@ function renderActivity() {
     live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state, true));
   }
   const ended = [];
-  for (const task of [...groups.values()].sort((a, b) => b.id - a.id)) {
+  for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
       if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
     }
@@ -596,13 +691,12 @@ function renderActivity() {
   else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
 }
 
-function beginReply(target, text = '', choice = null) {
+function beginReply(target, text = '') {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   if (view.dm) selectBot(view.id);
   const current = replies.get(view.id);
   if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
-  if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
-    replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
+  if (current?.messageId !== target.messageId || text) replies.set(view.id, { ...target, text });
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -647,7 +741,7 @@ function questionActions(context, task, { dialog = false } = {}) {
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
   for (const choice of task.wait.choices ?? []) {
     const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
-      if (view?.id === context.id) beginReply(target, choice);
+      if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
     });
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);
@@ -659,50 +753,21 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
-function candidateButton(target, candidate, order) {
-  const started = startedText(candidate.createdAt, !!order);
-  const state = candidate.state ? stateLabels[candidate.state] ?? '' : '';
-  const label = order ? `${candidate.request} (${[order, started].filter(Boolean).join(', ')})` : candidate.request;
-  const option = button(null, 'button candidate', () => beginReply(target, label, { taskId: candidate.taskId, label }));
-  option.append(node('span', 'candidate-request', candidate.request));
-  const detail = [order, started, state].filter(Boolean).join(' · ');
-  if (detail) option.append(node('span', 'candidate-detail', detail));
-  option.setAttribute('aria-label', [candidate.request, detail].filter(Boolean).join(', '));
-  option.disabled = candidate.state === 'ended';
-  return option;
-}
-function clarificationTitle(clarification) {
-  return clarification?.route === 'model_budget' ? waitLabel('model_budget') : 'Clarification requested';
-}
-function clarificationActions(clarification) {
+function pausedActions(turn) {
   const actions = node('div', 'event-actions');
-  if (clarification.route === 'model_budget') {
-    const waitMessageId = clarification.messageId;
-    const key = `message/${waitMessageId}`;
-    const approve = button('Approve one more model call', 'button',
-      () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
-    approve.disabled = pendingWaits.has(key);
-    actions.append(approve);
-    return actions;
-  }
-  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
-  if (clarification.destinations) {
-    for (const destination of clarification.destinations)
-      actions.append(button(destination, 'button', () => beginReply(target, destination)));
-  } else {
-    const candidates = clarification.candidates ?? [];
-    const repeated = repeatedRequests(candidates);
-    const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
-    const order = (candidate) => {
-      if (!repeated.has(candidate.request)) return '';
-      const same = candidates.filter((item) => item.request === candidate.request)
-        .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || a.taskId - b.taskId);
-      const index = same.indexOf(candidate);
-      return index === same.length - 1 ? 'requested last' : `requested ${ordinals[index] ?? `${index + 1}th`}`;
-    };
-    for (const candidate of candidates) actions.append(candidateButton(target, candidate, order(candidate)));
-  }
-  actions.append(button('Write a reply', 'text-button', () => beginReply(target)));
+  const waitMessageId = turn.messageId;
+  const key = `message/${waitMessageId}`;
+  const approve = button('Approve one more model call', 'button',
+    () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+  approve.disabled = pendingWaits.has(key);
+  actions.append(approve);
+  return actions;
+}
+function suggestionActions(event) {
+  const actions = node('div', 'event-actions');
+  const target = { kind: 'message', messageId: event.id, summary: event.data.text };
+  for (const suggestion of event.data.suggestions)
+    actions.append(button(suggestion, 'button', () => beginReply(target, suggestion)));
   return actions;
 }
 function messageSide(event) {
@@ -813,14 +878,10 @@ function eventCard(event, context, place) {
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
     bubble.append(text);
-    const clarification = context.clarifications.get(data.messageId);
-    if (clarification) extras.push(clarificationActions(clarification));
-    if (data.source?.messageId) {
-      const links = node('div', 'event-actions');
-      links.append(sourceAction(data.source));
-      extras.push(links);
-      if (data.route === 'respond') replyTarget = ['Reply to this answer', { kind: 'result', messageId: event.id, summary: data.text }];
-    }
+    const paused = context.paused.get(data.messageId);
+    if (paused) extras.push(pausedActions(paused));
+    else if (data.suggestions?.length) extras.push(suggestionActions(event));
+    if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
     text.textContent = copy;
@@ -891,8 +952,7 @@ function workingLine(data) {
   dots.append(node('span'), node('span'), node('span'));
   let label = presenceLabels.thinking;
   if (data.presence === 'working') {
-    const active = data.activeSessions?.[0];
-    label = data.sessionTasks?.find((task) => task.id === active?.taskId)?.request ?? presenceLabels.working;
+    label = data.activeSessions?.[0]?.request ?? presenceLabels.working;
   }
   const text = node('span', 'working-label', label);
   text.title = label;
@@ -922,7 +982,7 @@ function peerThread(events, dm) {
   const fragment = document.createDocumentFragment();
   if (!events.length) {
     const empty = node('div', 'empty-state');
-    const title = dm.error ? 'DM unavailable' : dm.loaded ? 'No messages yet' : 'Loading…';
+    const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
     empty.append(node('h2', null, title));
     if (dm.error) empty.append(node('p', null, dm.error));
     fragment.append(empty);
@@ -994,18 +1054,18 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   if (view?.dm) {
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
-    if (!changed('timeline', dm.id, dm.peerId, events, dm.loaded, dm.error, participants, dayFormat.format(Date.now()))) return;
+    if (!changed('timeline', dm.id, dm.peerId, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
     elements.timeline.replaceChildren(peerThread(events, dm));
     moveScroll();
     return;
   }
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
-    clarifications: new Map((data?.clarifications ?? []).map(item => [item.messageId, item])),
+    paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
@@ -1063,7 +1123,7 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', clarification: 'Reply to a clarification', result: 'Reply to a result' };
+const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
@@ -1099,8 +1159,6 @@ function renderComposer() {
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
-  elements['reply-choice'].hidden = !reply?.choice;
-  elements['reply-choice'].textContent = reply?.choice ? `Selected: ${reply.choice}` : '';
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
@@ -1281,12 +1339,11 @@ const botEditor = createBotEditor(elements['bot-editor'], {
   async onSaved(savedBot, savedMode) {
     const returnToSettings = reopenSettingsOnClose;
     reopenSettingsOnClose = false;
-    await refreshBots();
+    await Promise.all([refreshBots(), view?.id === savedBot.id && view.refresh()]);
     if (savedMode === 'create') {
       selectBot(savedBot.id);
       return;
     }
-    if (view?.id === savedBot.id) await refreshView(view);
     if (returnToSettings && view?.id === savedBot.id && view.data) {
       openDetail({ kind: 'settings', section: 'general', status: 'Appearance updated' });
     }
@@ -1315,12 +1372,9 @@ function openEditAppearance(bot) {
 }
 
 function generalContent(bot) {
-  const presence = view.data.presence ?? 'idle';
   const hero = node('div', 'settings-hero');
   const face = node('span', 'settings-avatar');
-  detailAvatar = { state: presence, mount: () => {
-    return showAvatar(face, bot, { still: false, state: presence });
-  } };
+  detailAvatar = { mount: () => showAvatar(face, bot, { still: false }) };
   hero.append(
     face,
     node('p', 'settings-name', bot.name),
@@ -1342,17 +1396,13 @@ function generalContent(bot) {
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
-  for (const item of bot.cron) {
-    const expression = String(item.schedule ?? item.expression ?? item.cron ?? '');
-    const timezone = item.timezone ?? item.timeZone;
-    const readable = describeCron(expression);
-    const row = node('div', `cron-row${item.enabled === false ? ' disabled' : ''}`);
+  for (const { schedule, timezone, request } of bot.cron) {
+    const readable = describeCron(schedule);
+    const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
-    if (timezone) when.append(node('span', 'cron-zone', timezone));
-    if (readable) when.append(node('code', 'cron-expression', expression));
-    row.append(when, node('span', 'cron-state', item.enabled === false ? 'Paused' : 'Enabled'),
-      node('p', 'cron-request', item.request));
+    if (readable) when.append(readable);
+    when.append(node('code', 'cron-expression', schedule), node('span', 'cron-zone', timezone));
+    row.append(when, node('p', 'cron-request', request));
     list.append(row);
   }
   return [list];
@@ -1460,11 +1510,6 @@ function renderDetail() {
     labelDetail(`${bot.name} settings`);
     renderDetailNav(sections, detail.section);
     if (changed('detail', detail, bot)) replaceDetail(() => settingsContent(bot, detail.section));
-    const presence = view.data.presence ?? 'idle';
-    if (detailAvatar && detailAvatar.state !== presence) {
-      detailAvatar.handle?.update({ state: presence });
-      detailAvatar.state = presence;
-    }
     return;
   }
   labelDetail(null);
@@ -1506,12 +1551,12 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'clarification') {
-    const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, clarification, [...pendingWaits])) {
-      elements['detail-title'].textContent = clarificationTitle(clarification);
-      elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
-      if (clarification) elements['detail-body'].append(clarificationActions(clarification));
+  if (detail.kind === 'paused') {
+    const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
+    if (changed('detail', detail, turn, [...pendingWaits])) {
+      elements['detail-title'].textContent = waitLabel('model_budget');
+      elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
+      if (turn) elements['detail-body'].append(pausedActions(turn));
     }
     return;
   }
@@ -1536,17 +1581,16 @@ function render(scroll) {
   renderDetail();
 }
 
-function mergeLatest(context, latest) {
-  const { events, olderBefore } = latest;
-  const first = events[0]?.id;
-  const missedPage = first && first > context.newestEvent;
-  if (!context.events.size || missedPage) {
-    context.events.clear();
-    context.olderBefore = olderBefore;
+function mergeSessionTasks(context, tasks) {
+  for (const task of tasks) {
+    if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
+      context.loadedSessions.set(task.id, task);
   }
-  for (const event of events) context.events.set(event.id, event);
-  context.newestEvent = events.at(-1)?.id ?? context.newestEvent;
-  if (!context.loadedSessions.size) context.sessionsBefore = latest.sessionsBefore;
+}
+
+function mergeLatest(context, latest) {
+  if (!context.data) context.sessionsBefore = latest.sessionsBefore;
+  mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
   const reply = replies.get(context.id);
   if (!reply || sendingMessages.has(context.id)) return;
@@ -1556,86 +1600,94 @@ function mergeLatest(context, latest) {
       replies.delete(context.id);
       setNotice(context, 'That question is no longer open, so your reply was not sent.');
     }
-  } else if (reply.kind === 'clarification' &&
-             !latest.clarifications.some((item) => item.messageId === reply.messageId)) {
-    if (reply.text.trim()) reply.closed = true;
-    else {
-      replies.delete(context.id);
-      setNotice(context, 'That confirmation has closed, so your reply was not sent.');
-    }
   }
+}
+async function conversationPage(timeline, before) {
+  if (!timeline.peerId) return api(botQuery('conversation', timeline.id, before));
+  const { messages, hasOlder } = await api(peerQuery(timeline, before));
+  return { events: messages, olderBefore: hasOlder ? messages[0].id : 0 };
 }
 async function refreshPeerConversation(context, scroll) {
+  if (context !== view) return;
   const dm = context.dm;
-  const generation = ++dm.generation;
+  const isCurrent = () => context === view;
+  const readPage = before => conversationPage(dm, before);
   try {
-    const page = await api(peerQuery(dm));
-    if (context !== view || generation !== dm.generation) return;
-    const first = page.messages[0]?.id;
-    if (!dm.events.size || first > dm.newestEvent) {
-      dm.events.clear();
-      dm.olderBefore = page.hasOlder ? first : 0;
-    }
-    for (const event of page.messages) dm.events.set(event.id, event);
-    dm.newestEvent = page.messages.at(-1)?.id ?? dm.newestEvent;
-    dm.loaded = true;
+    const latest = await readPage();
+    await refreshEventHistory(dm, latest, readPage, isCurrent);
+    if (!isCurrent()) return;
     dm.error = null;
   } catch (error) {
-    if (context !== view || generation !== dm.generation) return;
-    if (!dm.loaded) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    if (!isCurrent()) return;
+    if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
+    if (![403, 404].includes(error.status)) retrySync();
   }
-  render(scroll);
+  renderTimeline(scroll);
 }
 async function refreshView(context, scroll) {
-  const generation = ++context.generation;
-  const peerRefresh = context.dm && refreshPeerConversation(context, scroll);
+  if (context !== view) return;
+  const isCurrent = () => context === view;
   try {
-    const latest = await api(botQuery('view', context.id));
-    if (context !== view || generation !== context.generation) return;
+    const params = new URLSearchParams({ bot: context.id });
+    if (context.data) {
+      params.set('changesAfter', context.data.historyCursor);
+      params.set('sessionsAfter', context.data.sessionCursor);
+    }
+    const latest = await api(`view?${params}`);
+    await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
+    if (!isCurrent()) return;
     mergeLatest(context, latest);
     setConnection('ready');
-    render(scroll);
-    if (context.openSettingsOnLoad) {
-      const botId = context.openSettingsOnLoad;
-      context.openSettingsOnLoad = null;
-      openSettingsFromMenu(botId);
-    }
   } catch (error) {
-    if (context !== view || generation !== context.generation) return;
+    if (!isCurrent()) return;
     if (error.status === 404) void refreshBots();
-    else setConnection('offline');
-  } finally {
-    await peerRefresh;
+    else {
+      setConnection('offline');
+      retrySync();
+    }
+    return;
+  }
+  render(scroll);
+  if (context.openSettingsOnLoad) {
+    context.openSettingsOnLoad = null;
+    openSettingsFromMenu(context.id);
   }
 }
-async function refreshBots() {
-  const generation = ++listGeneration;
+const refreshBots = coalescedRefresh(async () => {
   try {
     const latest = await api('bots');
-    if (generation !== listGeneration) return;
     bots = latest;
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
     render();
   } catch {
-    if (generation === listGeneration) setConnection('offline');
+    setConnection('offline');
+    retrySync();
   }
+});
+function readTimeline(context, read) {
+  const next = (context.pageRead ?? Promise.resolve()).then(read, read);
+  context.pageRead = next;
+  return next;
 }
+
 async function loadOlder() {
   const context = timelineContext();
-  const cursor = context?.olderBefore;
-  if (!cursor || context.loadingOlder) return;
+  if (!context?.olderBefore || context.loadingOlder) return;
   context.loadingOlder = true;
   if (context.peerId) context.olderFailed = false;
   renderTimeline();
   try {
-    const page = await api(context.peerId ? peerQuery(context, cursor) : botQuery('conversation', context.id, cursor));
-    if (context !== timelineContext() || context.olderBefore !== cursor) return;
-    const events = context.peerId ? page.messages : page.events;
-    context.olderBefore = context.peerId ? (page.hasOlder ? events[0]?.id : 0) : page.olderBefore;
-    for (const event of events) context.events.set(event.id, event);
-    renderTimeline('older');
+    await readTimeline(context, async () => {
+      if (context !== timelineContext() || !context.olderBefore) return;
+      const cursor = context.olderBefore;
+      const { events, olderBefore } = await conversationPage(context, cursor);
+      if (context !== timelineContext() || context.olderBefore !== cursor) return;
+      context.olderBefore = olderBefore;
+      for (const event of events) context.events.set(event.id, event);
+      renderTimeline('older');
+    });
   } catch {
     if (context !== timelineContext()) return;
     if (context.peerId) context.olderFailed = true;
@@ -1655,7 +1707,7 @@ async function loadSessions() {
   try {
     const page = await api(botQuery('sessions', context.id, cursor));
     if (context !== view) return;
-    for (const task of page.sessionTasks) context.loadedSessions.set(task.id, task);
+    mergeSessionTasks(context, page.sessionTasks);
     context.sessionsBefore = page.sessionsBefore;
   } catch { if (context === view) setNotice(context, 'Could not load earlier sessions.', true); }
   finally {
@@ -1671,11 +1723,12 @@ async function operate(context, task, operation, fields = {}) {
 async function submitOperation(context, key, payload) {
   if (!context || pendingWaits.has(key)) return;
   const isOpen = () => view === context && (payload.waitMessageId
-    ? detail?.kind === 'clarification' && detail.messageId === payload.waitMessageId
+    ? detail?.kind === 'paused' && detail.messageId === payload.waitMessageId
     : detail?.waitId === payload.waitId);
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
   if (view?.id === context.id) render();
+  let failed = false;
   try {
     await api('operations', { botId: context.id, ...payload });
     setNotice(context, payload.operation === 'answer' ? 'Answer received.' : 'Action received.');
@@ -1684,8 +1737,9 @@ async function submitOperation(context, key, payload) {
     const message = errors[error.message] ?? 'Flock could not confirm the action. Check the conversation.';
     setNotice(context, message, true);
     if (isOpen()) showDetailError(message);
+    failed = true;
   } finally {
-    if (view?.id === context.id) await refreshView(view);
+    if ((failed || !liveUpdates.live) && view?.id === context.id) await Promise.all([view.refresh(), refreshBots()]);
     pendingWaits.delete(key);
     if (view?.id === context.id) render();
   }
@@ -1697,13 +1751,11 @@ async function submit(event) {
   const reply = replies.get(context.id);
   const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
-  const candidateTaskId = reply?.candidateTaskId;
   const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId &&
-    previous.candidateTaskId === candidateTaskId ? previous.clientMessageId : crypto.randomUUID();
+  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
+    ? previous.clientMessageId : crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  if (replyToMessageId && candidateTaskId) payload.candidateTaskId = candidateTaskId;
   rememberMessage(context.id, { payload, reply });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
@@ -1713,8 +1765,8 @@ async function submit(event) {
     if (reply) replies.delete(context.id);
     else drafts.delete(context.id);
     setNotice(context, 'Message received.');
-    if (showingComposer(context.id)) await refreshView(view, 'bottom');
-    void refreshBots();
+    if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
+    if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
     if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
@@ -1763,10 +1815,6 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
-  if (reply?.candidateTaskId && reply.text !== reply.choice) {
-    delete reply.candidateTaskId;
-    delete reply.choice;
-  }
   fitMessage();
   notices.delete(view.id);
   const limit = composerLimit(reply);
@@ -1816,14 +1864,46 @@ document.addEventListener('keydown', (event) => {
   else if (workspace.classList.contains('nav-open') && !elements.detail.open && !elements['bot-editor'].open) openNavigation(false);
 });
 
-function refresh() {
+let syncRetry;
+function retrySync() {
+  if (!document.hidden) syncRetry ??= setTimeout(syncAll, 2500);
+}
+
+function syncAll() {
+  clearTimeout(syncRetry);
+  syncRetry = null;
   if (document.hidden) return;
   void refreshBots();
-  if (view) void refreshView(view);
+  void view?.refresh();
+  void view?.dm?.refresh();
 }
+
+const liveUpdates = createLiveUpdates(syncAll, (change) => {
+  if (change.list === true) void refreshBots();
+  if (view && change.bot === view.id) void view.refresh();
+  const dm = view?.dm;
+  if (dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId) void dm.refresh();
+});
+
+function subscribeToView() {
+  if (document.hidden) {
+    liveUpdates.use(null);
+    return;
+  }
+  const params = new URLSearchParams();
+  if (view) params.set('bot', view.id);
+  if (view?.dm) params.set('peer', view.dm.peerId);
+  liveUpdates.use(params.size ? `/api/events?${params}` : '/api/events');
+}
+
+function resumeUpdates() {
+  subscribeToView();
+  syncAll();
+}
+
 render();
-refresh();
-setInterval(refresh, 2500);
-document.addEventListener('visibilitychange', refresh);
-window.addEventListener('pageshow', (event) => { if (event.persisted) refresh(); });
+resumeUpdates();
+document.addEventListener('visibilitychange', resumeUpdates);
+window.addEventListener('pagehide', () => liveUpdates.use(null));
+window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });

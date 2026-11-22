@@ -24,11 +24,8 @@ CREATE TABLE IF NOT EXISTS model_attempts(
   id INTEGER PRIMARY KEY, budget_id TEXT NOT NULL REFERENCES model_budgets(id),
   purpose TEXT NOT NULL, time INTEGER NOT NULL,
   message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
-  event_id INTEGER REFERENCES events(id), usage TEXT,
-  route_step INTEGER, route_input TEXT, route_decision TEXT)
+  event_id INTEGER REFERENCES events(id), usage TEXT)
 )SQL");
-    exec("CREATE INDEX IF NOT EXISTS model_route_calls ON model_attempts(message_id,route_step,id)"
-         " WHERE route_decision IS NOT NULL");
     transaction.commit();
 }
 
@@ -37,44 +34,14 @@ std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) 
     return key;
 }
 
-std::string Store::Impl::messageModelBudget(Id messageId, Id clarificationReplyId) {
+std::string Store::Impl::messageModelBudget(Id messageId) {
     auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
     if (!row.next()) throw Conflict("The originating message is missing");
     const auto routing = row.json(0);
     if (auto saved = field(routing,"modelBudgetId"); !saved.empty()) return saved;
-
-    std::string budget;
-    if (clarificationReplyId) {
-        auto origin = query("SELECT message_id FROM route_decisions WHERE reply_id=? AND message_id<?",
-                            {clarificationReplyId,messageId});
-        if (origin.next()) budget = messageModelBudget(origin.number(0));
-    }
-    if (budget.empty()) budget = ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+    const auto budget = ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
     exec("UPDATE messages SET routing=json_set(routing,'$.modelBudgetId',?) WHERE id=?",{budget,messageId});
     return budget;
-}
-
-void Store::Impl::inheritModelBudget(Id messageId, Id clarificationReplyId) {
-    auto origin = query("SELECT message_id FROM route_decisions WHERE reply_id=? AND message_id<?",
-                        {clarificationReplyId,messageId});
-    if (!origin.next()) return;
-    const auto originating = messageModelBudget(origin.number(0));
-    auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
-    if (!row.next()) return;
-    const auto current = field(row.json(0),"modelBudgetId");
-    if (current.empty() || current == originating) return;
-    auto count = query("SELECT count(*) FROM model_attempts WHERE message_id=? AND budget_id=?",
-                       {messageId,current});
-    count.next();
-    if (const auto moved = count.number(0)) {
-        exec("UPDATE model_attempts SET budget_id=? WHERE message_id=? AND budget_id=?",
-             {originating,messageId,current});
-        exec("UPDATE model_budgets SET attempts=attempts-? WHERE id=?",{moved,current});
-        exec("UPDATE model_budgets SET attempts=min(attempts+?,call_limit) WHERE id=?",
-             {moved,originating});
-    }
-    exec("UPDATE messages SET routing=json_set(routing,'$.modelBudgetId',?) WHERE id=?",
-         {originating,messageId});
 }
 
 std::string Store::Impl::taskModelBudget(const Json& task) {
@@ -108,17 +75,7 @@ void Store::Impl::grantModelCall(std::string_view budget) {
     if (!sqlite3_changes(db)) throw Conflict("Cannot increase this model call limit");
 }
 
-std::optional<Decision> Store::Impl::savedRouteCall(Id messageId, unsigned step, const Json& input) const {
-    auto row = query("SELECT route_decision FROM model_attempts WHERE message_id=? AND route_step=?"
-                     " AND route_input=? AND route_decision IS NOT NULL ORDER BY id DESC LIMIT 1",
-                     {messageId,step,input});
-    if (!row.next()) return std::nullopt;
-    const auto saved = row.json(0);
-    return Decision{saved.at("tool"),saved.at("args"),saved.at("reason"),saved.at("usage")};
-}
-
-Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemptId, unsigned routeStep,
-                               const Json& routeInput) {
+Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemptId) {
     Decision decision;
     try {
         decision = model.decide(input);
@@ -129,12 +86,10 @@ Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemp
         }
         throw;
     }
-    std::lock_guard lock(mutex);
-    const auto checkpoint = routeStep ? Json{{"tool",decision.tool},{"args",decision.args},
-        {"reason",decision.reason},{"usage",decision.usage}} : Json(nullptr);
-    exec("UPDATE model_attempts SET usage=?,route_step=?,route_input=?,route_decision=? WHERE id=?",
-         {decision.usage.empty() ? Json(nullptr) : decision.usage,routeStep ? Json(routeStep) : Json(nullptr),
-          routeInput,checkpoint,attemptId});
+    if (!decision.usage.empty()) {
+        std::lock_guard lock(mutex);
+        exec("UPDATE model_attempts SET usage=? WHERE id=?",{decision.usage,attemptId});
+    }
     return decision;
 }
 }
