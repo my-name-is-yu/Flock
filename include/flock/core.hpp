@@ -49,7 +49,7 @@ struct ModelInput {
     std::string feedback;
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
-    Json images = Json::array();
+    std::vector<std::string> images{};
 
 };
 struct ModelError : std::runtime_error {
@@ -120,7 +120,7 @@ public:
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
-class ChannelConnector;
+struct ChannelConnector;
 class LocalMachine;
 enum class ChannelKind;
 struct Person;
@@ -161,7 +161,7 @@ public:
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
     std::vector<std::string> peerPartners(std::string_view bot) const;
-    void connectChannel(std::shared_ptr<ChannelConnector>);
+    void connectChannel(ChannelConnector);
     void artifactBaseUrl(std::string url);
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event,
                         const std::function<Intake(std::string_view, std::string_view)>& routing);
@@ -171,11 +171,14 @@ public:
     Json localConnections(const Person&) const;
     void decideLocalConnection(const Person&, Id id, bool approve);
     void disconnectLocalConnection(const Person&, Id id);
+    Json runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun,
+                                  std::string_view machineId, std::string_view operation,
+                                  const std::filesystem::path& path);
     const std::filesystem::path& path() const;
 
 private:
-    Json receive(const Intake&, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, const VerifiedChannelMessage*);
+    Json receive(std::string_view botId, std::string_view clientMessageId, std::string_view text,
+                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&);
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;

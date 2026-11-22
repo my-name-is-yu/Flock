@@ -1534,11 +1534,11 @@ void Runtime::tickConcurrent() {
     };
     collect(p_->conversationWorkers);
     collect(p_->workers);
-    if (!p_->channelWorker.valid() ||
-        p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-        if (p_->channelWorker.valid()) p_->channelWorker.get();
+    if (p_->channelWorker.valid() &&
+        p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        p_->channelWorker.get();
+    if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async,[db = &p_->db] { db->deliverChannels(); });
-    }
     constexpr auto maxConversationWorkers = 4u;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {
         for (const auto& [bot,id] : p_->db.pendingConversations(maxConversationWorkers)) {

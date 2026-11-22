@@ -122,7 +122,8 @@ Set `FLOCK_CHANNEL_BRIDGES_FILE` to a host-controlled JSON file before starting
     }
   },
   "artifactBaseUrl": "https://previews.example.com",
-  "localMachines": {"laptop": "alice"}
+  "localMachines": {"laptop": "alice"},
+  "sessionBridgeCredentialEnv": "FLOCK_SESSION_BRIDGE_KEY"
 }
 ```
 
@@ -149,12 +150,18 @@ This allows Flock to retry with the same key. The bridge should apply
 `suggestions` from the reply payload using the channel's available controls
 or plain text.
 
-Expose only the artifact preview path at the optional HTTPS
-`artifactBaseUrl` if recipients need it remotely. Published links contain
-random access tokens and serve sandboxed HTML.
+To publish HTML artifacts in a channel, set an HTTPS `artifactBaseUrl`
+and proxy only its artifact preview path to Flock. Published links contain
+random access tokens, honor current workspace permission, and serve sandboxed HTML.
 
 Local machine entries name the Flock host and its owner. The owner can review
 requests under **Bot access settings → Local machine connections**. Each
 approval lists exact absolute paths for `read_file` or `list_directory`
-within one active Session. The host adapter opens paths without following
-symlinks. Reusable execution environments are configured through Bot settings.
+within one active Session. A trusted Session bridge authenticates the caller
+and sends its verified `environmentId`, `threadId` and `runId` with
+`machineId`, `operation` and `path` to loopback
+`POST /api/channels/local-operations`. The request uses a separate bearer
+credential from `sessionBridgeCredentialEnv`, held by the bridge. C++ adapters
+can use `Store::runLocalMachineOperation` with the same authenticated Run.
+The host opens paths without following symlinks. Reusable execution
+environments are configured through Bot settings.

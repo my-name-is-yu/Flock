@@ -35,52 +35,25 @@ public:
     virtual ChannelDelivery reconcile(std::string_view key, const ChannelOrigin&) = 0;
 };
 
-using AuthenticateChannel = std::function<std::optional<ChannelSender>(
-    std::string_view credential, std::string_view workspace, std::string_view sender)>;
-
-class ChannelConnector {
-public:
-    virtual ~ChannelConnector() = default;
-    ChannelKind kind() const { return kind_; }
-    const ChannelCapabilities& capabilities() const { return capabilities_; }
-    std::optional<ChannelSender> authenticate(std::string_view, std::string_view, std::string_view) const;
-    ChannelDelivery send(std::string_view key, const ChannelOrigin&, std::string_view operation,
-                         const Json& payload) const;
-    ChannelDelivery reconcile(std::string_view key, const ChannelOrigin&) const;
-protected:
-    ChannelConnector(ChannelKind, ChannelCapabilities, AuthenticateChannel, std::shared_ptr<ChannelTransport>);
-private:
-    ChannelKind kind_;
-    ChannelCapabilities capabilities_;
-    AuthenticateChannel authenticate_;
-    std::shared_ptr<ChannelTransport> transport_;
+struct ChannelConnector {
+    ChannelKind kind;
+    ChannelCapabilities capabilities;
+    std::function<bool(std::string_view credential, std::string_view workspace)> authenticates;
+    std::function<std::optional<ChannelSender>(std::string_view workspace, std::string_view sender)> resolveSender;
+    std::shared_ptr<ChannelTransport> transport;
 };
 
-class SlackConnector final : public ChannelConnector {
-public:
-    SlackConnector(AuthenticateChannel, std::shared_ptr<ChannelTransport>,
-                   ChannelCapabilities = {true,true,true,true,{"image/png","image/jpeg","image/webp","text/plain"},4*1024*1024});
-};
-class IMessageConnector final : public ChannelConnector {
-public:
-    IMessageConnector(AuthenticateChannel, std::shared_ptr<ChannelTransport>,
-                      ChannelCapabilities = {true,false,true,true,{"image/png","image/jpeg","image/webp","text/plain"},4*1024*1024});
-};
-
+ChannelCapabilities channelCapabilities(ChannelKind);
 Scope channelScope(const ChannelOrigin&, std::string_view operation);
 
-struct ChannelAttachment {
+struct ChannelResource {
     std::string name, mimeType, bytes;
 };
 
 struct VerifiedChannelMessage {
     ChannelOrigin origin;
-    std::string personId;
-    std::vector<ChannelAttachment> attachments;
-};
-
-struct ChannelResource {
-    std::string name, mimeType, bytes;
+    std::string senderId, personId;
+    std::vector<ChannelResource> attachments;
 };
 
 struct ChannelAccessDenied : Conflict { using Conflict::Conflict; };

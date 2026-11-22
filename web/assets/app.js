@@ -835,13 +835,18 @@ function eventCard(event, context, place) {
     const link = node('a', 'button', file.name);
     link.href = '/api/channels/attachments/' + encodeURIComponent(file.id);
     link.download = file.name;
+    if (file.mimeType.startsWith('image/')) {
+      const preview = node('img', 'channel-image');
+      preview.src = link.href;
+      preview.alt = file.name;
+      preview.loading = 'lazy';
+      link.replaceChildren(preview);
+    }
     extras.push(link);
   }
   for (const artifact of data.artifacts ?? []) {
-    const preview = new URL(artifact.url, location.origin);
-    if (!preview.pathname.startsWith('/api/artifacts/')) continue;
     const link = node('a', 'button', artifact.title);
-    link.href = preview.pathname;
+    link.href = '/api/artifacts/' + encodeURIComponent(artifact.id);
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     extras.push(link);

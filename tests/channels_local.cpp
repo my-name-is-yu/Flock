@@ -32,13 +32,17 @@ struct Temp {
 
 struct SessionAdapter final : T3 {
     int launches = 0;
+    std::function<Observation(const RunRef&)> observeRun;
     std::string authGeneration(const std::string&, const Json&) override { return "auth"; }
-    Delivery send(const Command&) override {
+    Delivery send(const Command& command) override {
         ++launches;
-        return {Delivery::Kind::Accepted,{"thread-"+std::to_string(launches),"run-"+std::to_string(launches),""},{}};
+        const auto thread = command.tool == "follow_up" ? command.target.threadId : "thread-"+std::to_string(launches);
+        return {Delivery::Kind::Accepted,{thread,"run-"+std::to_string(launches),""},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
-    Observation observe(const std::string&, const Json&, const RunRef&) override { return {}; }
+    Observation observe(const std::string&, const Json&, const RunRef& run) override {
+        return observeRun ? observeRun(run) : Observation{};
+    }
     void interrupt(const std::string&, const Json&, const RunRef&) override {}
 };
 
@@ -85,14 +89,16 @@ void grant(Store& store, std::string_view bot) {
 }
 
 void connect(Store& store, const std::shared_ptr<RecordedTransport>& transport) {
-    const AuthenticateChannel sender = [](auto credential, auto workspace, auto identity) -> std::optional<ChannelSender> {
-        if (credential == "fixture-auth" && workspace == "workspace" && identity == "linked-user")
+    const auto authenticate = [](auto credential,auto workspace) {
+        return credential == "fixture-auth" && workspace == "workspace";
+    };
+    const auto sender = [](auto workspace, auto identity) -> std::optional<ChannelSender> {
+        if (workspace == "workspace" && identity == "linked-user")
             return ChannelSender{"release",owner.id};
         return std::nullopt;
     };
-    store.connectChannel(std::make_shared<SlackConnector>(sender,transport));
-    store.connectChannel(std::make_shared<IMessageConnector>(sender,transport,
-        ChannelCapabilities{true,false,false,false,{"image/png"},100}));
+    store.connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),authenticate,sender,transport});
+    store.connectChannel({ChannelKind::imessage,{true,false,false,false,{"image/png"},100},authenticate,sender,transport});
 }
 
 Json event(std::string thread, std::string id, std::string text) {
@@ -101,6 +107,15 @@ Json event(std::string thread, std::string id, std::string text) {
 
 Decision reply(std::string text) {
     return {"reply",{{"text",text},{"suggestions",{"Start here","Show me more"}}},{}};
+}
+
+Observation finished() {
+    Observation result;
+    result.kind = Observation::Kind::Finished;
+    result.settled = true;
+    result.status = "completed";
+    result.report = "Session report";
+    return result;
 }
 
 void channels(const std::filesystem::path& database) {
@@ -122,7 +137,9 @@ void channels(const std::filesystem::path& database) {
             const auto& file = input.event.at("attachments").at(0);
             check(file.at("name") == "screenshot.png" && file.at("size") == image.size(),"Missing screenshot metadata");
             attachment = file.at("id");
-            check(input.images == Json::array({"data:image/png;base64,"+encodeAttachment(image)}),"Model cannot read screenshot");
+            check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)},"Model cannot read screenshot");
+        } else {
+            check(input.history.empty() && !input.event.contains("earlierAttachments"),"Slack content leaked into iMessage");
         }
         return reply("Thread reply");
     };
@@ -160,6 +177,7 @@ void channels(const std::filesystem::path& database) {
     std::this_thread::sleep_for(std::chrono::seconds(5));
     Store store(database);
     connect(store,transport);
+    store.artifactBaseUrl("https://previews.example.com");
     Runtime runtime(store,model,t3,notes);
     runtime.runConversations();
     check(transport->reconciliations == 1 && transport->effects.size() == 2,"Lost reply was not reconciled on restart");
@@ -206,17 +224,37 @@ void channels(const std::filesystem::path& database) {
         case 1: return {"channel_react",{{"reaction","thumbsup"}},{}};
         case 2: return {"channel_send_attachment",{{"attachmentId",attachment}},{}};
         case 3: return {"publish_artifact",{{"title","Preview"},{"html","<p>Preview</p>"}},{}};
-        default:
+        default: {
             for (const auto& entry : results) check(entry["result"]["delivery"] == "accepted","Channel action was not sent");
             artifact = results.back()["result"]["url"];
+            const auto& sent = input.event.at("channel").at("sentMessages");
+            check(sent.back().at("text") == "Updated","Accepted edit is missing from sent-message context");
             return reply("Actions completed.");
+        }
         }
     };
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","actions","Perform the supported actions"),intake);
     runtime.runConversations();
     check(transport->effects.size() == 13 && transport->effects[10]["payload"]["contentBase64"] == encodeAttachment(image),
           "Supported actions or attachment payload missing");
-    check(store.artifact(artifact.substr(artifact.find_last_of('/')+1))->bytes == "<p>Preview</p>","Artifact persistence");
+    const auto artifactId = artifact.substr(artifact.find_last_of('/')+1);
+    check(artifact.starts_with("https://previews.example.com/") && store.artifact(artifactId)->bytes == "<p>Preview</p>",
+          "Artifact publication needs an absolute URL and persisted HTML");
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& earlier = input.event.at("earlierAttachments");
+        const auto& results = input.event.at("turn");
+        check(earlier.at(0).at("id") == attachment,"Earlier screenshot was not discoverable in-thread");
+        if (results.empty()) {
+            check(input.images.empty(),"Earlier screenshot was injected without selecting it");
+            return {"read_channel_attachment",{{"attachmentId",attachment}},{}};
+        }
+        check(input.images == std::vector<std::string>{"data:image/png;base64,"+encodeAttachment(image)} &&
+              results.at(0).at("result").at("imageIncluded") == true,"Earlier screenshot did not reach the model");
+        return reply("I can still see the screenshot.");
+    };
+    store.receiveChannel(slack,"fixture-auth",event("slack-thread","followup","Look at the screenshot again"),intake);
+    runtime.runConversations();
+    check(transport->effects.size() == 14,"Screenshot follow-up did not reach the originating thread");
     store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"read"),GrantChange::revoke);
     check(!store.attachment(owner,attachment),"Attachment download ignored revocation");
     bool denied = false;
@@ -228,8 +266,96 @@ void channels(const std::filesystem::path& database) {
     };
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","revoked","Forward the screenshot"),intake);
     runtime.runConversations();
-    check(denied && transport->effects.size() == 14,"Bot attachment reference ignored revocation");
+    check(denied && transport->effects.size() == 15,"Bot attachment reference ignored revocation");
+    store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"use"),GrantChange::revoke);
+    check(!store.artifact(artifactId),"Public preview survived source channel revocation");
     check(ChannelOrigin{slack,"a:b","c","d"}.key() != ChannelOrigin{slack,"a","b:c","d"}.key(),"Dedupe delimiters collide");
+}
+
+void taskUpdates(const std::filesystem::path& database) {
+    Store store(database);
+    SessionAdapter t3;
+    Script model;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    connect(store,transport);
+    grant(store,"release");
+    const auto channel = ChannelKind::slack;
+    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
+    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    auto original = event("private-origin","start","Start the private release task");
+    auto publish = event("private-origin","publish","Publish the preview");
+
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("text") == "Publish the preview") {
+            if (input.event.at("turn").empty()) return {"publish_artifact",{{"title","test"},{"html","<p>test</p>"}},{}};
+            check(input.event.at("turn").at(0).at("result").at("unsupported") == true,
+                  "Missing preview origin wasn't reported as unsupported");
+            return reply("Preview unavailable.");
+        }
+        if (input.event.at("turn").empty()) return {"start_task",{{"request","A private release task"}},{}};
+        return reply("Task started.");
+    };
+    store.receiveChannel(channel,"fixture-auth",publish,intake);
+    runtime.runConversations();
+    check(transport->effects.size() == 2 && transport->effects.at(0).at("action") == "reply" &&
+          transport->effects.at(0).at("payload").at("text").get<std::string>().find("preview URL") != std::string::npos,
+          "Publishing without a preview origin reached transport or did not explain the limitation");
+    const auto receipt = store.receiveChannel(channel,"fixture-auth",original,intake);
+    for (int i = 0; i < 4; ++i) runtime.tick();
+    const auto taskId = store.activeTasks("release").at(0).at("id").get<Id>();
+    const auto active = store.task(taskId).at("activeRun");
+    check(active.is_object(),"Channel task did not start a Session");
+    t3.observeRun = [](const RunRef&) {
+        Observation observed;
+        observed.kind = Observation::Kind::Question;
+        observed.question.requestId = "release-question";
+        return observed;
+    };
+    model.decideNext = [](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "question")
+            return {"ask_user",{{"question","Which private target?"},{"choices",{"Preview","Production"}}},
+                    "The release needs a target"};
+        return reply("Unexpected turn");
+    };
+    for (int i = 0; i < 4; ++i) runtime.tick();
+    const auto wait = store.task(taskId).at("wait");
+    check(transport->effects.size() == 4 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
+          transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
+          "Task question was not delivered to the originating thread");
+
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        check(input.task.at("tasks").empty() && input.history.empty(),"Another thread received private task context");
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"cancel_task",{{"taskId",taskId},{"generation",store.task(taskId).at("generation")}},{}};
+        check(steps.at(0).at("result").at("ok") == false,"Another thread could address a private task by ID");
+        return reply("No task in this thread.");
+    };
+    store.receiveChannel(channel,"fixture-auth",event("other-thread","ask","What is the release target?"),intake);
+    runtime.runConversations();
+    check(store.task(taskId).at("state") == "waiting","Another thread cancelled a private task");
+
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "result")
+            return {"complete",{{"report","Private release completed."}},"The Session confirmed the release"};
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"answer_task_question",{{"taskId",taskId},{"waitId",wait.at("id")},{"text","Preview"}},{}};
+        check(steps.at(0).at("result").at("ok") == true,"Originating thread could not answer its question");
+        return reply("Answer received.");
+    };
+    const auto answer = event("private-origin","answer","Preview");
+    store.receiveChannel(channel,"fixture-auth",answer,intake);
+    runtime.runConversations();
+    t3.observeRun = [](const RunRef&) { return finished(); };
+    for (int i = 0; i < 5; ++i) runtime.tick();
+    check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 7 &&
+          transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
+          transport->effects.back().at("payload").at("text") == "Private release completed.",
+          "Task completion was not delivered to the originating thread");
+    check(store.receiveChannel(channel,"fixture-auth",original,intake) == receipt,"Task-start event changed on replay");
+    store.receiveChannel(channel,"fixture-auth",answer,intake);
+    runtime.runConversations();
+    check(transport->effects.size() == 7,"Task replay repeated a channel update");
 }
 
 void local(const std::filesystem::path& database, const std::string& path) {
@@ -250,7 +376,8 @@ void local(const std::filesystem::path& database, const std::string& path) {
         check(run.is_object(),"Fixture Session did not start");
         return run;
     };
-    const auto a = session("release"), b = session("release"), peer = session("peer");
+    auto a = session("release");
+    const auto b = session("release"), peer = session("peer");
     const auto args = [&](const Json& run) {
         return Json{{"threadId",run.at("threadId")},{"runId",run.at("runId")},{"machineId","laptop"}};
     };
@@ -259,20 +386,18 @@ void local(const std::filesystem::path& database, const std::string& path) {
         data["rules"] = Json::array({{{"operation","read_file"},{"path",path}}});
         return Decision{"request_local_machine_connection",data,{}};
     };
-    const auto operation = [&](const Json& run, std::string op, std::string file) {
-        auto data = args(run);
-        data.update(Json{{"operation",op},{"path",file}});
-        return Decision{"run_local_machine_operation",data,{}};
+    const auto operation = [&](const Json& run, std::string_view op, const std::string& file) {
+        const RunRef ref{run.at("threadId"),run.at("runId"),""};
+        return store.runLocalMachineOperation("env",ref,"laptop",op,file);
     };
     unsigned count = 0;
-    const auto turn = [&](auto bot, const Decision& action, bool success, std::string expected = "") {
+    const auto turn = [&](auto bot, const Decision& action, bool success) {
         bool observed = false;
         model.decideNext = [&](const ModelInput& input) {
             const auto& steps = input.event.at("turn");
             if (steps.empty()) return action;
             const auto& result = steps.at(0).at("result");
             check(result.at("ok") == success,"Unexpected local operation authorization");
-            if (!expected.empty()) check(result.at("output").at("text") == expected,"Wrong machine data");
             observed = true;
             return reply("Chat is available");
         };
@@ -284,19 +409,38 @@ void local(const std::filesystem::path& database, const std::string& path) {
     turn("release",request(a),true);
     const auto id = store.localConnections(owner).at(0).at("id").get<Id>();
     rejects([&] { store.decideLocalConnection(root,id,true); });
-    turn("release",operation(a,"read_file",path),false);
+    rejects([&] { operation(a,"read_file",path); });
+    const auto originalRun = a;
+    const auto originalRunId = originalRun.at("runId").get<std::string>();
+    t3.observeRun = [&](const RunRef& run) { return run.runId == originalRunId ? finished() : Observation{}; };
+    model.decideNext = [](const ModelInput&) {
+        return Decision{"follow_up",{{"instruction","Continue in this Session"}},"The work needs one more Run"};
+    };
+    for (int i = 0; i < 5; ++i) runtime.tick();
+    for (const auto& task : store.activeTasks("release")) {
+        const auto active = store.task(task.at("id")).at("activeRun");
+        if (active.is_object() && active.at("threadId") == originalRun.at("threadId")) a = active;
+    }
+    check(a.at("runId") != originalRun.at("runId"),"Fixture did not start a follow-up Run in Session A");
     store.decideLocalConnection(owner,id,true);
-    turn("release",operation(a,"read_file",path),true,"fixture text");
-    turn("release",operation(a,"read_file",path+".forbidden"),false);
-    turn("release",operation(a,"list_directory",path),false);
-    turn("release",operation(b,"read_file",path),false);
-    turn("peer",operation(a,"read_file",path),false);
-    turn("peer",operation(peer,"read_file",path),false);
+    rejects([&] { operation(originalRun,"read_file",path); });
+    check(operation(a,"read_file",path).at("text") == "fixture text","Wrong machine data");
+    rejects([&] { operation(a,"read_file",path+".forbidden"); });
+    rejects([&] { operation(a,"list_directory",path); });
+    rejects([&] { operation(b,"read_file",path); });
+    rejects([&] { operation(peer,"read_file",path); });
+    turn("release",{"run_local_machine_operation",args(a),{}},false);
+    const auto original = path + ".original";
+    std::filesystem::rename(path,original);
+    std::filesystem::create_symlink(original,path);
+    rejects([&] { operation(a,"read_file",path); });
+    std::filesystem::remove(path);
+    std::filesystem::rename(original,path);
     store.disconnectLocalConnection(owner,id);
-    turn("release",operation(a,"read_file",path),false);
+    rejects([&] { operation(a,"read_file",path); });
     turn("release",request(b),true);
     store.decideLocalConnection(owner,store.localConnections(owner).at(0).at("id"),false);
-    turn("release",operation(b,"read_file",path),false);
+    rejects([&] { operation(b,"read_file",path); });
     check(store.access().grants("release") == environments,"Local approval created reusable grants");
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
@@ -318,6 +462,7 @@ int main() {
         const auto path = temp.path / "notes";
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
+        taskUpdates(temp.path / "task-updates.db");
         local(temp.path / "local.db",std::filesystem::canonical(path).string());
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

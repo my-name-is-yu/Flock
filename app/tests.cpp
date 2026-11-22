@@ -490,12 +490,11 @@ void responseContract() {
         {"channel_send_attachment",{"reason"}},
         {"read_channel_attachment",{"reason","attachmentId"}},
         {"publish_artifact",{"reason","title","html"}},
-        {"request_local_machine_connection",{"reason","threadId","runId","machineId","rules"}},
-        {"run_local_machine_operation",{"reason","threadId","runId","machineId","operation","path"}}
+        {"request_local_machine_connection",{"reason","threadId","runId","machineId","rules"}}
     };
     input.tools.clear();
     for (const auto& [name,args] : requiredChannelArgs) input.tools.push_back(name);
-    input.images = Json::array({"data:image/png;base64,YQ=="});
+    input.images = {"data:image/png;base64,YQ=="};
     const auto channelRequest = responseRequest(input);
     for (const auto& function : channelRequest.at("tools").at(0).at("tools")) {
         const auto name = function.at("name").get<std::string>();
@@ -508,7 +507,7 @@ void responseContract() {
     const auto content = channelRequest.at("input").at(0).at("content");
     check(content.at(0).at("type") == "input_text" && content.at(1).at("type") == "input_image" &&
           content.at(1).at("image_url") == input.images.at(0),"Screenshot did not enter the Responses image input");
-    input.images = Json::array();
+    input.images.clear();
     input.event = {{"kind","intake"}};
 
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});

@@ -3,6 +3,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -22,6 +23,17 @@ bool sameCredential(std::string_view supplied, std::string_view expected) {
     for (std::size_t i = 0; i < expected.size(); ++i)
         difference |= static_cast<unsigned char>(supplied[i] ^ expected[i]);
     return difference == 0;
+}
+
+std::string bridgeCredential(const std::string& key, std::vector<std::string>& used) {
+    const auto secret = std::getenv(key.c_str());
+    if (!secret || std::string_view(secret).size() < 32 ||
+        std::string_view(secret).find_first_of(" \r\n\t") != std::string_view::npos)
+        throw Conflict("Bridge credentials must have at least 32 characters without whitespace");
+    std::string authorization = "Bearer " + std::string(secret);
+    if (std::ranges::find(used,authorization) != used.end()) throw Conflict("Bridge credentials must be distinct");
+    used.push_back(authorization);
+    return authorization;
 }
 
 class BridgeTransport final : public ChannelTransport {
@@ -58,18 +70,14 @@ private:
     std::shared_ptr<const Workspaces> workspaces_;
 };
 
-void connect(Store& store, ChannelKind kind, const Json& entries) {
+void connect(Store& store, ChannelKind kind, const Json& entries, std::vector<std::string>& credentials) {
     if (!entries.is_object()) throw Conflict("Channel workspaces must be an object");
     if (entries.empty()) return;
     auto workspaces = std::make_shared<Workspaces>();
     for (const auto& [id,settings] : entries.items()) {
         const auto port = settings.at("bridgePort").get<unsigned>();
-        const auto key = settings.at("credentialEnv").get<std::string>();
-        const auto secret = std::getenv(key.c_str());
-        if (!port || port > 65535 || !secret || std::string_view(secret).size() < 32 ||
-            std::string_view(secret).find_first_of(" \r\n\t") != std::string_view::npos)
-            throw Conflict("A channel workspace needs a local bridge port and a credential of at least 32 characters");
-        Workspace workspace{port,"Bearer " + std::string(secret),{}};
+        if (!port || port > 65535) throw Conflict("A channel workspace needs a valid local bridge port");
+        Workspace workspace{port,bridgeCredential(settings.at("credentialEnv"),credentials),{}};
         const auto& links = settings.at("senders");
         if (!links.is_object()) throw Conflict("Channel senders must be an object");
         for (const auto& [sender,link] : links.items()) {
@@ -79,32 +87,39 @@ void connect(Store& store, ChannelKind kind, const Json& entries) {
         }
         workspaces->emplace(id,std::move(workspace));
     }
-    auto authenticate = [workspaces](std::string_view credential, std::string_view workspace, std::string_view sender)
-        -> std::optional<ChannelSender> {
+    auto authenticate = [workspaces](std::string_view credential, std::string_view workspace) {
         const auto selected = workspaces->find(workspace);
-        if (selected == workspaces->end() || !sameCredential(credential,selected->second.credential)) return std::nullopt;
+        return selected != workspaces->end() && sameCredential(credential,selected->second.credential);
+    };
+    auto resolveSender = [workspaces](std::string_view workspace,std::string_view sender) -> std::optional<ChannelSender> {
+        const auto selected = workspaces->find(workspace);
+        if (selected == workspaces->end()) return std::nullopt;
         const auto identity = selected->second.senders.find(sender);
         if (identity == selected->second.senders.end()) return std::nullopt;
         return identity->second;
     };
-    auto transport = std::make_shared<BridgeTransport>(workspaces);
-    if (kind == ChannelKind::slack) store.connectChannel(std::make_shared<SlackConnector>(authenticate,transport));
-    else store.connectChannel(std::make_shared<IMessageConnector>(authenticate,transport));
+    store.connectChannel({kind,channelCapabilities(kind),std::move(authenticate),std::move(resolveSender),
+                          std::make_shared<BridgeTransport>(workspaces)});
 }
 }
 
-void configureChannelBridges(Store& store, const std::filesystem::path& file) {
+void configureChannelBridges(Store& store, const std::filesystem::path& file, WebCallbacks& callbacks) {
     std::ifstream source(file);
     if (!source) throw Conflict("Cannot read channel bridge configuration");
     const auto config = Json::parse(source,nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid channel bridge configuration");
     try {
-        connect(store,ChannelKind::slack,config.value("slack",Json::object()));
-        connect(store,ChannelKind::imessage,config.value("imessage",Json::object()));
+        std::vector<std::string> credentials;
+        connect(store,ChannelKind::slack,config.value("slack",Json::object()),credentials);
+        connect(store,ChannelKind::imessage,config.value("imessage",Json::object()),credentials);
         store.artifactBaseUrl(config.value("artifactBaseUrl",""));
         const auto machines = config.value("localMachines",Json::object());
         if (!machines.is_object()) throw Conflict("Local machines must be an object");
         for (const auto& [id,owner] : machines.items()) store.connectLocalMachine(id,hostLocalMachine(owner.get<std::string>()));
+        if (config.contains("sessionBridgeCredentialEnv")) {
+            callbacks.authenticateSessionBridge = [credential = bridgeCredential(config.at("sessionBridgeCredentialEnv"),credentials)](
+                std::string_view supplied) { return sameCredential(supplied,credential); };
+        }
     } catch (const Json::exception&) { throw Conflict("Invalid channel bridge configuration"); }
 }
 }

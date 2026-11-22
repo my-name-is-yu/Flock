@@ -14,12 +14,15 @@ function configureResourceForm(operations) {
   resource.resourceKind.onchange = selectOperations;
   selectOperations();
 }
+function post(url, data) {
+  return fetch(url, {
+    method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
+    body: JSON.stringify(data)
+  });
+}
 async function submit(path, data) {
   try {
-    const response = await fetch('/api/access/' + path, {
-      method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
-      body: JSON.stringify({botId, ...data})
-    });
+    const response = await post('/api/access/' + path, {botId, ...data});
     if (response.status === 409 && (await response.json()).error === 'configure_web_identities_first') {
       $('status').textContent = 'Configure FLOCK_WEB_IDENTITIES_FILE and restart Flock before granting people access.';
       return;
@@ -51,6 +54,7 @@ async function load() {
   const response = await fetch('/api/access?' + new URLSearchParams({bot:botId}));
   if (!response.ok) throw Error();
   const data = await response.json();
+  $('administration').hidden = false;
   configureResourceForm(data.operations);
   for (const id of ['inputs','requests','changes','grants','people']) $(id).replaceChildren();
   for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
@@ -82,13 +86,17 @@ async function load() {
 }
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
-  if (!response.ok) return;
+  if (!response.ok) throw Error();
   const connections = (await response.json()).filter(x =>
     x.botId === botId && ['pending','approved'].includes(x.status));
   $('local-connections').hidden = connections.length === 0;
   $('machines').replaceChildren();
   for (const connection of connections) {
-    const item = row('machines', connection.machineId + ' · ' + connection.threadId);
+    const item = document.createElement('div');
+    $('machines').append(item);
+    const title = document.createElement('p');
+    title.textContent = connection.machineId + ' · ' + connection.threadId;
+    item.append(title);
     const rules = document.createElement('ul');
     for (const rule of connection.rules) {
       const entry = document.createElement('li');
@@ -98,10 +106,7 @@ async function loadMachines() {
     item.append(rules);
     const change = async (action, approve) => {
       try {
-        const result = await fetch('/api/channels/local-connections/' + action, {
-          method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
-          body: JSON.stringify({id:connection.id, approve})
-        });
+        const result = await post('/api/channels/local-connections/' + action, {id:connection.id, approve});
         if (!result.ok) throw Error();
         await loadMachines();
         $('status').textContent = 'Local connection updated.';
@@ -112,7 +117,9 @@ async function loadMachines() {
       button(item,'Decline',() => change('decide',false));
     } else button(item,'Disconnect',() => change('disconnect'));
   }
+  return connections.length;
 }
-await loadMachines().catch(() => {});
-try { await load(); document.getElementById(section)?.scrollIntoView(); }
-catch { $('status').textContent = 'Bot administrator access is required.'; }
+const [machines, admin] = await Promise.allSettled([loadMachines(), load()]);
+if (machines.status === 'rejected') $('status').textContent = 'Could not load local machine connections.';
+else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Bot administrator access is required.';
+document.getElementById(location.hash.slice(1) || section)?.scrollIntoView();

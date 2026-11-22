@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -840,7 +841,11 @@ void channelEndpoints(const std::filesystem::path& database) {
         std::vector<Json> replies;
         ChannelDelivery send(std::string_view, const ChannelOrigin& origin, std::string_view operation,
                              const Json& payload) override {
-            if (operation == "publish_artifact") preview = payload.at("url");
+            if (operation == "publish_artifact") {
+                const auto url = payload.at("url").get<std::string>();
+                check(url.starts_with("https://previews.example.com/"),"Preview publication is missing its configured origin");
+                preview = url.substr(std::string_view("https://previews.example.com").size());
+            }
             if (operation == "reply") replies.push_back({{"origin",origin.json()},{"payload",payload}});
             return {ChannelDelivery::State::accepted,"posted"};
         }
@@ -863,15 +868,17 @@ void channelEndpoints(const std::filesystem::path& database) {
     const Person root{"admin",true}, owner{"alice",false};
     store.access().personGrant(root,"release",owner.id,Role::decide,GrantChange::grant);
     store.access().resourceGrant(root,"release",{"environment","local-env","launch"},GrantChange::grant);
-    store.connectLocalMachine("fixture",hostLocalMachine(owner.id));
     const auto transport = std::make_shared<Transport>();
-    const AuthenticateChannel authorize = [&](auto credential, auto workspace, auto user) -> std::optional<ChannelSender> {
-        if (credential == "Bearer fixture-channel" && workspace == "W" && user == "U")
+    const auto authenticate = [](auto credential,auto workspace) {
+        return credential == "Bearer fixture-channel" && workspace == "W";
+    };
+    const auto authorize = [&](auto workspace, auto user) -> std::optional<ChannelSender> {
+        if (workspace == "W" && user == "U")
             return ChannelSender{"release",owner.id};
         return std::nullopt;
     };
-    store.connectChannel(std::make_shared<SlackConnector>(authorize,transport));
-    store.connectChannel(std::make_shared<IMessageConnector>(authorize,transport));
+    for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
+        store.connectChannel({channel,channelCapabilities(channel),authenticate,authorize,transport});
     for (const auto channel : {ChannelKind::slack,ChannelKind::imessage})
         for (const auto op : {"use","read"})
             store.access().resourceGrant(root,"release",channelScope({channel,"W","",""},op),GrantChange::grant);
@@ -879,6 +886,13 @@ void channelEndpoints(const std::filesystem::path& database) {
     cb.authenticate = [=](std::string_view token) {
         return token == "Bearer fixture-owner" ? owner : Person{};
     };
+    const std::string sessionCredential(32,'s');
+    const auto config = database.parent_path() / "session-bridge.json";
+    std::ofstream(config) << Json{{"localMachines",{{"fixture",owner.id}}},{"sessionBridgeCredentialEnv","FLOCK_HTTP_TEST_SESSION_KEY"},
+                                 {"artifactBaseUrl","https://previews.example.com"}}.dump();
+    setenv("FLOCK_HTTP_TEST_SESSION_KEY",sessionCredential.c_str(),1);
+    configureChannelBridges(store,config,cb);
+    unsetenv("FLOCK_HTTP_TEST_SESSION_KEY");
     const auto server = startWeb(store,0,cb);
     Browser browser(*server);
     httplib::Client bridge("127.0.0.1",static_cast<int>(server->port()));
@@ -919,15 +933,30 @@ void channelEndpoints(const std::filesystem::path& database) {
     for (int i = 0; i < 3; ++i) runtime.tick();
     model.local = store.task(task).at("activeRun");
     check(model.local.is_object(),"Fixture Session did not start");
+    const auto localFile = std::filesystem::canonical(database.parent_path()) / "session-local.txt";
+    std::ofstream(localFile) << "Approved only for this Session";
     model.local["machineId"] = "fixture";
-    model.local["rules"] = Json::array({{{"operation","read_file"},{"path","/tmp/example"}}});
+    model.local["rules"] = Json::array({{{"operation","read_file"},{"path",localFile.string()}}});
     browser.post("/api/messages",{{"botId","release"},{"text","Request local"},{"clientMessageId","local-1"}},201);
     runtime.runConversations();
     const auto connections = browser.get("/api/channels/local-connections");
     check(connections.size() == 1 && connections[0]["status"] == "pending","Local request HTTP listing");
     const auto id = connections[0].at("id");
+    const auto endpoint = "/api/channels/local-operations";
+    auto request = model.local;
+    request.erase("rules");
+    request.update(Json{{"environmentId","local-env"},{"operation","read_file"},{"path",localFile.string()}});
+    const httplib::Headers bridgeIdentity{{"Authorization","Bearer " + sessionCredential}};
+    Browser::checked(bridge.Post(endpoint,credential,request.dump(),"application/json"),401);
+    Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
     browser.post("/api/channels/local-connections/decide",{{"id",id},{"approve",true}});
+    check(Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),200).at("text") ==
+          "Approved only for this Session","Approved Session could not read its file through the bridge");
+    auto otherRun = request;
+    otherRun["runId"] = "different-run";
+    Browser::checked(bridge.Post(endpoint,bridgeIdentity,otherRun.dump(),"application/json"),403);
     browser.post("/api/channels/local-connections/disconnect",{{"id",id}});
+    Browser::checked(bridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
     check(browser.get("/api/channels/local-connections")[0]["status"] == "disconnected","Local decision endpoints");
 }
 } // namespace

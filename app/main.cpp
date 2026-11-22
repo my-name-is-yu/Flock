@@ -184,22 +184,24 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
 #ifdef FLOCK_WITH_WEB
-    if (const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE")) configureChannelBridges(store,bridges);
+    const auto identityFile = web ? std::getenv("FLOCK_WEB_IDENTITIES_FILE") : nullptr;
+    WebCallbacks callbacks{
+        [&] { return bots.cards(); },
+        [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+        [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
+        [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
+            return bots.updateProfile(botId,profile,image);
+        },
+        [&](std::string_view botId) { return bots.avatarImage(botId); },
+        options.peers,
+        identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
+        [&](const BotChange& change) { bots.apply(change); },
+    };
+    if (const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE"))
+        configureChannelBridges(store,bridges,callbacks);
     std::unique_ptr<WebServer> server;
     if (web) {
-        const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
-        server = startWeb(store,port,{
-            [&] { return bots.cards(); },
-            [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
-            [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
-            [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-                return bots.updateProfile(botId,profile,image);
-            },
-            [&](std::string_view botId) { return bots.avatarImage(botId); },
-            options.peers,
-            identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
-            [&](const BotChange& change) { bots.apply(change); },
-        });
+        server = startWeb(store,port,std::move(callbacks));
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
 #endif

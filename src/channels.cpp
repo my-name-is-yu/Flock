@@ -2,11 +2,13 @@
 #include "conversation_storage.hpp"
 
 #include <algorithm>
+#include <charconv>
 
 namespace flockv0 {
 namespace {
 constexpr std::size_t attachmentLimit = 4 * 1024 * 1024;
 constexpr std::size_t attachmentCount = 4;
+constexpr std::size_t artifactLimit = 256 * 1024;
 constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 std::string required(const Json& data, std::string_view key, std::size_t max) {
@@ -30,22 +32,26 @@ std::string segment(std::string_view value) {
 }
 
 ChannelOrigin originFrom(const Json& data) {
-    return {field(data,"channelKind") == "slack" ? ChannelKind::slack : ChannelKind::imessage,
+    const auto name = field(data,"channelKind");
+    if (name != "slack" && name != "imessage") throw Conflict("Invalid stored channel kind");
+    return {name == "slack" ? ChannelKind::slack : ChannelKind::imessage,
             field(data,"workspaceId"),field(data,"threadRef"),field(data,"externalMessageId")};
 }
 
-std::string limitation(const ChannelCapabilities& caps, std::string_view operation, const Json& payload) {
+std::string limitation(const ChannelCapabilities& caps, std::string_view operation, bool canPublish) {
     if (operation == "reply" && !caps.supportsReplies) return "This channel does not support threaded replies.";
     if (operation == "channel_edit_message" && !caps.supportsEdit) return "This channel does not support editing messages.";
     if (operation == "channel_react" && !caps.supportsReact) return "This channel does not support reactions.";
     if (operation == "publish_artifact" && !caps.supportsHtmlArtifacts) return "This channel does not support HTML artifacts.";
-    if (operation == "channel_send_attachment") {
-        const auto mime = field(payload,"mimeType");
-        if (std::ranges::find(caps.allowedAttachmentTypes,mime) == caps.allowedAttachmentTypes.end())
-            return "This channel does not accept that attachment type.";
-        if (payload.value("size",std::size_t{}) > std::min(caps.maxAttachmentBytes,attachmentLimit))
-            return "That attachment exceeds this channel's size limit.";
-    }
+    if (operation == "publish_artifact" && !canPublish) return "No public HTML preview URL is configured for this channel.";
+    return {};
+}
+
+std::string attachmentLimitation(const ChannelCapabilities& caps, std::string_view mime, std::size_t size) {
+    if (std::ranges::find(caps.allowedAttachmentTypes,mime) == caps.allowedAttachmentTypes.end())
+        return "This channel does not accept that attachment type.";
+    if (size > std::min(caps.maxAttachmentBytes,attachmentLimit))
+        return "That attachment exceeds this channel's size limit.";
     return {};
 }
 
@@ -53,13 +59,14 @@ bool matchesMime(std::string_view mime, std::string_view bytes) {
     if (mime == "image/png") return bytes.starts_with("\x89PNG\r\n\x1a\n");
     if (mime == "image/jpeg") return bytes.starts_with("\xff\xd8\xff");
     if (mime == "image/webp") return bytes.size() >= 12 && bytes.starts_with("RIFF") && bytes.substr(8,4) == "WEBP";
-    if (mime == "image/gif") return bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a");
-    if (mime == "text/plain") {
-        if (bytes.find('\0') != bytes.npos) return false;
-        try { (void)Json(bytes).dump(); }
-        catch (const Json::type_error&) { return false; }
-    }
+    if (mime != "text/plain" || bytes.find('\0') != bytes.npos) return false;
+    try { (void)Json(bytes).dump(); }
+    catch (const Json::type_error&) { return false; }
     return true;
+}
+
+bool canReadAttachment(const ChannelCapabilities& caps, std::string_view mime, std::string_view bytes) {
+    return !bytes.empty() && attachmentLimitation(caps,mime,bytes.size()).empty() && matchesMime(mime,bytes);
 }
 
 std::size_t decodedSize(std::string_view input) {
@@ -121,46 +128,26 @@ Scope channelScope(const ChannelOrigin& origin, std::string_view operation) {
     return {"service",Json::array({channelName(origin.kind),origin.workspaceId}).dump(),std::string(operation)};
 }
 
-ChannelConnector::ChannelConnector(ChannelKind kind, ChannelCapabilities caps, AuthenticateChannel auth,
-                                   std::shared_ptr<ChannelTransport> transport)
-    : kind_(kind), capabilities_(std::move(caps)), authenticate_(std::move(auth)), transport_(std::move(transport)) {
-    if (!authenticate_ || !transport_) throw Conflict("A channel needs authentication and transport");
+ChannelCapabilities channelCapabilities(ChannelKind kind) {
+    return {true,kind == ChannelKind::slack,true,true,{"image/png","image/jpeg","image/webp","text/plain"},attachmentLimit};
 }
-
-std::optional<ChannelSender> ChannelConnector::authenticate(std::string_view credential, std::string_view workspace,
-                                                             std::string_view sender) const {
-    return authenticate_(credential,workspace,sender);
-}
-
-ChannelDelivery ChannelConnector::send(std::string_view key, const ChannelOrigin& origin,
-                                       std::string_view operation, const Json& payload) const {
-    if (origin.kind != kind_ || !limitation(capabilities_,operation,payload).empty())
-        return {ChannelDelivery::State::rejected,{}};
-    return transport_->send(key,origin,operation,payload);
-}
-
-ChannelDelivery ChannelConnector::reconcile(std::string_view key, const ChannelOrigin& origin) const {
-    return transport_->reconcile(key,origin);
-}
-
-SlackConnector::SlackConnector(AuthenticateChannel auth, std::shared_ptr<ChannelTransport> transport,
-                               ChannelCapabilities caps)
-    : ChannelConnector(ChannelKind::slack,std::move(caps),std::move(auth),std::move(transport)) {}
-
-IMessageConnector::IMessageConnector(AuthenticateChannel auth, std::shared_ptr<ChannelTransport> transport,
-                                     ChannelCapabilities caps)
-    : ChannelConnector(ChannelKind::imessage,std::move(caps),std::move(auth),std::move(transport)) {}
 
 void Store::Impl::migrateChannels() {
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_messages(
       message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-      event_key TEXT NOT NULL UNIQUE, origin TEXT NOT NULL, person_id TEXT NOT NULL))SQL");
+      event_key TEXT NOT NULL UNIQUE, scope_key TEXT NOT NULL, origin TEXT NOT NULL,
+      sender_id TEXT NOT NULL, person_id TEXT NOT NULL))SQL");
+    exec("CREATE INDEX IF NOT EXISTS channel_messages_scope ON channel_messages(scope_key,message_id DESC)");
+    exec(R"SQL(CREATE VIEW IF NOT EXISTS channel_tasks AS
+      SELECT t.id AS task_id,c.message_id,c.scope_key FROM tasks t JOIN channel_messages c
+      ON c.message_id=json_extract(t.data,'$.sourceMessageId'))SQL");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_attachments(
       id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES channel_messages(message_id),
       position INTEGER NOT NULL, name TEXT NOT NULL, mime_type TEXT NOT NULL, bytes BLOB NOT NULL,
       UNIQUE(message_id,position)))SQL");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_deliveries(
       id TEXT PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES channel_messages(message_id),
+      reply_id INTEGER UNIQUE REFERENCES journal(id),
       operation TEXT NOT NULL, payload TEXT NOT NULL,
       state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','unknown','accepted','rejected','unsupported')),
       external_id TEXT NOT NULL DEFAULT '', next_attempt INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT ''))SQL");
@@ -169,51 +156,69 @@ void Store::Impl::migrateChannels() {
       source_id INTEGER NOT NULL REFERENCES channel_messages(message_id), reason TEXT NOT NULL,
       PRIMARY KEY(source_id,reason)))SQL");
     exec(R"SQL(CREATE TABLE IF NOT EXISTS channel_artifacts(
-      id TEXT PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES channel_messages(message_id),
+      id TEXT PRIMARY KEY REFERENCES channel_deliveries(id),
       title TEXT NOT NULL, html TEXT NOT NULL))SQL");
 }
 
-void Store::connectChannel(std::shared_ptr<ChannelConnector> connector) {
-    if (!connector) throw Conflict("Channel connector is required");
+void Store::connectChannel(ChannelConnector connector) {
+    if (!connector.authenticates || !connector.resolveSender || !connector.transport)
+        throw Conflict("A channel needs authentication, an identity directory, and transport");
     std::lock_guard lock(p_->mutex);
-    p_->channels[connector->kind()] = std::move(connector);
+    p_->channels.insert_or_assign(connector.kind,std::move(connector));
 }
 
 void Store::artifactBaseUrl(std::string url) {
-    if (!url.empty() && (!url.starts_with("https://") || url.size() <= 8 ||
-        url.find_first_of(" \r\n\t?#\\") != url.npos || url.find('\0') != url.npos))
-        throw Conflict("Artifact base URL must use HTTPS");
-    while (url.ends_with('/')) url.pop_back();
+    if (!url.empty()) {
+        if (!url.starts_with("https://") || url.size() <= 8) throw Conflict("Artifact base URL must be an HTTPS origin");
+        if (url.ends_with('/')) url.pop_back();
+        const auto authority = std::string_view(url).substr(8);
+        const auto portSeparator = authority.find(':');
+        const auto host = authority.substr(0,portSeparator);
+        if (host.empty() || host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != host.npos ||
+            host.find_first_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == host.npos)
+            throw Conflict("Artifact base URL must be an HTTPS origin");
+        if (portSeparator != authority.npos) {
+            const auto port = authority.substr(portSeparator + 1);
+            unsigned value = 0;
+            const auto parsed = std::from_chars(port.data(),port.data() + port.size(),value);
+            if (parsed.ec != std::errc{} || parsed.ptr != port.data() + port.size() || value == 0 || value > 65535)
+                throw Conflict("Invalid artifact origin port");
+        }
+    }
     std::lock_guard lock(p_->mutex);
     p_->artifactOrigin = std::move(url);
 }
 
 bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& origin,
-                                std::string_view person, std::string_view operation) const {
+                                std::string_view sender, std::string_view person, std::string_view operation) const {
+    const auto connector = channels.find(origin.kind);
+    if (connector == channels.end()) return false;
+    const auto linked = connector->second.resolveSender(origin.workspaceId,sender);
+    if (!linked || linked->botId != bot || linked->personId != person) return false;
     auto access = Access(const_cast<Impl&>(*this));
     return access.permitsPerson({std::string(person),false},bot,Role::decide) &&
-           access.permits(bot,channelScope(origin,operation),true);
+           access.permits(bot,channelScope(origin,"use"),true) &&
+           (operation == "use" || access.permits(bot,channelScope(origin,operation),true));
 }
 
 Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const Json& event,
                            const std::function<Intake(std::string_view,std::string_view)>& routing) {
-    std::shared_ptr<ChannelConnector> connector;
-    {
-        std::lock_guard lock(p_->mutex);
-        const auto found = p_->channels.find(kind);
-        if (found == p_->channels.end()) throw ChannelAccessDenied("Channel is not connected");
-        connector = found->second;
-    }
+    std::lock_guard lock(p_->mutex);
+    const auto found = p_->channels.find(kind);
+    if (found == p_->channels.end()) throw ChannelAccessDenied("Channel is not connected");
+    const auto& connector = found->second;
     ChannelOrigin origin{kind,required(event,"workspaceId",128),required(event,"threadRef",200),
                          required(event,"externalMessageId",128)};
-    const auto sender = connector->authenticate(credential,origin.workspaceId,required(event,"senderId",200));
-    if (!sender || !p_->permitsChannel(sender->botId,origin,sender->personId,"use"))
+    const auto senderId = required(event,"senderId",200);
+    if (!connector.authenticates(credential,origin.workspaceId)) throw ChannelAccessDenied("Channel bridge is not authorized");
+    const auto sender = connector.resolveSender(origin.workspaceId,senderId);
+    if (!sender || !p_->permitsChannel(sender->botId,origin,senderId,sender->personId,"use"))
         throw ChannelAccessDenied("Channel sender is not authorized");
-    VerifiedChannelMessage message{origin,sender->personId,{}};
+    VerifiedChannelMessage message{origin,senderId,sender->personId,{}};
     const auto files = event.value("attachments",Json::array());
     if (!files.is_array() || files.size() > attachmentCount) throw Conflict("Too many attachments");
-    const auto& caps = connector->capabilities();
-    if (!files.empty() && !p_->permitsChannel(sender->botId,origin,sender->personId,"read"))
+    const auto& caps = connector.capabilities;
+    if (!files.empty() && !p_->permitsChannel(sender->botId,origin,senderId,sender->personId,"read"))
         throw ChannelAccessDenied("Channel attachment access is not granted");
     std::size_t total = 0;
     for (const auto& file : files) {
@@ -221,7 +226,7 @@ Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const 
         const auto mime = required(file,"mimeType",128);
         const auto encoded = required(file,"contentBase64",attachmentLimit * 4 / 3 + 4);
         const auto size = decodedSize(encoded);
-        const auto reason = limitation(caps,"channel_send_attachment",{{"mimeType",mime},{"size",size}});
+        const auto reason = attachmentLimitation(caps,mime,size);
         if (!reason.empty()) throw Conflict(reason);
         total += size;
         if (total > attachmentLimit) throw Conflict("Attachments exceed the total size limit");
@@ -231,23 +236,17 @@ Json Store::receiveChannel(ChannelKind kind, std::string_view credential, const 
     }
     auto text = field(event,"text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    const auto intake = routing(sender->botId,text);
-    if (intake.botId != sender->botId) throw ChannelAccessDenied("Channel route does not match the linked Bot");
-    return receive(intake,origin.key(),text,0,&message);
+    return receive(sender->botId,origin.key(),text,0,&message,[&] { return routing(sender->botId,text); });
 }
 
-void Store::Impl::saveChannelMessage(Id id, const VerifiedChannelMessage& message, bool replay) {
-    auto botRow = query("SELECT bot_id FROM messages WHERE id=?",{id});
-    if (!botRow.next()) throw Conflict("Channel message is missing");
-    const auto bot = botRow.string(0);
-    if (!permitsChannel(bot,message.origin,message.personId,"use") ||
-        (!message.attachments.empty() && !permitsChannel(bot,message.origin,message.personId,"read")))
+void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
+    if (!permitsChannel(bot,message.origin,message.senderId,message.personId,message.attachments.empty() ? "use" : "read"))
         throw ChannelAccessDenied("Channel access is no longer granted");
     const auto scrub = redactor(bot);
-    scrub.requirePublic({message.origin.json(),message.personId});
+    scrub.requirePublic({message.origin.json(),message.senderId,message.personId});
     if (replay) {
-        auto saved = query("SELECT 1 FROM channel_messages WHERE message_id=? AND event_key=? AND person_id=?",
-                           {id,message.origin.key(),message.personId});
+        auto saved = query("SELECT 1 FROM channel_messages WHERE message_id=? AND sender_id=? AND person_id=?",
+                           {id,message.senderId,message.personId});
         if (!saved.next()) throw Conflict("Channel event already belongs to another sender");
         auto files = query("SELECT name,mime_type,bytes FROM channel_attachments WHERE message_id=? ORDER BY position",{id});
         for (const auto& file : message.attachments) {
@@ -259,7 +258,10 @@ void Store::Impl::saveChannelMessage(Id id, const VerifiedChannelMessage& messag
     }
     if (query("SELECT 1 FROM channel_messages WHERE event_key=?",{message.origin.key()}).next())
         throw Conflict("Channel event already belongs to another Bot");
-    exec("INSERT INTO channel_messages VALUES(?,?,?,?)",{id,message.origin.key(),message.origin.json(),message.personId});
+    const auto& origin = message.origin;
+    const auto scope = Json::array({channelName(origin.kind),origin.workspaceId,origin.threadRef,message.senderId,message.personId});
+    exec("INSERT INTO channel_messages VALUES(?,?,?,?,?,?)",
+         {id,origin.key(),scope.dump(),origin.json(),message.senderId,message.personId});
     Id position = 0;
     for (const auto& file : message.attachments) {
         scrub.requirePublic({file.name,file.mimeType,file.bytes});
@@ -268,74 +270,127 @@ void Store::Impl::saveChannelMessage(Id id, const VerifiedChannelMessage& messag
     }
 }
 
-Json Store::Impl::channelContext(Id id, std::string_view bot) const {
-    auto row = query("SELECT c.origin,c.person_id FROM channel_messages c JOIN messages m ON m.id=c.message_id"
+bool Store::Impl::channelMessageAuthorized(Id id, std::string_view bot) const {
+    auto row = query("SELECT origin,sender_id,person_id FROM channel_messages WHERE message_id=?",{id});
+    return !row.next() || permitsChannel(bot,originFrom(row.json(0)),row.string(1),row.string(2),"use");
+}
+
+Json Store::Impl::channelContext(Id id, std::string_view bot, std::vector<std::string>* images) const {
+    auto row = query("SELECT c.origin,c.sender_id,c.person_id,c.scope_key FROM channel_messages c JOIN messages m ON m.id=c.message_id"
                      " WHERE c.message_id=? AND m.bot_id=?",{id,bot});
     if (!row.next()) return Json::object();
-    const auto origin = row.json(0);
-    Json context{{"channel",origin}};
-    if (permitsChannel(bot,originFrom(origin),row.string(1),"read")) {
-        auto files = query("SELECT id,name,mime_type,length(bytes) FROM channel_attachments WHERE message_id=? ORDER BY position",{id});
-        auto& attachments = context["attachments"] = Json::array();
-        while (files.next()) attachments.push_back({{"id",files.number(0)},{"name",files.string(1)},
-            {"mimeType",files.string(2)},{"size",files.number(3)}});
+    const auto origin = originFrom(row.json(0));
+    const auto sender = row.string(1), person = row.string(2);
+    Json context{{"channel",origin.json()}};
+    if (!permitsChannel(bot,origin,sender,person,"use")) return context;
+    const auto& caps = channels.at(origin.kind).capabilities;
+    if (permitsChannel(bot,origin,sender,person,"read")) {
+        const int modelContext = images ? 1 : 0;
+        auto files = query(R"SQL(
+SELECT a.id,a.name,a.mime_type,length(a.bytes),a.message_id,CASE WHEN a.message_id=? AND ? THEN a.bytes END
+FROM channel_attachments a JOIN channel_messages c ON c.message_id=a.message_id JOIN messages m ON m.id=c.message_id
+WHERE c.scope_key=? AND m.bot_id=? AND a.message_id<=? AND (? OR a.message_id=?)
+ORDER BY a.message_id DESC,a.position LIMIT 24
+)SQL",{id,modelContext,row.string(3),bot,id,modelContext,id});
+        while (files.next()) {
+            const auto type = files.string(2);
+            const auto size = files.number(3);
+            if (size <= 0 || !attachmentLimitation(caps,type,static_cast<std::size_t>(size)).empty()) continue;
+            const bool current = files.number(4) == id;
+            context[current ? "attachments" : "earlierAttachments"].push_back(
+                {{"id",files.number(0)},{"name",files.string(1)},{"mimeType",type},{"size",size},
+                 {"messageId",files.number(4)}});
+            if (current && images && type.starts_with("image/")) {
+                const auto bytes = files.string(5);
+                if (matchesMime(type,bytes)) images->push_back("data:" + type + ";base64," + encodeAttachment(bytes));
+            }
+        }
     }
-    if (!permitsChannel(bot,originFrom(origin),row.string(1),"use")) return context;
+    if (!images) return context;
     auto sent = query(R"SQL(
-SELECT d.external_id,json_extract(d.payload,'$.text') FROM channel_deliveries d
-JOIN channel_messages c ON c.message_id=d.source_id JOIN messages m ON m.id=c.message_id
-WHERE m.bot_id=? AND c.person_id=? AND d.state='accepted' AND d.operation='reply' AND d.external_id!=''
-AND json_extract(c.origin,'$.channelKind')=? AND json_extract(c.origin,'$.workspaceId')=?
-AND json_extract(c.origin,'$.threadRef')=? ORDER BY d.rowid DESC LIMIT 10
-)SQL",{bot,row.string(1),origin.at("channelKind"),origin.at("workspaceId"),origin.at("threadRef")});
+WITH scoped AS (
+  SELECT d.rowid AS sequence,d.operation,d.external_id,d.payload
+  FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
+  JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND c.scope_key=? AND d.state='accepted'
+  AND d.operation IN ('reply','channel_edit_message')
+)
+SELECT post.external_id,coalesce((
+  SELECT json_extract(edit.payload,'$.text') FROM scoped edit WHERE edit.operation='channel_edit_message'
+  AND json_extract(edit.payload,'$.externalMessageId')=post.external_id ORDER BY edit.sequence DESC LIMIT 1
+),json_extract(post.payload,'$.text'))
+FROM scoped post WHERE post.operation='reply' AND post.external_id!='' ORDER BY post.sequence DESC LIMIT 10
+)SQL",{bot,row.string(3)});
     auto& messages = context["channel"]["sentMessages"] = Json::array();
     while (sent.next()) messages.push_back({{"externalMessageId",sent.string(0)},{"text",bounded(sent.string(1),500)}});
-    const auto connector = channels.find(originFrom(origin).kind);
-    if (connector != channels.end()) {
-        const auto& caps = connector->second->capabilities();
-        context["channel"]["capabilities"] = {{"supportsReplies",caps.supportsReplies},{"supportsEdit",caps.supportsEdit},
-            {"supportsReact",caps.supportsReact},{"supportsHtmlArtifacts",caps.supportsHtmlArtifacts},
-            {"allowedAttachmentTypes",caps.allowedAttachmentTypes},{"maxAttachmentBytes",std::min(caps.maxAttachmentBytes,attachmentLimit)}};
-    }
+    context["channel"]["capabilities"] = {{"supportsReplies",caps.supportsReplies},{"supportsEdit",caps.supportsEdit},
+        {"supportsReact",caps.supportsReact},{"supportsHtmlArtifacts",caps.supportsHtmlArtifacts && !artifactOrigin.empty()},
+        {"allowedAttachmentTypes",caps.allowedAttachmentTypes},{"maxAttachmentBytes",std::min(caps.maxAttachmentBytes,attachmentLimit)}};
     return context;
 }
 
-Json Store::Impl::channelImages(Id id, std::string_view bot) const {
-    const auto context = channelContext(id,bot);
-    Json images = Json::array();
-    for (const auto& ref : context.value("attachments",Json::array())) {
-        const auto type = field(ref,"mimeType");
-        if (type != "image/png" && type != "image/jpeg" && type != "image/webp" && type != "image/gif") continue;
-        auto file = query("SELECT bytes FROM channel_attachments WHERE id=?",{ref.at("id")});
-        if (file.next()) images.push_back("data:" + type + ";base64," + encodeAttachment(file.string(0)));
-    }
-    return images;
+std::optional<ChannelResource> Store::Impl::channelAttachment(Id source, Id attachment, std::string_view bot) const {
+    auto row = query(R"SQL(
+SELECT a.name,a.mime_type,a.bytes,original.origin,original.sender_id,original.person_id
+FROM channel_attachments a JOIN channel_messages original ON original.message_id=a.message_id
+JOIN messages m ON m.id=a.message_id JOIN channel_messages current ON current.message_id=?
+WHERE a.id=? AND m.bot_id=? AND original.scope_key=current.scope_key AND original.message_id<=current.message_id
+)SQL",{source,attachment,bot});
+    if (!row.next()) return std::nullopt;
+    const auto origin = originFrom(row.json(3));
+    if (!permitsChannel(bot,origin,row.string(4),row.string(5),"read")) return std::nullopt;
+    return ChannelResource{row.string(0),row.string(1),row.string(2)};
 }
 
 std::optional<ChannelResource> Store::attachment(const Person& person, Id id) const {
     std::lock_guard lock(p_->mutex);
     auto row = p_->query(R"SQL(
-SELECT a.name,a.mime_type,a.bytes,m.bot_id,c.origin,c.person_id
+SELECT a.name,a.mime_type,a.bytes,m.bot_id,c.origin,c.sender_id,c.person_id
 FROM channel_attachments a JOIN channel_messages c ON c.message_id=a.message_id JOIN messages m ON m.id=c.message_id
 WHERE a.id=?)SQL",{id});
-    if (!row.next() || !Access(*p_).permitsPerson(person,row.string(3),Role::view) ||
-        !p_->permitsChannel(row.string(3),originFrom(row.json(4)),row.string(5),"read")) return std::nullopt;
-    return ChannelResource{row.string(0),row.string(1),row.string(2)};
+    if (!row.next()) return std::nullopt;
+    const auto bot = row.string(3);
+    const auto origin = originFrom(row.json(4));
+    if (!Access(*p_).permitsPerson(person,bot,Role::view) ||
+        !p_->permitsChannel(bot,origin,row.string(5),row.string(6),"read")) return std::nullopt;
+    ChannelResource file{row.string(0),row.string(1),row.string(2)};
+    if (!canReadAttachment(p_->channels.at(origin.kind).capabilities,file.mimeType,file.bytes)) return std::nullopt;
+    return file;
 }
 
 std::optional<ChannelResource> Store::artifact(std::string_view id) const {
     std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT title,html FROM channel_artifacts WHERE id=?",{id});
+    auto row = p_->query(R"SQL(
+SELECT a.title,a.html,c.origin,c.sender_id,c.person_id,m.bot_id
+FROM channel_artifacts a JOIN channel_deliveries d ON d.id=a.id
+JOIN channel_messages c ON c.message_id=d.source_id JOIN messages m ON m.id=c.message_id
+WHERE a.id=? AND length(CAST(a.html AS BLOB))<=? AND d.state IN ('unknown','accepted')
+)SQL",{id,artifactLimit});
     if (!row.next()) return std::nullopt;
+    const auto origin = originFrom(row.json(2));
+    if (!p_->permitsChannel(row.string(5),origin,row.string(3),row.string(4),"use") ||
+        !p_->channels.at(origin.kind).capabilities.supportsHtmlArtifacts) return std::nullopt;
     return ChannelResource{row.string(0),"text/html; charset=utf-8",row.string(1)};
 }
 
 void Store::Impl::queueChannelReply(Id source, Id reply, const Json& data) {
     exec(R"SQL(
-INSERT INTO channel_deliveries(id,source_id,operation,payload)
-SELECT ?,message_id,'reply',? FROM channel_messages WHERE message_id=?)SQL",
+INSERT INTO channel_deliveries(id,source_id,reply_id,operation,payload)
+SELECT ?,message_id,?,'reply',? FROM channel_messages WHERE message_id=?
+ON CONFLICT(reply_id) DO NOTHING)SQL",
          {"reply-" + std::to_string(reply) + "-" + actionId(),
-          Json{{"text",data.at("text")},{"suggestions",data.value("suggestions",Json::array())}},source});
+          reply,Json{{"text",data.at("text")},{"suggestions",data.value("suggestions",Json::array())}},source});
+}
+
+void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json& data) {
+    const bool question = kind == "waiting" && field(data,"reason") == "user_question";
+    if (!question && kind != "completed" && kind != "cancelled") return;
+    auto source = query("SELECT message_id,t.bot_id FROM channel_tasks c JOIN tasks t ON t.id=c.task_id WHERE t.id=?",{task});
+    if (!source.next()) return;
+    const auto scrub = redactor(source.string(1));
+    const auto text = kind == "cancelled" ? "The task was cancelled." : field(data,"text");
+    if (text.empty()) return;
+    queueChannelReply(source.number(0),entry,scrub.payload({{"text",bounded(text,8000)},
+        {"suggestions",question ? data.value("choices",Json::array()) : Json::array()}}));
 }
 
 void Store::Impl::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
@@ -354,39 +409,33 @@ Json Store::Impl::channelTool(Id message, std::string_view bot, const Decision& 
     const auto& tool = decision.tool;
     if (tool != "channel_edit_message" && tool != "channel_react" && tool != "channel_send_attachment" &&
         tool != "publish_artifact" && tool != "read_channel_attachment") return nullptr;
-    auto source = query("SELECT origin,person_id FROM channel_messages WHERE message_id=?",{message});
+    auto source = query("SELECT origin,sender_id,person_id,scope_key FROM channel_messages WHERE message_id=?",{message});
     if (!source.next()) throw Conflict("This tool requires a channel conversation");
     const auto origin = originFrom(source.json(0));
-    const auto person = source.string(1);
-    const auto found = channels.find(origin.kind);
-    if (found == channels.end()) throw Conflict("Channel is disconnected");
-    const auto& caps = found->second->capabilities();
-    if (!permitsChannel(bot,origin,person,tool == "read_channel_attachment" ? "read" : "use"))
+    const auto sender = source.string(1), person = source.string(2);
+    if (!permitsChannel(bot,origin,sender,person,tool == "read_channel_attachment" ? "read" : "use"))
         throw ChannelAccessDenied("Channel access is no longer granted");
+    const auto& caps = channels.at(origin.kind).capabilities;
 
     const auto& args = decision.args;
     const auto attachment = [&]() {
-        if (!permitsChannel(bot,origin,person,"read"))
-            throw ChannelAccessDenied("Channel attachment access is no longer granted");
-        auto rows = query(R"SQL(
-SELECT a.name,a.mime_type,a.bytes FROM channel_attachments a
-JOIN channel_messages c ON c.message_id=a.message_id JOIN messages m ON m.id=c.message_id
-WHERE a.id=? AND m.bot_id=? AND json_extract(c.origin,'$.channelKind')=?
-AND json_extract(c.origin,'$.workspaceId')=? AND json_extract(c.origin,'$.threadRef')=? AND c.person_id=?
-)SQL",{conversation_storage::integer(args,"attachmentId"),bot,channelName(origin.kind),origin.workspaceId,origin.threadRef,person});
-        if (!rows.next()) throw Conflict("Attachment is not in this conversation");
-        return ChannelResource{rows.string(0),rows.string(1),rows.string(2)};
+        auto file = channelAttachment(message,conversation_storage::integer(args,"attachmentId"),bot);
+        if (!file) throw Conflict("Attachment is unavailable in this conversation");
+        return std::move(*file);
     };
     if (tool == "read_channel_attachment") {
         const auto file = attachment();
-        if (file.mimeType != "text/plain") throw Conflict("Image attachments are provided directly in the model input");
-        return {{"ok",true},{"name",file.name},{"text",bounded(file.bytes,16000)},{"truncated",file.bytes.size() > 16000}};
+        if (!canReadAttachment(caps,file.mimeType,file.bytes)) throw Conflict("Attachment is outside current channel limits");
+        return {{"ok",true},{"readAttachmentId",args.at("attachmentId")},{"channelKind",channelName(origin.kind)}};
     }
 
     Json payload = Json::object();
     std::string bytes;
+    auto reason = limitation(caps,tool,!artifactOrigin.empty());
     if (tool == "channel_send_attachment") {
         if (args.contains("attachmentId")) {
+            if (args.contains("name") || args.contains("mimeType") || args.contains("contentBase64"))
+                throw Conflict("Use an attachment ID or file data");
             auto file = attachment();
             bytes = std::move(file.bytes);
             payload = {{"name",file.name},{"mimeType",file.mimeType},{"size",bytes.size()},
@@ -396,21 +445,28 @@ AND json_extract(c.origin,'$.workspaceId')=? AND json_extract(c.origin,'$.thread
             const auto encoded = field(args,"contentBase64");
             payload = {{"name",required(args,"name",255)},{"mimeType",mime},{"size",decodedSize(encoded)}};
         }
+        reason = attachmentLimitation(caps,field(payload,"mimeType"),payload.at("size"));
     }
-    if (auto reason = limitation(caps,tool,payload); !reason.empty()) {
+    if (!reason.empty()) {
         channelLimitation(message,bot,reason,caps.supportsReplies);
         return {{"ok",false},{"unsupported",true},{"reason",reason},{"noticeQueued",caps.supportsReplies}};
     }
 
+    const auto key = actionId();
+    std::string html;
     if (tool == "channel_edit_message") {
         const auto target = required(args,"externalMessageId",128);
         if (!query(R"SQL(
 SELECT 1 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
-JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND d.operation IN ('reply','channel_send_attachment','publish_artifact')
-AND d.state='accepted' AND d.external_id=? AND json_extract(c.origin,'$.channelKind')=?
-AND json_extract(c.origin,'$.workspaceId')=? AND json_extract(c.origin,'$.threadRef')=? AND c.person_id=?
-)SQL",{bot,target,channelName(origin.kind),origin.workspaceId,origin.threadRef,person}).next())
+JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND c.scope_key=? AND d.operation='reply'
+AND d.state='accepted' AND d.external_id=?
+)SQL",{bot,source.string(3),target}).next())
             throw Conflict("The target must be a message this Bot sent in this channel thread");
+        if (query(R"SQL(
+SELECT 1 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id
+JOIN messages m ON m.id=c.message_id WHERE m.bot_id=? AND c.scope_key=? AND d.operation='channel_edit_message'
+AND d.state IN ('pending','unknown') AND json_extract(d.payload,'$.externalMessageId')=?
+)SQL",{bot,source.string(3),target}).next()) throw Conflict("An edit to this message is awaiting delivery confirmation");
         payload = {{"externalMessageId",target},{"text",required(args,"text",8000)}};
     } else if (tool == "channel_react") {
         payload = {{"externalMessageId",origin.externalMessageId},{"reaction",required(args,"reaction",80)}};
@@ -423,24 +479,41 @@ AND json_extract(c.origin,'$.workspaceId')=? AND json_extract(c.origin,'$.thread
         }
     } else if (tool == "publish_artifact") {
         const auto title = required(args,"title",255);
-        const auto html = required(args,"html",256 * 1024);
+        html = required(args,"html",artifactLimit);
         redactor(bot).requirePublic({title,html});
-        const auto id = actionId();
-        exec("INSERT INTO channel_artifacts VALUES(?,?,?,?)",{id,message,title,html});
-        payload = {{"title",title},{"url",artifactOrigin + "/api/artifacts/" + id}};
+        payload = {{"title",title},{"url",artifactOrigin + "/api/artifacts/" + key}};
     }
     redactor(bot).requirePublic(payload);
-    const auto key = actionId();
     exec("INSERT INTO channel_deliveries(id,source_id,operation,payload) VALUES(?,?,?,?)",{key,message,tool,payload});
     Json result{{"ok",true},{"delivery","queued"},{"deliveryId",key}};
     if (tool == "publish_artifact") {
+        exec("INSERT INTO channel_artifacts VALUES(?,?,?)",{key,payload.at("title"),html});
         result["url"] = payload.at("url");
-        result["artifact"] = payload;
+        result["artifact"] = {{"title",payload.at("title")},{"id",key}};
     }
     return result;
 }
 
-Json Store::Impl::channelToolStatus(Json result) const {
+Json Store::Impl::channelToolStatus(Id source, std::string_view bot, Json result, std::vector<std::string>* images) const {
+    if (result.contains("readAttachmentId")) {
+        const auto file = channelAttachment(source,result.at("readAttachmentId"),bot);
+        const auto kind = field(result,"channelKind") == "slack" ? ChannelKind::slack : ChannelKind::imessage;
+        if (!file || !canReadAttachment(channels.at(kind).capabilities,file->mimeType,file->bytes))
+            return {{"ok",false},{"error","Channel attachment is no longer available"}};
+        if (file->mimeType == "text/plain")
+            return {{"ok",true},{"name",file->name},{"text",bounded(file->bytes,16000)},{"truncated",file->bytes.size() > 16000}};
+        if (images) {
+            auto image = "data:" + file->mimeType + ";base64," + encodeAttachment(file->bytes);
+            if (std::ranges::find(*images,image) == images->end()) {
+                std::size_t used = 0;
+                for (const auto& existing : *images) used += existing.size();
+                if (used + image.size() > (attachmentLimit + 2) / 3 * 4 + attachmentCount * 32)
+                    return {{"ok",false},{"error","The total image limit for this turn is reached"}};
+                images->push_back(std::move(image));
+            }
+        }
+        return {{"ok",true},{"name",file->name},{"imageIncluded",true}};
+    }
     const auto key = field(result,"deliveryId");
     if (key.empty()) return result;
     auto row = query("SELECT state,external_id,reason FROM channel_deliveries WHERE id=?",{key});
@@ -457,11 +530,17 @@ Json Store::Impl::channelToolStatus(Json result) const {
     return result;
 }
 
+bool Store::Impl::channelDeliveryDue() const {
+    std::lock_guard lock(mutex);
+    return !channels.empty() && query("SELECT 1 FROM channel_deliveries WHERE state IN ('pending','unknown')"
+                                     " AND next_attempt<=? LIMIT 1",{unixTime()}).next();
+}
+
 void Store::Impl::deliverChannels() {
     std::unique_lock deliveryLock(deliveryMutex,std::try_to_lock);
     if (!deliveryLock.owns_lock()) return;
     for (int i = 0; i < 20; ++i) {
-        std::shared_ptr<ChannelConnector> connector;
+        std::shared_ptr<ChannelTransport> transport;
         ChannelOrigin origin{};
         std::string key, operation, state, bot;
         Json payload;
@@ -469,7 +548,7 @@ void Store::Impl::deliverChannels() {
             std::lock_guard lock(mutex);
             Transaction tx(db);
             auto row = query(R"SQL(
-SELECT d.id,d.operation,d.payload,d.state,c.origin,c.person_id,m.bot_id,d.source_id
+SELECT d.id,d.operation,d.payload,d.state,c.origin,c.sender_id,c.person_id,m.bot_id,d.source_id
 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id JOIN messages m ON m.id=c.message_id
 WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMIT 1
 )SQL",{unixTime()});
@@ -479,25 +558,31 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
             payload = row.json(2);
             state = row.string(3);
             origin = originFrom(row.json(4));
-            bot = row.string(6);
+            bot = row.string(7);
             const auto found = channels.find(origin.kind);
-            if (found != channels.end()) connector = found->second;
-            std::string blocked;
-            if (!connector) {
+            const auto sender = row.string(5), person = row.string(6);
+            if (found == channels.end() || (state == "unknown" && !permitsChannel(bot,origin,sender,person,"use"))) {
                 exec("UPDATE channel_deliveries SET next_attempt=? WHERE id=?",{unixTime()+5,key});
                 tx.commit();
                 continue;
             }
-            const auto reason = state == "pending" ? limitation(connector->capabilities(),operation,payload) : std::string{};
-            if (!permitsChannel(bot,origin,row.string(5),"use")) blocked = "rejected";
-            else if (!reason.empty()) {
-                blocked = "unsupported";
-                if (operation != "reply") channelLimitation(row.number(7),bot,reason,connector->capabilities().supportsReplies);
-            }
-            if (blocked.empty() && state == "pending" && payload.contains("attachmentId")) {
-                auto file = query("SELECT bytes FROM channel_attachments WHERE id=?",{payload.at("attachmentId")});
-                if (!permitsChannel(bot,origin,row.string(5),"read") || !file.next()) blocked = "rejected";
-                else payload["contentBase64"] = encodeAttachment(file.string(0));
+            transport = found->second.transport;
+            const auto& caps = found->second.capabilities;
+            std::string blocked, reason;
+            if (state == "pending") {
+                if (!permitsChannel(bot,origin,sender,person,"use")) blocked = "rejected";
+                else if (operation == "channel_send_attachment") {
+                    reason = attachmentLimitation(caps,field(payload,"mimeType"),payload.at("size"));
+                    if (reason.empty() && payload.contains("attachmentId")) {
+                        const auto file = channelAttachment(row.number(8),payload.at("attachmentId"),bot);
+                        if (!file || !canReadAttachment(caps,file->mimeType,file->bytes)) blocked = "rejected";
+                        else payload["contentBase64"] = encodeAttachment(file->bytes);
+                    }
+                } else reason = limitation(caps,operation,!artifactOrigin.empty());
+                if (!reason.empty()) {
+                    blocked = "unsupported";
+                    if (operation != "reply") channelLimitation(row.number(8),bot,reason,caps.supportsReplies);
+                }
             }
             if (!blocked.empty()) {
                 exec("UPDATE channel_deliveries SET state=?,reason=? WHERE id=?",{blocked,reason,key});
@@ -509,8 +594,8 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
         }
         ChannelDelivery outcome;
         try {
-            outcome = state == "pending" ? connector->send(key,origin,operation,payload)
-                                          : connector->reconcile(key,origin);
+            outcome = state == "pending" ? transport->send(key,origin,operation,payload)
+                                          : transport->reconcile(key,origin);
         } catch (const std::exception&) {}
         if (outcome.state == ChannelDelivery::State::unknown) continue;
         std::lock_guard lock(mutex);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -9,8 +10,7 @@
 
 namespace flockv0 {
 namespace {
-std::filesystem::path localPath(const Json& args) {
-    const auto raw = field(args,"path");
+std::filesystem::path localPath(const std::string& raw) {
     const std::filesystem::path path(raw);
     if (raw.size() > 4096 || raw.find('\0') != raw.npos || !path.is_absolute() ||
         raw != path.lexically_normal().string() || (path.has_relative_path() && path.filename().empty()))
@@ -18,8 +18,7 @@ std::filesystem::path localPath(const Json& args) {
     return path;
 }
 
-std::string localOperation(const Json& args) {
-    const auto operation = field(args,"operation");
+std::string_view localOperation(std::string_view operation) {
     if (operation != "read_file" && operation != "list_directory")
         throw Conflict("Unsupported local operation");
     return operation;
@@ -30,7 +29,8 @@ Json localRules(const Json& args) {
     if (!rules.is_array() || rules.empty() || rules.size() > 20) throw Conflict("Request one to twenty local rules");
     Json result = Json::array();
     for (const auto& rule : rules) {
-        const Json normalized{{"operation",localOperation(rule)},{"path",localPath(rule).string()}};
+        const Json normalized{{"operation",localOperation(field(rule,"operation"))},
+                              {"path",localPath(field(rule,"path")).string()}};
         if (std::ranges::find(result,normalized) == result.end()) result.push_back(normalized);
     }
     return result;
@@ -85,13 +85,18 @@ public:
         if (!dir) throw Conflict("Local directory could not be opened");
         file.release();
         Json entries = Json::array();
-        while (auto* entry = readdir(dir.get())) {
+        for (;;) {
+            errno = 0;
+            const auto* entry = readdir(dir.get());
+            if (!entry) {
+                if (errno) throw Conflict("Local directory could not be read");
+                return {{"entries",entries},{"truncated",false}};
+            }
             const std::string_view name(entry->d_name);
             if (name == "." || name == "..") continue;
             if (entries.size() == 100) return {{"entries",entries},{"truncated",true}};
             entries.push_back(Json::parse(Json(name).dump(-1,' ',false,Json::error_handler_t::replace)));
         }
-        return {{"entries",entries},{"truncated",false}};
     }
 private:
     std::string owner_;
@@ -120,53 +125,75 @@ void Store::connectLocalMachine(std::string id, std::shared_ptr<LocalMachine> ma
     p_->localMachines[std::move(id)] = std::move(machine);
 }
 
-Json Store::Impl::localMachineTool(std::string_view bot, const Decision& decision) {
-    const auto& tool = decision.tool;
-    if (tool != "request_local_machine_connection" && tool != "run_local_machine_operation") return nullptr;
+Json Store::Impl::localMachineTool(std::string_view bot, std::string_view scope, const Decision& decision) {
+    if (decision.tool != "request_local_machine_connection") return nullptr;
     const auto& args = decision.args;
     const auto thread = field(args,"threadId"), run = field(args,"runId"), machineId = field(args,"machineId");
     const auto machine = localMachines.find(machineId);
     if (machine == localMachines.end()) throw Conflict("Local machine is unavailable");
+    const auto owner = machine->second->owner();
+    if (!Access(*this).permitsPerson({std::string(owner),false},bot,Role::decide))
+        throw ChannelAccessDenied("The machine owner cannot review requests for this Bot");
     auto session = query(R"SQL(
 SELECT t.id,r.environment_id FROM runs r JOIN tasks t ON t.id=r.task_id
+LEFT JOIN channel_tasks c ON c.task_id=t.id
 WHERE t.bot_id=? AND r.thread_id=? AND r.run_id=?
+AND (?='' OR c.scope_key=?)
 AND t.state IN ('running','waiting')
 AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
 AND json_extract(t.data,'$.activeRun.runId')=r.run_id
 AND json_extract(t.data,'$.environmentId')=r.environment_id LIMIT 2
-)SQL",{bot,thread,run});
+)SQL",{bot,thread,run,scope,scope});
     if (!session.next()) throw Conflict("This Bot does not own that active Session");
     const auto task = session.number(0);
     const auto environment = session.string(1);
     if (session.next()) throw Conflict("The active Session is ambiguous");
-    const auto owner = machine->second->owner();
     auto connection = query(R"SQL(
 SELECT id,rules,status,machine_owner FROM local_machine_connections
 WHERE bot_id=? AND task_id=? AND environment_id=? AND thread_id=? AND machine_id=? AND status IN ('pending','approved')
 )SQL",{bot,task,environment,thread,machineId});
-    const bool exists = connection.next();
-    if (tool == "request_local_machine_connection") {
-        const auto rules = localRules(args);
-        redactor(bot).requirePublic({thread,run,machineId,owner,rules});
-        if (exists) {
-            if (connection.json(1) != rules || connection.string(3) != owner)
-                throw Conflict("Disconnect the existing request before changing its rules");
-            return {{"ok",true},{"connectionId",connection.number(0)},{"status",connection.string(2)}};
-        }
-        exec(R"SQL(
+    const auto rules = localRules(args);
+    redactor(bot).requirePublic({thread,run,machineId,owner,rules});
+    if (connection.next()) {
+        if (connection.json(1) != rules || connection.string(3) != owner)
+            throw Conflict("Resolve the existing request before changing its rules");
+        return {{"ok",true},{"connectionId",connection.number(0)},{"status",connection.string(2)}};
+    }
+    exec(R"SQL(
 INSERT INTO local_machine_connections(bot_id,task_id,environment_id,thread_id,requested_run_id,machine_id,machine_owner,rules,status)
 VALUES(?,?,?,?,?,?,?,?,'pending'))SQL",{bot,task,environment,thread,run,machineId,owner,rules});
-        return {{"ok",true},{"connectionId",last()},{"status","pending"},{"reviewUrl","/settings/" + std::string(bot) + "/access#local-connections"}};
-    }
-    const auto operation = localOperation(args);
-    const auto path = localPath(args);
-    const Json rule{{"operation",operation},{"path",path.string()}};
-    if (!exists || connection.string(2) != "approved" || connection.string(3) != owner ||
-        !Access(*this).permitsPerson({std::string(owner),false},bot,Role::decide))
+    return {{"ok",true},{"connectionId",last()},{"status","pending"},
+            {"reviewUrl","/settings/" + std::string(bot) + "/access#local-connections"}};
+}
+
+Json Store::runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun,
+                                     std::string_view machineId, std::string_view operation,
+                                     const std::filesystem::path& path) {
+    const Json rule{{"operation",localOperation(operation)},{"path",localPath(path.native()).string()}};
+    std::lock_guard lock(p_->mutex);
+    Transaction tx(p_->db);
+    const auto machine = p_->localMachines.find(machineId);
+    if (machine == p_->localMachines.end()) throw Conflict("Local machine is unavailable");
+    const auto owner = machine->second->owner();
+    auto connection = p_->query(R"SQL(
+SELECT c.bot_id,c.rules FROM runs r JOIN tasks t ON t.id=r.task_id
+JOIN local_machine_connections c ON c.task_id=t.id AND c.bot_id=t.bot_id
+AND c.environment_id=r.environment_id AND c.thread_id=r.thread_id
+WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
+AND c.machine_id=? AND c.machine_owner=? AND c.status='approved'
+AND t.state IN ('running','waiting')
+AND json_extract(t.data,'$.activeRun.threadId')=r.thread_id
+AND json_extract(t.data,'$.activeRun.runId')=r.run_id
+AND json_extract(t.data,'$.environmentId')=r.environment_id
+)SQL",{environment,authenticatedRun.threadId,authenticatedRun.runId,machineId,owner});
+    if (!connection.next() || !Access(*p_).permitsPerson({std::string(owner),false},connection.string(0),Role::decide))
         throw ChannelAccessDenied("The Session has no approved local connection");
+    const auto bot = connection.string(0);
     const auto rules = connection.json(1);
     if (std::ranges::find(rules,rule) == rules.end()) throw ChannelAccessDenied("The operation is outside the approved local rules");
-    return {{"ok",true},{"output",machine->second->run(operation,path)}};
+    auto output = p_->redactor(bot).payload(machine->second->run(operation,path));
+    tx.commit();
+    return output;
 }
 
 Json Store::localConnections(const Person& actor) const {
@@ -189,7 +216,7 @@ void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     auto row = p_->query(R"SQL(
-SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,t.state,t.data,c.thread_id,c.requested_run_id,c.environment_id
+SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,t.state,t.data,c.thread_id,c.environment_id
 FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
 )SQL",{id});
     if (!row.next() || row.string(2) != actor.id || !Access(*p_).permitsPerson(actor,row.string(0),Role::decide))
@@ -197,11 +224,12 @@ FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
     if (row.string(3) != "pending") throw Conflict("Local connection is no longer pending");
     if (approve) {
         const auto machine = p_->localMachines.find(row.string(1));
-        const auto active = row.json(5).at("activeRun");
+        const auto task = row.json(5);
+        const auto active = task.at("activeRun");
         if (machine == p_->localMachines.end() || machine->second->owner() != actor.id ||
             (row.string(4) != "running" && row.string(4) != "waiting") ||
-            field(active,"threadId") != row.string(6) || field(active,"runId") != row.string(7) ||
-            field(row.json(5),"environmentId") != row.string(8)) throw Conflict("Session or machine is no longer active");
+            field(active,"threadId") != row.string(6) || field(active,"runId").empty() ||
+            field(task,"environmentId") != row.string(7)) throw Conflict("Session or machine is no longer active");
     }
     p_->exec("UPDATE local_machine_connections SET status=?,decided_by=?,decided_at=? WHERE id=?",
              {approve ? "approved" : "declined",actor.id,unixTime(),id});

@@ -60,23 +60,27 @@ struct Store::Impl {
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
-    std::map<ChannelKind,std::shared_ptr<ChannelConnector>> channels;
+    std::map<ChannelKind,ChannelConnector> channels;
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
     std::string artifactOrigin;
     std::mutex deliveryMutex;
     void migrateAccess();
     void migrateChannels();
     void migrateLocalMachines();
-    void saveChannelMessage(Id, const VerifiedChannelMessage&, bool replay);
-    Json channelContext(Id, std::string_view bot) const;
-    Json channelImages(Id, std::string_view bot) const;
+    std::optional<Json> messageReceipt(std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo) const;
+    void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
+    bool channelMessageAuthorized(Id, std::string_view bot) const;
+    Json channelContext(Id, std::string_view bot, std::vector<std::string>* images = nullptr) const;
+    std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
-    Json localMachineTool(std::string_view bot, const Decision&);
+    Json localMachineTool(std::string_view bot, std::string_view scope, const Decision&);
     void queueChannelReply(Id source, Id reply, const Json&);
+    void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
+    bool channelDeliveryDue() const;
     void deliverChannels();
-    Json channelToolStatus(Json) const;
-    bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view person,
+    Json channelToolStatus(Id source, std::string_view bot, Json, std::vector<std::string>* images = nullptr) const;
+    bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
@@ -102,12 +106,12 @@ struct Store::Impl {
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     std::optional<conversation::Message> turnMessage(Id messageId) const;
-    Json turnInput(const conversation::Message&, int step) const;
+    Json turnInput(const conversation::Message&, int step, std::vector<std::string>& images) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
-    Json ownTask(Id taskId, std::string_view bot) const;
-    Json resultReference(Id messageId, std::string_view bot) const;
+    Json ownTask(Id taskId, const conversation::Message&) const;
+    Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                              std::string_view environment, Id messageId, const Json& source, bool resume);
     bool acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,

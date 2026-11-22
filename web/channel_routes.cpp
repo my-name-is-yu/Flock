@@ -18,8 +18,9 @@ Id connectionId(const Json& body) {
 }
 }
 
-bool channelWebhook(std::string_view path) {
-    return path == "/api/channels/slack/events" || path == "/api/channels/imessage/events";
+bool bridgeEndpoint(std::string_view path) {
+    return path == "/api/channels/slack/events" || path == "/api/channels/imessage/events" ||
+           path == "/api/channels/local-operations";
 }
 
 bool artifactPreview(std::string_view path) {
@@ -47,6 +48,7 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         res.headers.erase("Content-Security-Policy");
         res.set_header("Content-Security-Policy","sandbox; default-src 'none'; style-src 'unsafe-inline'; "
                        "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+        res.set_header("Cross-Origin-Opener-Policy","same-origin");
         res.set_content(artifact->bytes,artifact->mimeType);
     });
     server.Get(R"(/api/channels/attachments/([0-9]+))",[&](const auto& req, auto& res) {
@@ -55,13 +57,29 @@ void channelRoutes(httplib::Server& server, Store& store, const WebCallbacks& ca
         const auto parsed = std::from_chars(value.data(),value.data()+value.size(),id);
         const auto attachment = parsed.ec == std::errc{} ? store.attachment(person(callbacks,req),id) : std::nullopt;
         if (!attachment) return reply(res,404,{{"error","attachment_not_found"}});
-        res.set_header("Content-Disposition","attachment");
+        if (attachment->mimeType == "text/plain") res.set_header("Content-Disposition","attachment");
         res.set_content(attachment->bytes,attachment->mimeType);
     });
     server.Get("/api/channels/local-connections",[&](const auto& req, auto& res) {
         reply(res,200,store.localConnections(person(callbacks,req)));
     });
+    server.Post("/api/channels/local-operations",[&](const auto& req, auto& res) {
+        if (!callbacks.authenticateSessionBridge || req.get_header_value_count("Authorization") != 1 ||
+            !callbacks.authenticateSessionBridge(req.get_header_value("Authorization")))
+            return reply(res,401,{{"error","session_bridge_identity_required"}});
+        if (req.body.size() > 8192) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto body = Json::parse(req.body);
+            const RunRef run{body.at("threadId"),body.at("runId"),{}};
+            reply(res,200,store.runLocalMachineOperation(body.at("environmentId").template get<std::string>(),run,
+                body.at("machineId").template get<std::string>(),body.at("operation").template get<std::string>(),
+                body.at("path").template get<std::string>()));
+        } catch (const ChannelAccessDenied&) { reply(res,403,{{"error","session_access_denied"}}); }
+        catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const Conflict& e) { reply(res,409,{{"error",e.what()}}); }
+    });
     server.Post(R"(/api/channels/local-connections/(decide|disconnect))",[&](const auto& req, auto& res) {
+        if (req.body.size() > 1024) return reply(res,413,{{"error","payload_too_large"}});
         try {
             const auto body = Json::parse(req.body);
             const auto actor = person(callbacks,req);

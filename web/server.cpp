@@ -363,7 +363,7 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
-        if (req.method == "POST" && web::channelWebhook(req.path)) {
+        if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
             else if (req.get_header_value_count("Content-Type") != 1 ||
                      req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");

@@ -188,7 +188,9 @@ Json Store::Impl::queueBlocker(Id id) const {
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
     exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
-    return last();
+    const auto entry = last();
+    queueChannelTaskUpdate(id,entry,kind,data);
+    return entry;
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
@@ -581,14 +583,8 @@ WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);
-        if (event["kind"] == "conversation_message") {
-            auto context = p_->channelContext(rows.number(0),bot);
-            if (context.contains("channel")) {
-                context["channel"].erase("sentMessages");
-                context["channel"].erase("capabilities");
-            }
-            event["data"].update(context);
-        }
+        if (event["kind"] == "conversation_message")
+            event["data"].update(p_->channelContext(rows.number(0),bot));
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(),result.end());
