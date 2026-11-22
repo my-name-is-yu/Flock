@@ -940,7 +940,10 @@ LIMIT 1
                 return;
             if (outcome.value("ok",false)) {
                 Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect.at("run"))}};
-                if (effect.contains("text")) entry["text"] = effect.at("text");
+                if (effect.contains("text")) {
+                    entry["text"] = effect.at("text");
+                    entry["revisionId"] = effect.at("run").value("revisionId",Json(nullptr));
+                }
                 journal(effect.at("taskId"),effect.at("kind") == "steer" ? "instruction_steered" : "interrupt_requested",entry);
             }
             saveTurnResults(id,step,Json::array({outcome}));

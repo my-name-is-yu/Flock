@@ -862,6 +862,18 @@ void peerWorkAndRestart() {
     check(f.store->tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 &&
           f.task(root)["additionalUsed"] == 0 && f.logs(root,"user_answer") == 1 && f.logs(root,"completed") == 1,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
+    const auto result = f.botMessages("alpha").back();
+    const auto completion = f.store->latestTaskResult(root).at("data");
+    check(!completion.contains("source") && completion.at("dependency") == Json{
+              {"exchangeId",result.at("exchangeId")},{"messageId",result.at("messageId")},{"taskId",recipient},
+              {"botId","beta"},{"requestKind","work"},{"status","completed"}},
+          "the completion did not retain the peer result as its dependency");
+    check(completion.at("evidenceRefs") == Json::array({
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","final-answer"},
+               {"kind","peer_report"},{"messageId",result.at("messageId")}},
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","item-1"},
+               {"kind","session_read"},{"messageId",result.at("messageId")}}}),
+          "the completion lost the scoped references for the peer report and history item");
     const struct Message {
         const char* type;
         const char* from;
@@ -930,6 +942,33 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     const auto& wait = paused.at("wait");
     check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
           wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
+}
+
+void peerCompletionKeepsEvidenceWithinTheReadGrant() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit("Decide whether the PR can ship");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto kind = input.event.at("kind");
+        if (input.task.at("id") == sender) {
+            if (kind == "intake") return botRequest("beta","work","Verify the PR");
+            return complete();
+        }
+        if (kind == "bot_request") return work();
+        return botReply("result","Verified the PR");
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.store->access().resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    f.t3.finish("run-1");
+    f.reach(recipient,"completed");
+    f.restart();
+    f.reach(sender,"completed");
+    const auto completion = f.store->latestTaskResult(sender).at("data");
+    check(completion.at("dependency").at("taskId") == recipient &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "completion exposed peer Run provenance outside its Session read grant");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
@@ -1473,6 +1512,11 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
+    const auto completion = f.store->latestTaskResult(consultation).at("data");
+    check(completion.at("dependency").at("messageId") == messages.back().at("messageId") &&
+          completion.at("dependency").at("requestKind") == "consult" &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "the consultation lost its peer dependency or attributed the reply to a Session");
 }
 
 void requestedCriteriaApplyToFirstPeerWork() {
@@ -2136,6 +2180,7 @@ int main() {
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
+            {"Peer completion evidence follows the Session read grant",peerCompletionKeepsEvidenceWithinTheReadGrant},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
             {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
