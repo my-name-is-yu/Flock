@@ -22,6 +22,7 @@ std::string fingerprint(const Json& payload) {
 }
 
 std::string_view approvalError(ApprovalGate result) {
+    if (result == ApprovalGate::waiting) return "The action is waiting for approval in Flock.";
     if (result == ApprovalGate::expired) return "The policy approval expired.";
     if (result == ApprovalGate::stale) return "The action changed or its policy approval is no longer current.";
     return "The action was denied by policy.";
@@ -30,12 +31,15 @@ std::string_view approvalError(ApprovalGate result) {
 PolicyOrigin Store::Impl::policyOrigin(const conversation::Message& message) {
     const bool background = message.routing.contains("gitEvent");
     PolicyOrigin origin{message.bot,message.channelScope,{},message.id,message.id,0,0,0,background};
-    if (!background && message.principalSource != conversation::PrincipalSource::channel)
+    if (background) return origin;
+    if (message.principalSource != conversation::PrincipalSource::channel) {
         origin.requester = turnActor(message).id;
-    if (message.principalSource == conversation::PrincipalSource::channel &&
-        channelMessageAuthorized(message.id,message.bot) && message.admittedActor.id != localOwner.id &&
-        Policy(*this).allows(message.admittedActor,Action::bot_talk,message.bot))
-        origin.requester = message.admittedActor.id;
+    } else if (channelMessageAuthorized(message.id,message.bot)) {
+        const auto& id = message.admittedActor.id;
+        const bool canSignIn = resolveWebIdentity ? resolveWebIdentity(id).has_value()
+                                                  : id == localOwner.id && !Policy(*this).requiresIdentity();
+        if (canSignIn) origin.requester = id;
+    }
     return origin;
 }
 
@@ -221,6 +225,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
         journal(origin.task,"policy_approval",{{"itemId",card},{"status","pending"}});
     }
     policy.audit(Person{},origin.bot,"approval_requested",{{"itemId",card},{"action",action},{"target",resource.target}});
+    if (origin.anchor) channelApprovalNotice(origin.anchor);
     return ApprovalGate::waiting;
 }
 

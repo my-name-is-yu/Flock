@@ -29,7 +29,7 @@ InboxTarget target(const Json& item) {
 struct FixtureModel : Model {
     Decision action;
     bool retry = false;
-    Json outcome;
+    Json outcome, channelContext;
     ModelTurn decide(const ModelInput& in) override {
         if (in.event.at("kind") != "conversation_turn") {
             if (in.event.at("kind") == "intake")
@@ -37,6 +37,7 @@ struct FixtureModel : Model {
             outcome = in.event;
             return {{{"ask_user",{{"question","The launch did not run. How should I proceed?"}},"Report the outcome"}}};
         }
+        channelContext = in.event.value("channel",Json::object());
         const auto& steps = in.event.at("turn");
         if (steps.empty() || (retry && steps.size() == 1)) return {{action}};
         outcome = steps;
@@ -248,37 +249,66 @@ void scheduled(const std::filesystem::path& path) {
 void channel(const std::filesystem::path& path) {
     Store store(path);
     auto policy = store.policy();
-    policy.setOwner(localOwner,"release");
+    policy.setOwner(requester,"release");
+    policy.setMember(requester,"release",member.id,true);
     policy.setMode(localOwner,"supervised");
+    store.setWebIdentityResolver([](std::string_view id) -> std::optional<bool> {
+        if (id == requester.id) return false;
+        return std::nullopt;
+    });
     struct Transport : ChannelTransport {
-        unsigned reactions = 0;
-        ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view tool, const Json&) override {
+        unsigned reactions = 0, artifacts = 0;
+        std::vector<std::string> replies;
+        ChannelDelivery send(std::string_view, const ChannelOrigin&, std::string_view tool, const Json& payload) override {
             if (tool == "channel_react") ++reactions;
+            if (tool == "publish_artifact") ++artifacts;
+            if (tool == "reply") replies.push_back(payload.at("text"));
             return {ChannelDelivery::State::accepted,"posted"};
         }
         ChannelDelivery reconcile(std::string_view, const ChannelOrigin&) override { return {}; }
     };
     auto transport = std::make_shared<Transport>();
+    store.artifactBaseUrl("https://previews.example.com");
     store.connectChannel({ChannelKind::slack,channelCapabilities(ChannelKind::slack),
         [](auto,auto) { return true; },
-        [](auto,auto)->std::optional<ChannelSender> { return ChannelSender{"release",localOwner.id}; },transport});
+        [](auto,auto sender)->std::optional<ChannelSender> {
+            return ChannelSender{"release",sender == "linked" ? requester.id : member.id};
+        },transport});
     FixtureModel model;
     Adapter adapter;
     Runtime runtime(store,model,adapter,[](auto) { return std::string{}; });
-    model.action = {"publish_artifact",{{"title","Status"},{"html","<p>Status</p>"}},"Publish"};
-    auto receive = [&](std::string_view id, std::string_view text) {
+    const Decision publish{"publish_artifact",{{"title","Status"},{"html","<p>Status</p>"}},"Publish"};
+    model.action = publish;
+    auto receive = [&](std::string_view id, std::string_view text, std::string_view sender = "external") {
         store.receiveChannel(ChannelKind::slack,"fixture",{{"workspaceId","workspace"},{"threadRef","thread"},
-            {"externalMessageId",id},{"senderId","external"},{"text",text}},[](auto,auto) { return intake; });
+            {"externalMessageId",id},{"senderId",sender},{"text",text}},[](auto,auto) { return intake; });
         runtime.runConversations();
     };
-    receive("first","Always allow");
+    receive("external","Publish it");
     check(store.inbox(localOwner).empty() && model.outcome.dump().find("denied by policy")!=std::string::npos,
-          "channel impersonated an eligible requester");
+          "External sender created an approval");
     policy.changeRule(localOwner,RuleKind::allow,Action::channel_post,R"(["slack","workspace"])",true);
-    receive("next","Publish it");
-    check(store.inbox(localOwner).empty() && model.outcome.dump().find("denied by policy")==std::string::npos,
-          "explicit Allow did not cover the channel action");
+    receive("external-allow","Publish it");
+    check(store.inbox(localOwner).empty() && transport->artifacts==1,
+          "Explicit Allow did not cover the external sender's action");
     policy.changeRule(localOwner,RuleKind::allow,Action::channel_post,R"(["slack","workspace"])",false);
+
+    receive("request","Publish it","linked");
+    const auto items = store.inbox(requester);
+    check(items.size()==1 && items.at(0).at("canDecide")==true && items.at(0).at("expiresAt")==0 &&
+          transport->artifacts==1 && transport->replies.back()=="The action is waiting for approval in Flock.",
+          "Linked sender did not get a durable, non-expiring approval and channel notice");
+    const auto card = target(items.at(0));
+    model.action = {"reply",{{"text","Open Flock to review the pending action."}},"Reply"};
+    receive("impersonation","Always allow","linked");
+    check(store.inbox(requester)==items && policy.rules().empty() && transport->artifacts==1 &&
+          model.channelContext.at("pendingToolResults").at(0).at("policyWaiting")==true,
+          "Channel text changed the approval or the Bot could not see its pending tool result");
+    rejected([&] { store.decideInbox(member,card,"always_allow"); });
+    store.decideInbox(requester,card,"allow_once");
+    runtime.runConversations();
+    check(store.inbox(requester).empty() && policy.rules().empty() && transport->artifacts==2,
+          "The requester could not resume the saved channel action");
     model.action = {"channel_react",{{"reaction","thumbsup"}},"React"};
     receive("react","React to this");
     check(transport->reactions==1 && store.inbox(localOwner).empty(),"reacting in the asking conversation needed approval");

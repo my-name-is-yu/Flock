@@ -186,10 +186,10 @@ bool Store::Impl::permitsChannel(std::string_view bot, const ChannelOrigin& orig
     if (connector == channels.end()) return false;
     const auto linked = connector->second.resolveSender(origin.workspaceId,sender);
     if (!linked || linked->botId != bot || linked->personId != person) return false;
-    auto access = Policy(const_cast<Impl&>(*this));
-    return access.allows(Person{std::string(person),false},Action::bot_talk,bot) &&
-           access.allows(bot,Action::channel_use,channelPolicyTarget(origin)) &&
-           (operation == "use" || !access.forbidden(bot,operation == "read" ? Action::channel_read : Action::channel_post,
+    auto policy = Policy(const_cast<Impl&>(*this));
+    return policy.allows(Person{std::string(person),false},Action::bot_talk,bot) &&
+           policy.allows(bot,Action::channel_use,channelPolicyTarget(origin)) &&
+           (operation == "use" || !policy.forbidden(bot,operation == "read" ? Action::channel_read : Action::channel_post,
                                                 channelPolicyTarget(origin)));
 }
 
@@ -221,7 +221,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     if (!files.is_array() || files.size() > attachmentCount) throw Conflict("Too many attachments");
     const auto& caps = connector.capabilities;
     if (!files.empty() && !p_->permitsChannel(sender->botId,origin,senderId,sender->personId,"read"))
-        throw ChannelAccessDenied("Channel attachment access is not granted");
+        throw ChannelAccessDenied("Channel attachment read denied");
     std::size_t total = 0;
     for (const auto& file : files) {
         const auto name = required(file,"name",255);
@@ -244,7 +244,7 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
 
 void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
     if (!permitsChannel(bot,message.origin,message.senderId,message.personId,message.attachments.empty() ? "use" : "read"))
-        throw ChannelAccessDenied("Channel access is no longer granted");
+        throw ChannelAccessDenied("Channel access is no longer authorized");
     const auto scrub = redactor(bot);
     scrub.requirePublic({message.origin.json(),message.senderId,message.personId});
     if (replay) {
@@ -324,6 +324,15 @@ FROM channel_posts post WHERE post.bot_id=? AND post.scope_key=? ORDER BY post.s
 )SQL",{bot,row.string(3),bot,row.string(3)});
     auto& messages = context["channel"]["sentMessages"] = Json::array();
     while (sent.next()) messages.push_back({{"externalMessageId",sent.string(0)},{"text",bounded(sent.string(1),500)}});
+    if (images) {
+        auto pending = query(R"SQL(
+SELECT DISTINCT p.action FROM policy_approvals p JOIN channel_messages c ON c.message_id=p.anchor
+WHERE p.status='pending' AND c.scope_key=? AND p.bot=? ORDER BY p.action
+)SQL",{row.string(3),bot});
+        while (pending.next())
+            context["channel"]["pendingToolResults"].push_back({{"ok",false},{"policyWaiting",true},
+                {"action",pending.string(0)},{"message",approvalError(ApprovalGate::waiting)}});
+    }
     context["channel"]["capabilities"] = {{"supportsReplies",caps.supportsReplies},{"supportsEdit",caps.supportsEdit},
         {"supportsReact",caps.supportsReact},{"supportsHtmlArtifacts",caps.supportsHtmlArtifacts && !artifactOrigin.empty()},
         {"allowedAttachmentTypes",caps.allowedAttachmentTypes},{"maxAttachmentBytes",std::min(caps.maxAttachmentBytes,attachmentLimit)}};
@@ -396,10 +405,28 @@ void Store::Impl::queueChannelTaskUpdate(Id task, Id entry, std::string_view kin
 }
 
 void Store::Impl::channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies) {
+    channelNotice(source,bot,reason,supportsReplies," I can post a normal follow-up in this conversation if you'd like.");
+}
+
+void Store::Impl::channelApprovalNotice(Id source) {
+    auto row = query("SELECT m.bot_id,c.origin FROM channel_messages c JOIN messages m ON m.id=c.message_id"
+                     " WHERE c.message_id=?",{source});
+    if (!row.next()) return;
+    const auto origin = originFrom(row.json(1));
+    const auto connector = channels.find(origin.kind);
+    const auto bot = row.string(0);
+    if (connector == channels.end() || !connector->second.capabilities.supportsReplies ||
+        Policy(*this).check(bot,Resource{Action::channel_post,channelPolicyTarget(origin),true}) != PolicyResult::allow)
+        return;
+    channelNotice(source,bot,approvalError(ApprovalGate::waiting),true);
+}
+
+void Store::Impl::channelNotice(Id source, std::string_view bot, std::string_view reason, bool supportsReplies,
+                                std::string_view followUp) {
     exec("INSERT OR IGNORE INTO channel_notices VALUES(?,?)",{source,reason});
     if (!sqlite3_changes(db)) return;
     std::string notice(reason);
-    if (supportsReplies) notice += " I can post a normal follow-up in this conversation if you'd like.";
+    if (supportsReplies) notice += followUp;
     exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_reply','{}',?)",{unixTime(),bot});
     const auto reply = last();
     const Json data{{"messageId",reply},{"replyToMessageId",source},{"text",notice},{"status","done"}};
@@ -428,7 +455,7 @@ Json Store::Impl::channelTool(Id message, std::string_view bot, const Decision& 
     const auto origin = originFrom(source.json(0));
     const auto sender = source.string(1), person = source.string(2);
     if (!permitsChannel(bot,origin,sender,person,tool == "read_channel_attachment" ? "read" : "use"))
-        throw ChannelAccessDenied("Channel access is no longer granted");
+        throw ChannelAccessDenied("Channel access is no longer authorized");
     const auto& caps = channels.at(origin.kind).capabilities;
 
     const auto& args = decision.args;
