@@ -38,7 +38,6 @@ const std::vector<std::pair<std::string_view,Tool>>& specs() {
             "pr",{{"prNumber","integer","Exact PR number."},{"title","string","New title.",false},
              {"body","string","New description.",false},{"baseRef","string","New base branch.",false},
              {"state","string","New PR state.",false,{{"open"},{"closed"}}}}}},
-        // Notification tools are presented in declaration order.
         {"git_pr_status",{"Read PR state and head commit using repository:read.",
             "read",{{"prNumber","integer","Exact PR number."}},"prNumber"}},
         {"git_commit_status",{"Read commit statuses and checks using repository:read.",
