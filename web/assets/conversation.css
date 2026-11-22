@@ -51,10 +51,28 @@
 .profile[data-state="offline"] .profile-status { color: var(--danger); }
 .profile-placeholder { font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
 
+.conversation-frame {
+  grid-area: 2 / 1; position: relative; display: grid; min-height: 0;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  isolation: isolate;
+}
+.conversation-frame::before, .conversation-frame::after {
+  content: ""; position: absolute; z-index: 1; inset-inline: 0;
+  height: .8rem; opacity: 0; pointer-events: none;
+  transition: opacity .12s ease-out;
+}
+.conversation-frame::before { top: 0; background: linear-gradient(var(--canvas), transparent); }
+.conversation-frame::after { bottom: 0; background: linear-gradient(transparent, var(--canvas)); }
+.conversation-frame[data-history-above]::before, .conversation-frame[data-history-below]::after { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .conversation-frame::before, .conversation-frame::after { transition: none; }
+}
+@media (forced-colors: active) {
+  .conversation-frame::before, .conversation-frame::after { display: none; }
+}
 .conversation {
   --bot-accent: var(--accent-fill);
   --user-bubble: #58418a;
-  grid-area: 2 / 1;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
   position: relative;
