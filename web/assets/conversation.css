@@ -23,9 +23,8 @@
 .peer-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile {
   display: flex; align-items: center; gap: .6rem; min-width: 0; max-width: min(22rem, 60vw);
-  padding: .3rem .7rem .3rem .35rem; border: 0; border-radius: var(--radius-md); background: none; text-align: left;
+  padding: .3rem .5rem;
 }
-.profile:hover { background: var(--hover); }
 .profile-face { position: relative; display: block; flex: none; }
 .avatar-profile { width: 2.25rem; height: 2.25rem; }
 .status-indicator {

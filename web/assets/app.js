@@ -589,7 +589,9 @@ function renderHeader() {
   profile.dataset.presence = presence;
   profile.dataset.state = offline ? 'offline' : presence;
   profile.title = `${bot.name} · ${status}`;
-  profile.setAttribute('aria-label', `${bot.name} settings`);
+  const settings = elements['settings-button'];
+  settings.title = `${bot.name} settings`;
+  settings.setAttribute('aria-label', settings.title);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
 }
@@ -1856,7 +1858,7 @@ elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
-for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
+elements['settings-button'].addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
 elements['peer-back'].addEventListener('click', () => {
   selectBot(view.id);

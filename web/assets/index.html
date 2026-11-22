@@ -71,10 +71,10 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status" hidden>
-            <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
-            <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
-          </button>
+          <div id="profile" class="profile" hidden>
+            <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+            <div class="profile-text"><h1 id="profile-name" class="profile-name"></h1><p id="profile-status" class="profile-status"></p></div>
+          </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
           <h1 id="peer-heading" class="peer-heading" tabindex="-1" hidden></h1>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
