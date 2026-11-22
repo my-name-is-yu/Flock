@@ -453,24 +453,13 @@ struct Pipe {
     std::pair<Fd,Fd> ends = make();
 };
 
-struct Capture {
-    std::string output[2];
-    bool truncated = false;
-    bool readAvailable(int fd, unsigned channel) {
-        char buffer[4096];
-        bool changed = false;
-        for (int i = 0; i < 8; ++i) {
-            const auto n = read(fd,buffer,sizeof(buffer));
-            if (n <= 0) break;
-            const auto room = workspaceOutputLimit-output[0].size()-output[1].size();
-            const auto used = std::min(static_cast<std::size_t>(n),room);
-            changed |= used > 0 || !truncated;
-            output[channel].append(buffer,used);
-            truncated |= used < static_cast<std::size_t>(n);
-        }
-        return changed;
-    }
-};
+WorkspaceOutput redactOutput(const WorkspaceOutput& capture, const SecretRedactor& scrub, bool partial) {
+    const auto stdoutText = safeOutput(scrub.text(capture.text[0],partial || capture.truncated));
+    const auto stderrText = safeOutput(scrub.text(capture.text[1],partial || capture.truncated));
+    const auto out = bounded(stdoutText,workspaceOutputLimit);
+    const auto err = bounded(stderrText,workspaceOutputLimit-out.size());
+    return {{out,err},capture.truncated || out != stdoutText || err != stderrText};
+}
 
 void verifyTree(int root) {
     std::size_t count = 0;
@@ -483,6 +472,21 @@ void verifyTree(int root) {
     });
 }
 
+}
+
+bool WorkspaceOutput::readAvailable(int fd, unsigned channel) {
+    char buffer[4096];
+    bool changed = false;
+    for (int i = 0; i < 8; ++i) {
+        const auto n = read(fd,buffer,sizeof(buffer));
+        if (n <= 0) break;
+        const auto room = workspaceOutputLimit-text[0].size()-text[1].size();
+        const auto used = std::min(static_cast<std::size_t>(n),room);
+        changed |= used > 0 || !truncated;
+        text[channel].append(buffer,used);
+        truncated |= used < static_cast<std::size_t>(n);
+    }
+    return changed;
 }
 
 int openExactChildDirectory(int parent, const fs::path& name) {
@@ -536,16 +540,45 @@ CREATE TABLE IF NOT EXISTS workspace_commands(
 
 void Store::Impl::recoverWorkspace() {
     std::lock_guard lock(mutex);
+    persistWorkspaceResults();
+    workspaceJobs.clear();
     exec("UPDATE workspace_commands SET state='unknown_after_restart' WHERE state IN ('running','stop_requested')");
 }
 
+void Store::Impl::persistWorkspaceResults() {
+    std::lock_guard lock(mutex);
+    for (auto it = workspaceJobs.begin(); it != workspaceJobs.end();) {
+        const auto& completion = it->second->completion;
+        if (const auto* error = std::get_if<std::exception_ptr>(&completion)) std::rethrow_exception(*error);
+        if (const auto* outcome = std::get_if<WorkspaceOutcome>(&completion)) {
+            const auto output = redactOutput(outcome->capture,sharedRedactor(),outcome->incomplete);
+            exec("UPDATE workspace_commands SET stdout=?,stderr=?,truncated=?,state=?,exit_code=? WHERE id=?",
+                 {output.text[0],output.text[1],int(output.truncated),
+                  outcome->exitCode ? "exited" : "unknown_after_restart",
+                  outcome->exitCode ? Json(*outcome->exitCode) : Json(nullptr),it->first});
+            it = workspaceJobs.erase(it);
+        } else ++it;
+    }
+}
+
 void Store::Impl::stopWorkspace() {
-    std::map<Id,std::unique_ptr<WorkspaceJob>> running;
     {
         std::lock_guard lock(mutex);
-        running.swap(workspaceJobs);
-        for (auto& [id,job] : running) job->worker.request_stop();
+        for (auto& [id,job] : workspaceJobs) job->worker.request_stop();
     }
+    // Runtime has joined the workers that can admit commands. Only command workers remain.
+    for (auto& [id,job] : workspaceJobs)
+        if (job->worker.joinable()) job->worker.join();
+    for (int attempt = 1; ; ++attempt) {
+        try {
+            persistWorkspaceResults();
+            break;
+        } catch (const StorageError& error) {
+            if (!error.contended() || attempt == 3) throw;
+            std::this_thread::sleep_for(50ms);
+        }
+    }
+    workspaceJobs.clear();
 }
 
 void Store::Impl::validateWorkspace(const ToolContext& ctx, const Decision& call) {
@@ -580,6 +613,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     const auto& args = call.args;
     if (call.tool == "workspace_command_status" || call.tool == "workspace_stop_command") {
         std::lock_guard lock(mutex);
+        persistWorkspaceResults();
         const auto id = toolId(args,"commandId");
         if (call.tool == "workspace_stop_command") {
             exec("UPDATE workspace_commands SET state='stop_requested' WHERE bot=? AND id=? AND state='running'",{ctx.bot,id});
@@ -628,7 +662,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
 #endif
     Pipe out, err, lease;
     std::lock_guard lock(mutex);
-    std::erase_if(workspaceJobs,[](const auto& entry) { return entry.second->done.load(); });
+    persistWorkspaceResults();
     if (workspaceJobs.size() >= 8 || query("SELECT 1 FROM workspace_commands WHERE bot=? AND state IN "
                                           "('running','stop_requested')",{ctx.bot}).next())
         throw Conflict("Workspace command limit reached");
@@ -636,8 +670,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     auto* control = job.get();
     exec("INSERT INTO workspace_commands(bot,started_at,state) VALUES(?,?,'running')",{ctx.bot,unixTime()});
     const auto id = last();
-    auto [entry,inserted] = workspaceJobs.emplace(id,std::move(job));
-    (void)inserted;
+    workspaceJobs.emplace(id,std::move(job));
     try {
         control->worker = std::jthread([this,control,id,cwd,pipeline,command = std::move(command),
 #ifdef __APPLE__
@@ -650,6 +683,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
             bool supervisorReaped = false;
             bool workerTimeout = false;
             int supervisorStatus = 0;
+            WorkspaceOutput capture;
             try {
                 if (control->stop || shutdown.stop_requested()) lease.ends.second.reset();
                 pid = launchSandbox(cwd,working.get(),std::move(command),lease.ends.first.get(),out.ends.second.get(),err.ends.second.get());
@@ -658,7 +692,6 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                 out.ends.second.reset();
                 err.ends.second.reset();
                 auto readers = std::array{pollfd{out.ends.first.get(),POLLIN,0},pollfd{err.ends.first.get(),POLLIN,0}};
-                Capture capture;
                 const auto deadline = std::chrono::steady_clock::now() + supervisorDeadline;
                 while (true) {
                     if (control->stop || shutdown.stop_requested()) lease.ends.second.reset();
@@ -681,30 +714,27 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                         supervisorReaped = true;
                         supervisorStatus = status;
                         for (unsigned i = 0; i < readers.size(); ++i) capture.readAvailable(readers[i].fd,i);
-                    }
-                    if (shutdown.stop_requested() && child > 0) break;
-                    if (changed || child > 0) {
+                        if (shutdown.stop_requested()) return;
                         std::lock_guard guard(mutex);
-                        const auto scrub = sharedRedactor();
-                        const bool partial = capture.truncated || child == 0;
-                        const auto stdoutText = safeOutput(scrub.text(capture.output[0],partial));
-                        const auto stderrText = safeOutput(scrub.text(capture.output[1],partial));
-                        const auto output = bounded(stdoutText,workspaceOutputLimit);
-                        const auto error = bounded(stderrText,workspaceOutputLimit-output.size());
-                        const bool truncated = capture.truncated || output != stdoutText || error != stderrText;
-                        const bool unknown = pipeline && child > 0 && WIFSIGNALED(status);
+                        const bool unknown = pipeline && WIFSIGNALED(status);
                         const auto exit = WIFEXITED(status) ? WEXITSTATUS(status) :
                                           WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 125;
-                        exec("UPDATE workspace_commands SET stdout=?,stderr=?,truncated=?,"
-                             "state=CASE WHEN ? THEN 'unknown_after_restart' WHEN ? THEN 'exited' ELSE state END,"
-                             "exit_code=CASE WHEN ? THEN NULL WHEN ? THEN ? ELSE exit_code END WHERE id=?",
-                             {output,error,int(truncated),
-                              int(unknown),int(child > 0 && !unknown),int(unknown),int(child > 0 && !unknown),
-                              child > 0 && !unknown ? Json(exit) : Json(nullptr),id});
+                        control->completion = WorkspaceOutcome{std::move(capture),unknown ? std::nullopt : std::optional{exit}};
+                        return;
                     }
-                    if (child > 0) break;
+                    if (changed) {
+                        try {
+                            std::lock_guard guard(mutex);
+                            const auto partial = redactOutput(capture,sharedRedactor(),true);
+                            exec("UPDATE workspace_commands SET stdout=?,stderr=?,truncated=? WHERE id=?",
+                                 {partial.text[0],partial.text[1],int(partial.truncated),id});
+                        } catch (const StorageError& error) {
+                            if (!error.contended()) throw;
+                        }
+                    }
                 }
-            } catch (const std::exception&) {
+            } catch (...) {
+                const auto error = std::current_exception();
                 lease.ends.second.reset();
                 if (pid > 0) {
                     int status = 0;
@@ -715,23 +745,23 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                         supervisorStatus = status;
                     }
                 }
-                try {
-                    std::lock_guard guard(mutex);
+                std::lock_guard guard(mutex);
+                try { std::rethrow_exception(error); }
+                catch (const Conflict&) {
+                    if (shutdown.stop_requested()) return;
                     const bool unknown = pipeline &&
                                          ((supervisorReaped && WIFSIGNALED(supervisorStatus)) ||
                                           (!supervisorReaped && pid > 0));
                     const int exit = workerTimeout ? 124 : 125;
-                    exec("UPDATE workspace_commands SET state=?,exit_code=?,"
-                         "stderr='Sandbox command or supervisor failed' WHERE id=?",
-                         {unknown ? "unknown_after_restart" : "exited",unknown ? Json(nullptr) : Json(exit),id});
-                } catch (const std::exception&) {}
+                    capture.text[1] = "Sandbox command or supervisor failed";
+                    control->completion = WorkspaceOutcome{std::move(capture),
+                        unknown ? std::nullopt : std::optional{exit},true};
+                } catch (...) { control->completion = error; }
             }
-            control->done = true;
         });
-    } catch (...) {
-        workspaceJobs.erase(entry);
-        exec("UPDATE workspace_commands SET state='exited',exit_code=125 WHERE id=?",{id});
-        throw;
+    } catch (const std::system_error&) {
+        control->completion = WorkspaceOutcome{{},125};
+        throw Conflict("Could not start the workspace command");
     }
     return {{"commandId",id},{"state","running"}};
 }

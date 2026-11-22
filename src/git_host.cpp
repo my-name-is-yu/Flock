@@ -216,6 +216,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
                 return {{"ok",true},{"data",{{"text",excerpt},{"truncated",log.truncated || excerpt.size() < utf8.size()}}}};
             }
             return {{"ok",true},{"data",scrub.payload(host.call(context,repo,decision),false,gitResultTextLimit)}};
+        } catch (const StorageError&) {
+            throw;
         } catch (const std::exception& error) {
             return {{"ok",false},{"error",sharedRedactor().text(error.what())}};
         }
@@ -300,6 +302,8 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
         }
         return gitTool(*host,message.bot,0,message.routing,call,
                        "turn/" + std::to_string(message.id) + "/" + std::to_string(step));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception& error) {
         return {{"ok",false},{"error",sharedRedactor().text(error.what())}};
     }

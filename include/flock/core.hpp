@@ -309,6 +309,7 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
+    std::function<void(std::string_view)> storageContention = {};
 };
 class Runtime {
 public:
@@ -322,6 +323,8 @@ public:
     // eligible projects independently and returns immediately.
     void tick();
     void tickConcurrent();
+    // Let admitted work settle while stopping further dispatch.
+    void requestStop();
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;

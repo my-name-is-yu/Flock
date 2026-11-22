@@ -1774,9 +1774,13 @@ void prefillPersistenceFailureDoesNotProceed() {
           f.t3.reads == 1 && f.logs(source,"report") == 1,
           "test did not reach a settled report with an incoming peer result");
     setSessionReadJournalFailure(f.directory/"state.db",true);
-    f.runtime->tick();
-    check(f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
-          f.logs(source,"model_failure") == 1 && f.logs(source,"completed") == 0 &&
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
+          f.logs(source,"model_failure") == 0 && f.logs(source,"completed") == 0 &&
           f.task(source)["state"] == "deciding",
           "the model proceeded with a prefill excerpt that SQLite did not durably save");
     setSessionReadJournalFailure(f.directory/"state.db",false);
