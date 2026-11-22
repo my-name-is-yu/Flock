@@ -3,6 +3,7 @@
 #include "embedded_assets.hpp"
 #include "views.hpp"
 #include "access_routes.hpp"
+#include "channel_routes.hpp"
 
 #include <httplib.h>
 
@@ -163,6 +164,18 @@ Json operationData(const Json& body, std::string_view operation) {
     return Json::object();
 }
 
+bool localApprovalNavigation(const Request& req) {
+    if (req.method != "GET" || req.has_header("Origin") ||
+        req.get_header_value("Sec-Fetch-Site") != "cross-site" ||
+        req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
+        req.get_header_value("Sec-Fetch-Dest") != "document") return false;
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    if (!path.starts_with(prefix)) return false;
+    path.remove_prefix(prefix.size());
+    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+}
+
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
@@ -211,6 +224,7 @@ public:
             error(res,404,"settings_not_found");
         });
         web::accessRoutes(server_,store_,callbacks_);
+        web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });
@@ -289,6 +303,7 @@ public:
         changes_.stop();
         server_.stop();
         worker_.join();
+        store_.setWebOrigin({});
     }
     unsigned port() const override { return port_; }
 
@@ -341,13 +356,23 @@ private:
             error(res,403,"invalid_host");
             return HandlerResult::Handled;
         }
+        if ((req.method == "GET" || req.method == "HEAD") && web::artifactPreview(req.path))
+            return HandlerResult::Unhandled;
         const auto origin = req.get_header_value("Origin");
         const auto origins = req.get_header_value_count("Origin");
         const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
         const bool sameOrigin = origins == 1 && origin == "http://" + host;
         if ((origins != 0 && !sameOrigin) || (req.has_header("Sec-Fetch-Site") &&
-            (req.get_header_value_count("Sec-Fetch-Site") != 1 || (fetchSite != "same-origin" && fetchSite != "none")))) {
+            (req.get_header_value_count("Sec-Fetch-Site") != 1 ||
+             (fetchSite != "same-origin" && fetchSite != "none" && !localApprovalNavigation(req))))) {
             error(res,403,"invalid_origin");
+            return HandlerResult::Handled;
+        }
+        if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
+            if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
+            else if (req.get_header_value_count("Content-Type") != 1 ||
+                     req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
+            else return HandlerResult::Unhandled;
             return HandlerResult::Handled;
         }
         if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
@@ -565,6 +590,8 @@ private:
 } // namespace
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
-    return std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
+    return server;
 }
 } // namespace flockv0

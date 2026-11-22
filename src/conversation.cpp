@@ -78,26 +78,40 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
                  " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
 }
 
+std::optional<Json> Store::Impl::messageReceipt(std::string_view bot, std::string_view clientId,
+                                               std::string_view text, Id replyTo) const {
+    auto row = query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
+                         {bot,clientId});
+    if (!row.next()) return std::nullopt;
+    return receiptRow(row,redactor(bot).text(std::string(text)),replyTo);
+}
+
 std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
                                    std::string_view text, Id replyTo) const {
     std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
-                         {bot,clientId});
-    if (!row.next()) return std::nullopt;
-    return receiptRow(row,p_->redactor(bot).text(std::string(text)),replyTo);
+    if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    return p_->messageReceipt(bot,clientId,text,replyTo);
 }
 
 Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
-    if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
-        !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
+    return receive(routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; });
+}
+
+Json Store::receive(std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
+                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route) {
+    if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
+        !hasText(text) || text.size() > messageSize || replyTo < 0)
         throw Conflict("Bot, client message ID and nonempty text are required");
     Json receipt;
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        const auto existing = p_->messageReceipt(bot,clientId,text,replyTo);
         if (existing) receipt = *existing;
         else {
+            const auto routing = route();
+            if (routing.botId != bot || !routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
             modelCallLimit(routing.config);
             const Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},
                                 {"config",routing.config}};
@@ -112,6 +126,7 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
+        if (channel) p_->saveChannelMessage(receipt.at("messageId"),bot,*channel,existing.has_value());
         transaction.commit();
     }
     return receipt;

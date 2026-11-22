@@ -17,14 +17,15 @@ add_custom_command(OUTPUT "${flock_web_asset_header}"
   DEPENDS ${flock_web_assets} "${CMAKE_CURRENT_SOURCE_DIR}/embed.cmake"
   VERBATIM)
 
-add_library(flock_web server.cpp access_routes.cpp identity.cpp views.cpp change_feed.cpp "${flock_web_asset_header}")
+add_library(flock_web server.cpp access_routes.cpp identity.cpp views.cpp change_feed.cpp
+                      channel_routes.cpp channel_bridge.cpp "${flock_web_asset_header}")
 target_include_directories(flock_web PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_include_directories(flock_web SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
 target_link_libraries(flock_web PUBLIC flock_core PRIVATE Threads::Threads)
 target_compile_options(flock_web PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
-  add_executable(flock_web_tests tests/http.cpp)
+  add_executable(flock_web_tests tests/http.cpp tests/channels_local.cpp)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
   target_link_libraries(flock_web_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web COMMAND flock_web_tests)

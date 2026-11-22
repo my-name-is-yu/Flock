@@ -1,10 +1,9 @@
-#include "flock/web.hpp"
-
-#include <httplib.h>
+#include "http_fixture.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -13,12 +12,8 @@
 #include <set>
 
 using namespace flockv0;
+using namespace flockv0::http_test;
 namespace {
-constexpr auto privateValue = "private-token-value";
-
-void check(bool condition, std::string_view message) {
-    if (!condition) throw std::runtime_error(std::string(message));
-}
 
 struct TestDirectory {
     std::filesystem::path path;
@@ -91,30 +86,6 @@ WebCallbacks callbacks() {
         }
     };
 }
-
-class Browser {
-public:
-    explicit Browser(const WebServer& server) : client("127.0.0.1",static_cast<int>(server.port())),
-        origin("http://127.0.0.1:" + std::to_string(server.port())) {}
-
-    Json get(const std::string& path) { return checked(client.Get(path),200); }
-    Json post(const std::string& path, const Json& data, int status = 200) {
-        return checked(client.Post(path,headers(),data.dump(),"application/json"),status);
-    }
-    Id request(std::string_view bot, std::string_view text) {
-        return post("/api/requests",{{"botId",bot},{"request",text}},201).at("taskId");
-    }
-    httplib::Headers headers() const { return {{"Origin",origin},{"Sec-Fetch-Site","same-origin"},{"X-Flock-Action","1"}}; }
-    static Json checked(const httplib::Result& response, int status) {
-        if (!response) throw std::runtime_error("HTTP request failed: " + httplib::to_string(response.error()));
-        if (response->status != status)
-            throw std::runtime_error("Unexpected HTTP " + std::to_string(response->status) + " from " + response->body.substr(0,240));
-        check(response->body.find(privateValue) == std::string::npos,"private connection value entered HTTP response");
-        return Json::parse(response->body);
-    }
-    httplib::Client client;
-    std::string origin;
-};
 
 void pageAssets(Browser& browser, const std::string& html) {
     const std::regex tags(R"(<(script|link)\b[^>]*>)");
@@ -909,11 +880,11 @@ void accessEndpoints(const std::filesystem::path& path) {
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
     std::ofstream(file) << accounts;
     std::filesystem::permissions(file,std::filesystem::perms::owner_read|std::filesystem::perms::owner_write);
-    cb.authenticate = webIdentities(file);
+    configureWebIdentities(store,file,cb);
     const auto link = path.parent_path()/"identity-link";
     std::filesystem::create_symlink(file,link);
     bool rejected = false;
-    try { webIdentities(link); } catch (const Conflict&) { rejected = true; }
+    try { configureWebIdentities(store,link,cb); } catch (const Conflict&) { rejected = true; }
     check(rejected,"symlink identity file accepted");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
@@ -958,6 +929,7 @@ int main() {
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
         accessEndpoints(directory.path / "access.db");
+        channelEndpoints(directory.path / "channels.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
