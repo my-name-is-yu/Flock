@@ -109,7 +109,7 @@
   padding-inline: .15rem 0;
   font-size: var(--text-md); line-height: 1.5;
 }
-.composer textarea::placeholder { color: var(--text-3); }
+.composer textarea::placeholder { color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .composer textarea:focus-visible { outline: none; }
 .composer textarea:read-only { color: var(--text-2); }
 
