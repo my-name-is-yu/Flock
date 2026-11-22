@@ -174,8 +174,17 @@ a.settings-row svg { margin-left: auto; }
 .wait-why { color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; overflow-wrap: anywhere; }
 .wait-form { display: grid; gap: .6rem; }
 .wait-form label { display: grid; gap: .3rem; color: var(--text-2); font-size: var(--text-sm); }
-.wait-form input { width: 100%; border: 1px solid var(--hairline); border-radius: var(--radius-md); padding: .55rem .7rem; background: var(--field); color: var(--text); font-size: var(--text-md); }
-.wait-form input:focus-visible { outline-offset: 0; }
+.wait-form input {
+  width: 100%; border: 1px solid var(--hairline); border-radius: var(--radius-md);
+  padding: .55rem .7rem; background: var(--field); color: var(--text); font-size: var(--text-md);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.wait-form input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--focus) 55%, var(--hairline));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+}
+.wait-form input:focus-visible { outline: none; }
 .wait-form > .dialog-button { justify-self: start; }
 .wait-actions { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: end; gap: .6rem; padding-top: .4rem; }
 .wait-primary { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
