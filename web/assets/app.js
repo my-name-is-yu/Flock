@@ -1,21 +1,24 @@
+import { handleComposerEnter } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { messagePlacement } from '/chat-grouping.mjs';
 import { mountBoardInbox } from '/board-inbox.js';
+import { ScreenshotError, screenshotMessage, stageScreenshots } from '/composer-screenshots.mjs';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
 import { replyArrivalId } from '/reply-arrival.mjs';
-import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
-  'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
+  'profile-name', 'profile-status', 'profile-heading', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -35,10 +38,14 @@ const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long'
 const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
+const sessionEndLabels = {
+  completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
+  interrupted: 'Interrupted', rolled_back: 'Rolled back', ended: 'Ended',
+};
 const stateLabels = {
+  ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
-  cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
-  failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
+  cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
 const waitLabels = {
@@ -81,6 +88,7 @@ function save(key, value) {
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
 const composerDrafts = createComposerDraftStore();
+const screenshotDrafts = new WeakMap();
 const sendingMessages = new Set();
 const pendingWaits = new Map();
 const notices = new Map();
@@ -207,12 +215,16 @@ function conversationUrl(botId, peerId) {
 function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
-  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) { renderBots(); return; }
+  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
+    if (view.source) backToLatest();
+    else renderBots();
+    return;
+  }
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    sessionsBefore: 0, ...existing, source: null, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
@@ -558,8 +570,7 @@ function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
   const profile = elements.profile;
-  profile.hidden = !bot || !!dm;
-  elements['settings-button'].hidden = !bot || !!dm;
+  elements['profile-heading'].hidden = !bot || !!dm;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
@@ -604,8 +615,8 @@ function renderHeader() {
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
   profile.dataset.state = offline ? 'offline' : presence;
-  profile.title = `${bot.name} · ${status}`;
-  profile.setAttribute('aria-label', `${bot.name} settings`);
+  profile.title = `${bot.name} settings`;
+  profile.setAttribute('aria-label', profile.title);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
   elements['profile-status'].hidden = !offline && presence === 'idle';
@@ -723,7 +734,9 @@ function renderActivity() {
   const ended = [];
   for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended'));
+      if (activeKeys.has(key(task.id, session))) continue;
+      const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+      ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
     }
   }
   const rows = [];
@@ -754,10 +767,12 @@ function beginReply(target, text = '') {
   elements.message.focus();
 }
 const icons = {
+  person: '<circle cx="12" cy="8" r="3.25"/><path d="M5.25 19c.6-3.5 3.1-5.4 6.75-5.4s6.15 1.9 6.75 5.4"/>',
   copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
   forward: '<path d="m14.5 7 5 5-5 5"/><path d="M19 12h-9a5.5 5.5 0 0 0-5.5 5.5V19"/>',
+  resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   open: '<path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V14"/><path d="M14 5h5v5M19 5l-8 8"/>',
@@ -794,8 +809,8 @@ const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.curren
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  const choices = task.wait.choices ?? [];
-  if (choices.length) {
+  const choices = task.wait.choices;
+  if (hasQuestionChoices(choices)) {
     const key = questionKey(task);
     const selections = context.questionChoices ??= new Map();
     actions.append(questionChoiceForm({
@@ -812,9 +827,9 @@ function questionActions(context, task, { dialog = false } = {}) {
       },
     }));
   }
-  const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
+  const reply = questionReplyButton(() => {
     if (view?.id === context.id) beginReply(target);
-  });
+  }, dialog);
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
   return actions;
@@ -842,6 +857,11 @@ function suggestionActions(event) {
   for (const suggestion of event.data.suggestions)
     actions.append(button(suggestion, 'button', () => beginReply(target, suggestion)));
   return actions;
+}
+function channelLabel(kind) {
+  if (kind === 'slack') return 'via Slack';
+  if (kind === 'imessage') return 'via iMessage';
+  return 'via external channel';
 }
 function reasonText(text) {
   const reason = node('p', 'event-reason');
@@ -941,6 +961,50 @@ function sourceAction(source, label = 'Open source') {
   control.dataset.timelineAction = `source:${source.messageId}`;
   return control;
 }
+function backToLatest() {
+  view.source = null;
+  view.pendingSource = null;
+  render('bottom');
+  elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  elements.conversation.focus({ preventScroll: true });
+}
+function cardSourceAction(bot, id, close) {
+  const botId = bot.id;
+  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
+  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', async () => {
+    close();
+    selectBot(botId);
+    if (!exact) {
+      backToLatest();
+      return;
+    }
+    const context = view;
+    // A later jump or Jump to latest replaces this request; only the newest one may apply.
+    const request = context.pendingSource = { id };
+    let page;
+    try {
+      page = await api(botQuery('conversation', botId, id + 1));
+    } catch {}
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
+    if (!page?.events.some((event) => event.id === id)) {
+      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+      return;
+    }
+    context.source = { id, bot, events: page.events };
+    renderTimeline();
+    const target = byId(`event-${id}`);
+    if (target) {
+      // Scroll only the conversation; scrollIntoView would also shift the page around it.
+      const scroller = elements.conversation;
+      const box = scroller.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      scroller.scrollTop += row.top - box.top - (box.height - row.height) / 2;
+      target.focus({ preventScroll: true });
+    }
+    updateJumpToLatest();
+  });
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
@@ -983,14 +1047,15 @@ function eventCard(event, context, place, report) {
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
   const showMeta = side === 'bot' && place.groupStart;
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
-  const name = node('span', side === 'bot' && place.groupStart ? 'msg-name' : 'msg-name sr-only',
-    side === 'bot' ? bot?.name ?? 'Bot' : 'You');
+  const author = side === 'external' ? 'Other sender' : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
+  const name = node('span', showMeta ? 'msg-name' : 'msg-name sr-only', author);
   const time = eventTime(event, scheduled);
   meta.append(name);
   row.append(meta);
 
   const line = node('div', 'msg-line');
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
+  else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
@@ -998,7 +1063,7 @@ function eventCard(event, context, place, report) {
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
-  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
@@ -1012,7 +1077,7 @@ function eventCard(event, context, place, report) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
-    } else {
+    } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
       extras.push(resolution);
@@ -1044,8 +1109,14 @@ function eventCard(event, context, place, report) {
     }
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
   } else if (event.kind === 'completed') {
-    bubble.classList.add('completed');
-    text.append(icon('check', 'glyph kind-icon'), node('span', 'sr-only', 'Complete: '), document.createTextNode(data.text ?? ''));
+    const outcome = data.runStatus;
+    if (outcome === 'completed') {
+      text.append(icon('check', 'glyph kind-icon result-success'), node('span', 'sr-only', 'Session complete: '));
+    } else if (['failed', 'cancelled', 'interrupted', 'rolled_back'].includes(outcome)) {
+      const tone = outcome === 'failed' ? 'result-failed' : 'result-interrupted';
+      text.append(icon('resultWarning', `glyph kind-icon ${tone}`), node('span', 'sr-only', `Session ${stateLabels[outcome].toLowerCase()}: `));
+    }
+    text.append(document.createTextNode(data.text ?? ''));
     const link = runIcon(data.run);
     if (link) text.append(link);
     bubble.append(text);
@@ -1055,6 +1126,10 @@ function eventCard(event, context, place, report) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
+    if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
+      const count = data.imageAttachmentCount;
+      bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
+    }
     if (event.kind === 'user_answer') {
       const question = data.question;
       if (question && !place.afterQuestion) {
@@ -1066,7 +1141,9 @@ function eventCard(event, context, place, report) {
     }
     if (event.kind === 'conversation_message' && data.replyToMessageId)
       extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
-    if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
+    if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
+    else if (event.id === context.latestWebMessageId && data.status === 'received')
+      extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;
     if (blocker) {
@@ -1208,7 +1285,12 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
+function timelineAtEnd(scroller, viewportHeight = scroller.clientHeight) {
+  return scroller.scrollHeight - scroller.scrollTop - viewportHeight <= 4;
+}
+
 function rememberReadingPosition() {
+  if (view?.source) return;
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
@@ -1243,19 +1325,27 @@ function eventHistoryForRefresh(context) {
 }
 
 function updateJumpToLatest() {
+  const scroller = elements.conversation;
+  const frame = scroller.parentElement;
+  const { height, top, atBottom } = timelineScrollPosition();
+  frame.toggleAttribute('data-history-above', top > 1);
+  frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
   const control = elements['jump-to-latest'];
-  const hidden = timelineScrollPosition().atBottom;
+  // An earlier page opened from a card is never the latest, even when scrolled to its end.
+  const hidden = !view?.source && atBottom;
   if (control.hidden === hidden) return;
-  if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
+  if (hidden && document.activeElement === control) scroller.focus({ preventScroll: true });
   control.hidden = hidden;
 }
 
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
   const older = elements.older;
-  const data = view?.data;
+  const source = view?.source;
+  const data = source ? null : view?.data;
   const context = timelineContext();
-  const events = [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
-  older.hidden = !context?.olderBefore;
+  const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
+  elements.conversation.classList.toggle('viewing-source', !!source);
+  older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
   const peerStatus = elements['peer-status'];
@@ -1268,9 +1358,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const moveScroll = () => {
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
-      // The restored offset already includes the returning composer's height.
-      composerHeight = elements['composer-container'].offsetHeight;
       restoreReadingPosition(position);
+      // The restored offset already includes the returning composer's height.
+      timelineHeight = scroller.clientHeight;
+      timelineWidth = scroller.clientWidth;
+      scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
       readingPositions.delete(key);
     } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
@@ -1285,13 +1377,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     moveScroll();
     return;
   }
-  if (changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) {
+  if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
     scroller.setAttribute('aria-label', 'Conversation history');
-    updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
+    updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
     moveScroll();
   }
-  const canAnimate = liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+  const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
     !reducedMotion.matches && !document.querySelector('dialog[open]');
   if (canAnimate) {
     const id = replyArrivalId(events, liveAfterId);
@@ -1299,10 +1391,15 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   }
 }
 
-function conversationRows(data, events, keep) {
+function conversationRows(data, events, keep, source) {
   const timeline = {
-    bot: data?.bot ?? bots.find((item) => item.id === view?.id),
-    canDecide: data?.canDecide === true,
+    bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
+    // Source lookups do not establish the latest message in the live conversation.
+    latestWebMessageId: data && !source ? events.findLast((event) =>
+      event.kind === 'conversation_message' && !event.data.channel?.channelKind)?.id : undefined,
+    // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
+    canDecide: !source && data?.canDecide === true,
+    readOnly: !!source,
     revealedTimeRow: view?.revealedTimeRow,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
@@ -1349,13 +1446,15 @@ function conversationRows(data, events, keep) {
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
     const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
     const row = keep(`event-${report?.id ?? event.id}`,
-      [event, report, botVersion, timeline.canDecide, place.groupStart, place.taskStart, place.afterQuestion, wait,
+      [event, report, botVersion, timeline.canDecide, timeline.readOnly, event.id === timeline.latestWebMessageId,
+        place.groupStart, place.taskStart, place.afterQuestion, wait,
         event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
         wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
         event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
       () => eventCard(event, timeline, place, report));
     if (place.side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
     row.classList.toggle('group-continues', !place.groupEnd);
+    row.classList.toggle('conversation-source-target', event.id === source?.id);
     rows.push(row);
     previous = event;
   });
@@ -1379,13 +1478,79 @@ function conversationRows(data, events, keep) {
   return rows;
 }
 
-const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const screenshotAnchor = (reply) => reply?.messageId ?? 0;
+const screenshotsFor = (composer) => screenshotDrafts.get(composer);
+let pickerTarget = null;
+let renderedScreenshots = null;
+
+function clearScreenshots(composer, reply) {
+  const drafts = screenshotsFor(composer);
+  const anchor = screenshotAnchor(reply);
+  const draft = drafts?.get(anchor);
+  drafts?.delete(anchor);
+  for (const image of draft?.images ?? []) URL.revokeObjectURL(image.preview);
+}
+
+async function addScreenshots(context, composer, reply, files) {
+  const anchor = screenshotAnchor(reply);
+  const isCurrent = () => view === context && context.composer === composer && context.data.canDecide === true && !context.dm &&
+    screenshotAnchor(composer.reply) === anchor && !closedQuestion(context, reply) && !sendingMessages.has(composer);
+  if (!files.length || !composer || !isCurrent()) return;
+  let drafts = screenshotsFor(composer);
+  if (!drafts) screenshotDrafts.set(composer, drafts = new Map());
+  const draft = drafts.get(anchor) ?? { images: [] };
+  if (draft.loading) return;
+  drafts.set(anchor, draft);
+  draft.loading = true;
+  draft.error = '';
+  notices.delete(context.id);
+  renderComposer();
+  try { await stageScreenshots(draft, files, isCurrent); }
+  finally {
+    draft.loading = false;
+    if (showingComposer(context.id)) renderComposer();
+  }
+}
+
+function renderScreenshots(draft, disabled) {
+  const list = elements['screenshot-previews'];
+  const images = draft?.images ?? null;
+  if (renderedScreenshots !== images) {
+    renderedScreenshots = images;
+    list.replaceChildren(...(images ?? []).map((image, index) => {
+      const item = node('li', 'screenshot-preview');
+      const preview = node('img');
+      preview.alt = image.attachment.name;
+      preview.title = image.attachment.name;
+      preview.src = image.preview;
+      const remove = button('×', 'icon-button remove-screenshot', () => {
+        const hadFocus = document.activeElement === remove;
+        URL.revokeObjectURL(image.preview);
+        draft.images = draft.images.filter((entry) => entry !== image);
+        draft.error = '';
+        renderComposer();
+        if (hadFocus) {
+          const buttons = list.querySelectorAll('button');
+          const next = buttons[Math.min(index, buttons.length - 1)] ?? elements['attach-screenshots'];
+          (next.disabled ? elements.message : next).focus();
+        }
+      });
+      remove.setAttribute('aria-label', `Remove ${image.attachment.name}`);
+      remove.title = `Remove ${image.attachment.name}`;
+      item.append(preview, remove);
+      return item;
+    }));
+  }
+  list.hidden = !images?.length;
+  for (const button of list.querySelectorAll('button')) button.disabled = disabled;
+}
+
 const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
   !context.data.waits.some((task) => task.wait.messageId === reply.messageId);
 let composition = null;
@@ -1407,24 +1572,30 @@ function scheduleNoticeFade(context, notice) {
 function fitMessage() {
   const field = elements.message;
   if (!field.offsetParent) return;
+  const scroller = elements.conversation;
+  const atBottom = timelineAtEnd(scroller);
   field.style.height = 'auto';
   field.style.height = `${field.scrollHeight}px`;
+  // Measuring the textarea briefly frees space and can clamp the timeline's scroll position.
+  if (atBottom) scroller.scrollTop = scroller.scrollHeight;
 }
 function renderComposer() {
   const context = view;
-  const available = !!context?.composer && !context.dm;
-  const canDecide = available && context.data?.canDecide === true;
+  const readOnly = context?.data?.canDecide === false;
+  const available = !!context?.data && !context.dm && (!!context.composer || readOnly);
+  const canDecide = available && context.data.canDecide === true;
   elements['composer-container'].hidden = !available;
   elements.composer.hidden = !canDecide;
   elements['view-only-notice'].hidden = !available || canDecide;
-  if (!canDecide) {
+  if (!canDecide || !context.composer) {
     composition = null;
     elements.message.value = '';
-    return;
+    return renderScreenshots(null, true);
   }
   const { composer } = context;
   const reply = composer.reply;
   if (composition && (composition.composer !== composer || composition.anchor !== reply?.messageId)) composition = null;
+  const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
   const notice = notices.get(context.id);
   const body = composer.text;
   const busy = sendingMessages.has(composer);
@@ -1442,15 +1613,19 @@ function renderComposer() {
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
+  elements['attach-screenshots'].disabled = busy || closedReply;
+  elements['attach-screenshots'].setAttribute('aria-disabled', String(!!screenshots?.loading));
+  renderScreenshots(screenshots, busy || !!screenshots?.loading);
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || !!composition || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || !!composition || closedReply || !!screenshots?.loading || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
-  elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
+  elements.send.title = reply ? 'Reply' : 'Send';
+  const screenshotError = !busy && !closedReply && screenshots?.error;
   elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
-  elements.notice.classList.toggle('error', !!notice?.isError);
-  elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
+    (closedReply ? 'This question is closed. You can still copy your reply.' : screenshotError || notice?.text || '');
+  elements.notice.classList.toggle('error', !!(notice?.isError || screenshotError));
+  elements.notice.classList.toggle('fading', !closedReply && !screenshotError && !!notice?.fading);
   scheduleNoticeFade(context, notice);
 }
 
@@ -1642,7 +1817,7 @@ function openNewBot(origin = elements['new-bot-button']) {
 function openEditAppearance(bot) {
   reopenSettingsOnClose = true;
   closeDetail();
-  botEditor.openEdit(bot, { bots, origin: elements['settings-button'] });
+  botEditor.openEdit(bot, { bots, origin: elements.profile });
 }
 
 function generalContent(bot) {
@@ -1883,7 +2058,8 @@ function render(scroll, liveAfterId) {
 
 function mergeSessionTasks(context, tasks) {
   for (const task of tasks) {
-    if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
+    // A history page can arrive after a live update for the same task.
+    if (task.generation >= (context.loadedSessions.get(task.id)?.generation ?? 0))
       context.loadedSessions.set(task.id, task);
   }
 }
@@ -1900,8 +2076,10 @@ function mergeLatest(context, latest) {
     const current = new Set(latest.waits.map(questionKey));
     for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
   }
-  const composer = context.composer = composerDrafts(context.id, latest.composerPerson);
-  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text) {
+  const composer = context.composer = latest.canDecide === true ? composerDrafts(context.id, latest.composerPerson) : null;
+  if (!composer) return;
+  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text &&
+      !screenshotsFor(composer)?.get(screenshotAnchor(composer.reply))?.images.length) {
     composer.closeReply();
     setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
@@ -2076,19 +2254,41 @@ async function submit(event) {
   if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
+  context.pendingSource = null;
+  if (context.source) {
+    context.source = null;
+    render('bottom');
+  }
   const { composer } = context;
-  const payload = composer.prepareSend();
+  const reply = composer.reply;
+  const fields = { botId: context.id, text: composer.text };
+  if (reply) fields.replyToMessageId = reply.messageId;
+  const screenshots = screenshotsFor(composer)?.get(screenshotAnchor(reply));
+  const attachments = screenshots?.images.map((image) => image.attachment) ?? [];
+  let payload;
   sendingMessages.add(composer);
   setNotice(context, 'Sending message…');
   try {
+    if (attachments.length) {
+      const prepared = await screenshotMessage(fields, attachments, screenshots.pending);
+      payload = prepared.payload;
+      screenshots.pending = prepared.pending;
+    } else payload = composer.prepareSend();
     await api('messages', payload);
-    composer.settleSend(payload, true);
+    if (attachments.length) {
+      composer.settleScreenshotSend(payload);
+      clearScreenshots(composer, reply);
+    } else composer.settleSend(payload, true);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) composer.settleSend(payload, false);
-    setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
+    if (payload && error.status >= 400 && error.status < 500) {
+      if (attachments.length) delete screenshots.pending;
+      else composer.settleSend(payload, false);
+    }
+    const message = error instanceof ScreenshotError ? error.message : errors[error.message];
+    setNotice(context, message ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
     sendingMessages.delete(composer);
@@ -2106,7 +2306,7 @@ elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
-for (const id of ['profile', 'settings-button']) elements[id].addEventListener('click', () => openDetail({ kind: 'settings' }));
+elements.profile.addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
 elements['peer-back'].addEventListener('click', () => {
   selectBot(view.id);
@@ -2122,15 +2322,24 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
-elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
-new ResizeObserver(updateJumpToLatest).observe(elements.conversation);
 elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
+  if (view?.source) {
+    backToLatest();
+    return;
+  }
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
+});
+elements.conversation.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && view?.source) {
+    event.preventDefault();
+    event.stopPropagation();
+    backToLatest();
+  }
 });
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
@@ -2138,6 +2347,25 @@ elements['cancel-reply'].addEventListener('click', () => {
   view.composer.closeReply();
   renderComposer();
   elements.message.focus();
+});
+elements['attach-screenshots'].addEventListener('click', () => {
+  if (elements['attach-screenshots'].getAttribute('aria-disabled') === 'true') return;
+  pickerTarget = { context: view, composer: view.composer, reply: view.composer.reply };
+  elements['screenshot-input'].click();
+});
+elements['screenshot-input'].addEventListener('change', (event) => {
+  const files = Array.from(event.target.files);
+  event.target.value = '';
+  const target = pickerTarget;
+  pickerTarget = null;
+  if (target) void addScreenshots(target.context, target.composer, target.reply, files);
+});
+elements['screenshot-input'].addEventListener('cancel', () => { pickerTarget = null; });
+elements.message.addEventListener('paste', (event) => {
+  const files = Array.from(event.clipboardData?.files ?? []);
+  if (!files.length || elements.message.readOnly) return;
+  event.preventDefault();
+  void addScreenshots(view, view.composer, view.composer.reply, files);
 });
 function updateDraft() {
   if (!view?.composer || view.dm || elements.message.readOnly) return;
@@ -2166,27 +2394,69 @@ elements.message.addEventListener('input', (event) => {
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
   if (composition || event.isComposing || event.keyCode === 229) return;
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
-    event.preventDefault();
-    elements.send.click();
-  } else if (event.key === 'Escape' && !elements['reply-context'].hidden) {
+  if (event.target === elements.message) handleComposerEnter(event, elements.send);
+  if (event.key === 'Escape' && !elements['reply-context'].hidden) {
     event.preventDefault();
     event.stopPropagation();
     elements['cancel-reply'].click();
   }
 });
-byId('send-hint').textContent = `${sendKey} ↵`;
-let composerHeight = 0;
-function resizeComposerAndKeepTimelineAtBottom() {
-  const height = elements['composer-container'].offsetHeight;
-  const composerGrowth = height - composerHeight;
-  composerHeight = height;
-  const scroller = elements.conversation;
-  const distanceFromPreviousBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight - composerGrowth;
-  if (composerGrowth > 0 && distanceFromPreviousBottom <= 4) scroller.scrollTop = scroller.scrollHeight;
-  fitMessage();
+new ResizeObserver(fitMessage).observe(elements['composer-container']);
+
+const scroller = elements.conversation;
+let timelineHeight = scroller.clientHeight;
+let timelineWidth = scroller.clientWidth;
+scroller.classList.add('follow-newest');
+scroller.addEventListener('scroll', () => {
+  updateJumpToLatest();
+  // A resize can also scroll the timeline. Only update the reading position at the settled size.
+  if (scroller.clientHeight === timelineHeight && scroller.clientWidth === timelineWidth) {
+    scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
+  }
+}, { passive: true });
+new ResizeObserver(() => {
+  const height = scroller.clientHeight;
+  const width = scroller.clientWidth;
+  const widthChanged = width !== timelineWidth;
+  const resized = height !== timelineHeight || widthChanged;
+  // At the same width, a scroll can already have moved away from the previous bottom.
+  const wasAtBottom = widthChanged || timelineAtEnd(scroller, timelineHeight);
+  timelineHeight = height;
+  timelineWidth = width;
+  if (width > 0 && resized && wasAtBottom && scroller.classList.contains('follow-newest')) scroller.scrollTop = scroller.scrollHeight;
+  updateJumpToLatest();
+}).observe(scroller);
+// The timeline grows without resizing the scroller, which changes the history fades.
+new ResizeObserver(updateJumpToLatest).observe(elements.timeline);
+
+const visualViewport = window.visualViewport;
+if (visualViewport) {
+  const touchInput = matchMedia('(any-pointer: coarse)');
+  let viewportFrame = null;
+  const updateKeyboardViewport = () => {
+    if (viewportFrame !== null) return;
+    viewportFrame = requestAnimationFrame(() => {
+      viewportFrame = null;
+      const height = Math.floor(visualViewport.height);
+      // Leave browser chrome and pinch zoom alone. Use the fallback only when the keyboard shrinks the visual viewport.
+      const keyboardOverlaysLayout = touchInput.matches && document.activeElement === elements.message &&
+        !elements.message.readOnly && Math.abs(visualViewport.scale - 1) < .01 && window.innerHeight - height > 80;
+      if (keyboardOverlaysLayout) {
+        workspace.style.setProperty('--keyboard-viewport-height', `${height}px`);
+        workspace.style.setProperty('--keyboard-viewport-top', `${visualViewport.offsetTop}px`);
+      } else {
+        workspace.style.removeProperty('--keyboard-viewport-height');
+        workspace.style.removeProperty('--keyboard-viewport-top');
+      }
+      workspace.classList.toggle('keyboard-viewport', keyboardOverlaysLayout);
+    });
+  };
+  visualViewport.addEventListener('resize', updateKeyboardViewport);
+  visualViewport.addEventListener('scroll', updateKeyboardViewport);
+  window.addEventListener('resize', updateKeyboardViewport);
+  elements.message.addEventListener('focus', updateKeyboardViewport);
+  elements.message.addEventListener('blur', updateKeyboardViewport);
 }
-new ResizeObserver(resizeComposerAndKeepTimelineAtBottom).observe(elements['composer-container']);
 document.addEventListener('click', (event) => {
   if (menu && !event.target.closest('.row-menu, .menu-popover')) closeMenu(false);
 });
@@ -2260,4 +2530,4 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 
-mountBoardInbox(api);
+mountBoardInbox(api, cardSourceAction);

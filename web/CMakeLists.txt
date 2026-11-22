@@ -37,6 +37,9 @@ if(BUILD_TESTING)
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
     add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    add_test(NAME flock_web_composer_screenshot_dimensions COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-dimensions.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_composer_screenshot_dimensions PROPERTIES TIMEOUT 30)
     add_test(NAME flock_web_message_time_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/message-time.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_message_time_dom PROPERTIES TIMEOUT 30)
@@ -59,6 +62,8 @@ if(BUILD_TESTING)
       COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
+    add_test(NAME flock_web_composer_screenshots
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshots.mjs")
     if(FLOCK_CHROME_EXECUTABLE)
       add_test(NAME flock_web_timeline_rows_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/timeline-rows.mjs" "${FLOCK_CHROME_EXECUTABLE}")
@@ -73,5 +78,7 @@ if(BUILD_TESTING)
           "$<TARGET_FILE:flock_web_conversation_tests>")
       set_tests_properties(flock_web_chatgpt_conversation PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     endif()
+    add_test(NAME flock_web_composer_shortcuts
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-shortcuts.mjs")
   endif()
 endif()

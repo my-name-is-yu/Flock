@@ -19,6 +19,8 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     tick(runtime,2);
     const auto before = store.task(release);
     const auto history = store.history(release);
+    for (int i = 0; i < 40; ++i)
+        store.receive(owner,{"release","unused","local-env","release"},"new-"+std::to_string(i),"Later message");
     auto cb = callbacks();
     cb.authenticate = [](std::string_view authorization) -> Person {
         if (authorization == "Bearer reviewer") return {"reviewer"};
@@ -60,6 +62,16 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     stale.erase("targetRevision");
     browser.post("/api/inbox/decide",stale,400);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    const auto waitAnchor = inbox.at(0).at("conversationEventId").get<Id>();
+    const auto cursor = "&before=" + std::to_string(waitAnchor + 1);
+    const auto latest = browser.get("/api/conversation?bot=release");
+    const auto source = browser.get("/api/conversation?bot=release" + cursor).at("events");
+    check(latest.at("olderBefore") > waitAnchor &&
+          source.front().at("kind") == "request" &&
+          source.back().at("id") == waitAnchor && source.back().at("kind") == "waiting" &&
+          source.back().at("data").at("text") == inbox.at(0).at("prompt"),
+          "view-only reader could not load the older question with its surrounding history");
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage" + cursor),403);
     check(browser.post("/api/inbox/decide",answer,403).at("error") == "access_denied" &&
           store.task(release) == before && store.history(release) == history,
           "denied Inbox decision advanced the request");

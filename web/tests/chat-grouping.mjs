@@ -33,3 +33,9 @@ const question = message(localTime(10, 0), 'waiting', 4, { id: 2 });
 const answer = message(shortlyAfter, 'user_answer', 4, { waitId: 2 });
 assert.equal(messagePlacement(question, answer, null).taskStart, false);
 assert.equal(messagePlacement(question, answer, null).afterQuestion, true);
+
+const imported = (fromViewer) => message(shortlyAfter, 'conversation_message', 0, { channel: { channelKind: 'slack', fromViewer } });
+assert.equal(messagePlacement(first, imported(true), null).side, 'user');
+assert.equal(messagePlacement(first, imported(true), null).groupStart, false);
+assert.equal(messagePlacement(first, imported(false), null).side, 'external');
+assert.equal(messagePlacement(first, imported(false), null).groupStart, true);
