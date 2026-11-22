@@ -119,6 +119,10 @@ public:
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
+struct Person;
+struct InboxTarget;
+struct BotChange;
+using ApplyBotChange = std::function<void(const BotChange&)>;
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -127,6 +131,13 @@ public:
     Store& operator=(const Store&) = delete;
 
     Access access();
+    Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
+    Json inbox(const Person&, std::string_view bot = {}) const;
+    Json decisionHistory(const Person&, std::string_view bot = {}) const;
+    void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
+                     const Json& data = Json::object(), const ApplyBotChange& = {});
+    Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
+                       std::string_view title, std::string_view prompt);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,

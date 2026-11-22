@@ -1,5 +1,6 @@
 import { accentColor, showAvatar } from '/avatars.js';
 import { createBotEditor } from '/bot-editor.js';
+import { mountBoardInbox } from '/board-inbox.js';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -37,7 +38,7 @@ const waitLabels = {
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
-  session_question: 'The session updated the question',
+  session_question: 'The session updated the question', withdrawn: 'Question withdrawn',
 };
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
@@ -1782,3 +1783,5 @@ setInterval(refresh, 2500);
 document.addEventListener('visibilitychange', refresh);
 window.addEventListener('pageshow', (event) => { if (event.persisted) refresh(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
+
+mountBoardInbox(api);

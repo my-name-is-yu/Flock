@@ -29,7 +29,7 @@ constexpr std::size_t resultChunk = 6000;
 constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
-                                         "cancel_task","message_session","interrupt_session","read_result",
+                                         "record_task_blocker","withdraw_task_question","cancel_task","message_session","interrupt_session","read_result",
                                          "find_tasks","reply","list_grants","request_access","list_secrets",
                                          "request_secret_input","list_connections",
                                          "check_environment_readiness","update_bot_settings","request_bot_change"};
@@ -91,6 +91,7 @@ Json taskState(const Json& task, Id messageId) {
     Json view = {{"generation",task.at("generation")},{"revisionId",task.value("currentRevision",Id{0})},
                  {"state",task.at("state")},{"doneWhen",bounded(field(task,"doneWhen"),1600)},
                  {"replanning",task.value("replanning",false)},{"wait",waitView(task.value("wait",Json(nullptr)),messageId)}};
+    if (const auto reason = field(task,"blockerReason"); !reason.empty()) view["blockerReason"] = reason;
     if (const auto intent = field(task,"intent"); !intent.empty()) view["intent"] = bounded(intent,1000);
     return view;
 }
@@ -413,6 +414,15 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("That question is no longer current");
         operate(task.at("id"),waitId,"answer",{{"text",answer},{"messageId",message.id}},true);
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
+    }
+    if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
+        auto task = ownTask(identifier(args,"taskId",true),bot);
+        expectGeneration(task);
+        active(task);
+        if (tool == "record_task_blocker") recordTaskBlocker(task,text(args,"blockerReason",2000,true));
+        else withdrawTaskQuestion(task,identifier(args,"waitId",true));
+        return {{"ok",true},{"effect",tool == "record_task_blocker" ? "blocker_recorded" : "question_withdrawn"},
+                {"taskId",task.at("id")},{"current",taskState(task,message.id)}};
     }
     if (tool == "cancel_task") {
         const auto task = ownTask(identifier(args,"taskId",true),bot);
@@ -785,20 +795,24 @@ WHERE j.conversation_bot_id=? AND t.status='paused' ORDER BY j.id DESC
 void Store::approveMessageModelCall(std::string_view botId, Id waitMessageId) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    auto paused = p_->query(R"SQL(
+    p_->approveMessageModelCall(botId,waitMessageId);
+    transaction.commit();
+}
+
+void Store::Impl::approveMessageModelCall(std::string_view botId, Id waitMessageId) {
+    auto paused = query(R"SQL(
 SELECT t.message_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE m.bot_id=? AND t.pause_id=? AND t.status='paused'
 )SQL",{botId,waitMessageId});
     if (!paused.next()) throw Conflict("Waiting item is no longer current");
     const auto message = paused.number(0);
-    const auto budget = p_->messageModelBudget(message);
-    p_->grantModelCall(budget);
-    const auto attempt = p_->reserveModelCall(budget,"conversation_turn",message,0,0);
+    const auto budget = messageModelBudget(message);
+    grantModelCall(budget);
+    const auto attempt = reserveModelCall(budget,"conversation_turn",message,0,0);
     if (!attempt) throw Conflict("The approved model call could not be reserved");
-    p_->exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
+    exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});
-    p_->exec("UPDATE journal SET data='{}' WHERE id=?",{message});
-    p_->exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
-    transaction.commit();
+    exec("UPDATE journal SET data='{}' WHERE id=?",{message});
+    exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
 }
 }

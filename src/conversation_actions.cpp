@@ -87,4 +87,30 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
     save(task);
     return conflicting;
 }
+
+void Store::Impl::recordTaskBlocker(Json& task, std::string_view reason) {
+    if (terminal(task) || task.at("state") == "cancelling" || !conversation_storage::hasText(reason) || reason.size() > 2000)
+        throw Conflict("An active task and blocker reason are required");
+    task["blockerReason"] = redactor(field(task,"botId")).text(std::string(reason));
+    journal(task.at("id"),"blocker_recorded",
+            {{"blockerReason",task.at("blockerReason")},{"targetRevision",task.value("currentRevision",Id{0})}});
+    save(task);
+}
+
+void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
+    const auto& wait = task.at("wait");
+    if (task.at("state") != "waiting" || field(wait,"reason") != "user_question" ||
+        wait.at("id") != waitId || task.value("replanning",false))
+        throw Conflict("The question is no longer open");
+    auto updated = currentEvent(task);
+    for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
+    updated["withdrawnUserQuestion"] = field(wait,"text");
+    consumeEvent(task);
+    event(task,"withdraw/" + std::to_string(waitId),updated);
+    clearWait(task,"withdrawn");
+    journal(task.at("id"),"question_withdrawn",{{"waitId",waitId}});
+    task["state"] = "deciding";
+    save(task);
+}
+
 }

@@ -449,6 +449,7 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
+                   "record_task_blocker","withdraw_task_question",
                    "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change"};
@@ -459,7 +460,7 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 18 &&
+    check(turn.at("tools").at(0).at("tools").size() == 20 &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
@@ -470,6 +471,10 @@ void responseContract() {
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
+    check(turnTool("record_task_blocker")["required"] == Json::array({"reason","taskId","generation","blockerReason"}) &&
+          turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
+          turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
+          "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&

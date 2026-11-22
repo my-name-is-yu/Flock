@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -60,6 +60,12 @@ struct Store::Impl {
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     void migrateAccess();
+    void migrateBoardInbox();
+    std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
+    void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
+    void approveMessageModelCall(std::string_view bot, Id pause);
+    void recordTaskBlocker(Json&, std::string_view reason);
+    void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot) const;
     Json accessTool(std::string_view bot, const Json& routing, const Decision&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
