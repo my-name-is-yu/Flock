@@ -354,7 +354,7 @@ void workspaceAndLifecycle(Fixture& f) {
     const std::string longMissing(2000,'m');
     const auto capped = f.until(f.pipeline(Json::array({
         Json::array({"cat","missing-"+longMissing}),Json::array({"cat","missing-"+longMissing}),
-        Json::array({"cat","missing-"+longMissing}),Json::array({"yes"})})),
+        Json::array({"cat","missing-"+longMissing}),Json::array({"printf","%10000s","x"})})),
         [](const Json& state) { return state.at("state") == "exited"; },5s);
     check(capped.at("truncated") == true &&
           capped.at("stdout").get<std::string>().size()+capped.at("stderr").get<std::string>().size() <= workspaceOutputLimit,
