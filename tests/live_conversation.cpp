@@ -115,6 +115,45 @@ int count(const Json& actions, std::string_view tool, Id task = 0) {
     }));
 }
 
+std::string lower(std::string text) {
+    std::ranges::transform(text,text.begin(),[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return text;
+}
+
+bool mentions(const std::string& text, std::string_view needle) {
+    return lower(text).find(lower(std::string(needle))) != std::string::npos;
+}
+
+std::vector<Json> events(Scene& s, Id task, std::string_view kind) {
+    std::vector<Json> found;
+    for (const auto& row : s.store.history(task,0,200))
+        if (row.at("kind") == kind) found.push_back(row.at("data"));
+    return found;
+}
+
+// Everything the turn handed to the task: queued or steered instructions, plus any changed intent or criteria.
+std::string delivered(Scene& s, Id task, const Json& reply) {
+    std::string text;
+    for (const auto* kind : {"instruction_accepted","instruction_steered"})
+        for (const auto& data : events(s,task,kind))
+            if (data.value("messageId",Json(nullptr)) == reply.at("replyToMessageId")) text += data.value("text","") + "\n";
+    const auto current = s.store.task(task);
+    return text + current.value("intent","") + "\n" + current.value("requestedDoneWhen","") + "\n" + current.value("doneWhen","");
+}
+
+bool stopped(Scene& s, Id task) {
+    const auto state = s.store.task(task).at("state");
+    return state == "cancelled" || state == "cancelling" || !events(s,task,"cancel_requested").empty();
+}
+
+// A correct action followed by a cancellation in the same turn is still wrong.
+std::string untouched(Scene& s, const Json& reply, std::initializer_list<Id> tasks) {
+    if (count(reply.at("actions"),"cancel_task")) return "the turn also cancelled work";
+    for (const auto task : tasks)
+        if (stopped(s,task)) return "task " + std::to_string(task) + " was stopped";
+    return "";
+}
+
 using Scenario = std::function<std::string(Scene&)>;
 
 const std::vector<std::pair<std::string,Scenario>> scenarios{
@@ -122,7 +161,9 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         const auto reply = s.send("Run the project's existing test suite on the cloud Mac and report any failures");
         const auto tasks = s.store.tasks("release");
         if (count(reply.at("actions"),"start_task") != 1 || tasks.size() != 1) return "expected one new task";
-        return s.store.task(tasks[0]["id"]).at("environmentId") == "cloud" ? "" : "the task did not use the cloud Mac";
+        const auto id = tasks[0]["id"].get<Id>();
+        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
+        return s.store.task(id).at("environmentId") == "cloud" ? "" : "the task did not use the cloud Mac";
     }},
     {"a reply that matches an offered choice answers the question",[](Scene& s) -> std::string {
         s.model.questions["Prepare the release label"] = {{"question","Which label should I use?"},
@@ -130,15 +171,19 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         const auto id = s.task("Prepare the release label","label");
         const auto question = s.store.task(id).at("wait").at("messageId").get<Id>();
         const auto reply = s.send("Cancel this task",question);
-        if (count(reply.at("actions"),"cancel_task")) return "the offered answer cancelled the task";
-        return count(reply.at("actions"),"answer_task_question",id) == 1 ? "" : "the question was not answered";
+        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
+        if (count(reply.at("actions"),"answer_task_question",id) != 1) return "the question was not answered";
+        const auto answers = events(s,id,"user_answer");
+        return answers.size() == 1 && lower(answers[0].value("text","")) == "cancel this task"
+            ? "" : "the saved answer was not the offered choice";
     }},
     {"a named stop cancels only that task",[](Scene& s) -> std::string {
         const auto notes = s.task("Write the release notes","notes");
         const auto benchmark = s.task("Benchmark the startup time","benchmark");
         const auto reply = s.send("Stop the benchmark");
-        if (count(reply.at("actions"),"cancel_task",notes)) return "the release notes were cancelled";
-        return count(reply.at("actions"),"cancel_task",benchmark) == 1 ? "" : "the benchmark was not cancelled";
+        if (count(reply.at("actions"),"cancel_task",notes) || stopped(s,notes)) return "the release notes were cancelled";
+        return count(reply.at("actions"),"cancel_task",benchmark) == 1 && stopped(s,benchmark)
+            ? "" : "the benchmark was not cancelled";
     }},
     {"an ambiguous stop waits for a named target",[](Scene& s) -> std::string {
         const auto mobile = s.task("モバイル版のログイン画面を修正","mobile");
@@ -153,15 +198,23 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
     }},
     {"new criteria change the task",[](Scene& s) -> std::string {
         const auto id = s.task("Benchmark the startup time","benchmark");
-        s.send("For the startup benchmark, change the completion criteria to require a report column named startup_p95_ms");
+        const auto reply = s.send("For the startup benchmark, change the completion criteria to require a report column named startup_p95_ms");
+        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
         const auto criteria = s.store.task(id).at("doneWhen").get<std::string>();
         static const std::regex column(R"(\bstartup_p95_ms\b)");
         return std::regex_search(criteria,column) ? "" : "the saved completion criteria omitted the required column";
     }},
     {"two requests in one message start two tasks",[](Scene& s) -> std::string {
         const auto reply = s.send("Write the release notes. Separately, audit the third-party licenses.");
-        return count(reply.at("actions"),"start_task") == 2 && s.store.tasks("release").size() == 2
-            ? "" : "expected two new tasks";
+        const auto tasks = s.store.tasks("release");
+        if (count(reply.at("actions"),"start_task") != 2 || tasks.size() != 2) return "expected two new tasks";
+        if (const auto failure = untouched(s,reply,{tasks[0]["id"].get<Id>(),tasks[1]["id"].get<Id>()}); !failure.empty())
+            return failure;
+        const auto first = s.store.task(tasks[0]["id"]).value("request",""), second = s.store.task(tasks[1]["id"]).value("request","");
+        const auto notes = [](const std::string& request) { return mentions(request,"release note"); };
+        const auto audit = [](const std::string& request) { return mentions(request,"licens"); };
+        return (notes(first) && audit(second)) || (audit(first) && notes(second))
+            ? "" : "the two tasks were not the release notes and the license audit";
     }},
     {"explaining a result changes no work",[](Scene& s) -> std::string {
         const auto id = s.task("Compare three rollout plans","plans");
@@ -181,9 +234,11 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         const auto id = s.task("Benchmark the startup time","benchmark");
         const auto reply = s.send("For the running benchmark, use the staging database from now on");
         if (s.store.tasks("release").size() != 1) return "a new task was started";
+        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
         const auto& actions = reply.at("actions");
-        return count(actions,"message_session",id) + count(actions,"send_to_task",id) + count(actions,"change_task",id) == 1
-            ? "" : "the note did not reach the benchmark";
+        if (count(actions,"message_session",id) + count(actions,"send_to_task",id) + count(actions,"change_task",id) != 1)
+            return "the note did not reach the benchmark";
+        return mentions(delivered(s,id,reply),"staging") ? "" : "what reached the benchmark did not name the staging database";
     }},
 };
 }
