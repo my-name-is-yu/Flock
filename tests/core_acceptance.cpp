@@ -142,7 +142,9 @@ struct SimulatedT3 : T3 {
     }
     void question(std::string run) {
         runs.at(run).kind = Observation::Kind::Question;
-        runs.at(run).question = {"branch-question",Json::array({{{"id","branch"},{"options",Json::array({"main","dev"})}}})};
+        runs.at(run).question = {"branch-question",Json::array({{{"id","branch"},{"options",Json::array({
+            {{"label","Main branch"},{"value","main"}},{{"label","Development branch"},{"value","dev"}}
+        })}}})};
     }
     void external(std::string run) {
         runs.at(run).kind = Observation::Kind::ExternalInput;
@@ -252,12 +254,25 @@ void invalidDecisions() {
     f.model.script = [](const ModelInput&) { return work(); };
     f.reach(id,"running");
     f.t3.question("run-1");
+    f.t3.runs.at("run-1").question.fields.push_back({{"id","checks"},{"multiple",true},{"freeform",true},
+        {"options",Json::array({{{"label","Lint"},{"value","lint"}}})}});
     f.model.script = [](const ModelInput&) { return work(); };
     const auto questionWait = f.wait(id,"model_failure");
     check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence,"invalid in-question action executed");
     f.store->operate(id,questionWait,"retry");
-    f.model.script = [](const ModelInput&) { return reply(); };
+    int answerAttempts = 0;
+    f.model.script = [&](const ModelInput& input) {
+        auto answer = reply();
+        if (++answerAttempts == 1) answer.args["answers"]["checks"] = Json::array({"lint","another check"});
+        else {
+            check(!input.feedback.empty(),"model did not receive feedback on its invalid answer");
+            answer.args["answers"]["checks"] = "another check";
+        }
+        return answer;
+    };
     f.reach(id,"running");
+    check(answerAttempts == 2 && f.t3.replies == 1 && f.t3.seen.back().answers.at("checks") == "another check",
+          "T3 received the invalid answer instead of the model's correction");
     f.t3.finish("run-1");
     f.model.script = [](const ModelInput&) { return work(); };
     f.wait(id,"model_failure");

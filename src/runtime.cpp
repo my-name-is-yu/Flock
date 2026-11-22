@@ -72,38 +72,6 @@ void includeInstructions(std::string& instruction, const Json& pending) {
     instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
     for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
 }
-
-void validateAnswers(const Json& fields, const Json& answers) {
-    if (!fields.is_array() || fields.empty() || !answers.is_object())
-        throw Conflict("Answers are required per question field");
-    std::set<std::string> ids;
-    for (const auto& f : fields) {
-        const auto id = field(f,"id");
-        if (id.empty() || !ids.insert(id).second) throw Conflict("Unsupported question fields");
-        const bool required = f.value("required",true);
-        if (!answers.contains(id)) {
-            if (required) throw Conflict("A required question field was not answered");
-            continue;
-        }
-        const auto& a = answers[id];
-        const auto values = a.is_string() ? Json::array({a}) : a;
-        if (!values.is_array() || (required && values.empty()) ||
-            (values.size() > 1 && !f.value("multiple",false)))
-            throw Conflict("Question field answer has the wrong cardinality");
-        const auto options = f.value("options",Json::array());
-        const bool freeform = f.value("freeform",options.empty());
-        std::set<std::string> seen;
-        for (const auto& v : values) {
-            if (!v.is_string() || !present(v.get<std::string>()) || !seen.insert(v.get<std::string>()).second)
-                throw Conflict("Invalid or repeated answer");
-            if (!freeform && std::none_of(options.begin(),options.end(),[&](const Json& option) {
-                return option == v || field(option,"value") == v.get<std::string>();
-            })) throw Conflict("Answer does not match a question option");
-        }
-    }
-    for (auto i = answers.begin(); i != answers.end(); ++i)
-        if (!ids.contains(i.key())) throw Conflict("Answer references an unknown question field");
-}
 }
 
 struct Runtime::Impl {
@@ -1253,7 +1221,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         if (tool == "answer_session_question") {
             if (field(args,"requestId") != field(snapshot["question"],"requestId"))
                 throw Conflict("The Session question no longer matches");
-            validateAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
+            sessionQuestionAnswers(snapshot["question"]["fields"],args.value("answers",Json::object()));
         }
         change(snapshot,[&](Json& current) {
             const auto id = current["id"].get<Id>();

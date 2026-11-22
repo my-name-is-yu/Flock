@@ -22,6 +22,7 @@ if(TARGET SQLite3::SQLite3)
 else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
+target_sources(flock_core PRIVATE src/session_question.cpp)
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
