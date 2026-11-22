@@ -3,7 +3,7 @@
   background: var(--sidebar); display: flex; flex-direction: column; min-height: 0; min-width: 0;
   overflow: hidden;
   border-inline-end: 1px solid color-mix(in srgb, var(--hairline) 75%, transparent);
-  transition: opacity .18s ease, transform .22s cubic-bezier(.2, .9, .25, 1), visibility .22s;
+  transition: opacity .2s ease-out, transform .26s cubic-bezier(0.32, 0.72, 0, 1), visibility .26s;
 }
 .sidebar-resizer {
   position: relative; z-index: 6; width: 0; height: 100%;
@@ -13,19 +13,24 @@
   content: ""; position: absolute; inset-block: 0; inset-inline-start: -4px; width: 9px;
 }
 .sidebar-resizer::after {
-  content: ""; position: absolute; inset-block: 0; inset-inline-start: -1px; width: 2px;
-  background: transparent; transition: background-color .14s ease;
+  content: ""; position: absolute; inset-block: 0; inset-inline-start: -1px; width: 3px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+  opacity: 0; transform: scaleX(.35);
+  transition: opacity .16s ease, transform .18s cubic-bezier(0.23, 1, 0.32, 1), background-color .16s ease;
 }
 .sidebar-resizer:hover::after,
-.sidebar-resizer:focus-visible::after,
+.sidebar-resizer:focus-visible::after {
+  opacity: 1; transform: scaleX(1);
+}
 .workspace.sidebar-resizing .sidebar-resizer::after {
-  background: color-mix(in srgb, var(--text-3) 55%, transparent);
+  opacity: 1; transform: scaleX(1); background: var(--accent);
 }
 .sidebar-resizer:focus-visible { outline: none; }
 @media (width > 700px) {
   .workspace.sidebar-collapsed { grid-template-columns: 0px 0px minmax(0, 1fr); }
   .workspace.sidebar-collapsed > .sidebar {
-    opacity: 0; transform: translateX(-12px); pointer-events: none; visibility: hidden;
+    opacity: 0; transform: translateX(-20px); pointer-events: none; visibility: hidden;
     border-inline-end-width: 0;
   }
   .workspace.sidebar-collapsed > .sidebar-resizer { pointer-events: none; }
