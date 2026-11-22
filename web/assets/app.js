@@ -1,3 +1,4 @@
+import { handleComposerEnter } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
@@ -1319,7 +1320,6 @@ function conversationRows(data, events, keep) {
   return rows;
 }
 
-const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
 function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
@@ -1386,7 +1386,7 @@ function renderComposer() {
   elements.send.disabled = busy || !!composition || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
-  elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
+  elements.send.title = reply ? 'Reply' : 'Send';
   elements.notice.textContent = notice?.isError ? notice.text :
     (closedReply ? 'This question is closed. You can still copy your reply.' : notice?.text ?? '');
   elements.notice.classList.toggle('error', !!notice?.isError);
@@ -2106,16 +2106,13 @@ elements.message.addEventListener('input', (event) => {
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
   if (composition || event.isComposing || event.keyCode === 229) return;
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && event.target === elements.message) {
-    event.preventDefault();
-    elements.send.click();
-  } else if (event.key === 'Escape' && !elements['reply-context'].hidden) {
+  if (event.target === elements.message) handleComposerEnter(event, elements.send);
+  if (event.key === 'Escape' && !elements['reply-context'].hidden) {
     event.preventDefault();
     event.stopPropagation();
     elements['cancel-reply'].click();
   }
 });
-byId('send-hint').textContent = `${sendKey} ↵`;
 let composerHeight = 0;
 function resizeComposerAndKeepTimelineAtBottom() {
   const height = elements['composer-container'].offsetHeight;

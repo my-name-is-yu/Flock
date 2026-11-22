@@ -43,15 +43,11 @@
 .composer textarea:read-only { color: var(--text-2); }
 
 .composer-toolbar { display: contents; }
-.composer-toolbar > :is(.notice, .send-hint) { grid-area: feedback; }
+.composer-toolbar > .notice { grid-area: feedback; }
 .composer-toolbar > .notice:not(:empty) { padding: 0 .95rem .65rem; }
-.composer-toolbar > .notice:not(:empty) + .send-hint { display: none; }
-.composer-toolbar > .send-hint { justify-self: end; padding: 0 .95rem .35rem; }
 .notice { min-width: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; transition: opacity .4s ease; }
 .notice.error { color: var(--danger); }
 .notice.fading { opacity: 0; }
-.send-hint { font: inherit; font-size: var(--text-xs); color: var(--text-3); letter-spacing: .04em; opacity: 0; transition: opacity .15s ease; user-select: none; }
-.composer.can-send:focus-within .send-hint { opacity: 1; }
 
 :is(.reply-cancel, .send):focus-visible { outline-offset: -2px; }
 .send {
@@ -73,9 +69,6 @@
 }
 @keyframes send-spin { to { transform: rotate(1turn); } }
 
-@media (max-width: 700px), (hover: none) {
-  .send-hint { display: none; }
-}
 @media (max-width: 700px) {
   .composer-container {
     padding-left: max(.75rem, env(safe-area-inset-left));
@@ -85,6 +78,6 @@
   .composer textarea { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer, .notice, .send-hint, .send { transition: none; }
+  .composer, .notice, .send { transition: none; }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }
