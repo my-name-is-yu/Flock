@@ -7,11 +7,39 @@
   right: calc(clamp(.75rem, 2vw, 1.25rem) + 4.6rem);
 }
 .conversation-find-toggle[aria-expanded="true"] { background: var(--selected); color: var(--text); }
+
+/* Leave room for results and the selected message before growing the draft field. */
+.main:has(> .conversation-find:not([hidden])) {
+  position: relative;
+  grid-template-rows: auto minmax(clamp(0px, 100% - 14rem, 19.75rem), 1fr) minmax(0, auto);
+}
+.main:has(> .conversation-find:not([hidden])) .composer-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.main:has(> .conversation-find:not([hidden])) .composer {
+  min-height: 0;
+  /* Reply, screenshots, draft, feedback: only the draft row shrinks. */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+.main:has(> .conversation-find:not([hidden])) .composer textarea {
+  max-height: min(100%, 40vh, 18rem);
+}
+
 .conversation-find {
   position: absolute;
-  top: calc(100% + .5rem);
+  grid-area: 2 / 1 / 3 / 2;
+  z-index: 2;
+  top: .5rem;
   right: clamp(.5rem, 2vw, 1.25rem);
   width: min(25rem, calc(100% - 1rem));
+  /* Reserve space for the message bubble, its focus outline, and Jump to latest. */
+  max-height: max(6rem, calc(100% - var(--jump-to-latest-space) - 5.25rem));
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: .5rem;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
@@ -39,6 +67,7 @@
 .find-status:empty { padding: 0; }
 .find-results {
   list-style: none;
+  min-height: 3rem;
   max-height: min(15rem, 31dvh);
   overflow: auto;
   overscroll-behavior: contain;
@@ -62,7 +91,8 @@
 .find-match time { color: var(--text-2); white-space: nowrap; }
 .find-snippet { overflow-wrap: anywhere; line-height: 1.4; font-size: var(--text-sm); }
 .find-snippet mark { background: var(--accent-soft-hover); color: var(--text); font-weight: 650; }
-.find-more { margin: .2rem .5rem; }
+.find-bar, .find-status, .find-more { flex-shrink: 0; }
+.find-more { align-self: flex-start; margin: .2rem .5rem; }
 
 @media (max-width: 700px) {
   .conversation-find-toggle { left: calc(clamp(.75rem, 2vw, 1.25rem) + 2.3rem); right: auto; }

@@ -33,7 +33,9 @@ async function exercise(mountConversationFind) {
       if (holdRequest) return new Promise(resolve => { pending = resolve; });
       if (scope === triage) return Promise.resolve({ events: [item(3, 'Triage update')], olderBefore: 0 });
       if (!before) return Promise.resolve({ events: [item(40, 'Handoff [draft] today'),
-        item(41, 'Use the [redacted] marker in exported reports.'), item(42, 'Handoff [draft]', 'bot_message')], olderBefore: 40 });
+        item(41, 'Use the [redacted] marker in exported reports.'), item(42, 'Handoff [draft]', 'bot_message'),
+        ...Array.from({ length: 5 }, (_, index) => item(43 + index, `Short window match ${index + 1}`)),
+      ], olderBefore: 40 });
       if (before === 40) return Promise.resolve({ events: [item(11, 'Old handoff [draft] <img src=x>')], olderBefore: 11 });
       const run = { environmentId: 'local', threadId: 'release', runId: 'run' };
       if (before === 11) return Promise.resolve({ events: [{
@@ -133,6 +135,39 @@ async function exercise(mountConversationFind) {
   await wait();
   check(status.textContent === 'Conversation unavailable' && !$('.find-match') && more.hidden,
     'A denied history request exposed results or offered another page');
+
+  check(innerWidth === 390 && innerHeight === 550, 'Expected a 390 × 550 browser viewport');
+  failRequest = false;
+  find.setContext(release);
+  const fullDraft = Array.from({ length: 12 }, (_, index) => `Draft line ${index + 1}`).join('\n');
+  draft.value = fullDraft;
+  draft.style.height = '300px';
+  const height = draft.getBoundingClientRect().height;
+  check(height === 220, 'The draft must fill the textarea before Find opens');
+  $('#jump-to-latest').hidden = false;
+  draft.focus();
+  key(draft, 'f', { ctrlKey: true });
+  type('Short window match');
+  await wait();
+  const results = $('.find-results');
+  for (let index = 0; index < 4; index++) key(input, 'ArrowDown');
+  const selected = $('.find-match[aria-current="true"]').getBoundingClientRect();
+  const list = results.getBoundingClientRect();
+  const panelBottom = panel.getBoundingClientRect().bottom;
+  check(results.children.length === 5 && results.scrollTop > 0 &&
+    selected.top >= list.top - 1 && selected.bottom <= list.bottom + 1,
+    'Keyboard navigation must scroll the selected result into view');
+  const available = $('#jump-to-latest').getBoundingClientRect().top - panelBottom;
+  check(!more.hidden && more.getBoundingClientRect().bottom < panelBottom,
+    'Search earlier must stay visible inside Find');
+  check(available >= 64, `Find left only ${available}px above Jump to latest`);
+  check($('#send').getBoundingClientRect().bottom <= innerHeight &&
+    draft.getBoundingClientRect().bottom <= innerHeight && draft.scrollHeight > draft.clientHeight,
+    'The compact draft must remain visible and scrollable with Send in the viewport');
+  key(input, 'Escape');
+  key(input, 'Escape');
+  check(draft.value === fullDraft && draft.getBoundingClientRect().height === height &&
+    document.activeElement === draft, 'Closing Find must restore the full draft field');
 }
 
 const assets = new URL('../assets/', import.meta.url);
@@ -140,18 +175,19 @@ const read = (name) => readFileSync(new URL(name, assets), 'utf8');
 const directory = mkdtempSync(join(tmpdir(), 'flock-conversation-find-'));
 try {
   const html = read('index.html').replace(/<link\b[^>]*>/g, '').replace('<script type="module" src="/app.js"></script>', `
-    <style>${read('style.css')}${read('conversation-find.css')}</style>
+    <style>${['style.css', 'sidebar.css', 'conversation.css', 'conversation-find.css', 'composer.css'].map(read).join('\n')}</style>
     <script type="module">
       import { mountConversationFind } from ${JSON.stringify(new URL('conversation-find.mjs', assets).href)};
       try {
         await (${exercise})(mountConversationFind);
-        document.documentElement.dataset.flockResult = 'pass';
+        parent.document.documentElement.dataset.flockResult = 'pass';
       } catch (error) {
-        document.documentElement.dataset.flockResult = error.message;
+        parent.document.documentElement.dataset.flockResult = error.message;
       }
     </script>`);
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, html);
+  writeFileSync(join(directory, 'index.html'), html);
+  const fixture = join(directory, 'test.html');
+  writeFileSync(fixture, '<!doctype html><iframe src="index.html" width="390" height="550" style="border:0"></iframe>');
   const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
     '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
     '--virtual-time-budget=4000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });

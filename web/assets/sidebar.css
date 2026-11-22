@@ -95,6 +95,7 @@ button.activity:hover, a.activity:hover { background: var(--hover); }
 .activity-status span:last-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .activity-mark { width: .38rem; height: .38rem; border-radius: 50%; flex: none; background: currentColor; opacity: .7; }
 .activity-status.waiting { color: var(--warning); }
+.activity-status.failed { color: var(--danger); }
 .activity-status.live { color: var(--success); }
 .activity-status.live .activity-mark { animation: presence-pulse 1.6s ease-in-out infinite; }
 a.session-row { padding-right: 1.9rem; }
