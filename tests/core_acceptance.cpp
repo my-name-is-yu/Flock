@@ -93,6 +93,7 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
     std::vector<ReadRequest> readRequests;
+    std::vector<Excerpt> historyPages;
     std::function<void()> beforeRead;
     std::vector<RunRef> interruptedRuns;
     std::function<void()> onPreflight;
@@ -153,6 +154,7 @@ struct SimulatedT3 : T3 {
         readRequests.push_back(req);
         ++reads;
         if (beforeRead) beforeRead();
+        if (!historyPages.empty()) return historyPages.at(reads - 1);
         return {reads == 1 ? "commit wanted, updates enabled" : "RSS 25 MiB",
                 req.threadId,req.runId,"item-"+std::to_string(reads),"next",100,reads==1};
     }
@@ -697,6 +699,45 @@ void evidenceResume() {
     f.reach(id,"completed");
     check(f.t3.reads==2 && f.t3.launches==1 && f.t3.follows==0 && f.logs(id,"session_read")==2,
           "history read did not resume its budget");
+}
+
+void redactedHistoryPagination() {
+    Fixture f;
+    f.read = "on_demand";
+    f.restart();
+    const std::string secret = "fixture-history-secret";
+    auto access = f.store->access();
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"history-token"}),secret);
+    f.t3.historyPages = {
+        {"Token: " + secret,{},{},"history-item","7",64,true},
+        {"Verified " + secret,{},{},"history-item",{},0,false},
+    };
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        const auto& run = input.event.at("run");
+        Json ref = {{"threadId",run.at("threadId")},{"runId",run.at("runId")}};
+        if (input.evidence.empty()) return Decision{"session_read",ref,"Read the first page"};
+        const auto& first = input.evidence.front();
+        check(first.at("text") == "Token: [redacted]" && first.at("more") == true &&
+              first.at("itemTruncated") == true && first.at("nextCursor") == "7" && first.at("nextOffset") == 64,
+              "redaction lost the adapter's continuation");
+        if (input.evidence.size() == 1) {
+            ref["itemId"] = first.at("itemId");
+            ref["offset"] = first.at("nextOffset");
+            return Decision{"session_read",ref,"Read the final page"};
+        }
+        const auto& last = input.evidence.back();
+        check(last.at("text") == "Verified [redacted]" && last.at("more") == false &&
+              last.at("itemTruncated") == false && last.at("nextCursor") == "" && last.at("nextOffset") == 0,
+              "redaction made a complete excerpt appear truncated");
+        return complete();
+    };
+    const auto id = f.submit();
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.readRequests.size() == 2 && f.t3.readRequests.back().offset == 64,
+          "history did not resume at the adapter's offset");
 }
 
 void taskPagesShowProjectOwners() {
@@ -1925,6 +1966,7 @@ int main() {
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
+            {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},

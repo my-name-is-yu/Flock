@@ -731,10 +731,12 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             (!excerpt.runId.empty() && excerpt.runId != req.runId))
             throw Conflict("History source does not match the requested Run");
         scrub.requirePublic({excerpt.itemId,excerpt.nextCursor});
-        const auto text = bounded(scrub.text(excerpt.text),8192);
+        const auto redacted = scrub.text(excerpt.text);
+        auto text = bounded(redacted,8192);
+        const bool clipped = text.size() < redacted.size();
         return {{"environmentId",req.environmentId},{"threadId",req.threadId},{"runId",req.runId},
-                {"itemId",excerpt.itemId},{"text",text},{"more",excerpt.more || text.size() < excerpt.text.size()},
-                {"itemTruncated",excerpt.nextOffset > req.offset || text.size() < excerpt.text.size()},
+                {"itemId",excerpt.itemId},{"text",std::move(text)},{"more",excerpt.more || clipped},
+                {"itemTruncated",excerpt.nextOffset > req.offset || clipped},
                 {"nextCursor",excerpt.nextCursor},{"nextOffset",excerpt.nextOffset}};
     }
 
