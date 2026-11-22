@@ -1,11 +1,19 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 
+#include <algorithm>
 #include <future>
+#include <utility>
 
 namespace flockv0 {
 namespace {
-bool workspaceMutation(const Decision& call) {
-    return call.tool == "workspace_write_file" || call.tool == "workspace_run_command";
+bool filenamesMayMatch(const Decision& a, const Decision& b) {
+    const auto left = relativeToolPath(field(a.args,"path")).generic_string();
+    const auto right = relativeToolPath(field(b.args,"path")).generic_string();
+    const auto nonAscii = [](unsigned char c) { return c >= 128; };
+    if (std::ranges::any_of(left,nonAscii) || std::ranges::any_of(right,nonAscii)) return true;
+    const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c; };
+    return std::ranges::equal(left,right,[&](char m, char n) { return fold(m) == fold(n); });
 }
 
 bool conflict(const Decision& a, const Decision& b) {
@@ -14,10 +22,10 @@ bool conflict(const Decision& a, const Decision& b) {
         if (a.args.contains("commandId") && b.args.contains("commandId"))
             return a.args["commandId"] == b.args["commandId"] &&
                 (a.tool == "workspace_stop_command" || b.tool == "workspace_stop_command");
-        if (workspaceMutation(a) || workspaceMutation(b))
+        if (a.tool == "workspace_write_file" || b.tool == "workspace_write_file")
             return a.tool == "workspace_search" || b.tool == "workspace_search" ||
                 (a.args.contains("path") && b.args.contains("path") &&
-                 relativeToolPath(field(a.args,"path")) == relativeToolPath(field(b.args,"path")));
+                 filenamesMayMatch(a,b));
     }
     return (a.tool == "mcp_call_tool" || b.tool == "mcp_call_tool") &&
            a.args.contains("server") && b.args.contains("server") && a.args["server"] == b.args["server"];
@@ -25,83 +33,91 @@ bool conflict(const Decision& a, const Decision& b) {
 }
 
 void Store::Impl::saveTurnResults(Id message, int step, const Json& results) {
-    exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=? AND result IS NULL",
+    exec("UPDATE conversation_steps SET result=?,effect=NULL WHERE message_id=? AND step=? AND result IS NULL",
          {results,message,step});
 }
 
-void Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls) {
-    auto results = Json::array();
+bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vector<Decision>& calls) {
     std::vector<std::size_t> reserved;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (!turnMessage(ctx.messageId)) return false;
         auto previous = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
                               {ctx.messageId,step});
-        if (!previous.next()) return;
+        if (!previous.next()) return true;
         const auto saved = previous.string(0);
-        if (!saved.empty()) {
-            results = Json::parse(saved).at("pendingResults");
-            for (auto& result : results)
-                if (result.is_null()) result = {{"ok",false},{"delivery","unknown"},
-                    {"error","Flock restarted during this tool call. Its outcome is unknown."}};
-            saveTurnResults(ctx.messageId,step,results);
-            transaction.commit();
-            return;
-        }
+        Json results = saved.empty() ? Json(std::vector<Json>(calls.size())) : Json::parse(saved);
         const auto budget = messageModelBudget(ctx.messageId);
+        auto approved = takeReservedConversationCall(ctx.messageId);
+        const auto scrub = sessionRedactor();
         for (std::size_t i = 0; i < calls.size(); ++i) {
+            auto& result = results.at(i);
+            if (result.contains("inFlight")) {
+                result = {{"ok",false},{"delivery","unknown"},
+                          {"error","Flock restarted during this tool call. Its outcome is unknown."}};
+            }
+            if (!result.is_null()) continue;
             try {
                 validateBotTool(ctx,calls[i]);
                 for (const auto index : reserved)
                     if (conflict(calls[i],calls[index])) throw Conflict("Tool calls must be independent");
             } catch (const Conflict& error) {
-                results.push_back(toolFailure(error.what()));
+                result = toolFailure(scrub.text(error.what()));
                 continue;
             } catch (const std::exception&) {
-                results.push_back(toolFailure("Bot tool target is unavailable"));
+                result = toolFailure("Bot tool target is unavailable");
                 continue;
             }
-            if (!reserveModelCall(budget,"bot_tool",ctx.messageId,0,0)) {
-                auto rejected = toolFailure("The turn's action budget is exhausted");
-                rejected["budgetExhausted"] = true;
-                results.push_back(std::move(rejected));
-                continue;
-            }
+            if (!std::exchange(approved,0) && !reserveModelCall(budget,"bot_tool",ctx.messageId,0,0)) continue;
+            result = {{"inFlight",true}};
             reserved.push_back(i);
-            results.push_back(nullptr);
         }
+        if (approved) releaseModelCall(budget,approved);
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",
-             {Json{{"pendingResults",redactor(ctx.bot).record(results)}},ctx.messageId,step});
+             {results,ctx.messageId,step});
         transaction.commit();
     }
 
-    std::vector<std::pair<std::size_t,std::future<Json>>> workers;
+    const auto persist = [&](std::size_t i, Json result) {
+        std::lock_guard lock(mutex);
+        const auto scrub = sessionRedactor();
+        auto safe = scrub.record(std::move(result));
+        const auto encoded = safe.dump(-1,' ',false,Json::error_handler_t::replace);
+        exec("UPDATE conversation_steps SET effect=json_set(effect,?,json(?)) WHERE message_id=? AND step=?",
+             {"$[" + std::to_string(i) + "]",encoded,ctx.messageId,step});
+    };
+    std::vector<std::future<void>> workers;
+    workers.reserve(reserved.size());
     for (const auto i : reserved) {
         try {
-            workers.emplace_back(i,std::async(std::launch::async,[this,&ctx,&call = calls[i]]() -> Json {
+            workers.push_back(std::async(std::launch::async,[&,i] {
+                Json result;
                 try {
-                    auto result = executeBotTool(ctx,call);
+                    result = executeBotTool(ctx,calls[i]);
                     if (!result.contains("ok")) result["ok"] = true;
-                    return result;
                 } catch (const ToolOutcomeUnknown& error) {
-                    return {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
-                } catch (const Conflict& error) { return toolFailure(error.what()); }
-                catch (const std::exception&) { return toolFailure("Bot tool execution failed"); }
+                    result = {{"ok",false},{"error",error.what()},{"delivery","unknown"}};
+                } catch (const Conflict& error) {
+                    result = toolFailure(error.what());
+                } catch (const std::exception&) {
+                    result = toolFailure("Bot tool execution failed");
+                }
+                persist(i,std::move(result));
             }));
-        } catch (const std::system_error&) { results[i] = toolFailure("Could not start the Bot tool"); }
+        } catch (const std::system_error&) { persist(i,toolFailure("Could not start the Bot tool")); }
     }
-    for (auto& [i,worker] : workers) results[i] = worker.get();
+    for (auto& worker : workers) worker.get();
     std::lock_guard lock(mutex);
-    auto safe = redactor(ctx.bot).record(std::move(results));
-    for (auto& result : safe) {
-        if (!result.contains("stdout")) continue;
-        auto& output = result.at("stdout").get_ref<std::string&>();
-        auto& error = result.at("stderr").get_ref<std::string&>();
-        if (output.size() + error.size() <= workspaceOutputLimit) continue;
-        output = bounded(output,workspaceOutputLimit);
-        error = bounded(error,workspaceOutputLimit-output.size());
-        result["truncated"] = true;
-    }
-    saveTurnResults(ctx.messageId,step,safe);
+    Transaction transaction(db);
+    auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=?",{ctx.messageId,step});
+    if (!row.next()) throw Conflict("Bot tool step is missing");
+    const auto results = row.json(0);
+    const bool pending = std::ranges::any_of(results,[](const auto& result) { return result.is_null(); });
+    if (pending) {
+        if (const auto message = turnMessage(ctx.messageId)) pauseTurn(*message);
+    } else saveTurnResults(ctx.messageId,step,results);
+    transaction.commit();
+    return !pending;
 }
 }

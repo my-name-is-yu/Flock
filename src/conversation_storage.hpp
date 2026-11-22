@@ -4,6 +4,14 @@
 
 #include <algorithm>
 
+namespace flockv0::conversation {
+struct Message {
+    Id id = 0, replyTo = 0;
+    std::string bot, text;
+    Json routing;
+};
+}
+
 namespace flockv0::conversation_storage {
 inline constexpr auto messageSize = 16000;
 

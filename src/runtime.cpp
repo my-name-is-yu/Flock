@@ -1365,7 +1365,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             event.erase("_flockSavedCompletion");
             if (deferred.is_object() && deferred["generation"] == task["generation"]) {
                 if (db.conversationPending(field(task,"botId"))) return;
-                savedCompletion = Decision{deferred.value("tool","complete"),deferred["args"],deferred["reason"]};
+                savedCompletion = Decision{deferred.at("tool"),deferred.at("args"),deferred.at("reason")};
                 savedUsage = deferred["usage"];
             } else {
                 peer = db.peerExchange(task["id"]);

@@ -230,7 +230,7 @@ void notesAndRoutingOnRestart() {
 }
 
 Json requestContext(const Json& request) {
-    return Json::parse(request.at("input").at(0).at("content").get<std::string>());
+    return Json::parse(request.at("input").at(0).at("content").at(0).at("text").get<std::string>());
 }
 
 void notesAcrossConversationAndWork() {
@@ -521,7 +521,7 @@ void responseContract() {
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
-    const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
+    const auto peerContext = requestContext(peerRequest);
     const auto& destinations = peerContext.at("task").at("peers");
     check(destinations.size() == 1 && destinations.at(0).at("botId") == "verifier" &&
         destinations.at(0).at("name") == "Verifier",
@@ -596,8 +596,7 @@ void sessionConversationDispatch() {
         bool paged = false, revoked = false;
         Json sessionRef;
         HistoryModel(Store& store, const Scope& shared) : store(store), shared(shared) {}
-        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
-        Decision choose(const ModelInput& input) {
+        ModelTurn decide(const ModelInput& input) override {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
             std::string tool = "flock_session_search";
@@ -625,7 +624,7 @@ void sessionConversationDispatch() {
                 args = {{"text","The investigation is no longer readable."},{"reason","Explain the status"}};
             }
             return responseDecision(Json::array({{{"type","function_call"},{"namespace","flock"},
-                                    {"name",tool},{"arguments",args.dump()}}}),request).calls.at(0);
+                                    {"name",tool},{"arguments",args.dump()}}}),request);
         }
     } model(store,shared);
     store.access().resourceGrant({"root",true},"release",shared,GrantChange::grant);

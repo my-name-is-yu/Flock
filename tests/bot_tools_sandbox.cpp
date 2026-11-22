@@ -9,6 +9,7 @@
 #include <iostream>
 #include <mutex>
 #include <sqlite3.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -43,6 +44,8 @@ Decision call(std::string tool, Json args = Json::object()) {
 struct Provider : Model {
     std::vector<Decision> next;
     Json seen;
+    Json content;
+    std::function<void(const ModelInput&)> beforeTurn;
     ModelTurn decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
         auto output = Json::array();
@@ -55,6 +58,7 @@ struct Provider : Model {
         if (input.event.at("kind") != "conversation_turn") {
             emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
         } else {
+            if (beforeTurn) beforeTurn(input);
             check(request.at("parallel_tool_calls") == true,"Conversation schema did not enable parallel calls");
             check(request.at("instructions").get<std::string>().find("untrustedData") != std::string::npos,
                   "Tool output trust was not explained in the prompt");
@@ -63,6 +67,7 @@ struct Provider : Model {
                 for (const auto& action : next) emit(action);
             } else {
                 seen = steps;
+                content = request.at("input").at(0).at("content");
                 emit(call("reply",{{"text","Checked."}}));
             }
         }
@@ -91,6 +96,7 @@ struct FakeWeb : WebTools {
     bool synchronize = false;
     std::mutex mutex;
     std::condition_variable gate;
+    std::vector<std::string> searchQueries;
     unsigned arrived = 0;
     void rendezvous() {
         if (!synchronize) return;
@@ -102,6 +108,10 @@ struct FakeWeb : WebTools {
     }
     Json search(std::string_view query) override {
         ++searches;
+        {
+            std::lock_guard lock(mutex);
+            searchQueries.emplace_back(query);
+        }
         rendezvous();
         return {{"query",query},{"text","Untrusted search evidence"}};
     }
@@ -115,7 +125,12 @@ struct FakeWeb : WebTools {
 struct FakeMcp : McpTools {
     std::atomic<int> discoveries{0}, calls{0}, reads{0};
     bool hasServer(std::string_view server) const override { return server == "fixture" || server == "private"; }
-    Json discover(std::string_view) override { ++discoveries; return {{"tools",{"lookup"}},{"resources",{"fixture://data"}}}; }
+    Json discover(std::string_view, McpCollection collection, std::string_view cursor) override {
+        ++discoveries;
+        if (collection == McpCollection::resources) return {{"resources",{"fixture://data"}}};
+        if (cursor == "tools-page-2") return {{"tools",{"second"}}};
+        return {{"tools",{"lookup"}},{"nextCursor","tools-page-2"}};
+    }
     Json invoke(std::string_view, std::string_view name, const Json& args) override {
         ++calls;
         return {{"toolName",name},{"arguments",args}};
@@ -175,6 +190,12 @@ struct Fixture {
         check(steps.is_array() && steps.size() == 1,"Expected one tool result");
         return steps[0].at("result");
     }
+    void approve() {
+        const auto paused = store->pausedConversations("alpha");
+        check(paused.size() == 1,"Expected one paused turn");
+        store->approveMessageModelCall("alpha",paused[0].at("messageId"));
+        runtime->runConversations();
+    }
     std::string sql(const std::string& query) const {
         sqlite3* connection = nullptr;
         const auto opened = sqlite3_open_v2((home/"state.db").c_str(),&connection,SQLITE_OPEN_READONLY,nullptr);
@@ -216,6 +237,10 @@ void workspaceAndLifecycle(Fixture& f) {
     check(marker.at("files") == Json::array({"allowed.txt"}),"Workspace search missed its marker");
     check(f.run(call("workspace_read_file",{{"path","allowed.txt"}})).at("text") == "workspace-only-marker",
           "Workspace read missed its content");
+    write(root/"script","#!/bin/sh\n");
+    check(chmod((root/"script").c_str(),0700) == 0,"Could not make fixture script executable");
+    check(f.run(call("workspace_write_file",{{"path","script"},{"text","#!/bin/sh\nprintf updated"}})).at("ok") == true &&
+          access((root/"script").c_str(),X_OK) == 0,"Workspace edit lost executable permissions");
     check(!f.run(call("workspace_run_command",{{"argv",Json::array({"pwd"})}})).at("ok").get<bool>(),
           "Workspace command ran without an exec grant");
     f.grant({"workspace","alpha","exec"});
@@ -281,6 +306,14 @@ void workspaceAndLifecycle(Fixture& f) {
     check(env.at("exitCode") == 0 && env.dump().find("must-not-be-inherited") == std::string::npos,
           "Workspace command inherited Flock's environment");
 
+    const auto capturedSecret = f.store->access().requestSecret("alpha",{"capture-proof"});
+    f.store->access().submitSecret(owner,"alpha",capturedSecret,"command-redaction-fixture");
+    write(root/"captured","command-redaction-fixture");
+    const auto secretCommand = f.command(Json::array({"cat","captured"}));
+    check(f.until(secretCommand,finished).at("stdout") == "[redacted]" &&
+          f.sql("SELECT stdout FROM workspace_commands WHERE id=" + std::to_string(secretCommand)) == "[redacted]",
+          "Command captured a protected value in persistent state");
+
     const auto streaming = f.command(Json::array({"sh","-c",
         "i=0; while [ $i -lt 300 ]; do printf '%064d' 1; printf x >&2; i=$((i+1)); done; exec /bin/sleep 60"}));
     const auto large = f.until(streaming,[](const Json& status) { return status.at("truncated") == true; });
@@ -321,11 +354,15 @@ void externalTools(Fixture& f) {
           "An invalid or internal fetch target was accepted");
 
     for (const auto* op : {"discover","invoke","read_resource"}) f.grant({"mcp_server","fixture",op});
-    const auto discover = f.run(call("mcp_discover",{{"server","fixture"}}));
+    const auto discovery = call("mcp_discover",{{"server","fixture"},{"collection","tools"}});
+    const auto discover = f.run(discovery);
     const auto invoke = call("mcp_call_tool",{{"server","fixture"},{"name","lookup"},{"arguments",{{"query","x"}}}});
     const auto resource = call("mcp_read_resource",{{"server","fixture"},{"uri","fixture://data"}});
     check(discover.at("data").at("tools") == Json::array({"lookup"}) && discover.at("untrustedData") == true,
           "MCP discovery result was invalid");
+    auto nextPage = discovery;
+    nextPage.args["cursor"] = discover.at("data").at("nextCursor");
+    check(f.run(nextPage).at("data").at("tools") == Json::array({"second"}),"MCP tool cursor did not reach the adapter");
     const auto invoked = f.run(invoke);
     check(invoked.at("data").at("toolName") == "lookup" && invoked.at("untrustedData") == true,"MCP invocation failed");
     const auto readResource = f.run(resource);
@@ -333,7 +370,7 @@ void externalTools(Fixture& f) {
           "MCP resource read failed");
     for (const auto* op : {"discover","invoke","read_resource"})
         f.store->access().resourceGrant(owner,"alpha",{"mcp_server","fixture",op},GrantChange::revoke);
-    check(f.run(call("mcp_discover",{{"server","fixture"}})).at("ok") == false && f.mcp->discoveries == 1,
+    check(f.run(discovery).at("ok") == false && f.mcp->discoveries == 2,
           "Revoked MCP discovery reached the adapter");
     check(f.run(invoke).at("ok") == false && f.mcp->calls == 1,"Revoked MCP invocation reached the adapter");
     check(f.run(resource).at("ok") == false && f.mcp->reads == 1,"Revoked MCP resource read reached the adapter");
@@ -363,6 +400,7 @@ void externalTools(Fixture& f) {
     const auto image = call("inspect_attachment",{{"messageId",message},{"attachmentId","1"}});
     const auto audio = call("inspect_attachment",{{"messageId",message},{"attachmentId","2"}});
     check(f.run(image).at("ok") == false,"Attachment was inspected without its grant");
+    check(f.model.content.size() == 1,"Ungranted image reached the model request");
     f.grant({"attachment","alpha","inspect"});
     f.grant({"attachment","beta","inspect"},"beta");
     const auto metadata = f.batch({image,audio});
@@ -372,6 +410,9 @@ void externalTools(Fixture& f) {
           metadata[1].at("result").at("data").at("kind") == "audio" &&
           metadata[1].at("result").at("data").at("sampleRateHz") == 8000 &&
           metadata[1].at("result").at("untrustedData") == true,"Media inspection did not return scoped metadata");
+    check(f.model.content.size() == 3 && f.model.content[2].at("type") == "input_image" &&
+          f.model.content[2].at("image_url") == "data:image/png;base64," + media[0].at("dataBase64").get<std::string>(),
+          "An authorized attachment did not reach the production image input schema");
     check(f.run(image,"beta").at("ok") == false,"Another Bot could inspect the attachment");
     check(f.store->receipt("alpha","media","Please inspect these photos and audio",0,media).has_value(),
           "Attachment receipt was not idempotent");
@@ -381,12 +422,36 @@ void externalTools(Fixture& f) {
     f.batch({search,fetch},2);
     check(f.web->searches == searches+1 && f.web->fetches == fetches,"Parallel calls overspent the remaining budget");
     const auto id = std::to_string(f.lastMessage);
-    const auto result = Json::parse(f.sql("SELECT result FROM conversation_steps WHERE message_id="+id+" AND step=1"));
-    check(result[0].at("ok") == true && result[1].at("budgetExhausted") == true,
-          "Budget rejection was not explicit or ordered");
+    const auto pending = Json::parse(f.sql("SELECT effect FROM conversation_steps WHERE message_id="+id+" AND step=1"));
+    check(pending[0].at("ok") == true && pending[1].is_null(),"Exhausted batch did not retain its completed call");
     check(f.sql("SELECT CAST(attempts AS TEXT) FROM model_budgets WHERE id='message/"+id+"'") == "2" &&
           f.sql("SELECT CAST(count(*) AS TEXT) FROM model_attempts WHERE purpose='bot_tool' AND message_id="+id) == "1",
           "Action budget reservation was not durable");
+    f.restart();
+    f.store->access().resourceGrant(owner,"alpha",{"web","public","search"},GrantChange::revoke);
+    f.approve();
+    check(f.web->searches == searches+1 && f.web->fetches == fetches+1,
+          "Approval did not execute exactly the pending call");
+    f.approve();
+    check(f.model.seen[0].at("result").at("accessRevoked") == true &&
+          f.model.seen[1].at("result").at("ok") == true,"Revoked result reached the resumed model");
+}
+
+void approvalWhileAnotherTurnIsInferring(Fixture& f) {
+    f.grant({"web","public","search"});
+    const auto search = [](std::string query) { return call("web_search",{{"query",query}}); };
+    f.batch({search("older")},1);
+    const auto paused = f.store->pausedConversations("alpha").at(0).at("messageId").get<Id>();
+    f.model.beforeTurn = [&](const ModelInput& input) {
+        if (input.event.at("messageId") == f.lastMessage && input.event.at("turn").empty())
+            f.store->approveMessageModelCall("alpha",paused);
+    };
+    f.batch({search("newer")});
+    f.model.beforeTurn = {};
+    const auto& queries = f.web->searchQueries;
+    check(queries.size() >= 2 && queries[queries.size()-2] == "older" && queries.back() == "newer",
+          "A newer tool action overtook a resumed turn");
+    f.approve();
 }
 }
 
@@ -395,6 +460,7 @@ int main() {
         Fixture fixture;
         workspaceAndLifecycle(fixture);
         externalTools(fixture);
+        approvalWhileAnotherTurnIsInferring(fixture);
         std::cout << "Bot workspace and tool acceptance passed\n";
         return 0;
     } catch (const std::exception& error) {

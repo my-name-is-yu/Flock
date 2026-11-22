@@ -40,10 +40,9 @@ CREATE TABLE IF NOT EXISTS conversation_turns(
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
-  attempt_id INTEGER, decision TEXT, effect TEXT, result TEXT,
+  attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
+  result TEXT CHECK(json_type(result)='array'),
   PRIMARY KEY(message_id,step));
-UPDATE conversation_steps SET decision=json_array(json(decision)) WHERE json_type(decision)='object';
-UPDATE conversation_steps SET result=json_array(json(result)) WHERE json_type(result)='object';
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,

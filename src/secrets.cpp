@@ -108,10 +108,10 @@ std::string SecretRedactor::text(std::string_view source, bool truncated) const 
     return out;
 }
 
-Json SecretRedactor::payload(const Json& input) const {
+Json SecretRedactor::payload(const Json& input, bool truncated) const {
     if (values_.empty()) return input;
     auto scrub = [&](auto&& self, const Json& item) -> Json {
-        if (item.is_string()) return text(item.get_ref<const std::string&>());
+        if (item.is_string()) return text(item.get_ref<const std::string&>(),truncated);
         if (item.is_array()) {
             auto result = Json::array();
             for (auto& entry : item) result.push_back(self(self,entry));

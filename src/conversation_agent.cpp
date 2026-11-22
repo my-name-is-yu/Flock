@@ -10,12 +10,6 @@ using conversation_storage::integer;
 using conversation_storage::messageSize;
 using conversation_storage::verifiedEnvironment;
 
-struct conversation::Message {
-    Id id = 0, replyTo = 0;
-    std::string bot, text;
-    Json routing;
-};
-
 namespace {
 using conversation::Message;
 
@@ -631,7 +625,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 if (!row.string(1).empty()) continue;
                 if (!row.string(0).empty()) {
                     for (const auto& call : row.json(0))
-                        calls.push_back({call.at("tool"),call.at("args"),call.value("reason","")});
+                        calls.push_back({call.at("tool"),call.at("args"),call.at("reason")});
                 }
             }
             transaction.commit();
@@ -647,12 +641,8 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
                 input.tools.insert(input.tools.end(),botToolNames().begin(),botToolNames().end());
-                auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
-                                      " AND reserved_attempt IS NOT NULL",{id});
-                if (reserved.next()) {
-                    attempt = reserved.number(0);
-                    exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?",{id});
-                } else attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                attempt = takeReservedConversationCall(id);
+                if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
                 if (!attempt) pauseTurn(*message);
                 else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
                           " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
@@ -661,6 +651,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             if (!attempt) return true;
             try {
                 authorizeSessionHistory(message->bot,input.event.at("turn"),t3);
+                authorizeBotToolHistory(message->bot,id,input);
                 calls = callModel(message->bot,model,input,attempt).calls;
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count",false);
@@ -686,7 +677,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
 
         const auto& decision = calls.front();
         if (isBotTool(decision.tool)) {
-            runBotTools({message->bot,id,settings},step,calls);
+            if (!runBotTools({message->bot,id,settings},step,calls)) return true;
             continue;
         }
 
@@ -818,7 +809,9 @@ WHERE m.bot_id=? AND t.pause_id=? AND t.status='paused'
     const auto message = paused.number(0);
     const auto budget = p_->messageModelBudget(message);
     p_->grantModelCall(budget);
-    const auto attempt = p_->reserveModelCall(budget,"conversation_turn",message,0,0);
+    const bool toolPending = p_->query("SELECT 1 FROM conversation_steps WHERE message_id=?"
+                                       " AND result IS NULL AND json_type(effect)='array'",{message}).next();
+    const auto attempt = p_->reserveModelCall(budget,toolPending ? "bot_tool" : "conversation_turn",message,0,0);
     if (!attempt) throw Conflict("The approved model call could not be reserved");
     p_->exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});

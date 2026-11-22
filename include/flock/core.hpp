@@ -45,6 +45,10 @@ struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
 };
+struct ModelImage {
+    Id messageId;
+    std::string attachmentId, mimeType, dataBase64;
+};
 struct ModelInput {
     Json task, event, history;
     BotNotes notes;
@@ -52,6 +56,7 @@ struct ModelInput {
     std::string feedback;
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
+    std::vector<ModelImage> images = {};
 
 };
 struct ModelError : std::runtime_error {

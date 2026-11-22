@@ -5,7 +5,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
-#include <csignal>
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <spawn.h>
@@ -22,6 +22,10 @@ constexpr std::size_t maxSearchBytes = 1024 * 1024;
 constexpr std::size_t maxFileBytes = 8192;
 constexpr auto supervisorDeadline = 12s;
 
+std::string safeOutput(std::string_view value) {
+    return Json::parse(Json(std::string(value)).dump(-1,' ',false,Json::error_handler_t::replace)).get<std::string>();
+}
+
 class Fd {
     int value_;
 public:
@@ -36,38 +40,64 @@ public:
     }
     ~Fd() { if (value_ >= 0) close(value_); }
     int get() const { return value_; }
+    int release() { return std::exchange(value_,-1); }
     void reset() { if (value_ >= 0) close(std::exchange(value_,-1)); }
 };
 
-bool within(const fs::path& root, const fs::path& child) {
-    const auto [parent,end] = std::mismatch(root.begin(),root.end(),child.begin(),child.end());
-    return parent == root.end() && end != child.end();
-}
-
-void checkPath(const fs::path& root, const fs::path& relative) {
-    if (!within(root,fs::weakly_canonical(root / relative)))
-        throw Conflict("Path leaves the authorized directory");
-}
-
-Fd directory(const fs::path& root, const fs::path& relative) {
-    Fd current(open(root.c_str(),O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-    for (const auto& part : relative) {
+Fd directoryAt(int parent, const fs::path& relative) {
+    Fd current(openat(parent,".",O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    for (const auto& part : relative)
         current = Fd(openat(current.get(),part.c_str(),O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-    }
     return current;
 }
 
-std::string readFile(const fs::path& root, const fs::path& relative, std::size_t cap) {
-    checkPath(root,relative);
-    const auto parent = directory(root,relative.parent_path());
-    const Fd file(openat(parent.get(),relative.filename().c_str(),O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC));
+Fd directory(const fs::path& root) {
+    const Fd slash(open("/",O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    return directoryAt(slash.get(),root.relative_path());
+}
+
+template<class Visit>
+bool visitDirectory(int parent, const Visit& visit) {
+    auto fd = directoryAt(parent,{});
+    const std::unique_ptr<DIR,decltype(&closedir)> entries(fdopendir(fd.get()),closedir);
+    if (!entries) throw Conflict("Cannot enumerate workspace directory");
+    fd.release();
+    while (true) {
+        errno = 0;
+        const auto* entry = readdir(entries.get());
+        if (!entry) {
+            if (errno) throw Conflict("Cannot enumerate workspace directory");
+            return true;
+        }
+        const std::string_view name(entry->d_name);
+        if (name != "." && name != ".." && !visit(name,entry->d_ino)) return false;
+    }
+}
+
+Fd exactChildDirectory(int parent, const fs::path& name) {
+    auto child = directoryAt(parent,name);
+    struct stat info{};
+    if (fstat(child.get(),&info) != 0) throw Conflict("Cannot identify Bot workspace");
+    const bool missing = visitDirectory(parent,[&](std::string_view entry, auto inode) {
+        return entry != name.native() || inode != info.st_ino;
+    });
+    if (missing) throw Conflict("Bot workspace does not have the exact directory name");
+    return child;
+}
+
+Fd regularFile(int parent, const fs::path& filename) {
+    Fd file(openat(parent,filename.c_str(),O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC));
     struct stat info{};
     if (fstat(file.get(),&info) != 0 || !S_ISREG(info.st_mode) || info.st_nlink != 1)
-        throw Conflict("Only workspace regular files are readable");
+        throw Conflict("Only regular files with one link are readable");
+    return file;
+}
+
+std::string readFile(int file, std::size_t cap) {
     std::string result(cap,'\0');
     std::size_t size = 0;
     while (size < cap) {
-        const auto n = read(file.get(),result.data()+size,cap-size);
+        const auto n = read(file,result.data()+size,cap-size);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) throw Conflict("Unable to read workspace file");
         if (n == 0) break;
@@ -77,14 +107,17 @@ std::string readFile(const fs::path& root, const fs::path& relative, std::size_t
     return result;
 }
 
-void writeFile(const fs::path& root, const fs::path& relative, std::string_view data) {
-    checkPath(root,relative);
-    const auto parent = directory(root,relative.parent_path());
+void writeFile(int root, const fs::path& relative, std::string_view data) {
+    const auto parent = directoryAt(root,relative.parent_path());
     const auto filename = relative.filename();
     struct stat existing{};
-    if (fstatat(parent.get(),filename.c_str(),&existing,AT_SYMLINK_NOFOLLOW) == 0 &&
-        (!S_ISREG(existing.st_mode) || existing.st_nlink != 1))
-        throw Conflict("Only workspace regular files can be replaced");
+    mode_t permissions = 0600;
+    if (fstatat(parent.get(),filename.c_str(),&existing,AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(existing.st_mode) || existing.st_nlink != 1)
+            throw Conflict("Only regular files with one link can be replaced");
+        permissions = existing.st_mode & 0777;
+    } else if (errno != ENOENT) throw Conflict("Cannot inspect workspace file");
+
     const auto temporary = ".flock-write-" + actionId();
     const Fd file(openat(parent.get(),temporary.c_str(),O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,0600));
     try {
@@ -94,7 +127,8 @@ void writeFile(const fs::path& root, const fs::path& relative, std::string_view 
             if (count <= 0) throw Conflict("Unable to write workspace file");
             data.remove_prefix(static_cast<std::size_t>(count));
         }
-        if (fsync(file.get()) != 0 || renameat(parent.get(),temporary.c_str(),parent.get(),filename.c_str()) != 0)
+        if (fchmod(file.get(),permissions) != 0 || fsync(file.get()) != 0 ||
+            renameat(parent.get(),temporary.c_str(),parent.get(),filename.c_str()) != 0)
             throw Conflict("Unable to save workspace file");
     } catch (...) {
         unlinkat(parent.get(),temporary.c_str(),0);
@@ -102,57 +136,72 @@ void writeFile(const fs::path& root, const fs::path& relative, std::string_view 
     }
 }
 
-bool unsafeEntry(const fs::directory_entry& entry) {
-    const auto type = entry.symlink_status().type();
-    return type != fs::file_type::directory &&
-           (type != fs::file_type::regular || entry.hard_link_count() != 1);
+template<class Visit>
+bool walk(int parent, const fs::path& prefix, const Visit& visit) {
+    return visitDirectory(parent,[&](std::string_view name, auto) {
+        const auto relative = prefix / name;
+        const auto filename = relative.filename();
+        struct stat info{};
+        if (fstatat(parent,filename.c_str(),&info,AT_SYMLINK_NOFOLLOW) != 0)
+            throw Conflict("Workspace changed while it was being enumerated");
+        if (!visit(parent,relative,info)) return false;
+        if (!S_ISDIR(info.st_mode)) return true;
+        const auto child = directoryAt(parent,filename);
+        return walk(child.get(),relative,visit);
+    });
 }
 
-Json searchWorkspace(const fs::path& root, const fs::path& relative, std::string_view query) {
-    auto base = root;
-    if (!relative.empty()) {
-        checkPath(root,relative);
-        directory(root,relative);
-        base /= relative;
-    }
-    auto files = Json::array();
+Json searchWorkspace(int root, const fs::path& relative, std::string_view query) {
+    const auto base = directoryAt(root,relative);
+    std::vector<std::string> files;
     std::size_t visited = 0, bytes = 0;
     bool truncated = false;
-    for (const auto& entry : fs::recursive_directory_iterator(base)) {
-        if (++visited > maxEntries || bytes >= maxSearchBytes || files.size() >= 40) {
-            truncated = true;
-            break;
+    const bool complete = walk(base.get(),relative,[&](int parent, const fs::path& file, const struct stat& info) {
+        if (++visited > maxEntries || bytes >= maxSearchBytes || files.size() >= 40 ||
+            file.native().size() > 1024) return false;
+        if (!S_ISREG(info.st_mode) || info.st_nlink != 1) return true;
+        const auto input = regularFile(parent,file.filename());
+        const auto cap = std::min(maxFileBytes,maxSearchBytes-bytes);
+        const auto data = readFile(input.get(),cap+1);
+        const auto size = std::min(data.size(),cap);
+        bytes += size;
+        truncated |= data.size() > size;
+        if (std::string_view(data).substr(0,size).find(query) != std::string_view::npos) {
+            auto name = file.generic_string();
+            if (safeOutput(name) == name) files.push_back(std::move(name));
+            else truncated = true;
         }
-        if (unsafeEntry(entry) || !entry.is_regular_file()) continue;
-        const auto requested = entry.path().lexically_relative(root);
-        const auto content = readFile(root,requested,std::min(maxFileBytes+1,maxSearchBytes-bytes));
-        bytes += content.size();
-        truncated |= content.size() > maxFileBytes;
-        if (content.find(query) != std::string::npos) files.push_back(requested.generic_string());
-    }
-    return {{"files",files},{"truncated",truncated}};
+        return true;
+    });
+    std::ranges::sort(files);
+    return {{"files",files},{"truncated",truncated || !complete}};
 }
 
-void ensureDirectory(const fs::path& path) {
-    if (mkdir(path.c_str(),0700) != 0 && errno != EEXIST) throw Conflict("Cannot create Bot workspace");
-    directory(path,{});
+fs::path stateDirectory(const fs::path& database) {
+    return fs::canonical(database.has_parent_path() ? database.parent_path() : fs::path("."));
 }
 
-fs::path workspaceRoot(const fs::path& database, const ToolContext& ctx, bool create) {
+struct Workspace {
+    fs::path path;
+    Fd directory;
+};
+
+Workspace openWorkspace(const fs::path& database, const ToolContext& ctx) {
     if (!validBotId(ctx.bot)) throw Conflict("Invalid Bot workspace");
-    const auto state = fs::canonical(database.has_parent_path() ? database.parent_path() : fs::path("."));
-    const auto configured = ctx.settings.workspaceRoot.empty() ? state / "workspaces" : ctx.settings.workspaceRoot;
-    const auto base = fs::weakly_canonical(fs::absolute(configured));
-    const auto actualDatabase = fs::weakly_canonical(database);
-    if (base == state || within(base,state) || within(base,actualDatabase) ||
-        (within(state,base) && base != state / "workspaces") ||
-        fs::is_symlink(configured))
-        throw Conflict("Workspace storage must be isolated from Flock state");
-    if (create) ensureDirectory(base);
-    const auto root = base / ctx.bot;
-    if (fs::is_symlink(root) || fs::weakly_canonical(root) != root) throw Conflict("Unsafe Bot workspace directory");
-    if (create) ensureDirectory(root);
-    return root;
+    const auto state = stateDirectory(database);
+    const auto basePath = state / "workspaces";
+    const auto actualDatabase = fs::canonical(database);
+    for (auto parent = actualDatabase.parent_path(); parent != parent.root_path(); parent = parent.parent_path()) {
+        if (pathContains(basePath,parent) || (fs::exists(basePath) && fs::equivalent(basePath,parent)))
+            throw Conflict("Workspace storage must be outside the Flock database");
+    }
+    const auto stateFd = directory(state);
+    if (mkdirat(stateFd.get(),"workspaces",0700) != 0 && errno != EEXIST)
+        throw Conflict("Cannot create workspace storage");
+    const auto base = exactChildDirectory(stateFd.get(),"workspaces");
+    if (mkdirat(base.get(),ctx.bot.c_str(),0700) != 0 && errno != EEXIST)
+        throw Conflict("Cannot create Bot workspace");
+    return {basePath / ctx.bot,exactChildDirectory(base.get(),ctx.bot)};
 }
 
 std::vector<std::string> commandArguments(const Json& args) {
@@ -169,22 +218,31 @@ std::vector<std::string> commandArguments(const Json& args) {
     return result;
 }
 
+fs::path systemExecutable(const fs::path& path) {
+#if defined(__linux__)
+    const auto resolved = fs::canonical(path);
+    if (resolved.parent_path() != fs::canonical("/bin") && resolved.parent_path() != fs::canonical("/usr/bin"))
+        throw Conflict("Executable resolves outside system bin");
+    return resolved;
+#else
+    return path;
+#endif
+}
+
 fs::path executable(const fs::path& root, const std::string& name) {
     const fs::path requested(name);
     if (requested.is_absolute()) {
         if (requested.parent_path() != "/bin" && requested.parent_path() != "/usr/bin")
             throw Conflict("Executable must be in the workspace or system bin");
-        return requested;
+        return systemExecutable(requested);
     }
     if (!requested.has_parent_path()) {
         for (const auto* prefix : {"/usr/bin","/bin"}) {
             const auto candidate = fs::path(prefix) / requested;
-            if (access(candidate.c_str(),X_OK) == 0) return candidate;
+            if (access(candidate.c_str(),X_OK) == 0) return systemExecutable(candidate);
         }
     }
-    const auto relative = relativeToolPath(name);
-    checkPath(root,relative);
-    return root / relative;
+    return root / relativeToolPath(name);
 }
 
 #ifdef __APPLE__
@@ -209,12 +267,12 @@ const std::array systemRoots{
 
 std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cwd, const Json& args, bool writable,
                                         const fs::path& database) {
-    const auto state = fs::canonical(database.has_parent_path() ? database.parent_path() : fs::path("."));
+    const auto state = stateDirectory(database);
     const auto actualDatabase = fs::weakly_canonical(database);
     for (const auto* directory : systemRoots) {
         if (!fs::exists(directory)) continue;
         const auto system = fs::canonical(directory);
-        if (system == state || within(system,state) || within(system,root) || within(system,actualDatabase))
+        if (system == state || pathContains(system,state) || pathContains(system,root) || pathContains(system,actualDatabase))
             throw Conflict("Flock state and Bot workspaces must be outside sandbox system directories");
     }
     auto command = commandArguments(args);
@@ -223,6 +281,7 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
     const auto workspace = "(subpath " + sandboxLiteral(root.string()) + ")";
     auto profile = std::string(R"PROFILE((version 1)
 (deny default)
+(deny process-fork)
 (allow file-read* file-map-executable (subpath "/usr/lib") (subpath "/System/Library") (subpath "/usr/share/locale")
                  (subpath "/usr/bin") (subpath "/bin") (literal "/dev/null"))
 (allow file-read-data (literal "/"))
@@ -237,12 +296,12 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
     const auto inner = [](const fs::path& rootPath, const fs::path& path) {
         return std::string("/workspace/") + path.lexically_relative(rootPath).generic_string();
     };
-    if (within(root,command.front())) command.front() = inner(root,command.front());
+    if (pathContains(root,command.front())) command.front() = inner(root,command.front());
     std::vector<std::string> launch{"/usr/bin/bwrap","--unshare-all","--die-with-parent",
         "--new-session","--disable-userns","--cap-drop","ALL","--dev","/dev"};
     for (const auto* path : systemRoots) if (fs::exists(path))
         launch.insert(launch.end(),{"--ro-bind",path,path});
-    launch.insert(launch.end(),{writable ? "--bind" : "--ro-bind",root.string(),"/workspace",
+    launch.insert(launch.end(),{writable ? "--bind-fd" : "--ro-bind-fd","3","/workspace",
                                "--chdir",inner(root,cwd),"--"});
 #else
     (void)cwd;
@@ -274,22 +333,18 @@ struct Spawn {
     }
 };
 
-pid_t launchSandbox(const fs::path& cwd, std::vector<std::string> command, int lease, int out, int err) {
+pid_t launchSandbox(const fs::path& cwd, int directory, std::vector<std::string> command, int lease, int out, int err) {
     Spawn spawn;
     Spawn::check(posix_spawn_file_actions_adddup2(&spawn.actions,lease,STDIN_FILENO));
     Spawn::check(posix_spawn_file_actions_adddup2(&spawn.actions,out,STDOUT_FILENO));
     Spawn::check(posix_spawn_file_actions_adddup2(&spawn.actions,err,STDERR_FILENO));
+    Spawn::check(posix_spawn_file_actions_adddup2(&spawn.actions,directory,3));
 #ifdef __APPLE__
     Spawn::check(posix_spawnattr_setflags(&spawn.attributes,POSIX_SPAWN_CLOEXEC_DEFAULT));
-    const auto working = directory(cwd,{});
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    Spawn::check(posix_spawn_file_actions_addfchdir_np(&spawn.actions,working.get()));
-#pragma clang diagnostic pop
     auto home = "HOME=" + cwd.string();
 #else
     (void)cwd;
-    Spawn::check(posix_spawn_file_actions_addclosefrom_np(&spawn.actions,3));
+    Spawn::check(posix_spawn_file_actions_addclosefrom_np(&spawn.actions,4));
     std::string home = "HOME=/workspace";
 #endif
     std::string path = "PATH=/usr/bin:/bin", lang = "LANG=C";
@@ -338,17 +393,17 @@ struct Capture {
     }
 };
 
-void verifyTree(const fs::path& root) {
+void verifyTree(int root) {
     std::size_t count = 0;
-    for (const auto& entry : fs::recursive_directory_iterator(root)) {
-        if (++count > maxEntries) throw Conflict("Workspace has too many entries for command execution");
-        if (unsafeEntry(entry)) throw Conflict("Command workspace contains an unsafe entry");
-    }
+    walk(root,{},[&](int, const fs::path& path, const struct stat& info) {
+        if (++count > maxEntries || path.native().size() > 1024)
+            throw Conflict("Workspace tree is too large for command execution");
+        if (!S_ISDIR(info.st_mode) && (!S_ISREG(info.st_mode) || info.st_nlink != 1))
+            throw Conflict("Command workspace contains an unsafe entry");
+        return true;
+    });
 }
 
-std::string safeOutput(std::string_view value) {
-    return Json::parse(Json(std::string(value)).dump(-1,' ',false,Json::error_handler_t::ignore)).get<std::string>();
-}
 }
 
 fs::path relativeToolPath(std::string_view value) {
@@ -359,11 +414,21 @@ fs::path relativeToolPath(std::string_view value) {
     return path.lexically_normal();
 }
 
-Json readToolFile(const fs::path& root, const fs::path& relative) {
-    auto data = readFile(root,relative,maxFileBytes+1);
-    const auto truncated = data.size() > maxFileBytes;
-    if (truncated) data.resize(maxFileBytes);
-    return {{"text",safeOutput(data)},{"truncated",truncated}};
+bool pathContains(const fs::path& root, const fs::path& child) {
+    return std::mismatch(root.begin(),root.end(),child.begin(),child.end()).first == root.end();
+}
+
+Json readToolFile(int root, const fs::path& relative, const SecretRedactor& scrub) {
+    const auto parent = directoryAt(root,relative.parent_path());
+    const auto file = regularFile(parent.get(),relative.filename());
+    const auto data = readFile(file.get(),maxFileBytes+1);
+    const auto redacted = safeOutput(scrub.text(std::string_view(data).substr(0,maxFileBytes),data.size() > maxFileBytes));
+    return {{"text",bounded(redacted,maxFileBytes)},{"truncated",data.size() > maxFileBytes || redacted.size() > maxFileBytes}};
+}
+
+Json readToolFile(const fs::path& root, const fs::path& relative, const SecretRedactor& scrub) {
+    const auto fd = directory(root);
+    return readToolFile(fd.get(),relative,scrub);
 }
 
 void Store::Impl::migrateWorkspace() {
@@ -392,24 +457,19 @@ void Store::Impl::stopWorkspace() {
 
 void Store::Impl::validateWorkspace(const ToolContext& ctx, const Decision& call) {
     const auto& args = call.args;
-    const auto root = workspaceRoot(path,ctx,false);
     if (call.tool == "workspace_command_status" || call.tool == "workspace_stop_command") {
         if (!query("SELECT 1 FROM workspace_commands WHERE bot=? AND id=?",
                    {ctx.bot,toolId(args,"commandId")}).next()) throw Conflict("Unknown workspace command");
         return;
     }
     if (call.tool == "workspace_run_command") {
-        if (!Access(*this).permits(ctx.bot,{"workspace",ctx.bot,"read"},true))
-            throw Conflict("Workspace command requires workspace read access");
-        const auto cwd = args.contains("cwd") ? relativeToolPath(toolText(args,"cwd",1024)) : fs::path{};
-        if (!cwd.empty() && cwd != ".") checkPath(root,cwd);
-        executable(root,commandArguments(args).front());
+        if (args.contains("cwd")) relativeToolPath(toolText(args,"cwd",1024));
+        executable({},commandArguments(args).front());
         return;
     }
     if (call.tool != "workspace_search" || args.contains("path")) {
         const auto relative = relativeToolPath(toolText(args,"path",1024));
         if (relative == "." && call.tool != "workspace_search") throw Conflict("Expected a workspace file");
-        if (relative != ".") checkPath(root,relative);
     }
 }
 
@@ -424,6 +484,9 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                 const auto job = workspaceJobs.find(id);
                 if (job != workspaceJobs.end()) job->second->stop = true;
             }
+            auto row = query("SELECT state FROM workspace_commands WHERE bot=? AND id=?",{ctx.bot,id});
+            if (!row.next()) throw Conflict("Unknown workspace command");
+            return {{"commandId",id},{"state",row.string(0)}};
         }
         auto row = query("SELECT state,stdout,stderr,truncated,coalesce(exit_code,-1) "
                          "FROM workspace_commands WHERE bot=? AND id=?",{ctx.bot,id});
@@ -432,13 +495,14 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
         return {{"commandId",id},{"state",row.string(0)},{"stdout",row.string(1)},{"stderr",row.string(2)},
                 {"truncated",row.number(3)!=0},{"exitCode",exit < 0 ? Json(nullptr) : Json(exit)}};
     }
-    const auto root = workspaceRoot(path,ctx,true);
+    const auto workspace = openWorkspace(path,ctx);
+    const auto root = workspace.directory.get();
     if (call.tool == "workspace_search") {
         auto relative = args.contains("path") ? relativeToolPath(toolText(args,"path",1024)) : fs::path{};
         if (relative == ".") relative.clear();
         return searchWorkspace(root,relative,toolText(args,"query",256));
     }
-    if (call.tool == "workspace_read_file") return readToolFile(root,relativeToolPath(toolText(args,"path",1024)));
+    if (call.tool == "workspace_read_file") return readToolFile(root,relativeToolPath(toolText(args,"path",1024)),sessionRedactor());
     if (call.tool == "workspace_write_file") {
         const auto data = toolText(args,"text",maxFileBytes,true);
         writeFile(root,relativeToolPath(toolText(args,"path",1024)),data);
@@ -447,12 +511,11 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
 
     auto relative = args.contains("cwd") ? relativeToolPath(toolText(args,"cwd",1024)) : fs::path{};
     if (relative == ".") relative.clear();
-    if (!relative.empty()) checkPath(root,relative);
-    directory(root,relative);
+    auto working = directoryAt(root,relative);
     verifyTree(root);
-    const auto cwd = relative.empty() ? root : root / relative;
+    const auto cwd = relative.empty() ? workspace.path : workspace.path / relative;
     const bool writable = Access(*this).permits(ctx.bot,{"workspace",ctx.bot,"write"},true);
-    auto command = sandboxCommand(root,cwd,args,writable,path);
+    auto command = sandboxCommand(workspace.path,cwd,args,writable,path);
     Pipe out, err, lease;
     std::lock_guard lock(mutex);
     std::erase_if(workspaceJobs,[](const auto& entry) { return entry.second->done.load(); });
@@ -467,10 +530,17 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
     (void)inserted;
     try {
         control->worker = std::jthread([this,control,id,cwd,command = std::move(command),
+#ifdef __APPLE__
+                                        working = std::move(working),
+#else
+                                        working = std::move(workspace.directory),
+#endif
                                         out = std::move(out),err = std::move(err),lease = std::move(lease)](std::stop_token shutdown) mutable {
             pid_t pid = 0;
             try {
-                pid = launchSandbox(cwd,std::move(command),lease.ends.first.get(),out.ends.second.get(),err.ends.second.get());
+                if (control->stop || shutdown.stop_requested()) lease.ends.second.reset();
+                pid = launchSandbox(cwd,working.get(),std::move(command),lease.ends.first.get(),out.ends.second.get(),err.ends.second.get());
+                working.reset();
                 lease.ends.first.reset();
                 out.ends.second.reset();
                 err.ends.second.reset();
@@ -497,10 +567,17 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                     if (shutdown.stop_requested() && child > 0) break;
                     if (changed || child > 0) {
                         std::lock_guard guard(mutex);
+                        const auto scrub = sessionRedactor();
+                        const bool partial = capture.truncated || child == 0;
+                        const auto stdoutText = safeOutput(scrub.text(capture.output[0],partial));
+                        const auto stderrText = safeOutput(scrub.text(capture.output[1],partial));
+                        const auto output = bounded(stdoutText,workspaceOutputLimit);
+                        const auto error = bounded(stderrText,workspaceOutputLimit-output.size());
+                        const bool truncated = capture.truncated || output != stdoutText || error != stderrText;
                         const auto exit = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
                         exec("UPDATE workspace_commands SET stdout=?,stderr=?,truncated=?,"
                              "state=CASE WHEN ? THEN 'exited' ELSE state END,exit_code=? WHERE id=?",
-                             {safeOutput(capture.output[0]),safeOutput(capture.output[1]),int(capture.truncated),
+                             {output,error,int(truncated),
                               int(child > 0),child > 0 ? Json(exit) : Json(nullptr),id});
                     }
                     if (child > 0) break;

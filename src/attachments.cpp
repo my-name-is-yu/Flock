@@ -1,6 +1,7 @@
 #include "storage.hpp"
 
 #include <array>
+#include <set>
 
 namespace flockv0 {
 namespace {
@@ -37,11 +38,37 @@ std::uint32_t bigEndian(std::string_view data, std::size_t offset) {
     return value;
 }
 
-Json metadata(const Json& value) {
+std::uint32_t littleEndian(std::string_view data, std::size_t offset, unsigned size) {
+    std::uint32_t value = 0;
+    while (size) value = (value << 8) | static_cast<unsigned char>(data[offset + --size]);
+    return value;
+}
+
+void describeWav(std::string_view data, Json& result) {
+    std::uint32_t bytesPerSecond = 0, samples = 0;
+    for (std::size_t pos = 12; pos + 8 <= data.size();) {
+        const auto chunk = data.substr(pos,4);
+        const auto size = littleEndian(data,pos+4,4);
+        pos += 8;
+        if (size > data.size()-pos) throw Conflict("Invalid WAV chunk size");
+        if (chunk == "fmt " && size >= 16) {
+            result["channels"] = littleEndian(data,pos+2,2);
+            result["sampleRateHz"] = littleEndian(data,pos+4,4);
+            bytesPerSecond = littleEndian(data,pos+8,4);
+            result["bitsPerSample"] = littleEndian(data,pos+14,2);
+        }
+        if (chunk == "data") samples = size;
+        pos += size + size%2;
+    }
+    if (bytesPerSecond) result["durationMs"] = 1000ull*samples/bytesPerSecond;
+}
+
+Json metadata(const Json& value, const SecretRedactor& scrub) {
     if (!value.is_object() || value.size() != 3) throw Conflict("Invalid attachment");
     const auto name = toolText(value,"name",128);
     const auto mime = toolText(value,"mimeType",64);
     const auto bytes = decodeAttachment(toolText(value,"dataBase64",88000));
+    if (scrub.text(bytes) != bytes) throw Conflict("Protected secret values cannot be stored in attachments");
     const std::string_view data(bytes);
     Json result{{"name",name},{"mimeType",mime},{"sizeBytes",data.size()}};
     if (mime == "image/png" && data.size() >= 33 && data.starts_with("\x89PNG\r\n\x1a\n") &&
@@ -57,14 +84,7 @@ Json metadata(const Json& value) {
             (data.starts_with("ID3") || (static_cast<unsigned char>(data[0]) == 0xff && (data[1] & 0xe0) == 0xe0));
         if (!jpeg && !wav && !mp3)
             throw Conflict("Attachment must contain PNG, JPEG, WAV, or MP3 data matching its MIME type");
-        if (wav && data.substr(12,4) == "fmt ") {
-            const auto low = static_cast<unsigned char>(data[22]);
-            const auto high = static_cast<unsigned char>(data[23]);
-            result["channels"] = low | (high << 8);
-            std::uint32_t rate = 0;
-            for (int byte = 3; byte >= 0; --byte) rate = (rate << 8) | static_cast<unsigned char>(data[24+byte]);
-            result["sampleRateHz"] = rate;
-        }
+        if (wav) describeWav(data,result);
     }
     result["kind"] = mime.starts_with("image/") ? "image" : "audio";
     return result;
@@ -82,10 +102,13 @@ CREATE TABLE IF NOT EXISTS message_attachments(
 void Store::Impl::saveAttachments(Id message, const Json& attachments) {
     if (!attachments.is_array() || attachments.size() > 4 || attachments.dump().size() > 98000)
         throw Conflict("Attachments exceed the message limit");
+    if (attachments.empty()) return;
+    const auto scrub = sessionRedactor();
     for (std::size_t i = 0; i < attachments.size(); ++i) {
         const auto& attachment = attachments[i];
         const auto id = std::to_string(i+1);
-        auto view = metadata(attachment);
+        scrub.requirePublic(attachment);
+        auto view = metadata(attachment,scrub);
         view["attachmentId"] = id;
         exec("INSERT INTO message_attachments VALUES(?,?,?,?)",{message,id,view,attachment});
     }
@@ -96,5 +119,33 @@ Json Store::Impl::attachmentViews(Id message) const {
     auto result = Json::array();
     while (rows.next()) result.push_back({{"attachmentId",rows.string(0)}});
     return result;
+}
+
+Statement Store::Impl::scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const {
+    return query("SELECT a.metadata,a.payload FROM message_attachments a JOIN messages m ON m.id=a.message_id "
+                 "WHERE m.bot_id=? AND a.message_id<=? AND a.message_id=? AND a.attachment_id=?",
+                 {bot,throughMessage,toolId(args,"messageId"),toolText(args,"attachmentId",128)});
+}
+
+std::vector<ModelImage> Store::Impl::inspectedImages(std::string_view bot, Id message, const Json& steps) const {
+    std::vector<ModelImage> images;
+    std::set<std::pair<Id,std::string>> seen;
+    for (auto it = steps.rbegin(); it != steps.rend() && images.size() < 4; ++it) {
+        const auto& entry = *it;
+        if (entry.at("tool") != "inspect_attachment" || !entry.at("result").at("ok").get<bool>() ||
+            entry.at("result").at("data").value("kind","") != "image") continue;
+        const auto& args = entry.at("args");
+        const auto id = toolId(args,"messageId");
+        const auto attachmentId = toolText(args,"attachmentId",128);
+        if (!seen.emplace(id,attachmentId).second) continue;
+        auto row = scopedAttachment(bot,message,args);
+        if (!row.next()) continue;
+        const auto attachment = row.json(1);
+        const auto& base64 = attachment.at("dataBase64").get_ref<const std::string&>();
+        const auto bytes = decodeAttachment(base64);
+        if (sessionRedactor().text(bytes) == bytes)
+            images.push_back({id,attachmentId,attachment.at("mimeType"),base64});
+    }
+    return images;
 }
 }

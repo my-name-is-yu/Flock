@@ -1,5 +1,6 @@
 #include "bot_tools.hpp"
 #include "flock/access.hpp"
+#include "flock/secrets.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -16,6 +17,7 @@ constexpr std::string_view protocol = "2025-03-26";
 
 struct Response {
     std::string body, type, session;
+    long status = 0;
     bool truncated = false;
 };
 
@@ -76,13 +78,6 @@ std::string environmentToken(const std::string& name) {
     return raw;
 }
 
-void redact(std::string& body, std::string_view secret) {
-    if (secret.empty()) return;
-    for (std::size_t pos = 0; (pos = body.find(secret,pos)) != body.npos; pos += 10)
-        body.replace(pos,secret.size(),"[redacted]");
-
-}
-
 Response http(const std::string& url, bool publicOnly, const std::vector<std::string>& headers,
               const Json& rpc = nullptr, bool allowTruncated = false, bool closeSession = false) {
     static const auto init = curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -127,9 +122,10 @@ Response http(const std::string& url, bool publicOnly, const std::vector<std::st
         set(CURLOPT_POSTFIELDS,body.c_str());
     }
     const auto result = curl_easy_perform(curl.get());
-    long status = 0;
-    curl_easy_getinfo(curl.get(),CURLINFO_RESPONSE_CODE,&status);
-    if (status < 200 || status >= 300 ||
+    curl_easy_getinfo(curl.get(),CURLINFO_RESPONSE_CODE,&response.status);
+    const bool rpcRejection = rpc.contains("id") && response.status >= 400 && response.status < 500;
+    const bool success = response.status >= 200 && response.status < 300;
+    if ((!success && !rpcRejection) ||
         (result != CURLE_OK && !(result == CURLE_WRITE_ERROR && response.truncated && allowTruncated)))
         throw Conflict("External HTTP request failed or exceeded its limits");
     return response;
@@ -164,9 +160,8 @@ public:
     Json search(std::string_view query) override {
         if (token_.empty()) throw Conflict("Web search is not configured");
         const auto url = "https://api.search.brave.com/res/v1/web/search?count=6&q=" + urlEncode(query);
-        auto response = http(url,true,{"Accept: application/json","X-Subscription-Token: " + token_});
-        redact(response.body,token_);
-        const auto json = parse(response.body);
+        const auto response = http(url,true,{"Accept: application/json","X-Subscription-Token: " + token_});
+        const auto json = SecretRedactor({token_}).payload(parse(response.body));
         const auto matches = json.value("web",Json::object()).value("results",Json::array());
         auto results = Json::array();
         if (!matches.is_array()) throw Conflict("Search returned an invalid results list");
@@ -189,6 +184,8 @@ public:
     }
 };
 
+struct McpRejected : Conflict { using Conflict::Conflict; };
+
 Json rpcResult(const Response& response, int id) {
     Json message;
     if (response.type.starts_with("text/event-stream")) {
@@ -210,9 +207,17 @@ Json rpcResult(const Response& response, int id) {
         }
     } else message = parse(response.body);
     if (!message.is_object() || message.value("jsonrpc","") != "2.0" ||
-        !message.contains("id") || message["id"] != id || !message.contains("result") ||
-        !message["result"].is_object() || message.contains("error"))
-        throw Conflict("MCP server returned an invalid result or rejected the operation");
+        !message.contains("id") || message["id"] != id)
+        throw Conflict("MCP server returned an invalid response");
+    if (!message.contains("result") && message.contains("error") && message.at("error").is_object()) {
+        const auto& error = message.at("error");
+        const auto code = error.value("code",Json());
+        if (code.is_number_integer() && error.contains("message") && error.at("message").is_string() &&
+            (code == -32700 || code == -32600 || code == -32601 || code == -32602))
+            throw McpRejected("MCP server rejected the request (" + code.dump() + ")");
+    }
+    if (response.status >= 300 || !message.contains("result") || !message["result"].is_object() || message.contains("error"))
+        throw Conflict("MCP server returned an invalid or failed result");
     return std::move(message["result"]);
 }
 
@@ -227,9 +232,7 @@ struct McpSession {
     int id = 0;
 
     Response post(const Json& request) const {
-        auto result = http(server.url,false,headers,request);
-        redact(result.body,server.token);
-        return result;
+        return http(server.url,false,headers,request);
     }
 
     explicit McpSession(const Server& settings) : server(settings) {
@@ -260,8 +263,10 @@ struct McpSession {
     }
 
     Json call(std::string_view method, Json params = Json::object()) {
-        auto response = post({{"jsonrpc","2.0"},{"id",++id},{"method",method},{"params",std::move(params)}});
-        return rpcResult(response,id);
+        const auto response = post({{"jsonrpc","2.0"},{"id",++id},{"method",method},{"params",std::move(params)}});
+        auto result = rpcResult(response,id);
+        if (server.token.empty()) return result;
+        return SecretRedactor({server.token}).payload(result);
     }
 };
 
@@ -270,17 +275,25 @@ class ConfiguredMcp final : public McpTools {
 public:
     explicit ConfiguredMcp(std::map<std::string,Server,std::less<>> servers) : servers_(std::move(servers)) {}
     bool hasServer(std::string_view server) const override { return servers_.contains(server); }
-    Json discover(std::string_view server) override {
+    Json discover(std::string_view server, McpCollection collection, std::string_view cursor) override {
         McpSession session(servers_.at(std::string(server)));
-        Json result = Json::object();
-        if (session.tools) result["tools"] = session.call("tools/list");
-        if (session.resources) result["resources"] = session.call("resources/list");
-        return result;
+        const bool tools = collection == McpCollection::tools;
+        const auto key = tools ? "tools" : "resources";
+        if (!(tools ? session.tools : session.resources)) return {{key,Json::array()}};
+        auto params = Json::object();
+        if (!cursor.empty()) params["cursor"] = cursor;
+        return session.call(tools ? "tools/list" : "resources/list",std::move(params));
     }
     Json invoke(std::string_view server, std::string_view name, const Json& args) override {
         McpSession session(servers_.at(std::string(server)));
         if (!session.tools) throw Conflict("MCP server does not offer tools");
-        try { return session.call("tools/call",{{"name",name},{"arguments",args}}); }
+        try {
+            auto result = session.call("tools/call",{{"name",name},{"arguments",args}});
+            if (result.contains("isError") && !result.at("isError").is_boolean())
+                throw Conflict("Invalid MCP tool outcome");
+            return result;
+        }
+        catch (const McpRejected&) { throw; }
         catch (const std::exception&) { throw ToolOutcomeUnknown("The MCP tool outcome is unknown"); }
     }
     Json readResource(std::string_view server, std::string_view uri) override {
@@ -292,7 +305,7 @@ public:
 
 std::string mcpUrl(const std::string& url) {
     const std::unique_ptr<CURLU,decltype(&curl_url_cleanup)> handle(curl_url(),curl_url_cleanup);
-    if (!handle || url.size() > 2048 || url.find_first_of("\r\n\t ") != url.npos ||
+    if (!handle || url.size() > 2048 || url.find('\0') != url.npos || url.find_first_of("\r\n\t \\") != url.npos ||
         curl_url_set(handle.get(),CURLUPART_URL,url.c_str(),CURLU_DISALLOW_USER) != CURLUE_OK)
         throw Conflict("Invalid MCP endpoint");
     const auto get = [&](CURLUPart key) {
@@ -322,7 +335,8 @@ std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home) 
         if (value.empty() || value.find('\0') != value.npos) throw Conflict("Invalid Bot tools directory");
         return home / value;
     };
-    if (config.contains("workspaceRoot")) result->workspaceRoot = resolve(config.at("workspaceRoot").get<std::string>());
+    for (const auto& [key,value] : config.items())
+        if (key != "skills" && key != "mcpServers") throw Conflict("Unknown Bot tools setting " + key);
     const auto skills = config.value("skills",Json::object());
     if (!skills.is_object() || skills.size() > 128) throw Conflict("Invalid skills configuration");
     for (const auto& [id,value] : skills.items()) {

@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/access.hpp"
+#include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
 #include <mutex>
 #include <sqlite3.h>
@@ -43,18 +44,6 @@ private:
     int stateDirectory_;
 };
 
-class SecretRedactor {
-public:
-    explicit SecretRedactor(std::vector<std::string> values);
-    std::string text(std::string_view source, bool truncated = false) const;
-    Json payload(const Json&) const;
-    enum class Fields { protocol, external };
-    Json record(Json, Fields = Fields::protocol) const;
-    void requirePublic(const Json&) const;
-private:
-    std::vector<std::string> values_;
-};
-
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
@@ -83,19 +72,25 @@ struct Store::Impl {
     void migrateAttachments();
     void saveAttachments(Id, const Json&);
     Json attachmentViews(Id) const;
+    Statement scopedAttachment(std::string_view bot, Id throughMessage, const Json& args) const;
+    void authorizeBotToolHistory(std::string_view bot, Id message, ModelInput&);
+    std::vector<ModelImage> inspectedImages(std::string_view bot, Id message, const Json& steps) const;
     void recoverWorkspace();
     void stopWorkspace();
     std::map<Id,std::unique_ptr<WorkspaceJob>> workspaceJobs;
     void validateWorkspace(const ToolContext&, const Decision&);
     Json workspaceTool(const ToolContext&, const Decision&);
+    std::optional<Scope> authorizedBotToolScope(std::string_view bot, const Decision&);
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    void runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
+    bool runBotTools(const ToolContext&, int step, const std::vector<Decision>&);
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
+    Id takeReservedConversationCall(Id messageId);
+    void releaseModelCall(std::string_view budget, Id attempt);
     void grantModelCall(std::string_view budget);
     ModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;

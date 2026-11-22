@@ -40,5 +40,6 @@ fails after approval, use **Apply approved change** to retry.
 objects containing `name`, `mimeType` and `dataBase64`. Supported types are
 `image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
 to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
-`attachment/<botId>/inspect` to let that Bot inspect the metadata of media sent
-in its conversation.
+`attachment/<botId>/inspect` to let the Bot inspect media in its conversation.
+An image-capable ChatGPT model receives authorized image contents. Audio
+inspection returns file properties and WAV format and duration.

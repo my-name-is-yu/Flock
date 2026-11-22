@@ -69,6 +69,20 @@ Id Store::Impl::reserveModelCall(std::string_view budget, std::string_view purpo
     return last();
 }
 
+Id Store::Impl::takeReservedConversationCall(Id message) {
+    auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
+                          " AND reserved_attempt IS NOT NULL",{message});
+    if (!reserved.next()) return 0;
+    const auto id = reserved.number(0);
+    exec("UPDATE conversation_turns SET reserved_attempt=NULL WHERE message_id=?",{message});
+    return id;
+}
+
+void Store::Impl::releaseModelCall(std::string_view budget, Id attempt) {
+    exec("DELETE FROM model_attempts WHERE id=? AND budget_id=?",{attempt,budget});
+    if (sqlite3_changes(db)) exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
+}
+
 void Store::Impl::grantModelCall(std::string_view budget) {
     exec("UPDATE model_budgets SET call_limit=call_limit+1 WHERE id=? AND call_limit<?",
          {budget,std::numeric_limits<Id>::max()});
