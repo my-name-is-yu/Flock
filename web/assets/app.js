@@ -1863,7 +1863,7 @@ elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peer
 elements['peer-back'].addEventListener('click', () => {
   selectBot(view.id);
   const picker = elements['peer-picker'];
-  (picker.hidden ? elements.profile : picker).focus({ preventScroll: true });
+  (picker.hidden ? elements['profile-name'] : picker).focus({ preventScroll: true });
 });
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
