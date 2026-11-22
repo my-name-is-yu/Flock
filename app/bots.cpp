@@ -313,10 +313,14 @@ std::vector<std::string> Bots::ids() const {
     return result;
 }
 
-Bot Bots::get(std::string_view id) const {
-    const auto file = path(id) / "config.json";
-    const auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
+namespace {
+Json readBotConfig(const std::filesystem::path& file) {
+    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
+    return config;
+}
+
+Bot configuredBot(std::string_view id, const Json& config) {
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
@@ -373,9 +377,22 @@ Bot Bots::get(std::string_view id) const {
         const auto request = validatedString(schedule,"request");
         if (!validId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
             throw Conflict("Cron IDs must be valid and unique, and requests must fit in 16,000 bytes");
-        bot.schedules.push_back({scheduleId,expression,timezone,request,Cron(expression,timezone)});
+        bot.schedules.push_back({scheduleId,request,Cron(expression,timezone)});
     }
     return bot;
+}
+
+} // namespace
+
+Bot Bots::get(std::string_view id) const {
+    return configuredBot(id,readBotConfig(path(id) / "config.json"));
+}
+
+std::optional<Bot> Bots::scheduled(std::string_view id) const {
+    const auto config = readBotConfig(path(id) / "config.json");
+    const auto cron = config.find("cron");
+    if (cron == config.end() || (cron->is_array() && cron->empty())) return std::nullopt;
+    return configuredBot(id,config);
 }
 
 BotNotes Bots::notes(std::string_view id) const {
@@ -501,8 +518,7 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     std::lock_guard lock(mutex_);
     const auto botDir = path(id);
     const auto file = botDir / "config.json";
-    auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
-    if (!config.is_object()) throw Conflict("Invalid Bot config.json");
+    auto config = readBotConfig(file);
 
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
@@ -536,16 +552,6 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     }
 }
 
-bool Bots::hasCron(std::string_view id) const {
-    try {
-        const auto config = Json::parse(readText(path(id) / "config.json",maxConfigBytes),nullptr,false);
-        if (!config.is_object()) return true;
-        return config.contains("cron") && (!config["cron"].is_array() || !config["cron"].empty());
-    } catch (const std::exception&) {
-        return true;
-    }
-}
-
 Scheduler::Scheduler(const Bots& bots, Store& store, Seconds startedAt, ErrorReporter report)
     : bots_(bots), store_(store),
       next_(std::chrono::ceil<std::chrono::minutes>(std::chrono::seconds{startedAt}).count()*60), report_(std::move(report)) {}
@@ -554,9 +560,9 @@ void Scheduler::tick(Seconds now) {
     if (next_ > now) return;
     std::vector<Bot> configured;
     for (const auto& id : bots_.ids()) {
-        if (!bots_.hasCron(id)) continue;
-        try { configured.push_back(bots_.get(id)); }
-        catch (const std::exception& error) { report_(id,error.what()); }
+        try {
+            if (auto bot = bots_.scheduled(id)) configured.push_back(std::move(*bot));
+        } catch (const std::exception& error) { report_(id,error.what()); }
     }
     for (; next_ <= now; next_ += 60) {
         for (const auto& bot : configured) {

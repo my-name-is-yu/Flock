@@ -159,8 +159,7 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [] {
             return Json::array({
                 {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
-                    {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
+                    {"cron",Json::array()},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
                 {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()}},
                 {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},

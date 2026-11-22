@@ -110,6 +110,8 @@ void cronIntakeAndRestart() {
         fall.tick(utc(2026,11,1,7,0));
         const auto tasks = store.tasks();
         check(tasks.size() == 2,"both fall-back instants should submit exactly once");
+        check(tasks[0]["scheduleId"] == "fall" && tasks[0]["request"] == "Overlap",
+              "scheduled task lost its configured ID or request");
         check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
               tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
         check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
