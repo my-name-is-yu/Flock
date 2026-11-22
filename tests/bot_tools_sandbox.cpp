@@ -716,6 +716,10 @@ void mcpToolOutcomes(Fixture& f) {
           success.at("data").at("structuredContent").at("count") == 1,
           "Valid MCP content and extensions did not reach the model");
 
+    const auto compatible = f.run(invoke("compatible-content"));
+    check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
+          "Valid resource alternatives or legacy extensions were rejected");
+
     const auto failure = f.run(invoke("tool-failure"));
     check(failure.at("ok") == false && !failure.contains("delivery") && failure.at("untrustedData") == true &&
           failure.at("data").at("content").at(0).at("text") == "Tool failed" &&

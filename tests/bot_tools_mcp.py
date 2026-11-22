@@ -24,6 +24,13 @@ TOOL_RESULTS = {
         ],
         "structuredContent": {"count": 1},
     },
+    "compatible-content": {
+        "content": [
+            {"type": "resource", "resource": {"uri": "fixture://text", "text": "Ready", "blob": None}},
+            {"type": "resource", "resource": {"uri": "fixture://blob", "blob": "YQ==", "text": None}},
+            {"type": "text", "text": "Legacy", "annotations": {"lastModified": 1700000000}},
+        ],
+    },
     "tool-failure": {"content": [{"type": "text", "text": "Tool failed"}], "isError": True},
 }
 
