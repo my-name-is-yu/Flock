@@ -7,11 +7,23 @@
 
 namespace flockv0 {
 namespace {
+constexpr std::size_t maxRequestBytes = 16'000;
+
+void validateText(std::string_view value, std::string_view name, std::size_t maximum) {
+    if (value.size() > maximum || value.find_first_not_of(" \r\n\t") == value.npos)
+        throw Conflict("Invalid " + std::string(name));
+}
+
 std::string requiredText(const Json& args, std::string_view name, std::size_t maximum) {
     auto result = field(args,name);
-    if (result.size() > maximum || result.find_first_not_of(" \r\n\t") == result.npos)
-        throw Conflict("Invalid " + std::string(name));
+    validateText(result,name,maximum);
     return result;
+}
+
+Seconds nextScheduledRun(std::string_view expression, std::string_view timezone, Seconds after) {
+    const auto next = Cron(expression,timezone).next(after);
+    if (!next) throw Conflict("Cron has no future occurrence in the supported date range");
+    return *next;
 }
 
 bool validExternalId(std::string_view id) {
@@ -38,7 +50,7 @@ struct Automation {
 Automation automation(const Json& args, Seconds now) {
     if (!args.is_object()) throw Conflict("Invalid automation arguments");
     const auto kind = field(args,"kind");
-    Json def = {{"kind",kind},{"request",requiredText(args,"request",16000)}};
+    Json def = {{"kind",kind},{"request",requiredText(args,"request",maxRequestBytes)}};
     if (kind == "trigger") {
         const auto source = field(args,"source");
         if (!validBotId(source)) throw Conflict("Invalid webhook source");
@@ -62,8 +74,7 @@ Automation automation(const Json& args, Seconds now) {
     }
     const auto expression = requiredText(args,"cron",256);
     def["cron"] = expression;
-    const auto next = Cron(expression,timezone).next(now);
-    if (!next) throw Conflict("Cron has no future occurrence in the supported date range");
+    const auto next = nextScheduledRun(expression,timezone,now);
     return {std::move(def),next};
 }
 
@@ -80,10 +91,11 @@ Json automationView(const Statement& row) {
     return item;
 }
 
-bool matchesEvent(const Json& filter, const Json& event) {
+bool matchesEvent(const Json& filter, const Json& event, const SecretRedactor& scrub) {
     for (const auto& [name,value] : filter.items()) {
         const auto actual = event.find(name);
-        if (actual == event.end() || *actual != value) return false;
+        if (actual == event.end() || *actual != value || scrub.text(name) != name || scrub.payload(*actual) != *actual)
+            return false;
     }
     return true;
 }
@@ -175,39 +187,26 @@ Json Store::Impl::cancelAutomation(std::string_view bot, Id id) {
     return {{"id",id},{"status","canceled"}};
 }
 
-void Store::syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+std::vector<ScheduleImportError> Store::syncSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>& schedules, Seconds now) {
+    if (now < 0 || now > lastAutomationTime) throw Conflict("Clock is outside the supported range");
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    std::set<std::string> configured;
-    for (const auto& schedule : schedules) {
-        if (!validBotId(schedule.id) || schedule.routing.botId != bot ||
-            !configured.insert(schedule.id).second) throw Conflict("Invalid configured schedule");
-        const auto routing = route(schedule.routing);
-        const Json def = {{"kind","schedule"},{"request",schedule.routing.request},
-                          {"cron",schedule.expression},{"timezone",schedule.timezone}};
-        p_->redactor(bot).requirePublic({bot,schedule.id,routing,def});
-        auto old = p_->query(R"SQL(
-SELECT id,definition,status,routing FROM automations WHERE bot_id=? AND config_id=?
-)SQL",{bot,schedule.id});
-        if (!old.next()) {
-            const auto item = automation(def,now > 0 ? now - 1 : now);
-            p_->exec(R"SQL(
-INSERT INTO automations(bot_id,kind,definition,routing,status,next_run_at,created_by,created_at,config_id)
-VALUES(?,'schedule',?,?,'active',?,'config',?,?)
-)SQL",{bot,item.definition,routing,*item.next,now,schedule.id});
-            continue;
-        }
+    const auto scrub = p_->redactor(bot);
+    std::map<std::string_view,std::size_t> counts;
+    for (const auto& schedule : schedules) ++counts[schedule.id];
 
-        const auto oldDef = old.json(1);
-        const auto status = old.string(2);
-        const bool timingChanged = oldDef.at("cron") != def.at("cron") || oldDef.at("timezone") != def.at("timezone");
-        if (status != "canceled" && (timingChanged || status == "inactive" || status == "failed")) {
-            const auto item = automation(def,now > 0 ? now - 1 : now);
-            p_->exec("UPDATE automations SET definition=?,routing=?,status='active',next_run_at=?,error=NULL WHERE id=?",
-                     {item.definition,routing,*item.next,old.number(0)});
-        } else if (oldDef != def || old.json(3) != routing) {
-            if (status == "canceled") automation(def,now > 0 ? now - 1 : now);
-            p_->exec("UPDATE automations SET definition=?,routing=? WHERE id=?",{def,routing,old.number(0)});
+    std::set<std::string> configured;
+    std::vector<ScheduleImportError> errors;
+    for (const auto& schedule : schedules) {
+        try {
+            if (!validBotId(schedule.id) || schedule.routing.botId != bot)
+                throw Conflict("Invalid configured schedule");
+            if (counts.at(schedule.id) > 1) throw Conflict("Duplicate configured schedule ID");
+            p_->syncSchedule(schedule,now,scrub);
+            configured.insert(schedule.id);
+        } catch (const Conflict& error) {
+            errors.push_back({scrub.text(schedule.id),error.what()});
         }
     }
     p_->exec(R"SQL(
@@ -215,6 +214,42 @@ UPDATE automations SET status='inactive',next_run_at=NULL,error=NULL WHERE bot_i
 AND config_id IS NOT NULL AND config_id NOT IN (SELECT value FROM json_each(?))
 )SQL",{bot,Json(configured)});
     tx.commit();
+    return errors;
+}
+
+void Store::Impl::syncSchedule(const ConfiguredSchedule& schedule, Seconds now, const SecretRedactor& scrub) {
+    const auto& bot = schedule.routing.botId;
+    validateText(schedule.routing.request,"request",maxRequestBytes);
+    validateText(schedule.expression,"cron",256);
+    validateText(schedule.timezone,"timezone",128);
+    const auto routing = route(schedule.routing);
+    const Json def = {{"kind","schedule"},{"request",schedule.routing.request},
+                      {"cron",schedule.expression},{"timezone",schedule.timezone}};
+    scrub.requirePublic({bot,schedule.id,routing,def});
+    const auto after = now > 0 ? now - 1 : now;
+    auto old = query(R"SQL(
+SELECT id,definition,status,routing FROM automations WHERE bot_id=? AND config_id=?
+)SQL",{bot,schedule.id});
+    if (!old.next()) {
+        const auto next = nextScheduledRun(schedule.expression,schedule.timezone,after);
+        exec(R"SQL(
+INSERT INTO automations(bot_id,kind,definition,routing,status,next_run_at,created_by,created_at,config_id)
+VALUES(?,'schedule',?,?,'active',?,'config',?,?)
+)SQL",{bot,def,routing,next,now,schedule.id});
+        return;
+    }
+
+    const auto oldDef = old.json(1);
+    const auto status = old.string(2);
+    const bool timingChanged = oldDef.at("cron") != def.at("cron") || oldDef.at("timezone") != def.at("timezone");
+    if (status != "canceled" && (timingChanged || status == "inactive" || status == "failed")) {
+        const auto next = nextScheduledRun(schedule.expression,schedule.timezone,after);
+        exec("UPDATE automations SET definition=?,routing=?,status='active',next_run_at=?,error=NULL WHERE id=?",
+             {def,routing,next,old.number(0)});
+    } else if (oldDef != def || old.json(3) != routing) {
+        if (timingChanged) nextScheduledRun(schedule.expression,schedule.timezone,after);
+        exec("UPDATE automations SET definition=?,routing=? WHERE id=?",{def,routing,old.number(0)});
+    }
 }
 
 void Store::pruneAutomations(const std::vector<std::string>& configuredBots) {
@@ -317,20 +352,21 @@ SELECT id,bot_id,definition,routing FROM automations WHERE status='active' AND k
 AND json_extract(definition,'$.source')=? ORDER BY id
 )SQL",{source});
     const auto scrub = p_->sharedRedactor();
-    const auto payload = scrub.payload(event);
+    std::optional<Json> payload;
     std::map<std::string,Json> received;
     while (rows.next()) {
         const auto bot = rows.string(1);
         if (delivered.contains(bot) || !permits(bot)) continue;
-        scrub.requirePublic({source,eventId});
-        auto& receipts = received.try_emplace(bot,Json::array()).first->second;
+        const auto [delivery,first] = received.try_emplace(bot,Json::array());
+        if (first) p_->redactor(bot).requirePublic({source,eventId});
         const auto def = rows.json(2);
-        if (!matchesEvent(def.at("eventFilter"),payload)) continue;
+        if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
+        if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
         const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",source},
-                              {"externalEventId",eventId},{"event",payload},{"firedAt",now}};
+                              {"externalEventId",eventId},{"event",*payload},{"firedAt",now}};
         const auto task = p_->submit(intake(bot,field(def,"request"),rows.json(3)),{},0,nullptr,trigger);
-        receipts.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
+        delivery->second.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
     }
     if (delivered.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");
     Json tasks = Json::array();

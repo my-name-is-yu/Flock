@@ -558,26 +558,32 @@ void Bots::syncSchedules(Store& store, Seconds now,
                          const std::function<void(std::string_view,std::string_view)>& report) const {
     const auto botIds = ids();
     for (const auto& id : botIds) {
+        std::vector<ConfiguredSchedule> schedules;
+        std::vector<std::string> errors;
         try {
             const auto config = readConfig(id);
             const auto cron = config.value("cron",Json::array());
             if (!cron.is_array()) throw Conflict("cron must be an array");
-            std::vector<ConfiguredSchedule> schedules;
             if (!cron.empty()) {
                 const auto bot = configuredBot(id,config);
-                for (const auto& entry : cron) {
-                    schedules.push_back({validatedString(entry,"id"),validatedString(entry,"schedule"),
-                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                for (std::size_t i = 0; i < cron.size(); ++i) {
+                    const auto& entry = cron[i];
+                    try {
+                        schedules.push_back({validatedString(entry,"id"),validatedString(entry,"schedule"),
+                            validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                    } catch (const Conflict& error) {
+                        errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());
+                    }
                 }
             }
-            store.syncSchedules(id,schedules,now);
         } catch (const Conflict& error) {
-            store.syncSchedules(id,{},now);
-            report(id,error.what());
+            errors.emplace_back(error.what());
         } catch (const Json::exception& error) {
-            store.syncSchedules(id,{},now);
-            report(id,error.what());
+            errors.emplace_back(error.what());
         }
+        for (const auto& error : store.syncSchedules(id,schedules,now))
+            report(id,"cron schedule " + error.id + ": " + error.message);
+        for (const auto& error : errors) report(id,error);
     }
     store.pruneAutomations(botIds);
 }

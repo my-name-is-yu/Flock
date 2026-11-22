@@ -119,6 +119,7 @@ public:
 class Access;
 struct Person;
 struct ConfiguredSchedule;
+struct ScheduleImportError;
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
@@ -132,7 +133,8 @@ public:
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
-    void syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
     void pruneAutomations(const std::vector<std::string>& configuredBots);
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,

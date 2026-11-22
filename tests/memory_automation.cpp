@@ -17,6 +17,16 @@ void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+template <typename Function>
+void rejectsWithConflict(Function run, std::string_view expected) {
+    try { run(); }
+    catch (const Conflict& error) {
+        check(error.what() == expected,"Unexpected conflict message");
+        return;
+    }
+    throw std::runtime_error("Missing conflict: " + std::string(expected));
+}
+
 struct Directory {
     std::filesystem::path path;
     Directory() {
@@ -175,9 +185,53 @@ void memoryFlow(const std::filesystem::path& db) {
     check(sharedContent.at("content") == "Example: [redacted]","Shared text exposed another Bot's protected value");
 }
 
+void memoryRedactionLimit(const std::filesystem::path& db) {
+    Store store(db,[](auto) { return "Original"; });
+    auto access = store.access();
+    const auto secret = access.requestSecret(alpha.botId,{"short-fixture-value"});
+    access.submitSecret(owner,alpha.botId,secret,"z9q7");
+
+    const std::string suffix(8192 - 10,'x');
+    const Json tooLong{{"baseVersion",0},{"content","z9q7" + suffix + "tail"}};
+    rejectsWithConflict([&] { store.memory(owner,alpha.botId,"apply_memory_edit",tooLong); },
+                        "Redacted memory content exceeds 8,192 bytes");
+    const auto current = store.memory(owner,alpha.botId,"read_memory",Json::object());
+    const auto history = store.memory(owner,alpha.botId,"memory_history",Json::object());
+    check(current.at("version") == 0 && current.at("content") == "Original" && history.at("revisions").empty(),
+          "An oversized redacted edit changed the memory document or its history");
+
+    store.memory(owner,alpha.botId,"apply_memory_edit",{{"baseVersion",0},{"content","z9q7" + suffix}});
+    const auto saved = store.memory(owner,alpha.botId,"read_memory",Json::object());
+    check(saved.at("version") == 1 && saved.at("content") == "[redacted]" + suffix,
+          "An edit at exactly 8,192 redacted bytes was not stored intact");
+}
+
 Seconds utc(int year, unsigned month, unsigned day, int hour = 0) {
     using namespace std::chrono;
     return duration_cast<seconds>((sys_days{std::chrono::year{year}/month/day} + hours{hour}).time_since_epoch()).count();
+}
+
+void configuredRequestLimit(const std::filesystem::path& db) {
+    Store store(db);
+    const auto start = utc(2026,1,1,12);
+    const auto due = utc(2026,1,2);
+    auto target = alpha;
+    target.request = "Daily check";
+    ConfiguredSchedule schedule{"daily","0 0 * * *","Etc/UTC",target};
+    const auto stored = [&] { return store.automations(owner,alpha.botId).at("automations").front(); };
+    check(store.syncSchedules(alpha.botId,{schedule},start).empty(),"Initial schedule import failed");
+
+    schedule.routing.request = std::string(16'000,'x');
+    check(store.syncSchedules(alpha.botId,{schedule},due + 60).empty() && stored().at("nextRunAt") == due &&
+          stored().at("request") == schedule.routing.request,"A 16,000-byte request lost its original timing");
+
+    schedule.routing.request += 'y';
+    const auto errors = store.syncSchedules(alpha.botId,{schedule},due + 60);
+    check(errors.size() == 1 && errors.front().id == schedule.id && errors.front().message == "Invalid request" &&
+          stored().at("status") == "inactive" && stored().at("request").get<std::string>().size() == 16'000,
+          "An oversized update with unchanged timing was accepted");
+    store.fireDueAutomations(due + 60);
+    check(store.tasks().empty(),"A schedule with a rejected request fired");
 }
 
 void downtime(const std::filesystem::path& db) {
@@ -340,15 +394,67 @@ void webhookGrants(const std::filesystem::path& db) {
     check(replay.at("duplicate") == true && replay.at("tasks") == alphaReceipt && restarted.tasks().size() == 2,
           "Webhook replay leaked unrelated receipts or queued duplicate work");
 }
+
+void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
+    Store store(db);
+    const auto now = utc(2026,1,1);
+    const std::string secret = "fixture-status-token";
+    const auto trigger = [&](const std::string& expected) {
+        return store.createAutomation(owner,alpha,{{"kind","trigger"},{"source","deploy"},{"request","Check deployment"},
+            {"eventFilter",{{"status",expected}}}},now).at("id");
+    };
+    const auto marker = trigger("[redacted]");
+    trigger(secret);
+    auto access = store.access();
+    const auto request = access.requestSecret(alpha.botId,{"status-token"});
+    access.submitSecret(owner,alpha.botId,request,secret);
+
+    const auto hidden = store.receiveWebhook(owner,"deploy","hidden",{{"status",secret}},now);
+    check(hidden.at("tasks").empty() && store.tasks().empty(),"A protected event field matched a trigger");
+    const Json event{{"status","[redacted]"},{"details",{{"token",secret}}}};
+    const auto visible = store.receiveWebhook(owner,"deploy","visible",event,now);
+    check(visible.at("tasks").size() == 1 && visible.at("tasks").at(0).at("triggerId") == marker,
+          "A literal [redacted] event field did not match its trigger");
+    const auto task = store.tasks(alpha.botId).at(0);
+    check(task.at("trigger").at("event").at("details").at("token") == "[redacted]" &&
+          store.conversation(alpha.botId).dump().find(secret) == std::string::npos,
+          "Webhook provenance retained a protected event value");
+}
+
+void webhookMetadataUsesTargetBotSecrets(const std::filesystem::path& db) {
+    Store store(db);
+    const auto now = utc(2026,1,1);
+    const Person sender{"sender",false};
+    auto access = store.access();
+    access.personGrant(owner,alpha.botId,sender.id,Role::decide,GrantChange::grant);
+    const Json trigger{{"kind","trigger"},{"source","deploy"},{"request","Check deployment"}};
+    store.createAutomation(owner,alpha,trigger,now);
+    store.createAutomation(owner,beta,trigger,now);
+    const auto own = access.requestSecret(alpha.botId,{"alpha-token"});
+    const auto other = access.requestSecret(beta.botId,{"beta-token"});
+    access.submitSecret(owner,alpha.botId,own,"fixture-alpha-secret");
+    access.submitSecret(owner,beta.botId,other,"fixture-beta-secret");
+
+    const auto receipt = store.receiveWebhook(sender,"deploy","fixture-beta-secret",Json::object(),now);
+    check(receipt.at("tasks").size() == 1 && receipt.at("tasks").at(0).at("botId") == alpha.botId &&
+          store.tasks(beta.botId).empty(),"Another Bot's secret blocked an authorized webhook");
+    rejectsWithConflict([&] { store.receiveWebhook(sender,"deploy","fixture-alpha-secret",Json::object(),now); },
+                        "Secret values cannot be used as metadata");
+    check(store.tasks().size() == 1,"A target Bot secret was accepted as webhook metadata");
+}
 }
 
 int main() {
     try {
         Directory temp;
         memoryFlow(temp.path / "memory.sqlite3");
+        memoryRedactionLimit(temp.path / "memory-limit.sqlite3");
+        configuredRequestLimit(temp.path / "schedule-limit.sqlite3");
         downtime(temp.path / "downtime.sqlite3");
         isolatedFirings(temp.path / "firings.sqlite3");
         automationConversation(temp.path / "webhook.sqlite3");
         webhookGrants(temp.path / "webhook-grants.sqlite3");
+        webhookMatchesRawPublicFields(temp.path / "webhook-filters.sqlite3");
+        webhookMetadataUsesTargetBotSecrets(temp.path / "webhook-metadata.sqlite3");
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

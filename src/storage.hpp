@@ -74,6 +74,7 @@ struct Store::Impl {
                 Seconds now);
     Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
+    void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
     Json automations(std::string_view bot, Id before) const;
     Json cancelAutomation(std::string_view bot, Id id);
     void fireDueAutomations(Seconds now);

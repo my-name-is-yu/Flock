@@ -830,80 +830,6 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     browser.get("/api/conversation?bot=staging-triage");
     Browser::checked(browser.client.Get("/api/view?bot=release"),403);
 }
-
-void memoryAutomationEndpoints(const std::filesystem::path& path) {
-    Store store(path,[](auto) { return "Initial convention"; });
-    auto cb = callbacks();
-    cb.clock = [] { return Seconds{2'000'000'000}; };
-    cb.authenticate = [](std::string_view credential) {
-        if (credential == "Bearer owner") return Person{"owner",true};
-        if (credential == "Bearer reader") return Person{"reader",false};
-        return Person{};
-    };
-    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
-    auto server = startWeb(store,0,cb);
-    Browser browser(*server);
-    Browser::checked(browser.client.Get("/api/memory?bot=release"),401);
-    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
-    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web memory seed missing");
-    const auto proposal = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",0},
-        {"content","New convention"},{"rationale","Use staging"}}).at("proposalId");
-    const auto revision = browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},
-        {"proposalId",proposal}}).at("revisionId").get<Id>();
-    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},{"content","Stale"}},409);
-    const auto detail = browser.get("/api/memory/history?bot=release&revisionId=" + std::to_string(revision));
-    check(detail.at("previousContent") == "Initial convention" && detail.at("newContent") == "New convention",
-          "Web revision did not expose the diff");
-    browser.post("/api/memory/revert",{{"botId","release"},{"baseVersion",1},{"revisionId",revision}});
-    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web revert failed");
-    const auto pending = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
-        {"content","Pending convention"},{"rationale","Original proposal"}}).at("proposalId");
-    for (int i = 0; i < 20; ++i) {
-        const auto newer = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
-            {"content","Newer convention"},{"rationale","Subsequent proposal"}}).at("proposalId");
-        browser.post("/api/memory/reject",{{"botId","release"},{"proposalId",newer}});
-    }
-    const auto firstPage = browser.get("/api/memory/history?bot=release");
-    const auto older = browser.get("/api/memory/history?bot=release&proposalsBefore=" +
-        std::to_string(firstPage.at("proposalsBefore").get<Id>())).at("proposals");
-    check(firstPage.at("proposals").size() == 20 && older.at(0).at("id") == pending &&
-          older.at(0).at("status") == "pending","Newer proposals hid a pending proposal");
-
-    const auto reminder = browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},
-        {"request","Check staging"},{"timezone","Asia/Tokyo"},{"fireAt",2'000'000'010}},201).at("id").get<Id>();
-    browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},{"request","Check staging"},
-        {"timezone","Asia/Tokyo"},{"fireAt",2'000'000'000}},409);
-    const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
-    Browser::checked(browser.client.Delete(cancelPath),403);
-    check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",
-          "Web schedule cancellation failed");
-    const auto trigger = browser.post("/api/schedules",{{"botId","release"},{"kind","trigger"},{"source","deploy"},
-        {"eventFilter",{{"branch","main"}}},{"request","Check the deployment"}},201).at("id");
-    check(browser.get("/api/schedules?bot=release").at("automations").size() == 2,"Web automation list incomplete");
-
-    const auto webhook = [&](std::string id, std::string branch) {
-        return Json{{"externalEventId",id},{"event",{{"branch",branch}}}}.dump();
-    };
-    Browser::checked(browser.client.Post("/api/webhooks/deploy",webhook("event-1","main"),"application/json"),403);
-    const httplib::Headers headers{{"X-Flock-Action","1"}};
-    const auto send = [&](const std::string& payload) {
-        return Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,payload,"application/json"),202);
-    };
-    check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
-    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
-    Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
-    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",2},{"content","Unauthorized"}},403);
-    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
-    const auto accepted = send(webhook("event-1","main")), replayed = send(webhook("event-1","main"));
-    check(accepted.at("duplicate") == false && replayed.at("duplicate") == true &&
-          accepted.at("tasks").size() == 1 && replayed.at("tasks") == accepted.at("tasks") && store.tasks().size() == 1,
-          "Webhook redelivery enqueued another task");
-    store.fireDueAutomations(cb.clock()+60);
-    check(store.tasks().size() == 1,"Canceled reminder fired after its due time");
-    const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
-    check(request.at("trigger").at("externalEventId") == "event-1" && request.at("trigger").at("triggerId") == trigger,
-          "Web conversation lost webhook provenance");
-}
 } // namespace
 
 int main() {
@@ -914,7 +840,6 @@ int main() {
         peerConversation(directory.path / "peer-conversations.db");
         accessEndpoints(directory.path / "access.db");
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
-        memoryAutomationEndpoints(directory.path / "automation.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

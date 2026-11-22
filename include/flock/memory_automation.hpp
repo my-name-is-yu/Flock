@@ -38,4 +38,8 @@ struct ConfiguredSchedule {
     std::string id, expression, timezone;
     Intake routing;
 };
+
+struct ScheduleImportError {
+    std::string id, message;
+};
 }

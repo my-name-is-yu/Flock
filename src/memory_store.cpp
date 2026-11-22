@@ -226,7 +226,8 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
         updated = field(args,"content");
     }
 
-    updated = bounded(scrub.text(updated),memoryBytes);
+    updated = scrub.text(updated);
+    if (updated.size() > memoryBytes) throw Conflict("Redacted memory content exceeds 8,192 bytes");
     const auto summary = diffSummary(content,updated);
     if (!doc) createMemory(key,{},id,{},now);
     if (operation == "propose_memory_edit") {
