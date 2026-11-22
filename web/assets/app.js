@@ -175,7 +175,7 @@ async function api(path, body) {
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
-function peerQuery({ id: bot, peerId: peer, anchor }, before) {
+function peerQuery({ id: bot, peerId: peer }, before, anchor) {
   const params = new URLSearchParams({ bot, peer });
   if (before) params.set('before', before);
   else if (anchor) params.set('anchor', anchor);
@@ -983,6 +983,16 @@ function backToLatest() {
   elements.conversation.scrollTop = elements.conversation.scrollHeight;
   elements.conversation.focus({ preventScroll: true });
 }
+function focusConversationTarget(target) {
+  const row = target?.closest('article') ?? target;
+  if (!row) return;
+  const scroller = elements.conversation;
+  const box = scroller.getBoundingClientRect();
+  const message = row.getBoundingClientRect();
+  // Keep the outer workspace stationary while locating the message.
+  scroller.scrollTop += message.top - box.top - (box.height - message.height) / 2;
+  row.focus({ preventScroll: true });
+}
 function cardSourceAction(bot, id, close) {
   const botId = bot.id;
   const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
@@ -1008,15 +1018,7 @@ function cardSourceAction(bot, id, close) {
     }
     context.source = { id, bot, events: page.events };
     renderTimeline();
-    const target = byId(`event-${id}`);
-    if (target) {
-      // Scroll only the conversation; scrollIntoView would also shift the page around it.
-      const scroller = elements.conversation;
-      const box = scroller.getBoundingClientRect();
-      const row = target.getBoundingClientRect();
-      scroller.scrollTop += row.top - box.top - (box.height - row.height) / 2;
-      target.focus({ preventScroll: true });
-    }
+    focusConversationTarget(byId(`event-${id}`));
     updateJumpToLatest();
   });
 }
@@ -1289,6 +1291,7 @@ function peerMessage(event, from, anchored) {
   const { text, forwardedMessage } = event.data;
   const row = node('article', 'msg group-start peer-dm-message');
   row.id = `event-${event.id}`;
+  row.tabIndex = -1;
   row.toggleAttribute('data-anchored', anchored);
   if (forwardedMessage) {
     const content = node('div', 'peer-forward-content');
@@ -1365,7 +1368,7 @@ function updateJumpToLatest() {
   frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
   const control = elements['jump-to-latest'];
   // An explicitly opened history page is separate from the latest messages.
-  const hidden = !view?.source && !view?.dm?.anchor && atBottom;
+  const hidden = !view?.source && !view?.dm?.historical && atBottom;
   if (control.hidden === hidden) return;
   if (hidden && document.activeElement === control) scroller.focus({ preventScroll: true });
   control.hidden = hidden;
@@ -1389,7 +1392,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id, context.peerId);
   const position = key && readingPositions.get(key);
   const moveScroll = () => {
-    if (scroll === 'anchor') byId(`event-${context.anchorId}`)?.scrollIntoView({ block: 'center' });
+    if (scroll === 'anchor') focusConversationTarget(byId(`event-${context.anchorId}`));
     else if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
       restoreReadingPosition(position);
@@ -2118,9 +2121,9 @@ function mergeLatest(context, latest) {
     setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
 }
-async function conversationPage(timeline, before) {
+async function conversationPage(timeline, before, anchor) {
   if (!timeline.peerId) return api(botQuery('conversation', timeline.id, before));
-  const { messages, hasOlder, anchorId } = await api(peerQuery(timeline, before));
+  const { messages, hasOlder, anchorId } = await api(peerQuery(timeline, before, anchor));
   return { events: messages, olderBefore: hasOlder ? messages[0].id : 0, anchorId };
 }
 async function refreshPeerConversation(context, scroll) {
@@ -2130,15 +2133,21 @@ async function refreshPeerConversation(context, scroll) {
   const readPage = before => conversationPage(dm, before);
   const openingAnchor = dm.anchor && dm.newestEvent == null;
   try {
-    const latest = await readPage();
+    let latest = await conversationPage(dm, undefined, dm.historical ? dm.anchor : 0);
+    if (!isCurrent()) return;
+    const historical = dm.historical || (openingAnchor && !latest.events.some((event) => event.id === dm.anchor));
+    if (openingAnchor && historical) latest = await conversationPage(dm, undefined, dm.anchor);
     if (!isCurrent()) return;
     const eventHistory = dm.anchor ? dm : eventHistoryForRefresh(dm);
     await refreshEventHistory(eventHistory, latest, readPage, isCurrent);
     if (!isCurrent()) return;
     if (eventHistory !== dm) Object.assign(dm, eventHistory);
     dm.error = null;
-    dm.anchorId = latest.anchorId;
-    if (openingAnchor) scroll = 'anchor';
+    dm.historical = historical;
+    if (openingAnchor) {
+      dm.anchorId = historical ? latest.anchorId : dm.anchor;
+      scroll = 'anchor';
+    }
   } catch (error) {
     if (!isCurrent()) return;
     if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
@@ -2365,7 +2374,7 @@ elements['jump-to-latest'].addEventListener('click', () => {
   }
   const scroller = elements.conversation;
   const dm = view?.dm;
-  if (dm?.anchor) {
+  if (dm?.historical) {
     readingPositions.delete(timelineKey(dm.id, dm.peerId));
     selectBot(dm.id, dm.peerId);
     scroller.focus({ preventScroll: true });
