@@ -58,6 +58,8 @@
 .bot-name { display: flex; align-items: center; gap: .4rem; min-width: 0; font-size: .875rem; font-weight: 600; }
 .bot-name-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .presence-dot { width: .4rem; height: .4rem; border-radius: 50%; flex: none; background: var(--warning); }
+.unread-badge { flex: none; padding: .08rem .35rem; border-radius: var(--radius-full); background: var(--accent-soft); color: var(--accent); font-size: .68rem; line-height: 1.2; font-weight: 650; }
+.pin-unread { position: absolute; top: -.4rem; left: -.45rem; }
 .bot-preview { font-size: var(--text-xs); line-height: 1.35; min-height: 1em; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .working-dots { display: inline-flex; gap: 2px; margin-right: .4rem; vertical-align: middle; color: var(--success); }
 .working-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: working-dot 1.2s ease-in-out infinite; }
