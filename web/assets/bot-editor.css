@@ -7,22 +7,22 @@
   padding: 0;
   overflow: hidden;
   color: var(--text);
-  border: 0;
+  border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
   border-radius: var(--radius-xl);
   background: var(--overlay);
   box-shadow: var(--shadow-lg);
 }
 .bot-editor-dialog[open] { display: flex; }
-.bot-editor-dialog::backdrop { background: var(--backdrop); }
+.bot-editor-dialog::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
 
 .bot-editor-dialog, .bot-editor-dialog::backdrop {
-  transition: opacity .18s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1),
-    overlay .22s allow-discrete, display .22s allow-discrete;
+  transition: opacity .2s ease-out, transform .24s cubic-bezier(0.22, 1.15, 0.36, 1),
+    overlay .24s allow-discrete, display .24s allow-discrete;
 }
-.bot-editor-dialog:not([open]) { opacity: 0; transform: translateY(6px) scale(.985); transition-duration: .12s; }
-.bot-editor-dialog:not([open])::backdrop { opacity: 0; transition-duration: .12s; }
+.bot-editor-dialog:not([open]) { opacity: 0; transform: translateY(10px) scale(.96); transition-duration: .14s; }
+.bot-editor-dialog:not([open])::backdrop { opacity: 0; transition-duration: .14s; }
 @starting-style {
-  .bot-editor-dialog[open] { opacity: 0; transform: translateY(6px) scale(.985); }
+  .bot-editor-dialog[open] { opacity: 0; transform: translateY(10px) scale(.96); }
   .bot-editor-dialog[open]::backdrop { opacity: 0; }
 }
 

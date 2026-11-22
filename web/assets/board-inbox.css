@@ -85,6 +85,8 @@
   display: grid; gap: .12rem; min-width: 11.5rem; padding: .3rem;
   border: 1px solid var(--hairline); border-radius: var(--radius-md);
   background: var(--overlay); box-shadow: var(--shadow-lg);
+  transform-origin: top right;
+  animation: popover-enter .18s cubic-bezier(0.22, 1.2, 0.36, 1);
 }
 .decision-more-item {
   display: flex; align-items: center; gap: .5rem; min-height: 2rem; padding: .3rem .6rem;
@@ -253,7 +255,7 @@
   .board-inbox-form input { font-size: 16px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .decision-panel, .decision-panel-body, .decision-morph-card { transition: none; animation: none; }
+  .decision-panel, .decision-panel-body, .decision-morph-card, .decision-more-list { transition: none; animation: none; }
   .decision-more-item:active, .board-inbox-question .question-reply:active:not(:disabled),
   .board-inbox-question .question-confirm:active:not(:disabled), .board-inbox-form button:active:not(:disabled) { transform: none; }
 }
