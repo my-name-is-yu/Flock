@@ -78,8 +78,10 @@
   border-radius: var(--radius-sm);
   background: transparent;
   text-align: start;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
 }
 .find-match:hover { background: var(--hover); }
+.find-match:active { transform: scale(.985); }
 .find-match[aria-current="true"] { background: var(--accent-soft); }
 .find-match-meta { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; font-size: var(--text-xs); }
 .find-match-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
@@ -91,4 +93,7 @@
 
 @media (max-width: 700px) {
   .find-results { max-height: min(15rem, 26dvh); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .find-match:active { transform: none; }
 }
