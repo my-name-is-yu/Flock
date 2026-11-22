@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 include(FetchContent)
-find_package(SQLite3 REQUIRED)
+find_package(SQLite3 3.35 REQUIRED)
 find_package(nlohmann_json 3.12 QUIET)
 if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(nlohmann_json
