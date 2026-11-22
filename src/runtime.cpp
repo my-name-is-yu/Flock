@@ -895,7 +895,6 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
     };
 
     SessionContract sessionContract(const Json& task) {
-        // A first revision can adopt answers accepted at intake. A changed contract starts a new scope.
         auto row = db.query(R"SQL(
 SELECT r.intent,r.done_when,
        coalesce((SELECT max(j.id) FROM journal j WHERE j.task_id=r.task_id AND
@@ -909,7 +908,6 @@ FROM task_revisions r WHERE r.id=? AND r.task_id=?
         if (!row.next()) throw Conflict("The new Session needs an established task revision");
         SessionContract contract{row.string(0),row.string(1),row.number(2)};
         if (row.number(3)) {
-            // Before intake changes had a journal marker, the accepted conversation step held the intent.
             auto original = field(task,"request");
             if (task.contains("restartContext"))
                 original = taskIntent(db.load(task.at("restartContext").at("taskId")));
@@ -1073,7 +1071,6 @@ ORDER BY j.id
     void prepareDelegation(const Json& task, Json& action) {
         std::string instruction = field(action,"instructionBase");
         if (!action.contains("instructionBase")) {
-            // A ready action saved before this change can be rebuilt from the decision that queued it.
             auto row = db.query("SELECT data FROM journal WHERE task_id=? AND kind='decision'"
                                 " AND json_extract(data,'$.actionId')=?",{task.at("id"),action.at("id")});
             if (row.next()) {

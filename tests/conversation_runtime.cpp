@@ -1841,7 +1841,6 @@ void legacyIntakeChangeScopesTheFirstSessionAnswers() {
     f.reach(id,"waiting");
     task = f.task(id);
     f.store->operate(localOwner,TaskTarget::from(task,task["wait"]["id"]),"answer",{{"text","Use worker Green-32"}});
-    // Keep the accepted conversation step and waits that existed before intake changes had a journal marker.
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
     const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> legacy(raw,sqlite3_close);
