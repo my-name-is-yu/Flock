@@ -180,6 +180,17 @@ FROM automations WHERE bot_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
     return {{"automations",std::move(items)},{"before",next}};
 }
 
+Json Store::activeConfiguredSchedules(std::string_view bot) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT config_id,definition FROM automations
+WHERE bot_id=? AND config_id IS NOT NULL AND status='active'
+)SQL",{bot});
+    auto schedules = Json::object();
+    while (rows.next()) schedules[rows.string(0)] = rows.json(1);
+    return schedules;
+}
+
 Json Store::cancelAutomation(const Person& actor, std::string_view bot, Id id) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);

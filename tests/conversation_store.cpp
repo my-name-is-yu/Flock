@@ -448,6 +448,30 @@ void transientFailureResumesAfterTheLastFinishedStep() {
     check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 4,
           "The failed call was not counted against the message budget");
     check(fixture.count("SELECT count(*) FROM conversation_retries") == 0,"A completed turn kept stale retry metadata");
+    check(fixture.count("SELECT attempts FROM model_budgets WHERE id='message/" + std::to_string(message) + "'") == 4 &&
+          fixture.count("SELECT count(*) FROM messages WHERE id=" + std::to_string(message) +
+                        " AND json_type(routing,'$.modelBudgetId') IS NULL") == 1,
+          "Restart lost the deterministic budget or stored a redundant routing ID");
+}
+
+void legacyMessageBudgetKeepsItsAttemptCount() {
+    Fixture fixture;
+    Id message = 0;
+    {
+        Store store(fixture.database());
+        message = receive(store,"legacy-budget","Hello again");
+        fixture.sql("INSERT INTO model_budgets(id,call_limit,attempts) VALUES('legacy-shared',3,1)");
+        fixture.sql("UPDATE messages SET routing=json_set(routing,'$.modelBudgetId','legacy-shared') WHERE id=" +
+                    std::to_string(message));
+    }
+    Store restarted(fixture.database());
+    RuntimeFixture execution(restarted);
+    execution.model.conversation = [](const ModelInput&) { return say("Hello."); };
+    execution.runtime.runConversations();
+    check(reply(restarted,message)["text"] == "Hello." &&
+          fixture.count("SELECT attempts FROM model_budgets WHERE id='legacy-shared'") == 2 &&
+          fixture.count("SELECT count(*) FROM model_budgets") == 1,
+          "Restart replaced a previously saved message budget or lost its consumed calls");
 }
 
 void concurrentWorkerRecoversFromWriterContention() {
@@ -811,6 +835,7 @@ int main() {
         rejectedSessionReadStillAllowsAnOrdinaryReply();
         savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
+        legacyMessageBudgetKeepsItsAttemptCount();
         sessionNoteIsNotResentAfterARestart(false);
         sessionNoteIsNotResentAfterARestart(true);
         concurrentWorkerRecoversFromWriterContention();

@@ -236,6 +236,7 @@ public:
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;
+    Json activeConfiguredSchedules(std::string_view bot) const;
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
     [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
         std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);

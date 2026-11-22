@@ -1896,61 +1896,6 @@ elements.detail.addEventListener('close', () => {
   if (origin?.isConnected && (active === document.body || elements.detail.contains(active))) origin.focus();
 });
 
-const weekdayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const cronNames = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-function cronValues(field, min, max, names = {}) {
-  const value = (text) => {
-    const number = /^\d+$/.test(text) ? Number(text) : names[text.toLowerCase()];
-    return number >= min && number <= max ? number : null;
-  };
-  const values = new Set();
-  for (const part of field.split(',')) {
-    const [from, to, extra] = part.split('-').map(value);
-    if (extra !== undefined || from == null || (part.includes('-') && (to == null || to < from))) return null;
-    for (let item = from; item <= (to ?? from); item += 1) values.add(item);
-  }
-  return [...values].sort((a, b) => a - b);
-}
-function describeCron(expression) {
-  const fields = String(expression).trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  const [minute, hour, day, month, weekday] = fields;
-  const interval = (field, cycle) => {
-    const step = Number(/^\*\/([1-9]\d?)$/.exec(field)?.[1]);
-    return cycle % step === 0 ? step : null;
-  };
-  const daily = day === '*' && month === '*' && weekday === '*';
-  if (daily && hour === '*' && minute === '*') return 'Every minute';
-  const minuteInterval = interval(minute, 60);
-  if (daily && hour === '*' && minuteInterval) return `Every ${minuteInterval} minutes`;
-  if (!/^\d+$/.test(minute) || Number(minute) > 59) return null;
-  const mm = minute.padStart(2, '0');
-  if (daily && hour === '*') return `Hourly at :${mm}`;
-  const hourInterval = interval(hour, 24);
-  if (daily && hourInterval) return `Every ${hourInterval} hours${minute === '0' ? '' : ` at :${mm}`}`;
-  const hours = cronValues(hour, 0, 23);
-  if (!hours || hours.length > 4) return null;
-  const times = hours.map((item) => `${item}:${mm}`).join(', ');
-  if (day === '*' && month === '*') {
-    if (weekday === '*') return `Daily at ${times}`;
-    const days = cronValues(weekday, 0, 7, cronNames);
-    if (!days) return null;
-    const unique = [...new Set(days.map((item) => item % 7))].sort((a, b) => ((a + 6) % 7) - ((b + 6) % 7));
-    const key = unique.join(',');
-    if (unique.length === 7) return `Daily at ${times}`;
-    if (key === '1,2,3,4,5') return `Weekdays at ${times}`;
-    if (key === '6,0') return `Weekends at ${times}`;
-    return `Every ${unique.map((item) => weekdayNames[item]).join(', ')} at ${times}`;
-  }
-  if (weekday !== '*') return null;
-  const days = cronValues(day, 1, 31);
-  if (!days || days.length > 4) return null;
-  if (month === '*') return `Monthly on ${days.join(', ')} at ${times}`;
-  const months = cronValues(month, 1, 12);
-  if (!months || months.length !== 1 || days.length !== 1) return null;
-  return `Yearly on ${months[0]}/${days[0]} at ${times}`;
-}
-
 function sectionsFor(bot) {
   return bot.cron.length ? ['general', 'cron'] : ['general'];
 }
@@ -2148,13 +2093,13 @@ function generalContent(bot) {
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
   for (const item of bot.cron) {
-    const expression = item.schedule;
-    const readable = describeCron(expression);
     const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression));
-    when.append(node('span', 'cron-zone', item.timezone));
-    if (readable) when.append(node('code', 'cron-expression', expression));
+    when.append(
+      node('span', null, item.active ? 'Active' : 'Configured only'),
+      node('code', 'cron-expression', item.schedule),
+      node('span', 'cron-zone', item.timezone),
+    );
     row.append(when, node('p', 'cron-request', item.request));
     list.append(row);
   }
