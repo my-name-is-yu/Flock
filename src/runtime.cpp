@@ -210,16 +210,6 @@ struct Runtime::Impl {
         });
     }
 
-    void clearDeferredCompletionMarker(Id taskId, Id eventId) {
-        if (!eventId) return;
-        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,taskId});
-        if (!row.next()) return;
-        auto data = row.json(0);
-        const auto saved = data.erase("_flockSavedCompletion");
-        if (data.erase("_flockDeferredCompletion") || saved)
-            db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,taskId});
-    }
-
     std::vector<Id> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
@@ -260,7 +250,6 @@ ORDER BY id)SQL");
     }
 
     void cancelDone(Json& task) {
-        clearDeferredCompletionMarker(task["id"].get<Id>(),task.value("eventId",Id{0}));
         db.clearWait(task,"cancelled");
         db.unlockQuestion(task,"cancelled");
         if (!field(task,"actionId").empty()) {
@@ -535,7 +524,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             db.clearWait(current,"user_instruction");
             db.unlockQuestion(current,"user_instruction");
             if (!preservePeerAnswer) {
-                clearDeferredCompletionMarker(id,current.value("eventId",Id{0}));
                 db.consumeEvent(current);
                 if (current["lastRun"].is_null())
                     db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),{{"kind","intake"}});
@@ -1199,7 +1187,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
 
         if (deferUntilTurnsFinish(current,eventId,decision)) {
         } else {
-            clearDeferredCompletionMarker(id,eventId);
             db.consumeEvent(current);
             recordDecision(current,event,decision,actionId());
             current.erase("feedback");
@@ -1310,7 +1297,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 current.erase("requestedDoneWhen");
                 current.erase("criteriaSourceMessageId");
             }
-            clearDeferredCompletionMarker(id,event["id"].get<Id>());
             db.consumeEvent(current);
             const auto action = actionId();
             recordDecision(current,event,decision,action);
