@@ -15,6 +15,7 @@
 #include <ranges>
 #include <regex>
 #include <set>
+#include <stdexcept>
 #include <unistd.h>
 
 using namespace flockv0;
@@ -249,7 +250,14 @@ bool asksWhichTask(const Json& reply) {
     const bool asks = includes(text,"?") || includes(text,"？") || includes(text,"教えて") || includes(text,"ください");
     const bool identifiesChoice = includes(text,"どちら") || includes(text,"どの") || includes(text,"どっち") ||
         includes(text,"which") || (includes(text,"モバイル") && includes(text,"デスクトップ"));
-    return (mobile && desktop) || (asks && identifiesChoice);
+    const bool namesTarget = includes(text,"タスク") || includes(text,"作業") || includes(text,"対象");
+    const bool requestsChoice = includes(text,"指定") || includes(text,"選択") ||
+        includes(text,"選んで") || includes(text,"教えて");
+    static const std::regex requestsTarget(
+        R"((?:(?:^|[.!?;\n])\s*|\b(?:please|(?:can|could|would|will) you)\s+))"
+        R"((?:specify|clarify|choose|select|identify)\b[^.!?;\n]*\b(?:tasks?|target)\b)");
+    return (mobile && desktop) || (asks && (identifiesChoice || (namesTarget && requestsChoice))) ||
+        std::regex_search(text,requestsTarget);
 }
 
 bool requiresStartupColumn(const std::string& criteria) {
@@ -287,50 +295,130 @@ void checkCriteria(const Scene& s, const Turn& turn, Id id) {
           "the turn did not queue a consistent criteria replan for its new revision");
 }
 
+bool isAsciiDigit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+constexpr std::string_view clauseSeparators = ".!?\n;";
+
+bool isDecimalPoint(std::string_view text, std::size_t position) {
+    return text[position] == '.' && position > 0 && position + 1 < text.size() &&
+        isAsciiDigit(text[position - 1]) && isAsciiDigit(text[position + 1]);
+}
+
+std::string stripMarkdownFormatting(std::string_view input) {
+    const auto alphanumeric = [](char c) {
+        return isAsciiDigit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+    };
+    std::string text;
+    text.reserve(input.size());
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const char c = input[i];
+        if (c == '*' || c == '`' || c == '~') continue;
+        if (c == '_' && !(i > 0 && i + 1 < input.size() && alphanumeric(input[i - 1]) && alphanumeric(input[i + 1])))
+            continue;
+        text += c;
+    }
+    return text;
+}
+
+bool isFivePercent(std::string_view token) {
+    try {
+        std::size_t parsed = 0;
+        const double value = std::stod(std::string(token),&parsed);
+        return parsed == token.size() && value == 5.0;
+    } catch (const std::invalid_argument&) {
+        return false;
+    } catch (const std::out_of_range&) {
+        return false;
+    }
+}
+
+bool validInitialDurations(std::string_view phase) {
+    static const std::regex duration(
+        R"(((?:\b(?:not|never|avoid|instead\s+of|rather\s+than|no|without)|n(?:'|’)t)\s+)"
+        R"((?:(?:for|last|lasts|lasting|run|runs|running|wait|waiting|hold|holding)\s+){0,2})?)"
+        R"(\b((?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?))\b)");
+    static const std::regex allowedDuration(R"(24\s+hours?|(?:1|one|a)\s+day)");
+    using Iterator = std::regex_iterator<std::string_view::const_iterator>;
+    for (auto it = Iterator(phase.begin(),phase.end(),duration); it != Iterator(); ++it) {
+        const bool negated = (*it)[1].matched;
+        const auto& mention = (*it)[2];
+        if (negated == std::regex_match(mention.first,mention.second,allowedDuration)) return false;
+    }
+    return true;
+}
+
+bool validInitialDurationClauses(std::string_view text) {
+    static const std::regex initialPhase(
+        R"(\b(?:initial(?:ly)?|first|canary|rollout_canary|before\s+(?:expand|expanding|full))\b)"
+        R"(|(?:^|[^0-9.])5(?:\.0+)?\s*(?:%|percent\b))");
+    std::size_t start = 0;
+    while (start < text.size()) {
+        auto end = text.find_first_of(clauseSeparators,start);
+        // A decimal point is part of a percentage or duration within the clause.
+        while (end != std::string_view::npos && isDecimalPoint(text,end))
+            end = text.find_first_of(clauseSeparators,end + 1);
+        const auto clause = text.substr(start,end == std::string_view::npos ? end : end - start);
+        if (std::regex_search(clause.begin(),clause.end(),initialPhase) && !validInitialDurations(clause)) return false;
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return true;
+}
+
 bool explainsCanary(const std::string& reply) {
-    const auto text = lower(reply);
+    const auto text = stripMarkdownFormatting(lower(reply));
     static const std::regex canary(R"(\brollout_canary\b)");
     static const std::regex directsAlternative(
         R"((?:(?:(?:^|[.!?;\n])\s*(?:please\s+)?|\b(?:but|then|and)\s+|\b(?:i|we|you)\s+(?:would|should)\s+))"
         R"((?:use|enable|choose|select|go with)|\b(?:i|we)\s+(?:would\s+)?(?:prefer|recommend(?:\s+(?:using|choosing|selecting))?)))"
-        R"(\s+(?:the\s+)?`?\brollout_(?!canary\b)[a-z0-9_]+\b)");
+        R"(\s+(?:the\s+)?\brollout_(?!canary\b)[a-z0-9_]+\b)");
     static const std::regex alternativeChoice(
-        R"(\brollout_(?!canary\b)[a-z0-9_]+\b`?\s+(?:is\s+(?:recommended|preferred|selected)\b)"
+        R"(\brollout_(?!canary\b)[a-z0-9_]+\b\s+(?:is\s+(?:recommended|preferred|selected)\b)"
         R"(|is\s+the\s+(?:recommended|preferred|selected|best)\s+(?:flag|option|choice)\b|should\s+be\s+used\b))");
     static const std::regex initialPercentage(
         R"((\b(?:not|never|avoid|instead of|rather than)\s+)?\b)"
         R"((?:(?:start(?:s|ing)?|begin(?:s|ning)?)(?:\s+out)?\s+(?:at|with|by rolling out to))"
         R"(|(?:roll(?:s|ing)?\s+out\s+)?initially\s+(?:roll(?:s|ing)?\s+out\s+)?(?:to|for|at|with)))"
         R"(\s+([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent\b))");
-    static const std::regex duration(R"(\b(?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?)\b)");
-    static const std::regex allowedDuration(R"(24\s+hours?|(?:1|one|a)\s+day)");
     static const std::regex rejectsCanary(
-        R"(\b(?:not|never|avoid|instead of|rather than)\s+(?:(?:use|using|enable|enabling)\s+)?(?:the\s+)?`?rollout_canary\b)"
-        R"((?!`?\s+(?:to|for)\b))");
+        R"(\b(?:not|never|avoid|instead of|rather than)\s+(?:(?:use|using|enable|enabling)\s+)?(?:the\s+)?rollout_canary\b)"
+        R"((?!\s+(?:to|for)\b))");
     static const std::string fullAudience =
         R"(\b(?:(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|full rollout)\b|100\s*(?:%|percent\b)))";
     static const std::regex rejectsExpansion(
         R"(\b(?:not|never)\s+(?:expand|roll out|enable|use)\s+)"
-        R"((?:(?:it|the (?:flag|rollout)|`?rollout_canary`?)\s+)?(?:to|for)\s+)" + fullAudience +
+        R"((?:(?:it|the (?:flag|rollout)|rollout_canary)\s+)?(?:to|for)\s+)" + fullAudience +
         R"((?!\s+(?:initially|at first|immediately|right away|until|during|for the first)\b))"
         R"(|\bnever\s+expand\b(?=\s*(?:[.!?;]|$)|\s+beyond\b))"
-        R"(|\b(?:keep|stay|remain)\s+(?:it\s+)?at\s+5\s*(?:%|percent\b)\s+(?:permanently|indefinitely|forever)\b)");
+        R"(|\b(?:keep|stay|remain)\s+(?:it\s+)?at\s+5(?:\.0+)?\s*(?:%|percent\b)\s+(?:permanently|indefinitely|forever)\b)");
     static const std::regex rollout(
-        R"(\b5\s*(?:%|percent)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
+        R"((?:^|[^0-9.])([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent\b)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
         R"([\s\S]{0,160}?\b(?:24\s+hours?|(?:1|one|a)\s+day)\b)"
         R"([\s\S]{0,160}?\b(?:then|after(?:ward|wards| that)?|before|followed by)\b)"
         R"([\s\S]{0,160}?)" + fullAudience);
-    if (!std::regex_search(text,canary) || !std::regex_search(text,rollout) ||
+    if (!std::regex_search(text,canary) ||
         std::regex_search(text,rejectsCanary) || std::regex_search(text,rejectsExpansion) ||
         std::regex_search(text,directsAlternative) || std::regex_search(text,alternativeChoice)) return false;
     for (auto it = std::sregex_iterator(text.begin(),text.end(),initialPercentage); it != std::sregex_iterator(); ++it) {
         const bool negated = (*it)[1].matched;
-        const bool isFivePercent = (*it)[2] == "5";
-        if ((!negated && !isFivePercent) || (negated && isFivePercent)) return false;
+        if (negated == isFivePercent((*it)[2].str())) return false;
     }
-    for (auto it = std::sregex_iterator(text.begin(),text.end(),duration); it != std::sregex_iterator(); ++it)
-        if (!std::regex_match(it->str(),allowedDuration)) return false;
-    return true;
+    const std::string_view view = text;
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),rollout); it != std::sregex_iterator(); ++it) {
+        if (!isFivePercent((*it)[1].str())) continue;
+        const auto percentage = static_cast<std::size_t>(it->position(1));
+        auto separator = view.find_last_of(clauseSeparators,percentage);
+        while (separator != std::string_view::npos && isDecimalPoint(view,separator))
+            separator = view.find_last_of(clauseSeparators,separator - 1);
+        const auto start = separator == std::string_view::npos ? 0 : separator + 1;
+        const auto expanded = static_cast<std::size_t>(it->position() + it->length());
+        // Score the initial phase once and check surrounding clauses for additional claims about it.
+        return validInitialDurations(view.substr(start,expanded - start)) &&
+            validInitialDurationClauses(view.substr(0,start)) && validInitialDurationClauses(view.substr(expanded));
+    }
+    return false;
 }
 
 enum class NoteTiming { Immediate, SafeBoundary };
@@ -577,7 +665,11 @@ void selfTest() {
          "unexpected action");
     test("an ambiguous stop",{clarify,stopMobile,done});
     test("an ambiguous stop",{choices,stopMobile,done});
+    test("an ambiguous stop",{say("キャンセルするタスクを指定してください。"),stopMobile,done});
+    test("an ambiguous stop",{say("Please specify the task to cancel."),stopMobile,done});
     test("an ambiguous stop",{say("キャンセルしました。")},"did not ask which task");
+    test("an ambiguous stop",{say("確認します。")},"did not ask which task");
+    test("an ambiguous stop",{say("I cancelled the task.")},"did not ask which task");
     test("new criteria",{criteria("Include a report column named startup_p95_ms"),done});
     constexpr auto columnConstraint = "Include a report column named startup_p95_ms without changing the benchmark";
     test("new criteria",{criteria(columnConstraint,columnConstraint),done});
@@ -592,6 +684,25 @@ void selfTest() {
     test("two requests",{notes,start("Do not audit the third-party licenses"),done},"one-to-one");
     test("two requests",{start("Write the release notes and audit the third-party licenses"),audit,done},"one-to-one");
     test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, then expand it to everyone.")});
+    test("explaining",{say("Use rollout_canary for **5%** of users for a day, then expand to everyone.")});
+    test("explaining",{say("Use `rollout_canary` for _5%_ of users for **24 hours**, then expand to everyone.")});
+    test("explaining",{say("With rollout_canary, start with `5.00 percent` of users for a day, then expand to __everyone__.")});
+    test("explaining",{say("Use rollout_canary for 0.5% of users for a day, then expand to everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "The initial phase lasts 24 hours, not two days.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "The initial phase doesn’t last two days.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "The initial phase lasts two days.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone; "
+                            "the 5.0% phase lasts 2.5 days.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone and monitor for 2 weeks.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, not a day, then expand to everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for 2 weeks, not 24 hours, then expand to everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, then wait two days before expanding to everyone.")},
+         "did not explain");
+    test("explaining",{say("The flag is rollout_canary. Spend two days at 5% of users for 24 hours, then expand to everyone.")},
+         "did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone, including the remaining 95%.")});
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
                             "It does not expose all users initially.")});
