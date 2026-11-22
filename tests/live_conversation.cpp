@@ -23,9 +23,8 @@ void check(bool passed, const std::string& failure) {
 }
 
 void checkReply(const Json& data) {
-    const bool hasRoute = data.contains("route");
-    const auto outcome = data.value(hasRoute ? "route" : "status", "");
-    if (outcome != (hasRoute ? "reply" : "ok"))
+    const auto outcome = data.at("route").get<std::string>();
+    if (outcome != "reply")
         throw std::runtime_error("Turn ended with " + outcome + ": " + data.value("text", ""));
 }
 
@@ -612,10 +611,6 @@ struct Script : Model {
 
 void selfTest() {
     int passed = 0;
-    for (const auto& reply : {Json{{"route","reply"}},Json{{"status","ok"}}}) {
-        checkReply(reply);
-        ++passed;
-    }
     const auto run = [&](std::string_view name, const Scenario& scenario, std::vector<Decision> steps,
                          std::string_view expectedFailure = {}) {
         Script script(std::move(steps));

@@ -79,15 +79,13 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/timeline-rows.mjs" "${FLOCK_CHROME_EXECUTABLE}")
       set_tests_properties(flock_web_timeline_rows_dom PROPERTIES TIMEOUT 30)
     endif()
-    if(TARGET flock_app_support)
-      target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
-      target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
-      target_compile_definitions(flock_web_conversation_tests PRIVATE FLOCK_TEST_CHATGPT=1)
-      add_test(NAME flock_web_chatgpt_conversation
-        COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chatgpt.mjs"
-          "$<TARGET_FILE:flock_web_conversation_tests>")
-      set_tests_properties(flock_web_chatgpt_conversation PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
-    endif()
+    target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
+    target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
+    target_compile_definitions(flock_web_conversation_tests PRIVATE FLOCK_TEST_CHATGPT=1)
+    add_test(NAME flock_web_chatgpt_conversation
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/chatgpt.mjs"
+        "$<TARGET_FILE:flock_web_conversation_tests>")
+    set_tests_properties(flock_web_chatgpt_conversation PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     add_test(NAME flock_web_composer_shortcuts
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-shortcuts.mjs")
   endif()

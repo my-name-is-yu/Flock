@@ -4,13 +4,9 @@
 #include "model.hpp"
 #include "git_github.hpp"
 
-#ifdef FLOCK_WITH_T3
 #include "flock/root_delivery.hpp"
 #include "flock/t3_mcp.hpp"
-#endif
-#ifdef FLOCK_WITH_WEB
 #include "flock/web.hpp"
-#endif
 
 #include <charconv>
 #include <chrono>
@@ -23,7 +19,7 @@ namespace flockv0::app {
 namespace {
 constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
 
-  run [--fixed] [--no-web | --headless] [--port PORT] [--session-read off|on_demand|prefill]
+  run [--fixed] [--no-web] [--port PORT] [--session-read off|on_demand|prefill]
   bots
   access grant BOT KIND RESOURCE ACTION
   access revoke BOT KIND RESOURCE ACTION
@@ -136,16 +132,11 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
     const auto environment = args.pop("canonical environment ID");
     const auto url = args.pop("T3 MCP URL");
     args.end();
-#ifdef FLOCK_WITH_T3
     loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
     print({{"environmentId",environment},{"connected",true}});
     return 0;
-#else
-    (void)home;
-    throw Conflict("This build does not include the T3 adapter");
-#endif
 }
 
 volatile std::sig_atomic_t stopRequested = 0;
@@ -153,12 +144,12 @@ void requestStop(int) { stopRequested = 1; }
 
 void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
-    [[maybe_unused]] unsigned port = 0;
+    unsigned port = 0;
     RuntimeOptions options;
     while (!args.empty()) {
         const auto option = args.pop("run option");
         if (option == "--fixed") fixed = true;
-        else if (option == "--no-web" || option == "--headless") web = false;
+        else if (option == "--no-web") web = false;
         else if (option == "--port") port = static_cast<unsigned>(number(args,"port",0,65535));
         else if (option == "--session-read") {
             options.sessionRead = args.pop("session read mode");
@@ -166,12 +157,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                 throw Conflict("Session read mode must be off, on_demand or prefill");
         } else throw Conflict("Unknown run option: " + option);
     }
-#ifndef FLOCK_WITH_WEB
-    if (web) throw Conflict("This build does not include the Web UI. Run with --no-web.");
-#endif
-#ifndef FLOCK_WITH_T3
-    if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
-#endif
     Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
     if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) {
         options.gitHost = makeGitHubHost(token);
@@ -182,18 +167,14 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
-    }
-#ifdef FLOCK_WITH_T3
-    else {
+    } else {
         model = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
-#endif
     options.botTools = loadBotTools(home);
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
     options.storageContention = [](std::string_view error) { std::cerr << "Flock storage busy: " << error << '\n'; };
-#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
     auto handoffSession = web && !fixed ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
     std::shared_ptr<SessionHandoff> handoffs;
     SessionHandoff::People handoffPeople;
@@ -208,12 +189,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             return handoffSession->inputCommit(view.origin.invitation.target);
         };
     }
-#endif
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
-#ifdef FLOCK_WITH_WEB
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
@@ -231,7 +210,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"))
         configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
-#ifdef FLOCK_WITH_T3
     std::jthread handoffWorker;
     if (handoffSession && callbacks.configuredPerson) {
         handoffPeople = callbacks.configuredPerson;
@@ -264,14 +242,12 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
             }
         });
     }
-#endif
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
         server = startWeb(store,port,std::move(callbacks));
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
-#endif
     std::signal(SIGINT,requestStop);
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
@@ -280,9 +256,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
     handoffWorker.request_stop();
-#endif
     runtime.requestStop();
 }
 

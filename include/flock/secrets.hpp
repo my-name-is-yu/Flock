@@ -12,7 +12,6 @@ public:
     Json record(Json, Fields = Fields::protocol) const;
     void requirePublic(const Json&) const;
     bool containsProtected(const Json&) const;
-    static bool mayContainLegacyRedaction(const Json&);
 private:
     std::vector<std::string> values_;
 };
