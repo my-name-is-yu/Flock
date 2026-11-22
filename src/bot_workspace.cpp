@@ -352,7 +352,7 @@ std::vector<std::string> sandboxCommand(const fs::path& root, const fs::path& cw
         return std::string("/workspace/") + path.lexically_relative(rootPath).generic_string();
     };
     if (pathContains(root,command.front())) command.front() = inner(root,command.front());
-    std::vector<std::string> launch{"/usr/bin/bwrap","--unshare-all","--die-with-parent",
+    std::vector<std::string> launch{"/usr/bin/bwrap","--unshare-all","--unshare-user","--die-with-parent",
         "--new-session","--disable-userns","--cap-drop","ALL","--dev","/dev"};
     if (pipelineStage) launch.insert(launch.begin()+1,{"--seccomp","4"});
     for (const auto* path : systemRoots) if (fs::exists(path))
