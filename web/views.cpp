@@ -189,6 +189,7 @@ Json eventView(const Json& event) {
         }
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
+        if (data.contains("evidenceStatus")) copyFields(details,data,{"evidenceStatus","detail"});
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});

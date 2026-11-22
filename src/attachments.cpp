@@ -1,6 +1,6 @@
 #include "storage.hpp"
+#include "flock/base64.hpp"
 
-#include <array>
 #include <csetjmp>
 #include <jpeglib.h>
 #include <png.h>
@@ -8,31 +8,16 @@
 
 namespace flockv0 {
 namespace {
-constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 std::string decodeAttachment(std::string_view base64) {
-    if (base64.empty() || base64.size() > 88000 || base64.size() % 4 != 0)
+    if (base64.size() > 88000 || !base64DecodedSize(base64))
         throw Conflict("Attachment exceeds the size limit or has invalid base64 data");
-    std::string bytes;
-    bytes.reserve(base64.size()/4*3);
-    for (std::size_t pos = 0; pos < base64.size(); pos += 4) {
-        const auto block = base64.substr(pos,4);
-        std::array<unsigned,4> sextets{};
-        unsigned padding = 0;
-        for (unsigned i = 0; i < block.size(); ++i) {
-            if (block[i] == '=' && i >= 2 && pos+4 == base64.size()) { ++padding; continue; }
-            const auto value = alphabet.find(block[i]);
-            if (value == alphabet.npos || padding) throw Conflict("Invalid attachment base64 data");
-            sextets[i] = static_cast<unsigned>(value);
-        }
-        if ((padding == 2 && (sextets[1] & 15)) || (padding == 1 && (sextets[2] & 3)))
-            throw Conflict("Invalid attachment base64 data");
-        bytes += static_cast<char>((sextets[0] << 2) | (sextets[1] >> 4));
-        if (padding < 2) bytes += static_cast<char>((sextets[1] << 4) | (sextets[2] >> 2));
-        if (padding == 0) bytes += static_cast<char>((sextets[2] << 6) | sextets[3]);
+    try {
+        return decodeBase64(base64,65536);
+    } catch (const std::length_error&) {
+        throw Conflict("Attachment exceeds the size limit");
+    } catch (const std::invalid_argument&) {
+        throw Conflict("Invalid attachment base64 data");
     }
-    if (bytes.size() > 65536) throw Conflict("Attachment exceeds the size limit");
-    return bytes;
 }
 
 using ImageSize = std::pair<unsigned,unsigned>;

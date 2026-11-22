@@ -1,5 +1,7 @@
 #include "http_fixture.hpp"
 
+#include <sqlite3.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -700,7 +702,8 @@ void sidebarReplies(const std::filesystem::path& path) {
           "outgoing messages hid the latest incoming reply past the preview window");
 }
 
-void readChanges(Browser& stream, const std::string& path, const std::function<bool(const Json&)>& next) {
+void readChanges(Browser& stream, const std::string& path, const std::function<bool(const Json&)>& next,
+                 const std::function<void()>& onPing = {}) {
     using namespace std::chrono_literals;
     stream.client.set_read_timeout(2);
     const auto deadline = std::chrono::steady_clock::now() + 8s;
@@ -715,6 +718,7 @@ void readChanges(Browser& stream, const std::string& path, const std::function<b
             const auto frame = buffer.substr(0,end);
             buffer.erase(0,end + 2);
             if (frame.find("event: ready\n") != std::string::npos) ready = true;
+            if (onPing && frame.starts_with("event: ping\n")) onPing();
             constexpr std::string_view prefix = "event: change\ndata: ";
             if (!frame.starts_with(prefix)) continue;
             check(ready,"received an invalidation before the stream was ready");
@@ -805,9 +809,30 @@ void conversationPermissions(const std::filesystem::path& path) {
         if (credential == "Bearer decider") return Person{"decider"};
         return Person{};
     };
+    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
+    {
+        const auto server = startWeb(store,0,web);
+        Browser decider(*server);
+        decider.client.set_default_headers({{"Authorization","Bearer decider"}});
+        check(decider.get("/api/view?bot=release").at("canDecide") == true,
+              "custom authentication without a resolver prevented reads");
+        decider.post("/api/messages",message,503);
+        check(store.conversation("release").empty(),"a listener without a resolver queued a message");
+    }
+    bool deciderAvailable = true;
+    web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
+        if (person == "reader" || (person == "decider" && deciderAvailable)) return false;
+        return std::nullopt;
+    };
 
     const auto taskId = store.submit(web.intake("release","Draft release notes"));
-    FixedModel model;
+    struct ConversationModel : FixedModel {
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") == "conversation_turn")
+                return {{{"reply",{{"text","Ready to check the release"}},"Reply to the user"}}};
+            return FixedModel::decide(input);
+        }
+    } model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     tick(runtime,3);
@@ -832,7 +857,6 @@ void conversationPermissions(const std::filesystem::path& path) {
     const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
         {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
         {"targetGeneration",wait.at("generation")}};
-    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
     reader.post("/api/messages",message,403);
     reader.post("/api/operations",answer,403);
     unsigned updates = 0;
@@ -844,7 +868,23 @@ void conversationPermissions(const std::filesystem::path& path) {
         return true;
     });
     decider.post("/api/operations",answer);
-    decider.post("/api/messages",message,201);
+    const auto authorized = decider.post("/api/messages",message,201).at("messageId");
+    runtime.runConversations();
+    const auto assertReply = [&](const Json& id, std::string_view route) {
+        const auto events = reader.get(viewPath).at("events");
+        check(std::ranges::any_of(events,[&](const Json& event) {
+            return event.at("kind") == "conversation_reply" && event.at("data").at("replyToMessageId") == id &&
+                   event.at("data").at("route") == route;
+        }),"Queued message did not use the custom identity resolver");
+    };
+    assertReply(authorized,"reply");
+
+    auto queued = message;
+    queued["clientMessageId"] = "removed-before-run";
+    const auto revoked = decider.post("/api/messages",queued,201).at("messageId");
+    deciderAvailable = false;
+    runtime.runConversations();
+    assertReply(revoked,"access");
 }
 
 void retryEventProjection(const std::filesystem::path& path) {
@@ -864,6 +904,68 @@ void retryEventProjection(const std::filesystem::path& path) {
         }
         check(change == Json{{"list",true}},"list projection did not recover independently");
         return false;
+    });
+}
+
+void retryHistoryInvalidation(const std::filesystem::path& path) {
+    Store store(path);
+    auto web = callbacks();
+    const auto task = store.submit(web.intake("release","Release notes"));
+    const auto intake = web.intake("release","Follow up");
+    const auto message = store.receive(Person{"owner",true},intake,"old","Follow up").at("messageId").get<Id>();
+    for (int i = 0; i < 40; ++i)
+        store.receive(Person{"owner",true},intake,"new-" + std::to_string(i),"Newer message");
+
+    std::atomic<bool> projectionUnavailable = false;
+    std::atomic<bool> projectionFailed = false;
+    web.bots = [bots = web.bots,&projectionUnavailable,&projectionFailed] {
+        if (projectionUnavailable.load()) {
+            projectionFailed = true;
+            throw std::runtime_error("Bot profiles unavailable");
+        }
+        return bots();
+    };
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server), stream(*server);
+    const std::string viewPath = "/api/view?bot=release";
+    const auto olderPath = "/api/conversation?bot=release&before=" + std::to_string(message + 1);
+    auto baseline = browser.get(viewPath);
+    const auto changesPath = viewPath + "&changesAfter=" + baseline.at("historyCursor").dump();
+    baseline.erase("historyCursor");
+    check(baseline.at("events").front().at("id").get<Id>() > message &&
+          browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == false,
+          "expected an undelivered message outside the newest view");
+
+    bool initial = true;
+    unsigned pingsDuringFailure = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        if (std::exchange(initial,false)) {
+            check(change == Json{{"list",true},{"bot","release"}},"missing initial view scopes");
+            projectionUnavailable = true;
+
+            // Isolate the persisted effect of steering an old message from any other Runtime writes.
+            sqlite3* raw = nullptr;
+            const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+            const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+            check(opened == SQLITE_OK,"could not open the fixture writer");
+            sqlite3_busy_timeout(db.get(),2000);
+            const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) +
+                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + "))";
+            check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+                  "could not record the historical delivery");
+            return true;
+        }
+        check(!projectionUnavailable && change == Json{{"bot","release"}},
+              "recovery did not invalidate only the affected Bot view");
+        auto current = browser.get(viewPath);
+        current.erase("historyCursor");
+        check(current == baseline,"the history-only write changed the newest view");
+        check(browser.get(changesPath).at("changedMessageIds") == Json::array({message}) &&
+              browser.get(olderPath).at("events").back().at("data").at("deliveredToT3") == true,
+              "the recovered notification did not expose the updated historical message");
+        return false;
+    },[&] {
+        if (projectionFailed && ++pingsDuringFailure == 2) projectionUnavailable = false;
     });
 }
 
@@ -978,15 +1080,27 @@ void botProfileEndpoints(const std::filesystem::path& path) {
     check(uploaded.at("name") == "Scout Photo" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" && !uploaded.at("avatar").contains("file"),
           "POST /api/bots/profile leaked internal filename or missed upload metadata");
-    const auto imageUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
-    check(imageUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
+    const auto originalUrl = uploaded.at("avatar").at("imageUrl").get<std::string>();
+    check(originalUrl.starts_with("/api/bot-avatar?bot=bot-1&v="),"missing projected avatar imageUrl");
 
-    const auto fetchedImage = browser.client.Get(imageUrl);
+    const auto fetchedImage = browser.client.Get(originalUrl);
     check(fetchedImage && fetchedImage->status == 200 &&
           fetchedImage->get_header_value("Content-Type") == "image/png" &&
           fetchedImage->get_header_value("X-Content-Type-Options") == "nosniff" &&
           fetchedImage->body.starts_with("\x89PNG"),
           "GET /api/bot-avatar did not serve verified PNG");
+
+    auto paddedPng = validPngBase64;
+    paddedPng[paddedPng.size()-2] = 'J';
+    const auto padded = browser.post("/api/bots/profile",{
+        {"botId","bot-1"},
+        {"name","Scout Photo"},
+        {"avatar",{{"kind","upload"},{"color","#75b8e8"},{"filename","photo.png"},{"imageData",paddedPng}}},
+    },200);
+    const auto imageUrl = padded.at("avatar").at("imageUrl").get<std::string>();
+    const auto paddedImage = browser.client.Get(imageUrl);
+    check(paddedImage && paddedImage->status == 200 && paddedImage->body == fetchedImage->body,
+          "Unused Base64 bits changed the accepted avatar bytes");
 
     // Rename without re-uploading keeps imageUrl intact.
     const auto renamed = browser.post("/api/bots/profile",{
@@ -1111,6 +1225,7 @@ int main() {
         eventStream(directory.path / "events.db");
         conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
+        retryHistoryInvalidation(directory.path / "retry-history.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");

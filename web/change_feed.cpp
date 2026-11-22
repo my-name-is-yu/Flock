@@ -82,21 +82,29 @@ void ChangeFeed::stop() {
 std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes,
                                                 const Store::ConversationChanges& changes) {
     std::set<Scope> failed;
-    std::map<Scope,Json> snapshots;
+    std::map<Scope,std::optional<Json>> snapshots;
     for (const auto& scope : scopes) {
-        try { snapshots.emplace(scope,load_(scope)); }
-        catch (const std::exception&) { failed.insert(scope); }
+        auto& snapshot = snapshots[scope];
+        try { snapshot = load_(scope); }
+        catch (const std::exception&) {}
     }
     std::lock_guard lock(mutex_);
     const auto previousRevision = revision_;
     for (auto& [scope,snapshot] : snapshots) {
         const auto item = watched_.find(scope);
         if (item == watched_.end()) continue;
-        const auto* view = std::get_if<BotView>(&scope.target);
-        const bool historyChanged = view && !snapshot.is_null() && changes.messages.contains(view->bot);
-        if (item->second.snapshot == snapshot && !historyChanged) continue;
-        item->second.snapshot = std::move(snapshot);
-        item->second.revision = ++revision_;
+        auto& watched = item->second;
+        if (const auto* view = std::get_if<BotView>(&scope.target); view && changes.messages.contains(view->bot))
+            watched.historyPending = true;
+        if (!snapshot) {
+            // The shared journal cursor can advance while this scope still needs a refresh.
+            failed.insert(scope);
+            continue;
+        }
+        const bool historyChanged = std::exchange(watched.historyPending,false) && !snapshot->is_null();
+        if (watched.snapshot == snapshot && !historyChanged) continue;
+        watched.snapshot = std::move(snapshot);
+        watched.revision = ++revision_;
     }
     if (revision_ != previousRevision) changed_.notify_all();
     return failed;

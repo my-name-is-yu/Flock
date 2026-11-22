@@ -71,6 +71,37 @@ void cronIntakeAndRestart() {
     }
 }
 
+void invalidSessionSettingsPreserveDueTimes() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto folder = home / "release";
+    auto config = botConfig();
+    config["cron"] = Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},{"request","Daily check"}}});
+    createBot(folder,config,"SOUL","MEMORY");
+    const Bots bots(home);
+    const auto database = temp.path / "tasks.db";
+    const auto start = utc(2026,1,1,12,0);
+    const auto due = utc(2026,1,2,0,0);
+    const auto report = [](std::string_view,std::string_view) {};
+    {
+        Store store(database);
+        bots.syncSchedules(store,start,report);
+    }
+    config["session"] = {{"workspaceStrategy",{{"kind","worktree"}}}};
+    write(folder/"config.json",config.dump());
+    {
+        Store store(database);
+        bots.syncSchedules(store,due+3600,report);
+    }
+    config.erase("session");
+    write(folder/"config.json",config.dump());
+    Store store(database);
+    bots.syncSchedules(store,due+3600,report);
+    store.fireDueAutomations(due+3600);
+    check(store.tasks("release").size() == 1 && store.tasks("release").at(0).at("trigger").at("targetTime") == due,
+          "invalid Session settings erased the original scheduled occurrence");
+}
+
 void configuredScheduleLifecycle() {
     Sandbox temp;
     const auto home = temp.path / "bots";
@@ -220,6 +251,7 @@ void configuredSchedules() {
     cronSyntaxAndTimeZones();
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
+    invalidSessionSettingsPreserveDueTimes();
     invalidEntriesPreserveDueSchedule();
     malformedDuplicatesDeactivateSchedules();
 }

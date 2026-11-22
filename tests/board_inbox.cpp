@@ -127,7 +127,7 @@ struct Sessions : T3 {
         }
         return result;
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override { ++interrupts; }
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { ++interrupts; return InterruptOutcome::Requested; }
 };
 
 Intake intake(std::string bot, std::string text, std::string project, Json config = Json::object()) {
