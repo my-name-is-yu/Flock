@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { refreshEventHistory } from '../assets/event-history.mjs';
+import { refreshEventHistory, timelineMessages } from '../assets/event-history.mjs';
 
 const page = (ids, olderBefore) => ({ events: ids.map(id => ({ id })), olderBefore });
 const emptyHistory = () => ({ events: new Map(), olderBefore: 0 });
@@ -69,3 +69,31 @@ assert.deepEqual(loaded.events.get(4), resolved);
 assert.equal(loaded.events.has(1), false);
 assert.equal(loaded.olderBefore, 2);
 await refreshEventHistory(loaded, { ...latestAfterApproval, changedMessageIds: [] }, noPage, current);
+
+const report = {
+  id: 6, kind: 'report', time: 100, taskId: 1,
+  data: { report: 'Full report', status: 'completed', truncated: false, revisionId: 2, resultRunId: 'result',
+    run: { environmentId: 'env', threadId: 'thread', runId: 'launch' } },
+};
+const completion = {
+  id: 8, kind: 'completed', time: 101, taskId: 1,
+  data: { text: 'Full report', revisionId: 2, run: { environmentId: 'env', threadId: 'thread', runId: 'result' } },
+};
+const dayOf = time => Math.floor(time / 100);
+const timeline = (...events) => timelineMessages(events, dayOf);
+assert.deepEqual(timeline(report, completion), [{ event: completion, report }]);
+for (const data of [
+  { report: 'Full' }, { report: 'Full report ' }, { truncated: true }, { truncated: undefined },
+  { status: 'failed' }, { status: undefined }, { revisionId: null }, { revisionId: 3 },
+  { resultRunId: '' }, { resultRunId: 'launch' }, { run: null },
+  { run: { ...report.data.run, environmentId: 'other' } },
+  { run: { ...report.data.run, threadId: 'other' } },
+]) {
+  const distinct = { ...report, data: { ...report.data, ...data } };
+  assert.deepEqual(timeline(distinct, completion), [{ event: distinct }, { event: completion }]);
+}
+for (const distinct of [{ ...completion, taskId: 2 }, { ...completion, time: 200 }]) {
+  assert.deepEqual(timeline(report, distinct), [{ event: report }, { event: distinct }]);
+}
+assert.deepEqual(timeline(report, { kind: 'wait_closed' }, completion), [{ event: report }, { event: completion }]);
+assert.deepEqual(timeline(completion), [{ event: completion }]);
