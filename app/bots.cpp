@@ -1,4 +1,5 @@
 #include "bots.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -282,17 +283,7 @@ Bot configuredBot(std::string_view id, const Json& config) {
     if (!timeout.is_number_integer() || timeout.get<long double>() < 1 || timeout.get<long double>() > 2147483647)
         throw Conflict("runTimeoutSeconds must be a positive integer");
     bot.settings["runTimeoutSeconds"] = timeout.get<int>();
-    if (config.contains("session")) {
-        const auto& session = config["session"];
-        if (!session.is_object()) throw Conflict("session must be an object");
-        auto& stored = bot.settings["session"] = Json::object();
-        for (const auto* key : {"model","providerInstanceId","runtimeMode"})
-            if (session.contains(key)) stored[key] = validatedString(session,key);
-        if (session.contains("workspaceStrategy")) {
-            if (!session["workspaceStrategy"].is_object()) throw Conflict("session.workspaceStrategy must be an object");
-            stored["workspaceStrategy"] = session["workspaceStrategy"];
-        }
-    }
+    if (config.contains("session")) bot.settings["session"] = normalizeSessionSettings(config["session"]);
     const auto allowedBots = config.value("allowedBots",Json::array());
     if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
     std::set<std::string> allowedIds;

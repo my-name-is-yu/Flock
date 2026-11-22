@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -559,16 +560,9 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
             const auto action = outbox(task);
-            const auto& session = data["session"];
-            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready") || !session.is_object())
+            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready"))
                 throw Conflict("Session settings can only be corrected before an unsent action");
-            for (auto item = session.begin(); item != session.end(); ++item) {
-                if ((item.key() == "workspaceStrategy" && item->is_object()) ||
-                    ((item.key() == "model" || item.key() == "providerInstanceId" || item.key() == "runtimeMode") &&
-                     item->is_string())) continue;
-                throw Conflict("Invalid Session setting");
-            }
-            task["config"]["session"] = session;
+            task["config"]["session"] = normalizeSessionSettings(data["session"]);
         }
         if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
         else {
