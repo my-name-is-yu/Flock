@@ -71,10 +71,12 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <div id="profile" class="profile" hidden>
-            <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
-            <div class="profile-text"><h1 id="profile-name" class="profile-name" tabindex="-1"></h1><p id="profile-status" class="profile-status"></p></div>
-          </div>
+          <h1 id="profile-heading" class="profile-heading" aria-labelledby="profile-name" hidden>
+            <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status">
+              <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+              <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
+            </button>
+          </h1>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
           <h1 id="peer-heading" class="peer-heading" tabindex="-1" hidden></h1>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
@@ -84,9 +86,6 @@
           <button id="peer-picker" class="header-text-button peer-picker" type="button" aria-label="Bot DMs" aria-haspopup="dialog" title="Bot DMs" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
             <span>Bot DMs</span>
-          </button>
-          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
           </button>
         </div>
       </header>
