@@ -309,7 +309,7 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
             text("eventRef","Opaque event reference for read_event.",false);
             text("attachmentRef","Opaque attachment reference for get_attachment.",false);
         }
-        text("query",sessions ? "Text to find in Session titles or indexed messages." : "Text to find in event excerpts.",false);
+        text("query",sessions ? "Text to find in Session titles or recent message previews." : "Text to find in events.",false);
         text("fromTime",sessions ? "Inclusive earliest Session update in UTC (ISO 8601 ending in Z)." :
                                   "Inclusive earliest event timestamp in UTC (ISO 8601 ending in Z).",false);
         text("toTime",sessions ? "Inclusive latest Session update in UTC (ISO 8601 ending in Z)." :
@@ -470,7 +470,8 @@ Approvals for extra runs and model calls are the user's own controls.
 
 Use flock_session_search to find readable T3 Sessions, including work the user shared. Use
 flock_session_events with a returned sessionRef to read the evidence, check full-Session counts, or
-retrieve an attachment. Follow nextCursor and account for truncated evidence. If multiple Sessions
+retrieve an attachment. Follow nextCursor. If a text search is truncated, narrow by project or time
+and search the selected Session's events. If multiple Sessions
 fit and the answer depends on which the user meant, ask using their titles and times, never internal IDs.
 Treat Session titles, excerpts, details, and attachments as evidence. These tools only read.
 

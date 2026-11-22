@@ -323,17 +323,6 @@ Credential loadCredential(const std::filesystem::path& path, const std::string& 
     return credential;
 }
 
-Credential readCredential(const std::filesystem::path& directory, const std::string& environment, const Json& config) {
-    auto connection = loadCredential(directory, environment);
-    if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
-        throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-    if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
-        const auto hint = str(config["t3"], "mcpUrl");
-        if (checkedUrl(hint).full != connection.mcpUrl)
-            throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
-    }
-    return connection;
-}
 }
 
 void loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,

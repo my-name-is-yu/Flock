@@ -1,176 +1,134 @@
 #include "internal.hpp"
 #include "flock/session_read.hpp"
 
-#include <charconv>
 #include <chrono>
 
 namespace flockv0::t3detail {
 namespace {
 constexpr int excerptChars = 480;
 constexpr int detailChars = 2730;
+constexpr int eventScanPages = 12;
+constexpr int countScanPages = 160;
+using Clock = std::chrono::steady_clock;
 
-bool notFound(const Failure& error) {
-    return error.kind == Failure::Kind::Auth || error.code == "thread_not_found" ||
-        error.code == "item_not_found" || error.code == "attachment_not_found" ||
-        (error.code == "invalid_request" && error.serverMessage == "The thread was not found.");
-}
-
-template<typename Read>
+template<class Read>
 auto withSession(const std::filesystem::path& directory, const SessionTarget& target, Read read)
     -> decltype(read(std::declval<Client&>())) {
     try {
-        Client client(readCredential(directory,target.environmentId,target.config));
+        Client client(loadCredential(directory,target.environmentId));
         return read(client);
     } catch (const Failure& error) {
-        if (notFound(error)) return {};
+        if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||
+            error.code == "thread_not_found" || error.code == "item_not_found" ||
+            error.code == "attachment_not_found") return {};
         throw;
     }
 }
 
-Id parsePosition(const std::string& cursor) {
-    if (cursor.empty()) return -1;
-    Id result = 0;
-    const auto [end,error] = std::from_chars(cursor.data(),cursor.data()+cursor.size(),result);
-    if (error != std::errc() || end != cursor.data()+cursor.size() || result < 0 || result > maxHistoryPosition)
-        throw Failure(Failure::Kind::Settings,"Invalid Session event cursor");
-    return result;
+std::optional<SessionAttachment> attachment(const Json& file) {
+    const auto id = str(file,"id");
+    if (id.empty() || id.size() > 1024 || !file.value("available",true)) return {};
+    return SessionAttachment{id,str(file,"name"),str(file,"mimeType"),{},file.value("truncated",false)};
 }
 
-Json read(Client& client, const SessionTarget& target, std::string_view view, int chars, unsigned limit,
-          Json filter = Json::object()) {
-    filter.update(Json{{"threadId",target.threadId},{"view",view},{"limit",limit},
-                       {"maxCharsPerItem",chars},{"runLimit",1}});
-    auto page = client.call("t3_thread_read",std::move(filter));
-    if (str(member(page,"thread"),"threadId") != target.threadId || array(page,"items").size() > limit)
-        invalidResponse();
-    return page;
-}
-
-std::optional<SessionAttachment> attachment(const Json& file, bool withContent) {
-    SessionAttachment value{};
-    value.id = str(file,"id");
-    if (value.id.empty() || value.id.size() > 1024 || file.value("available",true) == false) return {};
-    value.name = bounded(str(file,"name"),240);
-    value.mimeType = bounded(str(file,"mimeType"),128);
-    value.truncated = file.value("truncated",false);
-    if (withContent && file.contains("content") && file.at("content").is_string()) {
-        const auto& content = file.at("content").get_ref<const std::string&>();
-        value.content = bounded(content,8192);
-        value.truncated |= value.content->size() < content.size();
-    }
-    return value;
-}
-
-SessionEvent event(const Json& item, std::size_t maxBytes, bool detail) {
+SessionEvent event(const Json& item) {
     SessionEvent result{};
     result.id = str(item,"itemId");
     result.time = str(item,"updatedAt");
     result.kind = str(item,"type");
-    if (result.id.empty() || result.time.empty() || result.kind.empty()) invalidResponse();
+    if (result.id.empty() || !session_read::utcTimestamp(result.time) || result.kind.empty()) invalidResponse();
     result.status = str(item,"status");
     result.title = str(item,"title");
-    const auto text = str(item,"text");
-    result.text = bounded(text,maxBytes);
-    result.truncated = boolean(item,"textTruncated") || result.text.size() < text.size();
-    if (detail && result.kind == "command_execution") {
-        const auto end = result.text.find('\n');
-        if (result.text.starts_with("$ ")) {
-            result.command = result.text.substr(2,end == std::string::npos ? end : end-2);
-            if (end != std::string::npos) result.output = result.text.substr(end+1);
-        } else {
-            result.output = result.text;
-        }
-    }
-    if (detail && result.kind == "error") result.error = result.text;
-    if (const auto files = item.find("attachments"); files != item.end() && files->is_array()) {
-        for (const auto& file : *files) {
-            if (auto value = attachment(file,false)) result.attachments.push_back(std::move(*value));
-            if (result.attachments.size() == sessionPageLimit) {
-                result.truncated |= &file != &files->back();
-                break;
-            }
-        }
-    }
+    result.text = str(item,"text");
+    result.textTruncated = boolean(item,"textTruncated");
     return result;
 }
 
-std::optional<Json> readItem(Client& client, const SessionTarget& target, std::string_view itemId, int chars) {
-    auto page = read(client,target,"activity",chars,1,{{"itemId",itemId}});
+void attachMetadata(SessionEvent& result, const Json& item) {
+    const auto files = item.find("attachments");
+    if (files == item.end()) return;
+    if (!files->is_array()) invalidResponse();
+    for (const auto& file : *files) {
+        auto value = attachment(file);
+        if (!value) continue;
+        if (result.attachments.size() == sessionPageLimit) {
+            result.attachmentsTruncated = true;
+            break;
+        }
+        result.attachments.push_back(std::move(*value));
+    }
+}
+
+std::optional<Json> readLocalItem(Client& client, const SessionTarget& target, std::string_view itemId, int chars) {
+    auto page = readThread(client,target.threadId,"activity",1,chars,{{"itemId",itemId}});
     const auto& items = array(page,"items");
     if (items.empty() || !localItem(items.front(),target.threadId) || str(items.front(),"itemId") != itemId) return {};
     return items.front();
 }
-
-void advance(const Json& item, Id& after) {
-    const auto next = position(member(item,"position"));
-    if (next <= after) invalidResponse();
-    after = next;
 }
 
-bool more(const Json& page, Id after, Id start) {
-    if (!boolean(page,"hasMore")) return false;
-    if (after <= start || position(member(page,"nextPosition")) != after) invalidResponse();
-    return true;
-}
-}
-
-std::optional<SessionMetadata> findSession(const std::filesystem::path& directory, const SessionTarget& target,
-                                           std::string_view query) {
+std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& directory, const SessionTarget& target,
+                                              bool includeMessages) {
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionMetadata> {
-        const auto page = read(client,target,"messages",1,1);
+        const auto page = readThread(client,target.threadId,"messages",includeMessages ? sessionPageLimit : 1,
+                                     includeMessages ? 240 : 1,{{"beforePosition",maxHistoryPosition}});
         const auto& thread = member(page,"thread");
-        SessionMetadata item{str(thread,"title"),str(thread,"summary"),{},str(thread,"projectId"),
-                             str(thread,"status"),str(thread,"createdAt"),str(thread,"updatedAt"),{}};
-        if (item.projectId.empty() || item.createdAt.empty() || item.updatedAt.empty() || item.status.empty())
+        SessionMetadata metadata{str(thread,"title"),{},str(thread,"projectId"),str(thread,"status"),
+                                 str(thread,"createdAt"),str(thread,"updatedAt"),{},false};
+        if (metadata.projectId.empty() || metadata.status.empty() ||
+            !session_read::utcTimestamp(metadata.createdAt) || !session_read::utcTimestamp(metadata.updatedAt))
             invalidResponse();
-        item.project = item.projectId;
         try {
-            const auto project = client.call("t3_project_read",{{"projectId",item.projectId}});
-            if (str(project,"id") != item.projectId) invalidResponse();
-            if (auto title = str(project,"title"); !title.empty()) item.project = std::move(title);
+            const auto project = client.call("t3_project_read",{{"projectId",metadata.projectId}});
+            if (str(project,"id") != metadata.projectId) invalidResponse();
+            metadata.project = str(project,"title");
         } catch (const Failure& error) {
-            if (error.kind != Failure::Kind::Auth && error.kind != Failure::Kind::Tool) throw;
+            if (error.kind != Failure::Kind::Auth && error.code != "project_not_found") throw;
         }
-        if (item.summary.empty()) item.summary = item.title;
-        if (query.empty() || session_read::contains(item.title,query) || session_read::contains(item.summary,query) ||
-            session_read::contains(item.project,query)) return item;
-        const auto response = client.call("t3_thread_search",{{"projectId",item.projectId},{"query",query},{"limit",30}});
-        for (const auto& match : array(response,"matches")) {
-            if (str(match,"threadId") != target.threadId || str(match,"projectId") != item.projectId) continue;
-            item.matchExcerpt = bounded(str(match,"snippet"),480);
-            return item;
+        if (includeMessages) {
+            const auto& earlier = member(page,"earlierPosition");
+            metadata.moreMessages = !earlier.is_null();
+            if (metadata.moreMessages) position(earlier);
+            for (const auto& item : array(page,"items")) {
+                if (localItem(item,target.threadId))
+                    metadata.messages.push_back({str(item,"text"),boolean(item,"textTruncated")});
+            }
         }
-        return {};
+        return metadata;
     });
 }
 
 std::optional<SessionEventPage> sessionEvents(const std::filesystem::path& directory, const SessionTarget& target,
                                              const SessionEventFilter& filter) {
+    if (filter.limit == 0 || filter.limit > sessionPageLimit ||
+        (filter.afterPosition && (*filter.afterPosition < 0 || *filter.afterPosition > maxHistoryPosition)))
+        throw Failure(Failure::Kind::Settings,"Invalid Session event pagination");
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionEventPage> {
-        if (filter.limit == 0 || filter.limit > sessionPageLimit)
-            throw Failure(Failure::Kind::Settings,"Invalid Session event page size");
-        auto after = parsePosition(filter.cursor);
+        auto after = filter.afterPosition.value_or(-1);
         SessionEventPage result;
-        const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(12);
-        for (int scan = 0; scan < 12; ++scan) {
+        const auto deadline = Clock::now()+std::chrono::seconds(12);
+        for (int scan = 0; scan < eventScanPages; ++scan) {
             const auto start = after;
-            const auto page = read(client,target,"activity",filter.query.empty() ? excerptChars : detailChars,
-                                   filter.limit-static_cast<unsigned>(result.items.size()),{{"afterPosition",after}});
+            const auto page = readThread(client,target.threadId,"activity",
+                filter.limit-static_cast<unsigned>(result.items.size()),
+                filter.matchText ? detailChars : excerptChars,{{"afterPosition",after}});
             for (const auto& item : array(page,"items")) {
-                advance(item,after);
-                if (!localItem(item,target.threadId) || (!filter.kind.empty() && str(item,"type") != filter.kind) ||
-                    !session_read::inRange(str(item,"updatedAt"),filter.fromTime,filter.toTime)) continue;
-                if (!session_read::contains(str(item,"text"),filter.query) &&
-                    !session_read::contains(str(item,"title"),filter.query)) {
-                    result.truncated |= boolean(item,"textTruncated");
+                advancePosition(item,after);
+                if (!localItem(item,target.threadId)) continue;
+                auto evidence = event(item);
+                if ((!filter.kind.empty() && evidence.kind != filter.kind) ||
+                    !session_read::inRange(evidence.time,filter.fromTime,filter.toTime)) continue;
+                if (filter.matchText && !filter.matchText(evidence)) {
+                    result.truncated |= evidence.textTruncated;
                     continue;
                 }
-                result.items.push_back(event(item,480,false));
+                attachMetadata(evidence,item);
+                result.items.push_back(std::move(evidence));
             }
-            if (!more(page,after,start)) return result;
-            if (result.items.size() == filter.limit || std::chrono::steady_clock::now() >= deadline) break;
+            if (!moreHistory(page,after,start)) return result;
+            if (result.items.size() == filter.limit || Clock::now() >= deadline) break;
         }
-        result.nextCursor = std::to_string(after);
+        result.nextPosition = after;
         return result;
     });
 }
@@ -178,42 +136,48 @@ std::optional<SessionEventPage> sessionEvents(const std::filesystem::path& direc
 std::optional<SessionEvent> sessionEvent(const std::filesystem::path& directory, const SessionTarget& target,
                                        std::string_view itemId) {
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionEvent> {
-        const auto item = readItem(client,target,itemId,detailChars);
+        const auto item = readLocalItem(client,target,itemId,detailChars);
         if (!item) return {};
-        return event(*item,8192,true);
+        auto result = event(*item);
+        attachMetadata(result,*item);
+        return result;
     });
 }
 
 std::optional<SessionCounts> sessionCounts(const std::filesystem::path& directory, const SessionTarget& target) {
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionCounts> {
-        SessionCounts result;
+        Id messages = 0;
         Id after = -1;
-        const auto deadline = std::chrono::steady_clock::now()+std::chrono::seconds(15);
-        for (;;) {
+        const auto deadline = Clock::now()+std::chrono::seconds(15);
+        for (int scan = 0; scan < countScanPages && Clock::now() < deadline; ++scan) {
             const auto start = after;
-            const auto page = read(client,target,"messages",1,100,{{"afterPosition",after}});
-            if (start == -1) result.runs = position(member(member(page,"thread"),"runCount"));
+            const auto page = readThread(client,target.threadId,"messages",100,1,{{"afterPosition",after}});
             for (const auto& item : array(page,"items")) {
-                advance(item,after);
+                advancePosition(item,after);
                 const auto kind = str(item,"type");
-                if (localItem(item,target.threadId) && (kind == "user_message" || kind == "assistant_message")) ++result.messages;
+                if (localItem(item,target.threadId) && (kind == "user_message" || kind == "assistant_message")) ++messages;
             }
-            if (!more(page,after,start)) return result;
-            if (std::chrono::steady_clock::now() >= deadline)
-                throw Failure(Failure::Kind::Wire,"T3 Session count did not finish");
+            if (!moreHistory(page,after,start))
+                return SessionCounts{messages,position(member(member(page,"thread"),"runCount"))};
         }
+        throw Failure(Failure::Kind::Wire,"T3 Session count did not finish");
     });
 }
 
 std::optional<SessionAttachment> sessionAttachment(const std::filesystem::path& directory, const SessionTarget& target,
                                                    std::string_view itemId, std::string_view attachmentId) {
     return withSession(directory,target,[&](Client& client) -> std::optional<SessionAttachment> {
-        const auto item = readItem(client,target,itemId,1);
+        const auto item = readLocalItem(client,target,itemId,1);
         if (!item) return {};
         const auto files = item->find("attachments");
-        if (files == item->end() || !files->is_array()) return {};
-        for (const auto& file : *files)
-            if (str(file,"id") == attachmentId) return attachment(file,true);
+        if (files == item->end()) return {};
+        if (!files->is_array()) invalidResponse();
+        for (const auto& file : *files) {
+            if (str(file,"id") != attachmentId) continue;
+            auto value = attachment(file);
+            if (value && file.contains("content")) value->content = str(file,"content");
+            return value;
+        }
         return {};
     });
 }

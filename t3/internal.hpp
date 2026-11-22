@@ -79,8 +79,11 @@ private:
     unsigned nextId_ = 0;
 };
 
-Credential readCredential(const std::filesystem::path&, const std::string& environment, const Json& config);
-std::optional<SessionMetadata> findSession(const std::filesystem::path&, const SessionTarget&, std::string_view query);
+Json readThread(Client&, std::string_view threadId, std::string_view view, unsigned limit, int chars,
+                Json args = Json::object(), int runLimit = 1);
+void advancePosition(const Json&, Id&);
+bool moreHistory(const Json&, Id after, Id start);
+std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path&, const SessionTarget&, bool includeMessages);
 std::optional<SessionEventPage> sessionEvents(const std::filesystem::path&, const SessionTarget&, const SessionEventFilter&);
 std::optional<SessionEvent> sessionEvent(const std::filesystem::path&, const SessionTarget&, std::string_view itemId);
 std::optional<SessionCounts> sessionCounts(const std::filesystem::path&, const SessionTarget&);

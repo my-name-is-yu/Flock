@@ -166,12 +166,6 @@ class Fixture(BaseHTTPRequestHandler):
             end = min(start + args.get("limit", len(ids)), len(ids))
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
-        if name == "t3_thread_search":
-            assert scenario == "session-read" and args["projectId"] == "project" and args["limit"] <= 30
-            matches = [{"threadId": "unrelated", "projectId": "project", "snippet": "private excerpt"}]
-            if args["query"] == "health check":
-                matches.append({"threadId": "manual", "projectId": "project", "snippet": "staging health check failed"})
-            return {"matches": matches}
         if name == "t3_thread_wait":
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
             if scenario == "resumed":
@@ -244,7 +238,7 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"code": "thread_not_found", "message": "The thread was not found."}
             if state.get("denyRead"):
                 return {"code": "capability_denied", "message": "Read scope required."}
-            summary |= {"title": "Staging investigation", "status": "failed", "runCount": 4,
+            summary |= {"title": "Staging investigation", "status": "failed", "runCount": 4, "archived": True,
                         "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
             rows = [self.item(thread_id, 0, "root", "user_message", "Investigate staging", source="web"),
                     self.item(thread_id, 1, "root", "command_execution", "$ ctest --output-on-failure\nTest 7 failed",
@@ -252,14 +246,20 @@ class Fixture(BaseHTTPRequestHandler):
                     self.item(thread_id, 2, "root", "error", "staging health check failed", status="failed"),
                     self.item(thread_id, 3, "root", "assistant_message", "I found the failure"),
                     self.item(thread_id, 4, "follow", "user_message", "Confirm the timeout", source="web"),
-                    self.item(thread_id, 5, "follow", "assistant_message", "timeout confirmed"),
+                    self.item(thread_id, 5, "follow", "assistant_message", "staging health check failed"),
                     self.item("unrelated", 6, "other", "assistant_message", "private history") | {"visibility": "inherited"},
                     self.item(thread_id, 7, "follow", "assistant_message", "界" * 8000)]
+            if state.get("longHistory"):
+                rows.extend(self.item(thread_id, i, "follow", "assistant_message", "unrelated note")
+                            for i in range(8, 25))
+                rows.append(self.item(thread_id, 25, "follow", "checkpoint", "search target"))
             rows[1]["attachments"] = [
                 {"id": "test-log", "name": "test.log", "mimeType": "text/plain",
                  "available": not state.get("denyAttachment"), "content": "Test 7 failed\n" + "x" * 9000},
                 {"id": "reference-only", "name": "report.pdf", "mimeType": "application/pdf"}]
             assert args["maxCharsPerItem"] <= 2730
+            if "beforePosition" in args and args["maxCharsPerItem"] != 1:
+                assert args["view"] == "messages" and args["limit"] <= 20 and args["maxCharsPerItem"] <= 240
             if args["maxCharsPerItem"] != 1:
                 for row in rows:
                     for attachment in row.get("attachments", []):
@@ -280,7 +280,7 @@ class Fixture(BaseHTTPRequestHandler):
         lower = args.get("afterPosition", -1)
         upper = args.get("beforePosition", float("inf"))
         matches = [row for row in rows if lower < row["position"] < upper]
-        pagination_test_page_size = 2
+        pagination_test_page_size = 20 if "beforePosition" in args and scenario == "session-read" else 2
         limit = min(args.get("limit", 30), pagination_test_page_size)
         page = matches[-limit:] if "beforePosition" in args else matches[:limit]
         for row in page:

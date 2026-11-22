@@ -108,15 +108,16 @@ inline constexpr unsigned sessionPageLimit = 20;
 
 struct SessionTarget {
     std::string environmentId, threadId;
-    Json config = Json::object();
+    bool operator==(const SessionTarget&) const = default;
+};
+struct SessionPreview {
+    std::string text;
+    bool truncated = false;
 };
 struct SessionMetadata {
-    std::string title, summary, project, projectId, status, createdAt, updatedAt, matchExcerpt;
-};
-struct SessionEventFilter {
-    std::string query, kind, fromTime, toTime;
-    unsigned limit = 10;
-    std::string cursor;
+    std::string title, project, projectId, status, createdAt, updatedAt;
+    std::vector<SessionPreview> messages;
+    bool moreMessages = false;
 };
 struct SessionAttachment {
     std::string id, name, mimeType;
@@ -124,13 +125,19 @@ struct SessionAttachment {
     bool truncated = false;
 };
 struct SessionEvent {
-    std::string id, time, kind, status, title, text, command, output, error;
+    std::string id, time, kind, status, title, text;
     std::vector<SessionAttachment> attachments;
-    bool truncated = false;
+    bool textTruncated = false, attachmentsTruncated = false;
+};
+struct SessionEventFilter {
+    std::string kind, fromTime, toTime;
+    unsigned limit = 10;
+    std::optional<Id> afterPosition;
+    std::function<bool(const SessionEvent&)> matchText;
 };
 struct SessionEventPage {
     std::vector<SessionEvent> items;
-    std::string nextCursor;
+    std::optional<Id> nextPosition;
     bool truncated = false;
 };
 struct SessionCounts {
@@ -148,7 +155,7 @@ public:
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
-    virtual std::optional<SessionMetadata> findSession(const SessionTarget&, std::string_view) { return {}; }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
     virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
