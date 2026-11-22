@@ -69,6 +69,10 @@ void boundary(Browser& browser) {
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
+    for (const std::string path : {"/api/compactions","/api/workflows"}) {
+        check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
+        Browser::checked(browser.client.Get(path+"?bot=missing"),404);
+    }
     browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
 }
 
@@ -841,6 +845,8 @@ void accessEndpoints(const std::filesystem::path& path) {
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/workflows?bot=triage"),403);
+    Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
     browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);

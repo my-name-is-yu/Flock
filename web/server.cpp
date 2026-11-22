@@ -242,7 +242,7 @@ public:
             if (!image) return error(res,404,"avatar_not_found");
             res.set_content(image->bytes().data(),image->bytes().size(),std::string(image->format().contentType));
         });
-        for (const auto path : {"/api/view","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -259,6 +259,10 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/compactions" || req.path == "/api/workflows") {
+                        const auto items = req.path == "/api/compactions" ? store_.compactions(id,before) : store_.workflows(id,before);
+                        return json(res,200,store_.access().redactSecrets(id,items));
+                    }
                     if (req.path == "/api/view") {
                         const auto changesAfter = req.has_param("changesAfter")
                             ? std::optional{queryId(req,"changesAfter",true)} : std::nullopt;

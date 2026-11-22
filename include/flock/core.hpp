@@ -233,6 +233,8 @@ public:
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
     Json tasks(std::string_view botId = {}, Id before = 0, unsigned limit = 50) const;
+    Json compactions(std::string_view bot, Id before = 0, unsigned limit = 50) const;
+    Json workflows(std::string_view bot, Id before = 0, unsigned limit = 20) const;
     Json activeTasks(std::string_view botId) const;
     // Distinct active state and replanning combinations, grouped by Bot ID.
     Json activeTaskStatesByBot() const;

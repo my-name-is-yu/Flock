@@ -26,7 +26,7 @@ endfunction()
 flock_fetch_cctz()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
-                       src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
+                       src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp)
 target_include_directories(flock_core PUBLIC include)
@@ -42,6 +42,10 @@ target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(flock_workflow_context tests/workflow_context.cpp)
+  target_link_libraries(flock_workflow_context PRIVATE flock_core)
+  target_compile_options(flock_workflow_context PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_workflow_context COMMAND flock_workflow_context)
   add_executable(flock_memory_automation tests/memory_automation.cpp)
   target_link_libraries(flock_memory_automation PRIVATE flock_core)
   target_compile_options(flock_memory_automation PRIVATE -Wall -Wextra -Wpedantic)

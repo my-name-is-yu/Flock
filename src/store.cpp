@@ -166,6 +166,14 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN candidates sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
   AND sender.project_id=task.project_id AND peer.phase<>'closed'
 WHERE COALESCE(peer.kind,'')<>'consult';
+CREATE VIEW IF NOT EXISTS project_slots AS
+WITH queue AS (
+  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
+  FROM project_execution_queue
+)
+SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
+             json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
+FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 CREATE VIEW IF NOT EXISTS project_task_order AS
 SELECT task.id, task.environment_id, task.project_id, task.state,
        ROW_NUMBER() OVER (
@@ -186,6 +194,8 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         initializeChannelSchema();
         initializeLocalMachineSchema();
         migrateModelBudget();
+        initializeCompactionSchema();
+        initializeWorkflowSchema();
         initializeMemorySchema();
         initializeAutomationSchema();
         initializeBoardInboxSchema();
@@ -214,15 +224,12 @@ void Store::Impl::save(Json& task) {
 namespace {
 // CROSS JOIN visits the requested IDs first. An empty request set never opens the queue.
 const std::string queueBlockers = R"SQL(
-queue AS (
-  SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
-  FROM project_execution_queue
-), blockers AS (
+blockers AS (
   SELECT requested.id,owner.id AS owner_id,owner.bot_id,
          json_extract(owner.data,'$.request') AS request,owner.state
   FROM requested
-  CROSS JOIN queue ON queue.id=requested.id
-  JOIN tasks owner ON owner.id=queue.head_id AND owner.id<>queue.id
+  CROSS JOIN project_slots slot ON slot.id=requested.id
+  JOIN tasks owner ON owner.id=slot.blocker_id
 )
 )SQL";
 

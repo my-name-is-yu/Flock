@@ -132,6 +132,17 @@ struct Store::Impl {
     Json taskDetails(Id, bool includeBlocker) const;
     void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
+    void initializeWorkflowSchema();
+    void initializeCompactionSchema();
+    Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
+    Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
+    Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
+    Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
+    Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
+    void advanceWorkflows(Seconds now);
+    void appendStageRequirements(std::string& instruction, const Json& task) const;
+    void stageObservation(const Json& task, const Observation&, Seconds now);
+    bool settleStageReport(Json& task);
     void migrateConversation();
     void migrateModelBudget();
     std::string messageModelBudget(Id messageId);
@@ -155,7 +166,7 @@ struct Store::Impl {
     Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                              std::string_view environment, Id messageId, const Json& source, bool resume);
-    bool acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,
+    bool acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
                            const Json& source, const Json& routing, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;

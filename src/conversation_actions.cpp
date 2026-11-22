@@ -61,9 +61,9 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     return id;
 }
 
-bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,
+bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
                                     const Json& source, const Json& routing, const TaskChange* change) {
-    auto task = load(taskId);
+    Id revision = task.value("currentRevision",Id{});
     bool conflicting = task.value("replanning",false);
     if (change) {
         const auto oldIntent = field(task,"intent");
@@ -114,7 +114,7 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
     }
     if (!task.contains("pendingInstructions")) task["pendingInstructions"] = Json::array();
     task["pendingInstructions"].push_back(pending);
-    journal(taskId,"instruction_accepted",pending);
+    journal(task.at("id"),"instruction_accepted",pending);
     save(task);
     return conflicting;
 }

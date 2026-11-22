@@ -350,7 +350,9 @@ void responseContract() {
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
                    "record_task_blocker","withdraw_task_question",
-                   "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
+                   "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
+                   "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
+                   "expand_context","continue_fresh_session","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
                    "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
@@ -364,6 +366,14 @@ void responseContract() {
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
     check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
+          turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId","role"}) &&
+          turnTool("workflow_status")["required"].back() == "workflowId" &&
+          turnTool("instruct_workflow_stage")["required"].back() == "instruction" &&
+          turnTool("stop_workflow_stage")["required"].back() == "stageId" &&
+          turnTool("stop_workflow")["required"].back() == "workflowId" &&
+          turnTool("compact_conversation")["required"].back() == "summary" &&
+          turnTool("expand_context")["properties"].contains("compactionId") &&
+          turnTool("continue_fresh_session")["required"].back() == "taskId" &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&

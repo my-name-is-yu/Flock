@@ -221,6 +221,55 @@ Json conversationReply(const Json& page, Id messageId) {
     return result;
 }
 
+void inspectors(const std::filesystem::path& path) {
+    struct InspectorModel : Model {
+        const std::string credential = "credential-protected-after-inspector-write";
+        Id boundary = 0;
+        Decision decide(const ModelInput& input) override {
+            if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
+                return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes "+credential}},"Summarize earlier work"};
+            if (input.event.at("turn").empty() && input.event.at("text")=="Release")
+                return {"start_workflow",{{"request","Prepare a release "+credential}},"Use a separate verifier"};
+            return {"reply",{{"text","Recorded"}},"Acknowledge the request"};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto){return std::string{};});
+    const auto routing = callbacks().intake("release","");
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    model.boundary = store.receive({"fixture",true},routing,"a","Original release instructions").at("messageId");
+    store.receive({"fixture",true},routing,"b","Summarize");
+    store.receive({"fixture",true},routing,"c","Release");
+    runtime.runConversations();
+    auto access = store.access();
+    access.submitSecret({"fixture",true},"release",access.requestSecret("release",{"inspector-token"}),model.credential);
+    const auto summaries = browser.get("/api/compactions?bot=release");
+    const auto workflows = browser.get("/api/workflows?bot=release");
+    const auto view = browser.get("/api/view?bot=release");
+    check(summaries.size()==1 && summaries[0]["endMessageId"]==model.boundary &&
+          summaries[0]["summary"]=="Preserve the release notes [redacted]" && view.at("compactions")==summaries,
+          "summary or its covered range missing from the inspector");
+    check(workflows.size()==1 && workflows[0]["request"]=="Prepare a release [redacted]" &&
+          workflows[0]["stages"].size()==2 && view.at("workflows")==workflows,
+          "workflow stages missing from the Bot view");
+    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
+          "inspectors mixed Bot histories");
+    const auto audit = browser.get("/api/conversation?bot=release");
+    check(audit.dump().find("Original release instructions")!=std::string::npos,
+          "summary removed the original message from the HTTP audit history");
+    bool linked = false;
+    for (const auto& event : audit.at("events")) {
+        const auto& data = event.at("data");
+        if (!data.contains("actions")) continue;
+        for (const auto& action : data.at("actions"))
+            if (action.at("tool")=="start_workflow" && action.at("workflowId")==workflows[0]["workflowId"])
+                linked = data.at("status")=="working";
+    }
+    check(linked,"workflow start was missing from the conversation reply");
+}
+
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
     for (auto env : {"local-env","backup-env"})
@@ -844,6 +893,7 @@ int main(int argc,char** argv) {
 #ifdef FLOCK_TEST_CHATGPT
         approvedProfiles(directory.path / "profile-approvals");
 #endif
+        inspectors(directory.path / "inspectors.db");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");

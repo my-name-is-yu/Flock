@@ -387,6 +387,65 @@ void taskUpdates(const std::filesystem::path& database) {
     check(transport->effects.size() == 7,"Task replay repeated a channel update");
 }
 
+void workflowContextIsWebScoped(const std::filesystem::path& database) {
+    Store store(database);
+    SessionAdapter t3;
+    Script model;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    connect(store,transport);
+    grant(store,"release");
+    const auto channel = ChannelKind::slack;
+    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+
+    model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
+    const auto original = store.receive(owner,intake("release",""),"web-original","Original Web evidence").at("messageId");
+    runtime.runConversations();
+
+    Json compaction, workflow;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"compact_conversation",{{"endMessageId",original},{"summary","Web summary"}},{}};
+        if (steps.size() == 1) {
+            compaction = steps.at(0).at("result").at("compaction").at("compactionId");
+            return {"start_workflow",{{"request","Web-only workflow"}},{}};
+        }
+        workflow = steps.at(1).at("result").at("workflowId");
+        return reply("Started in Web");
+    };
+    store.receive(owner,intake("release",""),"web-workflow","Summarize and start a workflow");
+    runtime.runConversations();
+    check(compaction.is_number() && workflow.is_number(),"Web workflow or compaction tool failed");
+
+    bool webContext = false;
+    model.decideNext = [&](const ModelInput& input) {
+        webContext = input.history.at(0).at("compactionId") == compaction &&
+                     input.task.at("workflows").at(0).at("workflowId") == workflow;
+        return reply("Loaded in Web");
+    };
+    store.receive(owner,intake("release",""),"web-context","Check the workflow");
+    runtime.runConversations();
+    check(webContext,"Web turn lost the workflow or compacted summary");
+
+    bool channelContextIsolated = false;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        check(input.history.empty() && !input.task.contains("workflows"),"Channel received Bot-wide Web context");
+        for (const auto* tool : {"compact_conversation","expand_context","continue_fresh_session","start_workflow",
+                                 "workflow_status","instruct_workflow_stage","stop_workflow_stage","stop_workflow"})
+            check(std::ranges::find(input.tools,tool) == input.tools.end(),"Channel advertised a Web tool");
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"expand_context",{{"compactionId",compaction}},{}};
+        if (steps.size() == 1) return {"workflow_status",{{"workflowId",workflow}},{}};
+        channelContextIsolated = !steps.at(0).at("result").at("ok").get<bool>() &&
+                                 !steps.at(1).at("result").at("ok").get<bool>();
+        return reply("Channel reply");
+    };
+    store.receiveChannel(channel,"fixture-auth",event("scope","probe","What is in my context?"),intake);
+    runtime.runConversations();
+    check(channelContextIsolated,"Channel called Web tools by ID or received Web context");
+}
+
 void sessionEvidence(const std::filesystem::path& database) {
     Store store(database);
     SessionAdapter t3;
@@ -640,6 +699,7 @@ int main() {
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
         taskUpdates(temp.path / "task-updates.db");
+        workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
         sessionEvidence(temp.path / "session-evidence.db");
         taskQuestionChoices(temp.path / "task-question-choices.db");
         local(temp.path / "local.db",std::filesystem::canonical(path).string());
