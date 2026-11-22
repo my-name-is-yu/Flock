@@ -655,13 +655,16 @@ void taskReadRecovery() {
           "recovery did not use saved snapshots through both access checks");
 }
 
-void boundedTaskReadAndForeignReference() {
+void boundedTaskReadAndForeignReference(bool comments) {
     Directory directory;
     Store store(directory.path/"state.db");
     auto host = std::make_shared<FakeHost>();
     Json page = Json::array();
-    for (int number = 1; number <= 30; ++number)
-        page.push_back({{"number",number},{"title",std::string(800,'"')},{"body",std::string(1500,'"')}});
+    for (int number = 1; number <= 30; ++number) {
+        if (comments)
+            page.push_back({{"id",number},{"author","reviewer-" + std::to_string(number)},{"body",std::string(1500,'\1')}});
+        else page.push_back({{"number",number},{"title",std::string(800,'"')},{"body",std::string(1500,'"')}});
+    }
     host->result = {{"items",std::move(page)},{"nextPage",2}};
     Script script;
     Sessions sessions;
@@ -673,7 +676,11 @@ void boundedTaskReadAndForeignReference() {
         const bool owner = input.task.at("id") == first;
         const auto recent = input.event.value("gitResults",Json::array());
         if (recent.empty()) {
-            if (owner) return {"git_manage_issue",{{"host",hostName},{"repo",repoName},{"action","list"}}, {}};
+            if (owner) {
+                Json args{{"host",hostName},{"repo",repoName},{"action",comments ? "list_comments" : "list"}};
+                if (comments) args["issueNumber"] = 42;
+                return {"git_manage_issue",std::move(args),{}};
+            }
             check(saved > 0 && !input.event.contains("gitReadRefs"),"another task discovered the saved reference");
             return {"git_read_result",{{"host",hostName},{"readId",saved}}, {}};
         }
@@ -684,8 +691,12 @@ void boundedTaskReadAndForeignReference() {
                   result.at("data").at("nextPage") == 2,"oversized Git read lost its bound or pagination");
             const auto& items = result.at("data").at("items");
             check(items.size() == 30,"bounded Git result omitted items from the page");
-            for (int number = 1; number <= 30; ++number)
-                check(items.at(number-1).at("number") == number,"bounded Git result lost a page item's identifier");
+            for (int number = 1; number <= 30; ++number) {
+                const auto& item = items.at(number-1);
+                check(item.at(comments ? "id" : "number") == number,"bounded Git result lost a page item's identifier");
+                if (comments)
+                    check(item.at("author") == "reviewer-" + std::to_string(number),"bounded Git result lost a comment author");
+            }
         } else check(result.at("ok") == false && !recent.back().contains("target"),"another task opened a saved read");
         return {"complete",{{"report","Checked the Git read"}}, {}};
     };
@@ -848,7 +859,8 @@ int main() {
         taskMutationAttempts();
         taskMutationRestart();
         taskReadRecovery();
-        boundedTaskReadAndForeignReference();
+        boundedTaskReadAndForeignReference(false);
+        boundedTaskReadAndForeignReference(true);
         redaction();
         notificationBudgetAndRevocation();
     } catch (const std::exception& error) {

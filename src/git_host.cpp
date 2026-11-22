@@ -167,10 +167,12 @@ Json boundedReadResult(std::string_view tool, const Json& result) {
                 const auto number = item.find("number"), id = item.find("id");
                 if (number != item.end() && number->is_number_integer())
                     page.push_back({{"number",*number},{"title",bounded(field(item,"title"),96)}});
-                else if (id != item.end() && id->is_number_integer())
-                    page.push_back({{"id",*id},{"body",bounded(field(item,"body"),96)}});
+                else if (id != item.end() && id->is_number_integer()) {
+                    auto author = bounded(field(item,"author"),64);
+                    const auto bodyLimit = std::min<std::size_t>(96,120-author.size());
+                    page.push_back({{"id",*id},{"author",std::move(author)},{"body",bounded(field(item,"body"),bodyLimit)}});
+                }
             }
-            // Keep every identifier on the page before offering the next server page.
             if (page.size() == items->size())
                 return {{"ok",true},{"truncated",true},{"data",{{"items",std::move(page)},{"nextPage",*next}}}};
         }
@@ -246,10 +248,9 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
             }
             authorized.insert(id);
         } catch (const std::exception&) {
-            // An unavailable access check cannot authorize disclosing stored evidence.
+            continue;
         }
     }
-    // A later host permission check can outlast a grant that authorized an earlier result.
     std::lock_guard lock(mutex);
     Transaction projection(db,Transaction::Mode::read);
     const auto localReadGranted = [&](std::string_view repo) {

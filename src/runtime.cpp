@@ -1265,7 +1265,6 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (isGitTool(tool)) {
             Json result;
             try {
-                // Decisions saved before attempt IDs still replay against their original event key.
                 const auto invocation = decision.attemptId ? "attempt/" + std::to_string(decision.attemptId)
                                                            : "event/" + event.at("id").dump();
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
