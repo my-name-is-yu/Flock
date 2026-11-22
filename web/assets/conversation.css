@@ -88,7 +88,9 @@
 .glyph svg { width: 1rem; height: 1rem; }
 .kind-icon { margin-right: .4em; vertical-align: -.17em; color: var(--text-3); }
 .kind-icon svg { width: 1.05em; height: 1.05em; }
-.completed .kind-icon { color: var(--success); }
+.kind-icon.result-success { color: var(--success); }
+.kind-icon.result-failed { color: var(--danger); }
+.kind-icon.result-interrupted { color: var(--warning); }
 .run-link { display: inline-grid; place-items: center; width: 1.45rem; height: 1.45rem; margin-left: .3rem; vertical-align: -.35em; border-radius: var(--radius-sm); color: var(--text-3); }
 .run-link:hover { color: var(--accent); background: var(--hover); }
 .run-link .glyph svg { width: .95rem; height: .95rem; }

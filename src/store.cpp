@@ -761,6 +761,17 @@ Json Store::conversation(std::string_view bot, Id before, unsigned limit) const 
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
+  WHEN page.kind='completed' AND json_extract(page.data,'$.source.status') IS NULL
+       AND length(json_extract(page.data,'$.source.runId'))>0
+       THEN json_set(page.data,'$.source.status',(
+         SELECT json_extract(r.data,'$.status') FROM journal r
+         WHERE r.task_id=page.task_id AND r.kind='report' AND r.id<page.id
+           AND json_extract(r.data,'$.environmentId')=json_extract(page.data,'$.source.environmentId')
+           AND json_extract(r.data,'$.run.threadId')=json_extract(page.data,'$.source.threadId')
+           AND json_extract(r.data,'$.resultRunId')=json_extract(page.data,'$.source.runId')
+           AND coalesce(json_extract(r.data,'$.itemId'),'')=coalesce(json_extract(page.data,'$.source.itemId'),'')
+           AND coalesce(json_extract(r.data,'$.revisionId'),0)=coalesce(json_extract(page.data,'$.revisionId'),0)
+         ORDER BY r.id DESC LIMIT 1))
   WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',

@@ -169,6 +169,8 @@ Json eventView(const Json& event) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
             if (!run.is_null()) {
+                const auto status = field(source,"status");
+                if (!status.empty() && !field(run,"runId").empty()) details["runStatus"] = status;
                 copyFields(run,source,{"itemId"});
                 details["run"] = std::move(run);
             }

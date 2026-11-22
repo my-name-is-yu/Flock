@@ -217,6 +217,23 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
     check(expectedTasks.empty(),"session pagination skipped tasks");
 }
 
+void failedCompletion(const std::filesystem::path& path) {
+    Store store(path);
+    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
+        .report="The health check failed",.resultRunId="failed-result",.itemId="failed-report",.settled=true};
+    store.submit({"release","Verify staging","local-env","release"});
+    tick(runtime,8);
+
+    const auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    const auto events = browser.get("/api/conversation?bot=release").at("events");
+    check(hasEvent(events,"completed","runStatus","failed"),"the final Bot message lost its failed Session outcome");
+}
+
 struct PeerModel final : Model {
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
@@ -523,7 +540,8 @@ void exercise(const std::filesystem::path& path) {
           "Web reconciliation did not start the Session with the corrected Bot settings");
     const auto page = reopened.get("/api/view?bot=release");
     check(hasEvent(page["events"],"report","report","T3 finished while the browser was closed") &&
-          hasEvent(page["events"],"completed","text","Draft complete"),
+          hasEvent(page["events"],"completed","text","Draft complete") &&
+          hasEvent(page["events"],"completed","runStatus","completed"),
           "reopened UI lost the Session result or Bot decision");
     const auto external = reopened.get("/api/view?bot=triage").at("waits").at(0);
     check(external["wait"]["run"]["link"] == "http://localhost:3773/linked%20env/thread-triage",
@@ -883,6 +901,7 @@ int main() {
     try {
         TestDirectory directory;
         exercise(directory.path / "state.db");
+        failedCompletion(directory.path / "failed-completion.db");
         eventStream(directory.path / "events.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
