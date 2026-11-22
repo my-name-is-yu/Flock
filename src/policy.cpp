@@ -231,7 +231,8 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
         !allows(bot,create ? Action::bot_create : Action::bot_rename,target))
         throw Conflict("Bot change denied by policy");
     if (!apply) throw Conflict("Bot changes are unavailable");
-    if (!identifier(creator.id)) throw DecisionDenied{};
+    // A Bot acts for the person it is talking to, so renaming needs that person's authority over the target.
+    if (!identifier(creator.id) || (!create && !allows(creator,Action::bot_settings,target))) throw DecisionDenied{};
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({name,target});
     const auto requestKey = std::to_string(message) + "-" + std::to_string(step);

@@ -232,6 +232,9 @@ void exercise(const std::filesystem::path& dir) {
         check(turn("request_bot_change",{{"operation",op},{"targetBotId","Target"},{"name","New"}})
                   .find("\"status\":\"applied\"") != std::string::npos,"Full did not apply a Bot change");
     check(applied.size() == 2 && store.inbox(owner).size() == 1,"Full queued a Bot change for review");
+    denied([&]{access.applyBotChange("Ernest",Person{"member",false},"rename_bot","Target","Hijacked",0,0,
+                                      options.applyBotChange);});
+    check(applied.size() == 2,"a non-owner renamed another person's Bot");
     access.changeNeverRule(owner,Action::bot_rename,"Target",true);
     check(turn("request_bot_change",{{"operation","rename_bot"},{"targetBotId","Target"},{"name","Denied"}})
               .find("denied by policy") != std::string::npos && applied.size() == 2,"Never allowed a Bot change");
