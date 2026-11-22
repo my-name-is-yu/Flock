@@ -13,7 +13,6 @@ const elements = Object.fromEntries([
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
-  'conversation-source', 'source-status', 'source-latest',
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
@@ -869,7 +868,7 @@ function backToLatest() {
 function cardSourceAction(bot, id, close) {
   const botId = bot.id;
   const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
-  return button(exact ? 'Open source' : 'Open Bot conversation', 'board-inbox-source', async () => {
+  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', async () => {
     close();
     selectBot(botId);
     if (!exact) {
@@ -877,28 +876,21 @@ function cardSourceAction(bot, id, close) {
       return;
     }
     const context = view;
-    const source = { id, bot, events: [], status: 'Loading conversation source…' };
-    context.source = source;
-    render();
-    elements['source-latest'].focus({ preventScroll: true });
+    let page;
     try {
-      const page = await api(botQuery('conversation', botId, id + 1));
-      if (!page.events.some((event) => event.id === id)) {
-        source.status = 'Source message is unavailable.';
-      } else {
-        source.events = page.events;
-        source.status = 'Conversation source';
-      }
-    } catch {
-      source.status = 'Could not load the conversation source.';
+      page = await api(botQuery('conversation', botId, id + 1));
+    } catch {}
+    if (context !== view) return;
+    if (!page?.events.some((event) => event.id === id)) {
+      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+      return;
     }
-    if (context !== view || context.source !== source) return;
-    renderTimeline('bottom');
+    context.source = { id, bot, events: page.events };
+    renderTimeline();
     const target = byId(`event-${id}`);
-    if (target) {
-      if (document.activeElement === elements['source-latest']) target.focus({ preventScroll: true });
-      target.scrollIntoView({ block: 'center' });
-    }
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: 'center' });
+    updateJumpToLatest();
   });
 }
 function runIcon(run) {
@@ -1147,6 +1139,7 @@ function timelineScrollPosition() {
 }
 
 function rememberReadingPosition() {
+  if (view?.source) return;
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
@@ -1182,7 +1175,8 @@ function eventHistoryForRefresh(context) {
 
 function updateJumpToLatest() {
   const control = elements['jump-to-latest'];
-  const hidden = timelineScrollPosition().atBottom;
+  // An earlier page opened from a card is never the latest, even when scrolled to its end.
+  const hidden = !view?.source && timelineScrollPosition().atBottom;
   if (control.hidden === hidden) return;
   if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
   control.hidden = hidden;
@@ -1194,9 +1188,6 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const data = source ? null : view?.data;
   const context = timelineContext();
   const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
-  elements['conversation-source'].hidden = !source;
-  if (source && elements['source-status'].textContent !== source.status)
-    elements['source-status'].textContent = source.status;
   older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
@@ -1324,7 +1315,7 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = context?.data && !context.dm && !context.source;
+  const available = context?.data && !context.dm;
   elements['composer-container'].hidden = !available;
   if (!available) return;
   const reply = replies.get(context.id);
@@ -1936,6 +1927,10 @@ async function submit(event) {
   event.preventDefault();
   const context = view;
   if (!context?.data || context.dm || elements.send.disabled) return;
+  if (context.source) {
+    context.source = null;
+    render('bottom');
+  }
   const reply = replies.get(context.id);
   const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
