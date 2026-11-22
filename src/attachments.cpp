@@ -145,7 +145,7 @@ Json metadata(const Json& value) {
 }
 }
 
-void Store::Impl::migrateAttachments() {
+void Store::Impl::initializeAttachmentsSchema() {
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS message_attachments(
  message_id INTEGER NOT NULL REFERENCES messages(id), attachment_id TEXT NOT NULL,

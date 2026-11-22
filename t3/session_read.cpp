@@ -18,10 +18,8 @@ auto withSession(const std::filesystem::path& directory, const SessionTarget& ta
         Client client(loadCredential(directory,target.environmentId));
         return read(client);
     } catch (const Failure& error) {
-        const bool missingThread = error.code == "thread_not_found" ||
-            (error.code == "invalid_request" && error.serverMessage == "The thread was not found.");
         if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings ||
-            missingThread || error.code == "item_not_found" || error.code == "attachment_not_found") return {};
+            error.reason == Failure::Reason::HistoryNotFound) return {};
         throw;
     }
 }
@@ -84,7 +82,7 @@ std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path& dire
             if (str(project,"id") != metadata.projectId) invalidResponse();
             metadata.project = str(project,"title");
         } catch (const Failure& error) {
-            if (error.kind != Failure::Kind::Auth && error.code != "project_not_found") throw;
+            if (error.kind != Failure::Kind::Auth && error.reason != Failure::Reason::ProjectNotFound) throw;
         }
         if (includeMessages) {
             const auto& earlier = member(page,"earlierPosition");

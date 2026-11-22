@@ -64,8 +64,8 @@ Json scopedResult(Json result, Json sessions = Json::array()) {
 
 class Store::Impl::SessionEvidence {
 public:
-    SessionEvidence(Store::Impl& store, Access& access, std::string_view bot, T3& t3)
-        : store_(store), access_(access), bot_(bot), t3_(t3) {}
+    SessionEvidence(Store::Impl& store, Access& access, std::string_view bot, std::string_view channelScope, T3& t3)
+        : store_(store), access_(access), bot_(bot), channelScope_(channelScope), t3_(t3) {}
 
     Json search(const Json& args) {
         const Filters filters(args);
@@ -82,7 +82,7 @@ public:
             after = anchor->target;
         }
 
-        const auto scrub = store_.sessionRedactor();
+        const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
         std::vector<SessionTarget> batch;
@@ -122,7 +122,7 @@ public:
             auto& items = result["sessions"];
             auto scopes = Json::array();
             if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
-            const auto latestScrub = store_.sessionRedactor();
+            const auto latestScrub = store_.sharedRedactor();
             SessionTarget last;
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
             bool truncated = unsearched != incomplete.end();
@@ -210,7 +210,7 @@ public:
         if (evidence.empty()) return;
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db,Transaction::Mode::read);
-        const auto scrub = store_.sessionRedactor();
+        const auto scrub = store_.sharedRedactor();
         for (const auto& [result,resourceAllowed] : evidence) {
             auto saved = std::move(*result);
             const auto allowed = resourceAllowed && std::ranges::all_of(saved.at("sessions"),[&](const Json& token) {
@@ -237,9 +237,17 @@ private:
     Store::Impl& store_;
     Access& access_;
     std::string_view bot_;
+    std::string_view channelScope_;
     T3& t3_;
 
     bool permitted(const SessionTarget& target) const {
+        if (!channelScope_.empty()) {
+            std::lock_guard lock(store_.mutex);
+            if (!store_.query(R"SQL(
+SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN channel_tasks c ON c.task_id=t.id
+WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
+)SQL",{bot_,channelScope_,target.environmentId,target.threadId}).next()) return false;
+        }
         return access_.permits(bot_,Scope::sessionRead(target.environmentId,target.threadId),true);
     }
 
@@ -265,14 +273,15 @@ private:
         std::lock_guard lock(store_.mutex);
         auto rows = store_.query(R"SQL(
 WITH candidates(environment,thread) AS (
- SELECT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id WHERE t.bot_id=?1
+ SELECT r.environment_id,r.thread_id FROM runs r JOIN tasks t ON t.id=r.task_id
+ LEFT JOIN channel_tasks c ON c.task_id=t.id WHERE t.bot_id=?1 AND (?5='' OR c.scope_key=?5)
  UNION
  SELECT json_extract(resource,'$[0]'),json_extract(resource,'$[1]') FROM bot_grants
-  WHERE bot=?1 AND kind='session' AND op='read'
+  WHERE bot=?1 AND kind='session' AND op='read' AND ?5=''
 )
 SELECT environment,thread FROM candidates WHERE (environment,thread) > (?2,?3)
 ORDER BY environment,thread LIMIT ?4
-)SQL",{bot_,after.environmentId,after.threadId,candidateBatch});
+)SQL",{bot_,after.environmentId,after.threadId,candidateBatch,channelScope_});
         std::vector<SessionTarget> result;
         while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
         return result;
@@ -374,7 +383,7 @@ ORDER BY environment,thread LIMIT ?4
         Transaction transaction(store_.db);
         if (!permitted(target)) return scopedResult(failure(unavailable));
         Json result{{"ok",true},{"truncated",false},{"nextCursor",nullptr}};
-        format(*value,store_.sessionRedactor(),result);
+        format(*value,store_.sharedRedactor(),result);
         auto scopes = Json::array({issue(RefKind::session,target,nullptr)});
         transaction.commit();
         return scopedResult(std::move(result),std::move(scopes));
@@ -396,7 +405,7 @@ ORDER BY environment,thread LIMIT ?4
         }
         SessionEventFilter filter{kind,filters.from,filters.to,limit,after,{}};
         if (!filters.query.empty()) {
-            const auto scrub = store_.sessionRedactor();
+            const auto scrub = store_.sharedRedactor();
             filter.matchText = [scrub,query = filters.query](const SessionEvent& item) {
                 return session_read::contains(scrub.text(item.text,item.textTruncated),query) ||
                        session_read::contains(scrub.text(item.title),query);
@@ -419,9 +428,9 @@ ORDER BY environment,thread LIMIT ?4
     }
 };
 
-Json Store::Impl::sessionReadTool(std::string_view bot, const Decision& decision, T3& t3) {
+Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision& decision, T3& t3) {
     Access access(*this);
-    SessionEvidence evidence(*this,access,bot,t3);
+    SessionEvidence evidence(*this,access,bot,channelScope,t3);
     try {
         if (!decision.args.is_object()) throw Conflict("Tool arguments must be an object");
         return decision.tool == "flock_session_search" ? evidence.search(decision.args) : evidence.events(decision.args);
@@ -432,8 +441,8 @@ Json Store::Impl::sessionReadTool(std::string_view bot, const Decision& decision
     }
 }
 
-void Store::Impl::authorizeSessionHistory(std::string_view bot, Json& steps, T3& t3) {
+void Store::Impl::authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3& t3) {
     Access access(*this);
-    SessionEvidence(*this,access,bot,t3).authorizeHistory(steps);
+    SessionEvidence(*this,access,bot,channelScope,t3).authorizeHistory(steps);
 }
 }

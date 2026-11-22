@@ -432,7 +432,7 @@ Json readToolFile(const fs::path& root, const fs::path& relative, const SecretRe
     return readToolFile(fd.get(),relative,scrub);
 }
 
-void Store::Impl::migrateWorkspace() {
+void Store::Impl::initializeWorkspaceSchema() {
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS workspace_commands(
  id INTEGER PRIMARY KEY, bot TEXT NOT NULL, started_at INTEGER NOT NULL,
@@ -503,7 +503,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
         if (relative == ".") relative.clear();
         return searchWorkspace(root,relative,toolText(args,"query",256));
     }
-    if (call.tool == "workspace_read_file") return readToolFile(root,relativeToolPath(toolText(args,"path",1024)),sessionRedactor());
+    if (call.tool == "workspace_read_file") return readToolFile(root,relativeToolPath(toolText(args,"path",1024)),sharedRedactor());
     if (call.tool == "workspace_write_file") {
         const auto data = toolText(args,"text",maxFileBytes,true);
         writeFile(root,relativeToolPath(toolText(args,"path",1024)),data);
@@ -568,7 +568,7 @@ Json Store::Impl::workspaceTool(const ToolContext& ctx, const Decision& call) {
                     if (shutdown.stop_requested() && child > 0) break;
                     if (changed || child > 0) {
                         std::lock_guard guard(mutex);
-                        const auto scrub = sessionRedactor();
+                        const auto scrub = sharedRedactor();
                         const bool partial = capture.truncated || child == 0;
                         const auto stdoutText = safeOutput(scrub.text(capture.output[0],partial));
                         const auto stderrText = safeOutput(scrub.text(capture.output[1],partial));

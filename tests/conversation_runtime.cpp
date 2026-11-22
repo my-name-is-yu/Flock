@@ -1,4 +1,5 @@
 #include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
@@ -57,7 +58,9 @@ Step stop(Id id) {
 }
 Step answer(Id id) {
     return [id](const ModelInput& input) {
-        return Decision{"answer_task_question",{{"taskId",id},{"waitId",listed(input,id).at("wait").at("waitId")},
+        const auto task = listed(input,id);
+        return Decision{"answer_task_question",{{"taskId",id},{"waitId",task.at("wait").at("waitId")},
+                                                {"revisionId",task.at("revisionId")},{"generation",task.at("generation")},
                                                 {"text",input.event.at("text")}},"Scripted answer"};
     };
 }
@@ -102,12 +105,17 @@ struct Script : Model {
             if (question != questions.end() && !input.event.contains("userAnswer"))
                 return {"ask_user",question->second,"The fixture needs a user answer"};
             Json args = {{"instruction","Measure and report the fixture"}};
-            if (input.task["doneWhen"] == "") args["doneWhen"] = "Report baseline latency";
+            if (input.needsDoneWhen) args["doneWhen"] = "Report baseline latency";
             return {"delegate",args,"Collect the fixture evidence"};
         }
         check(input.event["kind"] == "result","unexpected model event");
         if (beforeComplete) beforeComplete(input);
         if (onResult) return onResult(input);
+        if (input.task.contains("userInstructions")) {
+            const auto canFollow = std::ranges::find(input.tools,"follow_up") != input.tools.end();
+            return {canFollow ? "follow_up" : "delegate",{{"instruction","Apply the pending instructions"}},
+                    "The report predates the user instructions"};
+        }
         return {"complete",{{"report",input.event["report"]}},"The fixture report includes the requested evidence"};
     }
 };
@@ -165,26 +173,6 @@ struct SimulatedT3 : T3 {
     }
 };
 
-Id askAgain(const std::filesystem::path& path, Id task, const std::string& question) {
-    sqlite3* raw = nullptr;
-    check(sqlite3_open(path.c_str(),&raw) == SQLITE_OK,"could not open the question fixture");
-    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-    const auto run = [&](const std::string& sql) {
-        check(sqlite3_exec(db.get(),sql.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,"the question fixture failed");
-    };
-    const auto id = std::to_string(task);
-    const auto text = Json(question).dump();
-    run("INSERT INTO waits(task_id,data) VALUES(" + id + ",json_object('reason','user_question','text'," + text + "))");
-    const auto wait = std::to_string(sqlite3_last_insert_rowid(db.get()));
-    run("INSERT INTO journal(task_id,time,kind,data) VALUES(" + id + ",0,'waiting',json_object('id'," + wait +
-        ",'reason','user_question','text'," + text + "))");
-    const auto anchor = std::to_string(sqlite3_last_insert_rowid(db.get()));
-    run("UPDATE tasks SET state='waiting',generation=generation+1,data=json_set(data,'$.wait',json_object('id'," + wait +
-        ",'reason','user_question','text'," + text + ",'messageId'," + anchor +
-        ",'eventId',json_extract(data,'$.eventId'),'run',json_extract(data,'$.activeRun'))) WHERE id=" + id);
-    return std::stoll(wait);
-}
-
 struct Fixture {
     std::filesystem::path dir;
     std::unique_ptr<Store> store;
@@ -214,17 +202,17 @@ struct Fixture {
         store = std::make_unique<Store>(dir/"state.db");
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
-            return BotNotes{};
+            return std::string{};
         },RuntimeOptions{[this] { return now; }});
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
         return {std::move(bot),std::move(request),std::move(environment),std::move(project),
-            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}, {},0};
+            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}};
     }
     Json enqueue(std::string_view key,std::string_view text,Id replyTo = 0) {
         Store httpWriter(dir/"state.db");
-        return httpWriter.receive(routing(),key,text,replyTo);
+        return httpWriter.receive(localOwner,routing(),key,text,replyTo);
     }
     void script(std::string_view text, std::vector<Step> steps) {
         model.turns.insert_or_assign(std::string(text),std::move(steps));
@@ -254,8 +242,8 @@ struct Fixture {
         const auto found = std::find_if(timeline.begin(),timeline.end(),[&](const Json& row) { return row["id"] == id; });
         return found == timeline.end() ? Json(nullptr) : (*found)["data"];
     }
-    Json response(const Json& receipt) {
-        for (const auto& row : store->conversation("alpha"))
+    Json response(const Json& receipt, std::string_view bot = "alpha") {
+        for (const auto& row : store->conversation(bot))
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == receipt["messageId"]) return row["data"];
         return nullptr;
     }
@@ -286,7 +274,7 @@ void durableInboxAndTargetedRevision() {
     f.tick();
     check(f.event(id,"completed").is_null() && f.t3.sent.size() == 2 &&
           f.task(other)["state"] == "completed","a saved revision accepted a stale completion or held another task");
-    const auto receipt = f.store->receipt("alpha","raw",criteria);
+    const auto receipt = f.store->receipt(localOwner,"alpha","raw",criteria);
     check(receipt && f.conversationMessage((*receipt)["messageId"])["status"] == "stopping",
           "the accepted revision was not recorded");
     f.model.beforeComplete = {};
@@ -358,6 +346,7 @@ void followUpCarriesTheReferencedReport() {
           f.task(id)["sourceResultRefs"] == Json::array({pending["source"]}),
           "the active task did not save the referenced result with the pending instruction");
     f.restart();
+    f.model.onResult = {};
     f.t3.finish("run-2","Separate baseline checked");
     f.reach(id,"deciding");
     f.reach(id,"running");
@@ -386,9 +375,22 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.reach(id,"waiting");
     f.script("Include the table as CSV",{send(id)});
     const auto added = f.receive("format","Include the table as CSV");
+    f.script("Which accounts can I use?",{say("Choose an account for the measurement.")});
+    const auto clarification = f.response(f.receive("clarify","Which accounts can I use?",f.task(id)["wait"].at("messageId")));
+    f.script("Which one is for testing?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}}},
+                        "Offer the test account"};
+    }});
+    const auto explanation = f.response(f.receive("explain","Which one is for testing?",clarification.at("messageId")));
+    for (int i = 0; i < 16; ++i) f.store->submit(f.routing("Later queued task " + std::to_string(i)));
     f.script("Use account Quartz-717",{answer(id)});
-    f.receive("account","Use account Quartz-717",f.task(id)["wait"]["messageId"].get<Id>());
+    f.receive("account",explanation.at("suggestions").at(0).get<std::string>(),explanation.at("messageId"));
     check(f.event(id,"user_answer")["text"] == "Use account Quartz-717","the answer did not reach the question");
+    const auto& continuation = f.model.turnInputs.back();
+    check(std::ranges::none_of(continuation.history,[&](const Json& entry) {
+        return entry.value("taskId",Id{0}) == id && entry.value("kind",std::string{}) == "user_answer" &&
+               entry.value("text",std::string{}) == "Use account Quartz-717";
+    }),"the written answer was duplicated as a task answer in history");
     f.restart();
     f.reach(id,"running");
     check(answered && f.t3.sent.size() == 2 && f.t3.sent.back().target.threadId == "session-1" &&
@@ -414,23 +416,29 @@ void answersStayOnTheirQuestion() {
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == colorWait &&
           f.event(color,"user_answer").is_null(),"a reply to one question answered another");
 
-    Id reopened = 0;
     f.model.beforeTurn = [&](const ModelInput& input) {
-        if (input.event["text"] != "Flock" || !input.event["turn"].empty()) return;
-        {
-            Store writer(f.dir/"state.db");
-            writer.operate(naming,namingWait.at("id"),"answer",{{"text","別の名前"}});
-        }
-        reopened = askAgain(f.dir/"state.db",naming,"もう一度、名前を確認させてください");
+        if (!input.event.at("turn").empty()) return;
+        Store writer(f.dir/"state.db");
+        writer.operate(localOwner,TaskTarget::from(writer.task(naming),namingWait.at("id")),"answer",{{"text","別の名前"}});
     };
-    f.script("Flock",{answer(naming),answer(naming)});
+    f.script("Flock",{answer(naming)});
     f.receive("late-answer","Flock");
     f.model.beforeTurn = {};
-    const auto turn = f.lastTurn();
-    check(turn[0]["result"]["ok"] == false && turn[1]["result"]["ok"] == false &&
-          turn[1]["result"]["error"].get<std::string>().find("opened after") != std::string::npos &&
-          f.event(naming,"user_answer")["text"] == "別の名前" && f.task(naming)["wait"]["id"] == reopened,
-          "an in-flight answer overwrote an answered question or answered one that opened later");
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.event(naming,"user_answer")["text"] == "別の名前",
+          "an in-flight reply overwrote the answer that already reached the task");
+
+    f.reach(naming,"running");
+    f.model.onResult = [&](const ModelInput&) {
+        f.enqueue("early-answer","Confirmed");
+        return Decision{"ask_user",{{"question","Confirm the name?"}},"The result needs confirmation"};
+    };
+    f.script("Confirmed",{answer(naming)});
+    f.t3.finish(f.task(naming).at("activeRun").at("runId").get<std::string>(),"Name selected");
+    f.reach(naming,"waiting");
+    const auto reopened = f.task(naming).at("wait");
+    f.runtime->runConversations();
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(naming).at("wait") == reopened &&
+          f.event(naming,"user_answer")["text"] == "別の名前","a message answered a question that opened later");
 }
 
 void answersNeedTheirOwnReplyTargetAndAStableTask() {
@@ -440,19 +448,112 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     f.reach(color,"waiting");
     const auto wait = f.task(color)["wait"];
     f.script("どちらだっけ",{say("青か赤です。")});
-    f.receive("ask-back","どちらだっけ",wait.at("messageId").get<Id>());
+    const auto explanation = f.response(f.receive("ask-back","どちらだっけ",wait.at("messageId").get<Id>()));
     check(f.model.turnInputs.back().event["replyTo"]["choices"] == Json::array({"青","赤"}),
           "a reply to a question did not show the question's choices");
     f.script("hello",{say("Hi.")});
     const auto greeting = f.receive("hello","hello");
     f.script("yes",{answer(color)});
     f.receive("unrelated-yes","yes",f.response(greeting)["messageId"].get<Id>());
-    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
+    check(!listed(f.model.turnInputs.back(),color).at("wait").at("answerable").get<bool>() &&
+          f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
           "a reply to an unrelated message answered a task question");
+    const auto foreign = f.store->receive(localOwner,f.routing("","beta"),"foreign-greeting","hello",wait.at("messageId"));
+    f.runtime->runConversations();
+    f.receive("foreign-yes","yes",f.response(foreign,"beta").at("messageId"));
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.task(color)["wait"] == wait,
+          "a reply in another Bot's conversation gave access to this question");
     f.script("青。完了条件も色見本を付けることに",{change(color,{{"doneWhen","Attach a color sample"}}),answer(color)});
     f.receive("change-then-answer","青。完了条件も色見本を付けることに");
     check(f.lastTurn()[0]["result"]["ok"] == true && f.lastTurn()[1]["result"]["ok"] == false &&
           f.event(color,"user_answer").is_null(),"an answer that replanning would discard was reported as answered");
+    bool rejected = false;
+    try { f.store->operate(localOwner,TaskTarget::from(f.task(color),wait.at("id")),"answer",{{"text","青"}}); }
+    catch (const Conflict&) { rejected = true; }
+    check(rejected && f.task(color).at("wait") == wait && f.event(color,"user_answer").is_null(),
+          "a direct answer was accepted for a question that replanning will discard");
+    f.advanceUntil([&] {
+        const auto current = f.task(color).at("wait");
+        return current.is_object() && current.at("id") != wait.at("id");
+    },"the revised task did not ask its new question");
+    f.receive("old-explanation","yes",explanation.at("messageId"));
+    f.receive("old-question","yes",wait.at("messageId"));
+    check(f.task(color).at("state") == "waiting" && f.event(color,"user_answer").is_null(),
+          "an old question or its explanation answered the replacement question");
+    const auto replacement = f.task(color).at("wait");
+    f.model.beforeTurn = [&](const ModelInput& input) {
+        if (input.event.at("turn").empty()) f.store->operate(localOwner,TaskTarget::from(f.task(color),replacement.at("id")),"cancel");
+    };
+    f.receive("answer-after-cancel","yes",replacement.at("messageId"));
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.event(color,"user_answer").is_null(),
+          "an in-flight reply recorded an answer after cancellation");
+}
+
+void offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Decide whether the task should continue"));
+    f.model.questions.emplace(id,Json{{"question","Should I keep going?"},
+                                      {"choices",{"Cancel this task","Keep going"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id)["wait"];
+    f.script("Cancel this task",{answer(id)});
+    f.receive("cancel-choice","Cancel this task",wait.at("messageId").get<Id>());
+    check(f.model.turnInputs.back().event["replyTo"]["choices"] == Json::array({"Cancel this task","Keep going"}) &&
+          f.lastTurn()[0]["result"]["ok"] == true &&
+          f.event(id,"user_answer")["text"] == "Cancel this task" &&
+          f.event(id,"cancel_requested").is_null(),
+          "an offered cancellation-sounding answer was treated as a task cancel");
+}
+
+void directAnswersRemainInConversationHistory() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Choose a name"));
+    f.model.questions.emplace(id,Json{{"question","Which name?"},{"choices",{"Maple","Juniper"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text","Maple"}});
+    f.script("Which name did I choose?",{say("Maple")});
+    f.receive("remember-name","Which name did I choose?");
+    const auto& history = f.model.turnInputs.back().history;
+    check(std::ranges::any_of(history,[&](const Json& entry) {
+        return entry.value("kind",std::string{}) == "user_answer" && entry.at("role") == "user" &&
+               entry.at("taskId") == id && entry.at("waitId") == wait.at("id") && entry.at("text") == "Maple";
+    }),"the conversation lost the selected answer or its question reference");
+}
+
+void queuedTurnsSeeEarlierReplies() {
+    Fixture f;
+    f.script("Recommend a plan",{say("Use plan Maple")});
+    f.script("Explain your recommendation",{say("Maple needs fewer resources")});
+    const auto first = f.enqueue("recommend","Recommend a plan");
+    const auto second = f.enqueue("explain-recommendation","Explain your recommendation");
+    f.runtime->runConversations();
+    check(f.response(first).at("messageId") > second.at("messageId"),"the replies were not queued");
+    f.runtime->runConversations();
+    const auto& history = f.model.turnInputs.back().history;
+    check(std::ranges::any_of(history,[](const Json& entry) {
+        return entry.at("role") == "bot" && entry.at("text") == "Use plan Maple";
+    }),"the queued follow-up lost the reply to the earlier request");
+}
+
+void destinationClarificationContinuesFromConversationHistory() {
+    Fixture f;
+    constexpr auto request = "Run the release audit";
+    f.script(request,{say("Which environment should I use?")});
+    const auto first = f.receive("destination-request",request);
+    const auto clarification = f.response(first);
+    f.script("Use the cloud Mac",{start({{"request",request},{"environment","クラウドMac"}})});
+    f.receive("destination-choice","Use the cloud Mac",clarification["messageId"].get<Id>());
+    const auto& input = f.model.turnInputs.back();
+    const auto hasHistoryEntry = [&](std::string_view role,std::string_view text) {
+        return std::ranges::any_of(input.history,[&](const Json& entry) {
+            return entry["role"].get<std::string>() == role && entry["text"].get<std::string>() == text;
+        });
+    };
+    const auto tasks = f.store->tasks("alpha");
+    check(hasHistoryEntry("user",request) && hasHistoryEntry("bot","Which environment should I use?") &&
+          tasks.size() == 1 && f.task(tasks.front()["id"])["environmentId"] == "cloud",
+          "a destination clarification lost its original request or selected environment");
 }
 
 void suggestionsStayWithTheBotMessage() {
@@ -492,27 +593,58 @@ void pausedTurnDoesNotHoldCompletion() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
     f.reach(id,"running");
-    f.t3.finish("run-1","Timing evidence");
-    f.reach(id,"deciding");
     auto limited = f.routing();
     limited.config["modelCallLimit"] = 1;
     std::string seen;
+    Json latestResult;
+    bool reportInHistory = false;
+    bool foundResult = false, readResult = false;
     f.script("Check what is running, then change the criteria",{
         [](const ModelInput&) { return Decision{"find_tasks",Json::object(),"Look first"}; },
         [&](const ModelInput& input) {
             for (const auto& task : input.task.at("tasks"))
-                if (task.at("taskId") == id) seen = task.at("state");
+                if (task.at("taskId") == id) {
+                    seen = task.at("state");
+                    if (task.contains("latestResult")) latestResult = task.at("latestResult");
+                }
+            reportInHistory = std::ranges::any_of(input.history,[&](const Json& entry) {
+                return entry.value("taskId",Id{0}) == id && entry.value("kind",std::string{}) == "report" &&
+                       entry.value("text",std::string{}) == "Timing evidence";
+            });
+            return Decision{"find_tasks",Json::object(),"Find the current result"};
+        },
+        [&](const ModelInput& input) {
+            const auto& found = input.event.at("turn").back().at("result").at("tasks");
+            for (const auto& task : found)
+                if (task.at("taskId") == id)
+                    foundResult = task.at("latestResult").at("messageId") == latestResult.at("messageId");
+            return Decision{"read_result",{{"messageId",latestResult.at("messageId")}},"Read the final report"};
+        },
+        [&](const ModelInput& input) {
+            readResult = input.event.at("turn").back().at("result").at("text") == "Timing evidence";
             return Decision{"reply",{{"text","It already finished."}},"Report the current state"};
         }});
-    f.store->receive(limited,"paused","Check what is running, then change the criteria");
+    const auto message = f.store->receive(localOwner,limited,"paused","Check what is running, then change the criteria");
     f.tick();
     f.tick();
-    check(f.store->pausedConversations("alpha").size() == 1 && !f.event(id,"completed").is_null(),
-          "a turn waiting for a model call approval held the task's completion");
-    f.store->approveMessageModelCall("alpha",f.store->pausedConversations("alpha").at(0).at("messageId"));
-    f.tick();
-    check(f.store->pausedConversations("alpha").empty() && seen == "completed",
-          "the approved turn did not see the task as it is now");
+    check(f.store->pausedConversations("alpha").size() == 1,
+          "the conversation did not pause for model approval");
+    f.t3.finish("run-1","Timing evidence");
+    f.reach(id,"completed");
+    Id reportId = 0;
+    for (const auto& row : f.store->history(id))
+        if (row.at("kind") == "completed") reportId = row.at("id").get<Id>();
+    check(reportId > message.at("messageId").get<Id>(),"the fixture report did not arrive after the conversation message");
+    for (int call = 0; call < 3; ++call) {
+        const auto paused = f.store->pausedConversations("alpha").at(0);
+        const Id pause = paused.at("messageId");
+        f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,paused.at("replyToMessageId"),pause,0,0,pause},"approve");
+        f.tick();
+    }
+    check(f.store->pausedConversations("alpha").empty() && seen == "completed" &&
+          latestResult.value("messageId",Id{0}) == reportId && latestResult.value("kind",std::string{}) == "completed" &&
+          latestResult.value("excerpt",std::string{}) == "Timing evidence" && reportInHistory && foundResult && readResult,
+          "the approved turn did not see the task's latest report");
 }
 
 void cancelledReportCanBeReferencedWithoutRestarting() {
@@ -527,7 +659,7 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
     f.t3.finish("run-1",report);
     f.reach(old,"deciding");
     const auto source = f.store->latestTaskResult(old).at("id");
-    f.store->operate(old,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(old),0),"cancel");
     f.reach(old,"cancelled");
 
     constexpr auto request = "Write release notes explaining these findings";
@@ -551,9 +683,14 @@ void resumeRestoresCancelledTaskDirections() {
     f.script("Use a pinned regression fixture",{send(old)});
     f.receive("past-direction","Use a pinned regression fixture");
     f.reach(old,"running");
-    f.script("Keep the raw timing file",{send(old)});
-    f.receive("pending-direction","Keep the raw timing file");
-    f.store->operate(old,0,"cancel");
+    const std::string prefix = "Record all timing samples: ";
+    const std::string constraint = "Keep the raw timing file.";
+    const auto pending = prefix + std::string(9000 - prefix.size() - constraint.size(),'x') + constraint;
+    f.script("Add timing requirements",{send(old,{{"instruction",pending}})});
+    f.receive("pending-direction","Add timing requirements");
+    check(f.task(old).at("pendingInstructions").back().at("text") == pending,
+          "the full instruction was not pending at cancellation");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(old),0),"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
     Id cancellation = 0;
@@ -574,13 +711,296 @@ void resumeRestoresCancelledTaskDirections() {
     const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(next,"running");
     const auto& instruction = f.t3.sent.back().instruction;
+    const auto position = instruction.find(pending);
+    check(position != instruction.npos && instruction.find(prefix) == position &&
+          instruction.find(prefix,position + 1) == instruction.npos,
+          "the resumed Session did not receive the full pending instruction exactly once");
     check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
           f.task(next)["environmentId"] == "cloud" &&
           instruction.find("Measure the reference dataset") != std::string::npos &&
           instruction.find("Report baseline latency") != std::string::npos &&
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
-          instruction.find("Keep the raw timing file") != std::string::npos && f.t3.sent.back().tool == "delegate",
+          f.t3.sent.back().tool == "delegate",
           "resume omitted the original intent, criteria, or accepted directions");
+
+    constexpr auto goal = "Measure the release dataset";
+    constexpr auto criteria = "Report median throughput";
+    constexpr auto trace = "attach the raw trace";
+    constexpr auto revisionRequest = "Move this run to ローカルMac, measure the release dataset, "
+                                     "report median throughput, and attach the raw trace";
+    f.script(revisionRequest,{change(next,{{"intent",goal},{"doneWhen",criteria},{"environment","ローカルMac"}})});
+    f.receive("revise-resumed",revisionRequest);
+    check(f.task(next)["pendingEnvironmentId"] == "desktop" && f.task(next)["intent"] == goal &&
+          f.task(next)["doneWhen"] == criteria,"the combined move and work revision was not accepted");
+    constexpr auto abandonedMove = "Use ローカルMac for the next run";
+    f.script(abandonedMove,{change(next,{{"environment","ローカルMac"}})});
+    f.receive("old-destination",abandonedMove);
+    constexpr auto correctedCriteria = "Report p95 latency";
+    constexpr auto correction = "Change the completion criteria to report p95 latency";
+    f.script(correction,{change(next,{{"doneWhen",correctedCriteria}})});
+    f.receive("correct-criteria",correction);
+    f.store->operate(localOwner,TaskTarget::from(f.task(next),0),"cancel");
+    f.t3.finish(f.task(next)["activeRun"]["runId"].get<std::string>(),"Resumed work settled");
+    f.reach(next,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(next))
+        if (row["kind"] == "cancelled") anchor = row["id"];
+    const auto secondRequest = std::string("Resume the measurement on クラウドMac and keep the flamegraph ") +
+                               std::string(9000,'r');
+    f.script(secondRequest,{start({{"request",secondRequest},{"sourceResultMessageId",anchor},
+                                  {"resume",true},{"environment","クラウドMac"}})});
+    f.receive("resume-again",secondRequest,anchor);
+    const auto last = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(last != next && f.task(last)["sourceTaskId"] == next,"the second resume did not create fresh work");
+    f.reach(last,"running");
+    check(f.task(last)["intent"] == goal && f.task(last)["doneWhen"] == correctedCriteria &&
+          f.task(last)["environmentId"] == "cloud","the second resume lost its current work contract");
+    const auto& resumed = f.t3.sent.back().instruction;
+    check(resumed.find(trace) != resumed.npos,"the second resume lost the accepted trace direction");
+    check(f.t3.sent.back().environmentId == "cloud",
+          "the second resume did not use its current destination");
+    check(resumed.find(revisionRequest) != resumed.npos,"the second resume lost the revised mixed direction");
+    check(resumed.find("Report baseline latency") == resumed.npos,"the second resume replayed superseded criteria");
+    check(f.task(last)["remaining"] == 3,"the second resume charged for old work");
+
+    constexpr auto localNote = "Record the CPU model";
+    f.script(localNote,{send(last)});
+    f.receive("cpu-model",localNote);
+    f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(),"Measurement ready");
+    f.advanceUntil([&] { return f.t3.sent.back().tool == "follow_up"; },
+                   "the supplement never reached the Session");
+    const auto& follow = f.t3.sent.back().instruction;
+    check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos,
+          "the follow-up omitted or replayed directions");
+
+    constexpr auto move = "Continue the measurement on ローカルMac";
+    f.script(move,{change(last,{{"environment","ローカルMac"}})});
+    f.receive("move-resumed",move);
+    f.t3.finish(f.task(last)["activeRun"]["runId"].get<std::string>(),"Cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.back().environmentId == "desktop"; },
+                   "the resumed task did not move");
+    const auto& moved = f.t3.sent.back().instruction;
+    check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) &&
+          moved.find(trace) != moved.npos &&
+          sessionPrompt(f.t3.sent.back().actionId,moved).size() <= maxSessionPromptBytes &&
+          f.task(last)["remaining"] == 1,
+          "the moved Session lost an applicable direction or spent extra allowance");
+}
+
+void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Measure the reference dataset","alpha","cloud"));
+    f.reach(id,"running");
+    constexpr auto goal = "Measure the release dataset";
+    constexpr auto originalCriteria = "Report median throughput";
+    constexpr auto correctedCriteria = "Report p95 latency";
+    constexpr auto trace = "attach the raw trace";
+    constexpr auto mixed = "Move this run to ローカルMac, measure the release dataset, report median throughput, "
+                           "and attach the raw trace";
+    f.script(mixed,{change(id,{{"intent",goal},{"doneWhen",originalCriteria},{"environment","ローカルMac"}})});
+    f.receive("live-move-and-contract",mixed);
+    constexpr auto correction = "Change the completion criteria to report p95 latency";
+    f.script(correction,{change(id,{{"doneWhen",correctedCriteria}})});
+    f.receive("live-criteria-correction",correction);
+    check(f.task(id)["environmentId"] == "cloud" && f.task(id)["pendingEnvironmentId"] == "desktop" &&
+          f.task(id)["intent"] == goal && f.task(id)["doneWhen"] == correctedCriteria &&
+          f.t3.sent.size() == 1,
+          "the live route and criteria changes were not saved before delivery");
+
+    f.t3.finish("run-1","Previous cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the live move was not delivered");
+    const auto& command = f.t3.sent.back();
+    const auto& instruction = command.instruction;
+    check(command.tool == "delegate" && command.environmentId == "desktop" &&
+          f.task(id)["environmentId"] == "desktop" && f.task(id)["intent"] == goal &&
+          f.task(id)["doneWhen"] == correctedCriteria,
+          "the live replan started with the wrong destination or work contract");
+    check(instruction.find(trace) != instruction.npos && instruction.find(trace) == instruction.rfind(trace),
+          "the live replan dropped or duplicated the trace direction");
+    const auto intentHeading = instruction.find("Task intent:\n");
+    const auto criteriaHeading = instruction.find("Completion criteria:\n");
+    const auto intentValue = instruction.find(goal,intentHeading);
+    const auto criteriaValue = instruction.find(correctedCriteria,criteriaHeading);
+    check(intentHeading != instruction.npos && intentHeading == instruction.rfind("Task intent:\n") &&
+          intentValue != instruction.npos && intentValue == instruction.rfind(goal) &&
+          criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
+          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(correctedCriteria),
+          "the live replan did not state the current task intent and criteria once");
+}
+
+void environmentOnlyMoveKeepsWorkAcrossResume() {
+    Fixture f;
+    const std::string goal = "Measure " + std::string(4992,'g');
+    const std::string criteria = "Complete " + std::string(3991,'c');
+    constexpr auto create = "Start a large checksum measurement";
+    f.script(create,{start({{"request",goal},{"doneWhen",criteria},{"environment","クラウドMac"}})});
+    f.receive("large-contract",create);
+    const auto original = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(original,"running");
+
+    constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    constexpr auto trace = "trace:latency-samples-42";
+    const auto direction = std::string("Move this run to ローカルMac and include checksum ") + checksum +
+                           " and attach trace " + trace;
+    f.script(direction,{change(original,{{"environment","ローカルMac"}})});
+    f.receive("move-with-checksum",direction);
+    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+          "the fixture did not create an environment-only move");
+
+    f.t3.finish("run-1","Cloud work settled");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the move was not delivered to its new Session");
+    const auto& moved = f.t3.sent.back();
+    check(moved.environmentId == "desktop" && moved.instruction.find(checksum) != moved.instruction.npos &&
+          moved.instruction.find(checksum) == moved.instruction.rfind(checksum) &&
+          moved.instruction.find(trace) != moved.instruction.npos &&
+          moved.instruction.find(trace) == moved.instruction.rfind(trace),
+          "the move direction was not delivered to the new destination exactly once");
+    f.store->operate(localOwner,TaskTarget::from(f.task(original),0),"cancel");
+    f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(),"Desktop work settled");
+    f.reach(original,"cancelled");
+
+    const auto cancellation = f.store->latestTaskResult(original).at("id");
+    constexpr auto request = "Resume checksum validation on クラウドMac";
+    f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true},
+                            {"environment","クラウドMac"}})});
+    f.receive("resume-checksum",request,cancellation.get<Id>());
+    const auto resumed = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(resumed,"running");
+    const auto& command = f.t3.sent.back();
+    const auto& instruction = command.instruction;
+    check(command.environmentId == "cloud" && f.task(resumed)["environmentId"] == "cloud" &&
+          f.task(resumed)["intent"] == goal && f.task(resumed)["doneWhen"] == criteria,
+          "the resumed task did not use its current destination");
+    check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum) &&
+          instruction.find(trace) != instruction.npos && instruction.find(trace) == instruction.rfind(trace),
+          "the resumed Session dropped or duplicated the checksum or trace direction");
+    const auto intentHeading = instruction.find("Task intent:\n");
+    const auto criteriaHeading = instruction.find("Completion criteria:\n");
+    const auto intentValue = instruction.find(goal);
+    const auto criteriaValue = instruction.find(criteria);
+    check(intentHeading != instruction.npos && intentHeading == instruction.rfind("Task intent:\n") &&
+          intentValue != instruction.npos && intentValue == instruction.rfind(goal) && intentValue > intentHeading &&
+          criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
+          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(criteria) && criteriaValue > criteriaHeading,
+          "the resumed prompt duplicated or lost its large task contract");
+    check(sessionPrompt(command.actionId,instruction).size() <= maxSessionPromptBytes,
+          "the resumed prompt exceeded the Session prompt cap");
+}
+
+void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
+    Fixture f;
+    const auto original = f.store->submit(f.routing("Measure the checksum target","alpha","cloud"));
+    f.reach(original,"running");
+
+    constexpr auto checksum = "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    constexpr auto direction = "Move this run to ローカルMac and include checksum "
+                               "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
+    f.script(direction,{change(original,{{"environment","ローカルMac"}})});
+    f.receive("cancel-before-move-delivery",direction);
+    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+          "the fixture did not create an environment-only move");
+    const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
+    f.store->operate(localOwner,TaskTarget::from(f.task(original),0),"cancel");
+    f.t3.finish(activeRun,"Cloud work cancelled before the move was delivered");
+    f.reach(original,"cancelled");
+    check(f.t3.sent.size() == 1,"the environment-only move was delivered before cancellation");
+
+    Id cancellation = 0;
+    for (const auto& row : f.store->history(original))
+        if (row["kind"] == "cancelled") cancellation = row["id"];
+    check(cancellation > 0,"the cancelled task had no resume anchor");
+    constexpr auto request = "Resume the checksum work on クラウドMac";
+    f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true},
+                            {"environment","クラウドMac"}})});
+    f.receive("resume-before-delivery",request,cancellation);
+    const auto resumed = f.store->tasks("alpha").front().at("id").get<Id>();
+    f.reach(resumed,"running");
+    const auto& command = f.t3.sent.back();
+    const auto& instruction = command.instruction;
+    check(command.environmentId == "cloud" && f.task(resumed)["environmentId"] == "cloud",
+          "the resumed task did not use its current destination");
+    check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum),
+          "the cancelled pending direction was dropped or duplicated");
+}
+
+void resumeBatchesOversizedPendingBacklog() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing(std::string(16000,'i')));
+    f.script("Set criteria",{change(old,{{"doneWhen",std::string(8000,'c')},{"instruction",std::string(8000,'d')}})});
+    f.receive("criteria","Set criteria");
+    f.reach(old,"running");
+
+    std::vector<std::string> specs;
+    for (int i = 1; i <= 9; ++i) {
+        const auto marker = "SPEC-" + std::to_string(i);
+        specs.push_back(marker + std::string(14000,'x') + "END-" + std::to_string(i));
+        f.script(marker,{send(old,{{"instruction",specs.back()}})});
+        f.receive(marker,marker);
+    }
+    f.store->operate(localOwner,TaskTarget::from(f.task(old),0),"cancel");
+    f.t3.finish("run-1","Cancelled work settled");
+    f.reach(old,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(old))
+        if (row["kind"] == "cancelled") anchor = row.at("id");
+    f.script("Resume",{start({{"request",std::string(16000,'r')},{"sourceResultMessageId",anchor},{"resume",true}})});
+    f.receive("resume","Resume",anchor);
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    std::vector<Json> shown;
+    const auto recordBatch = [&](const ModelInput& input) {
+        if (!input.task.contains("userInstructions")) return;
+        shown.push_back(input.task.at("userInstructions"));
+        if (shown.back().size() < input.task.at("pendingInstructionCount").get<std::size_t>())
+            check(std::ranges::find(input.tools,"complete") == input.tools.end(),"completion could skip unseen instructions");
+    };
+    f.model.beforeIntake = recordBatch;
+    f.model.beforeComplete = recordBatch;
+    f.t3.loseNextSend = true;
+    f.reach(next,"waiting");
+    const auto inherited = f.task(next).at("pendingInstructions");
+    check(inherited.size() == specs.size() && f.t3.sent.back().tool == "delegate",
+          "unconfirmed delegate lost part of the inherited backlog");
+    for (std::size_t i = 0; i < specs.size(); ++i)
+        check(inherited[i].at("text") == specs[i],"unconfirmed delivery changed an inherited specification");
+
+    const auto wait = f.task(next).at("wait");
+    check(wait.at("reason") == "unknown_delivery","missing acknowledgement did not enter delivery recovery");
+    f.store->operate(localOwner,TaskTarget::from(f.task(next),wait.at("id")),"reconcile");
+    f.reach(next,"running");
+    const auto remaining = f.task(next).at("pendingInstructions");
+    check(!remaining.empty() && remaining.size() < inherited.size(),"delegate did not consume a bounded batch");
+    f.restart();
+    check(f.task(next).at("pendingInstructions") == remaining,"restart lost the outstanding batch");
+    for (std::size_t batch = 0; batch < specs.size(); ++batch) {
+        f.t3.finish(f.task(next).at("activeRun").at("runId").get<std::string>(),"Batch applied");
+        if (f.task(next).at("pendingInstructions").empty()) break;
+        f.reach(next,"deciding");
+        f.reach(next,"running");
+        check(f.t3.sent.back().tool == "follow_up","a subsequent batch did not continue the Session");
+    }
+    f.reach(next,"completed");
+    check(f.task(next).value("pendingInstructions",Json::array()).empty(),"completed with inherited work pending");
+
+    check(f.t3.sent.size() == shown.size() + 1,"expected one resumed Session command per model batch");
+    for (std::size_t batch = 0; batch < shown.size(); ++batch)
+        for (const auto& item : shown[batch])
+            check(f.t3.sent[batch + 1].instruction.find(item.at("text").get<std::string>()) != std::string::npos,
+                  "Session command differed from the batch shown to the model");
+    std::string dispatched;
+    for (const auto& cmd : f.t3.sent) {
+        check(cmd.instruction.size() + 2 * cmd.actionId.size() + 36 <= 120000,"Session prompt exceeded T3 preflight");
+        dispatched += cmd.instruction;
+    }
+    std::size_t cursor = 0;
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto pos = dispatched.find(specs[i],cursor);
+        check(pos != dispatched.npos,"Session commands omitted, truncated or reordered a specification");
+        cursor = pos + specs[i].size();
+        for (const auto marker : {"SPEC-","END-"}) {
+            const auto token = marker + std::to_string(i + 1);
+            check(dispatched.find(token,dispatched.find(token) + 1) == dispatched.npos,"duplicated specification marker");
+        }
+    }
 }
 
 void appendWaitsForSafeBoundary() {
@@ -613,6 +1033,30 @@ void appendWaitsForSafeBoundary() {
     check(f.t3.sent.size() == 3,"the queued task did not inherit the released project slot");
 }
 
+void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Confirm the existing criteria",{change(id,{{"doneWhen","Report baseline latency"}})});
+    const auto receipt = f.receive("same-criteria","Confirm the existing criteria");
+    check(!f.task(id).value("replanning",false) && f.task(id)["revisions"].size() == 1,
+          "repeating a criterion triggered replanning");
+    f.t3.finish("run-1","Baseline latency is 10 ms");
+    int decisions = 0;
+    f.model.onResult = [&](const ModelInput& input) {
+        const auto& item = input.task.at("userInstructions").at(0);
+        check(item.at("messageId") == receipt.at("messageId") && input.event.at("report") == "Baseline latency is 10 ms",
+              "settled decision missed the instruction identity or evidence");
+        Json args = {{"report","Baseline latency is 10 ms"}};
+        if (++decisions > 1)
+            args["acknowledgedInstructions"] = Json::array({{{"messageId",item.at("messageId")},{"step",item.at("step")}}});
+        return Decision{"complete",args,"The existing report satisfies the repeated criterion"};
+    };
+    f.reach(id,"completed");
+    check(decisions == 2 && f.t3.sent.size() == 1 && f.event(id,"decision").at("args").contains("acknowledgedInstructions"),
+          "completion ignored pending instructions or forced another Run");
+}
+
 void twoInstructionsFromOneMessageAreTrackedSeparately() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -634,6 +1078,50 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
           "the instructions were not both delivered");
 }
 
+void cancellationTakesOverRevisionStop() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Change criteria",{change(id,{{"doneWhen","Include timings"}})});
+    f.receive("revision","Change criteria");
+    f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"revision did not interrupt its Run");
+    const auto stop = f.task(id).at("runStop");
+    check(stop.at("intent") == "replan" && stop.at("run") == f.task(id).at("activeRun"),"wrong revision stop target");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
+    f.restart();
+    f.tick();
+    check(f.task(id).at("runStop").at("intent") == "cancel" && f.t3.interrupted.size() == 1,
+          "cancellation issued a second interrupt before its retry time");
+    f.now += 5;
+    f.tick();
+    check(f.t3.interrupted.size() == 2 && f.t3.interrupted[0] == f.t3.interrupted[1],"stop retry changed its Run");
+    f.t3.finish("run-1","Interrupted",false);
+    f.tick();
+    check(f.task(id)["state"] == "cancelling" && f.task(id)["activeRun"] == stop.at("run"),
+          "interrupt request released unsettled delegated work");
+    f.t3.finish("run-1","Interrupted");
+    f.reach(id,"cancelled");
+    check(f.t3.sent.size() == 1 && !f.task(id).contains("runStop") &&
+          f.event(id,"interrupt_settled")["intent"] == "cancel","settlement resumed superseded work");
+}
+
+void deliveryWaitsForEveryTarget() {
+    Fixture f;
+    const auto running = f.store->submit(f.routing("First measurement"));
+    const auto queued = f.store->submit(f.routing("Second measurement"));
+    f.reach(running,"running");
+    constexpr auto text = "Include CPU time in both measurements";
+    f.script(text,{note(running),send(queued)});
+    const Id message = f.receive("both-measurements",text).at("messageId");
+    check(f.t3.steered.size() == 1 && f.conversationMessage(message)["deliveredToT3"] == false,
+          "the first delivery marked the whole message as sent");
+    f.t3.finish(f.task(running).at("activeRun").at("runId").get<std::string>(),"First measurement complete");
+    f.reach(queued,"running");
+    check(f.t3.sent.back().instruction.find(text) != std::string::npos &&
+          f.conversationMessage(message)["deliveredToT3"] == true,
+          "the message was not marked as sent after the second delivery");
+}
+
 void unknownSendThenScopeChange() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -641,8 +1129,8 @@ void unknownSendThenScopeChange() {
     f.t3.loseNextSend = true;
     f.reach(id,"waiting");
     const auto before = f.task(id);
-    f.script("完了条件は p95 レイテンシを報告",{change(id,{{"doneWhen","p95 レイテンシを報告"}})});
-    const auto change = f.receive("revision","完了条件は p95 レイテンシを報告");
+    f.script("Use the updated specification",{change(id,{{"intent","Measure startup latency"},{"doneWhen","p95 レイテンシを報告"}})});
+    const auto change = f.receive("revision","Use the updated specification");
     check(f.task(id)["revisions"].size() == 2 && f.task(id)["doneWhen"] == "p95 レイテンシを報告",
           "explicit criteria did not create a revision");
     f.restart();
@@ -677,10 +1165,12 @@ void unknownSendThenScopeChange() {
     check(f.t3.sent.size() == 2,"the uncertain replacement did not reach T3 exactly once");
     const auto replacementAction = f.t3.sent.back().actionId;
     f.restart();
-    f.store->operate(id,f.task(id)["wait"]["id"],"reconcile");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),f.task(id)["wait"]["id"]),"reconcile");
     f.reach(id,"running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
-          f.t3.sent.back().instruction.find("p95 レイテンシ") != std::string::npos &&
+          f.t3.sent.back().tool == "follow_up" &&
+          f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
+          f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
           f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
           "the replacement did not reconcile as one delivery for the new revision");
     const auto runs = f.task(id)["runs"];
@@ -798,9 +1288,13 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
     check(f.task(other)["state"] == "completed" && f.task(id)["state"] == "deciding" && completionCalls == 1,
           "a received message failed to hold same-Bot completion or held another Bot's completion");
 
+    const auto held = f.task(id);
+    check(held.at("pendingDecision").at("eventId") == held.at("eventId") &&
+          held.at("pendingDecision").at("generation") == held.at("generation") &&
+          held.at("pendingDecision").at("tool") == "complete","deferred decision lost its task or event identity");
     f.restart();
     f.reach(id,"completed");
-    check(f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
+    check(!f.task(id).contains("pendingDecision") && f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
           "the buffered completion was lost or requested another model call after the read-only turn");
 }
 
@@ -827,7 +1321,7 @@ void unrelatedUpdatesDoNotDisturbATurn() {
     check(f.event(targetId,"instruction_accepted")["messageId"] == receipt["messageId"] &&
           f.event(other,"instruction_accepted").is_null() && f.response(receipt)["actions"].size() == 1,
           "an unrelated generation change or later receipt disturbed the turn");
-    const auto later = f.store->receipt("alpha","arrived-later","status");
+    const auto later = f.store->receipt(localOwner,"alpha","arrived-later","status");
     check(later && f.response(*later)["text"] == "Working on it.",
           "the later message did not get its own turn after the earlier one");
 }
@@ -840,7 +1334,7 @@ void staleTargetIsReportedToTheModel() {
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (!input.event["turn"].empty()) return;
         Store writer(f.dir/"state.db");
-        writer.operate(id,0,"cancel");
+        writer.operate(localOwner,TaskTarget::from(writer.task(id),0),"cancel");
     };
     const auto receipt = f.receive("racing-instruction",instruction);
     const auto result = f.lastTurn()[0]["result"];
@@ -888,7 +1382,7 @@ void concurrentTasksShareModelBudget() {
                    start({{"request","クラウドMacでメモリを計測して"},{"environment","クラウドMac"}})});
     auto routing = f.routing();
     routing.config["modelCallLimit"] = 4;
-    f.store->receive(routing,"compound-budget",text);
+    f.store->receive(localOwner,routing,"compound-budget",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "desktop" &&
@@ -921,7 +1415,7 @@ void concurrentTasksShareModelBudget() {
 
     const auto approve = [&] {
         Store writer(f.dir/"state.db");
-        try { writer.operate(pausedId,waitId,"approve"); return true; }
+        try { writer.operate(localOwner,TaskTarget::from(writer.task(pausedId),waitId),"approve"); return true; }
         catch (const Conflict&) { return false; }
     };
     auto first = std::async(std::launch::async,approve);
@@ -987,7 +1481,15 @@ void cloudDestinationWaitsForItsProject() {
     f.tick(2);
     check(f.task(desktopFollowing)["state"] == "queued" && f.task(desktopFollowing)["blockedBy"]["id"] == moving,
           "the desktop slot was released before the old Run settled");
-    f.t3.finish("run-2","Old location stopped");
+    f.t3.finish("run-2","Old location stopped " + std::string(6000,'x'));
+    bool sawHistoricalEnvironment = false;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] != moving) return;
+        for (const auto& row : input.history) {
+            if (row.at("kind") == "report" && row.value("truncated",false))
+                sawHistoricalEnvironment = row.at("source").at("environmentId") == "desktop";
+        }
+    };
     f.restart();
     f.reach(desktopFollowing,"running");
     check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 3 &&
@@ -998,7 +1500,7 @@ void cloudDestinationWaitsForItsProject() {
     f.reach(moving,"running");
     const auto task = f.task(moving);
     check(task.at("deadline")==f.now+1800,"moved task retained the old environment timeout");
-    check(f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
+    check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
           f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&
           task["runs"][1]["environmentId"] == "cloud" && task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
@@ -1025,6 +1527,10 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
                    "the queued transfer stayed behind unrelated work in its old queue");
     check(f.task(moving)["blockedBy"]["id"] == remote && f.t3.sent.size() == 2 && f.t3.interrupted.empty(),
           "the transferred Task bypassed the newer active destination owner");
+    const auto page = f.store->tasks("alpha",0,1);
+    const Json owner = {{"id",remote},{"botId","beta"},{"request","Newer destination owner"},{"state","running"}};
+    check(page.size() == 1 && page[0].at("id") == moving && page[0].at("blockedBy") == owner,
+          "the queued transfer's task page still pointed to its old environment");
     f.t3.finish(f.task(remote)["activeRun"]["runId"].get<std::string>(),"Destination settled");
     f.reach(moving,"running");
     check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" && f.task(local)["state"] == "running",
@@ -1047,8 +1553,7 @@ void latestTargetPrecedesABatchedBacklog() {
     f.receive("new-location","計測はローカルMacで");
     f.t3.finish("run-1","Settled before the next destination");
     f.advanceUntil([&] { return f.t3.sent.size() > 1; },"the backlog did not reach T3");
-    check(f.t3.sent[1].instruction.find("ローカルMacで") != std::string::npos,
-          "the first continuation did not take the latest destination into account");
+    check(f.t3.sent[1].environmentId == "desktop","the structured destination did not use the latest patch");
     for (std::size_t run = 2; run <= f.t3.sent.size(); ++run) {
         check(run <= 4,"the backlog exceeded the additional work allowance");
         f.t3.finish("run-" + std::to_string(run),"Continuation settled");
@@ -1057,17 +1562,23 @@ void latestTargetPrecedesABatchedBacklog() {
     }
     std::string sentInstructions;
     for (auto command = std::next(f.t3.sent.begin()); command != f.t3.sent.end(); ++command) {
-        check(command->environmentId == "desktop" && command->instruction.find("クラウドMacで") == std::string::npos,
+        check(command->environmentId == "desktop",
               "a continuation was sent with a superseded destination");
         sentInstructions += command->instruction;
         sentInstructions += '\n';
     }
+    check(sentInstructions.find("クラウドMacで") < sentInstructions.find(notes.front()) &&
+          sentInstructions.find("ローカルMacで") > sentInstructions.find(notes.back()),
+          "environment corrections dropped or reordered accepted directions");
     for (const auto& note : notes) {
         const auto first = sentInstructions.find(note);
         check(first != std::string::npos && sentInstructions.find(note,first + note.size()) == std::string::npos,
               "an accepted backlog instruction was lost, truncated, or sent twice");
     }
 }
+
+enum class UnsentAction { FirstDelegation, FollowUp };
+void checkUnsentRevision(UnsentAction action);
 
 void continuationUsesTheCurrentBudget() {
     Fixture f;
@@ -1089,7 +1600,7 @@ void continuationUsesTheCurrentBudget() {
     f.receive("unrelated-agreement","はい",wait["messageId"].get<Id>());
     check(f.lastTurn()[0]["result"]["ok"] == false && f.task(id)["wait"] == wait && f.task(id)["remaining"] == 0 &&
           f.event(id,"budget_granted").is_null(),"a conversation turn approved a budget wait");
-    f.store->operate(id,wait["id"],"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait["id"]),"approve");
     f.reach(id,"running");
     check(f.t3.sent.size() == 5 && f.task(id)["remaining"] == 0 && f.task(id)["additionalUsed"] == 4 &&
           f.store->tasks("alpha").size() == 1,"explicit budget approval did not permit precisely one extra Run");
@@ -1098,17 +1609,31 @@ void continuationUsesTheCurrentBudget() {
 }
 
 void revisionOfProvablyUnsentAction() {
+    checkUnsentRevision(UnsentAction::FirstDelegation);
+    checkUnsentRevision(UnsentAction::FollowUp);
+}
+
+void checkUnsentRevision(UnsentAction action) {
     Fixture f;
     const auto id = f.store->submit(f.routing());
+    if (action == UnsentAction::FollowUp) {
+        f.model.onResult = [](const ModelInput&) {
+            return Decision{"follow_up",{{"instruction","Verify the report"}},"The report needs verification"};
+        };
+        f.reach(id,"running");
+        f.t3.finish("run-1","Preliminary report");
+    }
     f.reach(id,"sending");
     f.script("完了条件はレポートを出す",{change(id,{{"doneWhen","レポートを出す"}})});
     f.receive("ready-revision","完了条件はレポートを出す");
+    f.restart();
     f.reach(id,"running");
     const auto task = f.task(id);
-    check(f.t3.sent.size() == 1 && task["remaining"] == 3 &&
-          f.t3.sent.front().instruction.find("レポートを出す") != std::string::npos,
-          "replacing unsent work delivered the wrong criteria or used an additional Run");
-    check(task["runs"][0]["revisionId"] == task["currentRevision"] &&
+    const unsigned charged = action == UnsentAction::FollowUp ? 1 : 0;
+    check(f.t3.sent.size() == 1 + charged && task["remaining"] == 3 - charged && task["additionalUsed"] == charged &&
+          f.t3.sent.back().instruction.find("レポートを出す") != std::string::npos,
+          "replacing unsent work delivered the wrong criteria or charged the wrong budget");
+    check(task["runs"].back()["revisionId"] == task["currentRevision"] &&
           task["revisions"][0]["doneWhen"] == "Report baseline latency" &&
           task["revisions"][1]["doneWhen"] == "レポートを出す",
           "a revision overwrote the prior immutable completion criteria");
@@ -1198,7 +1723,7 @@ void environmentsResolveByNameOrId() {
     f.script(text,{start({{"request","Benchmark"},{"environment","cloud"}}),
                    start({{"request","Archive"},{"environment","z-final"}}),
                    start({{"request","Audit"},{"environment","mars"}})});
-    const auto message = f.store->receive(routing,"environments",text);
+    const auto message = f.store->receive(localOwner,routing,"environments",text);
     f.runtime->runConversations();
     const auto tasks = f.store->tasks("alpha");
     check(tasks.size() == 2 && f.task(tasks[1]["id"])["environmentId"] == "cloud" &&
@@ -1217,12 +1742,23 @@ int main() {
         questionAnswerReachesTheBotBeforeContinuingWork();
         answersStayOnTheirQuestion();
         answersNeedTheirOwnReplyTargetAndAStableTask();
+        offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion();
+        destinationClarificationContinuesFromConversationHistory();
+        directAnswersRemainInConversationHistory();
+        queuedTurnsSeeEarlierReplies();
         pausedTurnDoesNotHoldCompletion();
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
+        resumeBatchesOversizedPendingBacklog();
+        liveMoveAndCriteriaCorrectionKeepCurrentContract();
+        environmentOnlyMoveKeepsWorkAcrossResume();
+        environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume();
         appendWaitsForSafeBoundary();
+        settledInstructionsCanBeAcknowledgedWithoutAnotherRun();
         twoInstructionsFromOneMessageAreTrackedSeparately();
+        cancellationTakesOverRevisionStop();
+        deliveryWaitsForEveryTarget();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();
         receivedRevisionPrecedesCompletion();

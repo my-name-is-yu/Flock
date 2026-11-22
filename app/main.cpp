@@ -10,7 +10,6 @@
 #include "flock/web.hpp"
 #endif
 
-#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -31,12 +30,12 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   tasks [BOT] [--before ID] [--limit N]
   status TASK
   history TASK [--after ID] [--limit N]
-  answer TASK WAIT TEXT
-  approve TASK WAIT
-  retry TASK WAIT
-  extend TASK WAIT NEW_UNIX_DEADLINE
-  reconcile TASK WAIT [--thread ID] [--run ID] [--question ID]
-  cancel TASK [WAIT]
+  answer TASK WAIT REVISION GENERATION TEXT
+  approve TASK WAIT REVISION GENERATION
+  retry TASK WAIT REVISION GENERATION
+  extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
+  reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
+  cancel TASK [WAIT REVISION GENERATION]
   t3 login ENVIRONMENT MCP_URL
   model login [--print-url] [--reconsent]
   model status
@@ -89,6 +88,10 @@ std::filesystem::path homePath(Arguments& args) {
     if (const auto* home = std::getenv("HOME"); home && *home)
         return std::filesystem::path(home) / ".config" / "flock";
     throw Conflict("Set FLOCK_HOME or provide --home DIRECTORY");
+}
+
+Store openStore(const std::filesystem::path& home) {
+    return Store(home / "flock.sqlite3");
 }
 
 void print(const Json& value) {
@@ -146,7 +149,7 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
 volatile std::sig_atomic_t stopRequested = 0;
 void requestStop(int) { stopRequested = 1; }
 
-void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bots& bots) {
+void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
@@ -167,6 +170,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 #ifndef FLOCK_WITH_T3
     if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
 #endif
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
@@ -178,29 +182,35 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
         model = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
-#else
-    (void)home;
 #endif
     options.botTools = loadBotTools(home);
-    const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
-    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
+    options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
+    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
+    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+        std::cerr << "Flock Bot " << id << ": " << error << '\n';
+    });
 #ifdef FLOCK_WITH_WEB
+    WebCallbacks callbacks{
+        [&] { return bots.cards(); },
+        [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
+        [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
+        [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
+            return bots.updateProfile(botId,profile,image);
+        },
+        [&](std::string_view botId) { return bots.avatarImage(botId); },
+        options.peers,
+        {},
+        [&](const BotChange& change) { bots.apply(change); },
+        options.clock,
+    };
+    const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
+        configureWebIdentities(store,identities,callbacks);
+    if (bridges) configureChannelBridges(store,bridges,callbacks);
     std::unique_ptr<WebServer> server;
     if (web) {
-        const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
-        server = startWeb(store,port,{
-            [&] { return bots.cards(); },
-            [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
-            [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
-            [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-                return bots.updateProfile(botId,profile,image);
-            },
-            [&](std::string_view botId) { return bots.avatarImage(botId); },
-            options.peers,
-            identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
-            [&](const BotChange& change) { bots.apply(change); },
-        });
+        server = startWeb(store,port,std::move(callbacks));
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
 #endif
@@ -208,24 +218,23 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
-    Scheduler schedule(bots,store,startedAt,[](std::string_view id,std::string_view error) {
-        std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
     while (!stopRequested) {
-        try { schedule.tick(unixTime()); }
-        catch (const std::exception& error) {
-            std::cerr << "Unable to submit scheduled tasks: " << error.what() << '\n';
-        }
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 }
 
-void operate(Store& store, const Bots& bots, const std::string& operation, Arguments& args) {
+void operate(const std::filesystem::path& home, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args,"task ID");
-    Id wait = 0;
+    auto store = openStore(home);
+    const auto status = store.task(task);
+    auto target = TaskTarget::from(status,0);
+    if (operation != "cancel" || !args.empty()) {
+        target.waitId = number(args,"wait ID");
+        target.revision = number(args,"revision ID",0);
+        target.generation = number(args,"generation",0);
+    }
     Json details = Json::object();
-    if (operation != "cancel" || !args.empty()) wait = number(args,"wait ID");
     if (operation == "answer") details["text"] = args.pop("answer");
     else if (operation == "extend") details["deadline"] = number(args,"new Unix deadline");
     else if (operation == "reconcile") {
@@ -236,25 +245,19 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
             else if (flag == "--question") details["questionId"] = args.pop("question ID");
             else throw Conflict("Unknown reconciliation option: " + flag);
         }
-        const auto status = store.task(task);
-        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
-            (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
-            const auto bot = bots.get(status["botId"].get<std::string>());
-            const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
-            const auto& environment = status.at("environmentId");
-            const bool allowed = environment == bot.environmentId ||
-                std::ranges::find(destinations,environment) != destinations.end();
-            if (!allowed || status["projectId"] != Json(bot.projectId))
-                throw Conflict("The project route changed. Cancel this task and submit a new request.");
-            details["session"] = bot.settings.value("session",Json::object());
-        }
     }
     args.end();
-    store.operate(task,wait,operation,details);
+
+    if (operation == "reconcile") {
+        details = reconciliationData(status,target.waitId,std::move(details),[&](std::string_view id, std::string_view request) {
+            return bots.get(id).intake(request);
+        });
+    }
+    store.operate(localOwner,target,operation,details);
     print(store.task(task));
 }
 
-void taskCommand(Store& store, const std::string& command, Arguments& args) {
+void taskCommand(const std::filesystem::path& home, const std::string& command, Arguments& args) {
     Id task = 0, cursor = 0;
     unsigned limit = 50;
     std::string bot;
@@ -267,25 +270,29 @@ void taskCommand(Store& store, const std::string& command, Arguments& args) {
         else if (flag == "--limit") limit = static_cast<unsigned>(number(args,"limit",1,200));
         else throw Conflict("Unknown pagination option: " + flag);
     }
+    const auto store = openStore(home);
     if (command == "history") {
         if (!store.hasTask(task)) throw Conflict("Task does not exist");
         print(store.history(task,cursor,limit));
     } else print(store.tasks(bot,cursor,limit));
 }
 
-void accessCommand(Store& store, Arguments& args) {
+void accessCommand(const std::filesystem::path& home, Arguments& args) {
     const auto action = args.pop("access command (grant, revoke or list)");
     if (action != "grant" && action != "revoke" && action != "list")
         throw Conflict("Unknown access command: " + action);
     const auto bot = args.pop("Bot ID");
     if (!validBotId(bot)) throw Conflict("Invalid Bot ID");
-    auto access = store.access();
+    std::optional<Scope> scope;
     if (action != "list") {
-        const Scope scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
-        args.end();
-        if (!scope.valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
-        access.resourceGrant(Person{"local-cli",true},bot,scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
-    } else args.end();
+        scope = Scope{args.pop("resource kind"),args.pop("resource ID"),args.pop("resource action")};
+        if (!scope->valid()) throw Conflict("Invalid access scope. Check KIND, RESOURCE and ACTION.");
+    }
+    args.end();
+    auto store = openStore(home);
+    auto access = store.access();
+    if (scope)
+        access.resourceGrant(Person{"local-cli",true},bot,*scope,action == "grant" ? GrantChange::grant : GrantChange::revoke);
     print(access.grants(bot));
 }
 
@@ -306,25 +313,23 @@ int runCli(Arguments& args) {
     if (command == "bots") {
         args.end();
         print(bots.cards());
-        return 0;
-    }
-    std::filesystem::create_directories(home);
-    Store store(home / "flock.sqlite3");
-    if (command == "run") daemon(args,home,store,bots);
-    else if (command == "access") accessCommand(store,args);
+    } else if (command == "run") daemon(args,home,bots);
+    else if (command == "access") accessCommand(home,args);
     else if (command == "submit") {
-        const auto bot = bots.get(args.pop("Bot ID"));
+        const auto botId = args.pop("Bot ID");
         const auto request = args.pop("request");
         args.end();
-        const auto id = store.submit(bot.intake(request));
+        const auto intake = bots.get(botId).intake(request);
+        auto store = openStore(home);
+        const auto id = store.submit(intake);
         print(store.task(id));
     } else if (command == "status") {
         const auto id = number(args,"task ID");
         args.end();
-        print(store.task(id));
-    } else if (command == "history" || command == "tasks") taskCommand(store,command,args);
+        print(openStore(home).task(id));
+    } else if (command == "history" || command == "tasks") taskCommand(home,command,args);
     else if (command == "answer" || command == "approve" || command == "retry" || command == "extend" ||
-             command == "reconcile" || command == "cancel") operate(store,bots,command,args);
+             command == "reconcile" || command == "cancel") operate(home,bots,command,args);
     else throw Conflict("Unknown command: " + command + ". Run 'flock --help'.");
     return 0;
 }

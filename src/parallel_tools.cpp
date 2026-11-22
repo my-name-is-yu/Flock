@@ -37,7 +37,8 @@ bool allowedAfterWebEvidence(std::string_view tool) {
         "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
         "list_grants","list_secrets","list_connections","check_environment_readiness","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
-        "skill_list","skill_read","inspect_attachment"
+        "skill_list","skill_read","inspect_attachment","workflow_status","expand_context",
+        "read_memory","memory_history","list_schedules"
     };
     return std::ranges::find(readOnly,tool) != std::end(readOnly);
 }
@@ -57,7 +58,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
-        if (!turnMessage(ctx.messageId)) return false;
+        if (!authorizeTurn(loadTurnMessage(ctx.messageId))) { transaction.commit(); return false; }
         auto previous = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
                               {ctx.messageId,step});
         if (!previous.next()) return true;
@@ -65,7 +66,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
         Json results = saved.empty() ? Json(std::vector<Json>(calls.size())) : Json::parse(saved);
         const auto budget = messageModelBudget(ctx.messageId);
         auto approved = takeReservedConversationCall(ctx.messageId);
-        const auto scrub = sessionRedactor();
+        const auto scrub = sharedRedactor();
         for (std::size_t i = 0; i < calls.size(); ++i) {
             auto& result = results.at(i);
             if (result.contains("inFlight")) {
@@ -100,7 +101,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
 
     const auto persist = [&](std::size_t i, Json result) {
         std::lock_guard lock(mutex);
-        const auto scrub = calls[i].tool == "inspect_attachment" ? redactor(ctx.bot) : sessionRedactor();
+        const auto scrub = calls[i].tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();
         auto safe = scrub.record(std::move(result));
         const auto encoded = safe.dump(-1,' ',false,Json::error_handler_t::replace);
         exec("UPDATE conversation_steps SET effect=json_set(effect,?,json(?)) WHERE message_id=? AND step=?",
@@ -134,7 +135,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
     const auto results = row.json(0);
     const bool pending = std::ranges::any_of(results,[](const auto& result) { return result.is_null(); });
     if (pending) {
-        if (const auto message = turnMessage(ctx.messageId)) pauseTurn(*message);
+        const auto message = loadTurnMessage(ctx.messageId);
+        if (authorizeTurn(message)) pauseTurn(message);
     } else saveTurnResults(ctx.messageId,step,results);
     transaction.commit();
     return !pending;

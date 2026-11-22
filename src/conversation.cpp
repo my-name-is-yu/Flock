@@ -13,17 +13,17 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-void Store::Impl::migrateConversation() {
+void Store::Impl::initializeConversationSchema() {
     Transaction transaction(db);
     if (sqlite3_exec(db,R"SQL(
-DROP TABLE IF EXISTS route_candidates;
-DROP TABLE IF EXISTS route_decisions;
-DROP TABLE IF EXISTS conversation_migrations;
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS journal_pending_turn ON journal(conversation_bot_id,id)
 WHERE kind='conversation_message' AND json_extract(data,'$.status') IS NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
+CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
+  json_extract(data,'$.messageId'),task_id,coalesce(json_extract(data,'$.step'),0))
+  WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL,
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
-  UNIQUE(bot_id,client_message_id), UNIQUE(bot_id,sequence));
+  person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
+  UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
@@ -65,58 +66,77 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 )SQL", {task["id"],intent,doneWhen,source ? Json(source) : Json(nullptr),task["id"]});
     const auto revision = last();
     task["currentRevision"] = revision;
+    task.erase("blockerReason");
+    task.erase("blockerWaitId");
     task["intent"] = intent;
     task["doneWhen"] = doneWhen;
     journal(task["id"],"task_revision",{{"revisionId",revision},{"sourceMessageId",source}});
     return revision;
 }
 
-// True while a message of this Bot has not been read yet. A turn paused for a model call approval does not hold
-// completion: it may wait indefinitely, and once approved it sees the tasks as they are then.
 bool Store::Impl::conversationPending(std::string_view bot) const {
     return query("SELECT 1 FROM journal WHERE conversation_bot_id=? AND kind='conversation_message'"
                  " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
 }
 
-std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
-                                   std::string_view text, Id replyTo, const Json& attachments) const {
-    std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
-                         {bot,clientId});
+std::optional<Json> Store::Impl::messageReceipt(const Person& actor, std::string_view bot, std::string_view clientId,
+                                               std::string_view text, Id replyTo, const Json& attachments) const {
+    auto row = query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?",
+                         {bot,actor.id,clientId});
     if (!row.next()) return std::nullopt;
-    auto stored = p_->query("SELECT payload FROM message_attachments WHERE message_id=? ORDER BY attachment_id",{row.number(0)});
+    auto stored = query("SELECT payload FROM message_attachments WHERE message_id=? ORDER BY attachment_id",{row.number(0)});
     auto media = Json::array();
     while (stored.next()) media.push_back(stored.json(0));
     if (media != attachments) throw Conflict("This client message ID already has different attachments");
-    return receiptRow(row,p_->redactor(bot).text(std::string(text)),replyTo);
+    return receiptRow(row,redactor(bot).text(std::string(text)),replyTo);
 }
 
-Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo, const Json& attachments) {
-    if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
-        !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
+std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId,
+                                   std::string_view text, Id replyTo, const Json& attachments) const {
+    std::lock_guard lock(p_->mutex);
+    if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (!Access(*p_).permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+    return p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
+}
+
+Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                    const Json& attachments) {
+    return receive(actor,routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; },attachments);
+}
+
+Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
+                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route, const Json& attachments) {
+    if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
+        !hasText(text) || text.size() > messageSize || replyTo < 0)
         throw Conflict("Bot, client message ID and nonempty text are required");
     Json receipt;
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo,attachments);
+        if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+        const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {
+            const auto routing = route();
+            if (routing.botId != bot || !routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
             modelCallLimit(routing.config);
             const Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},
                                 {"config",routing.config}};
             const auto scrub = p_->redactor(routing.botId);
-            scrub.requirePublic({routing.botId,clientId,saved});
+            scrub.requirePublic({routing.botId,actor.id,clientId,saved});
             p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {unixTime(),routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
+        actor.id,actor.adminRoot ? 1 : 0,routing.botId});
             p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }
+        if (channel) p_->saveChannelMessage(receipt.at("messageId"),bot,*channel,existing.has_value());
         transaction.commit();
     }
     return receipt;

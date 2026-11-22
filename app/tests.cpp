@@ -1,134 +1,23 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "tests/fixtures.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <set>
 #include <sstream>
-#include <unistd.h>
 
 using namespace flockv0;
 using namespace flockv0::app;
+using namespace flockv0::app::test;
 
 namespace flockv0::app {
 void sessionConversationDispatch(Store&, const Json&);
 }
 
 namespace {
-class Sandbox {
-public:
-    Sandbox() {
-        auto pattern = (std::filesystem::temp_directory_path() / "flock-app-XXXXXX").string();
-        const char* made = mkdtemp(pattern.data());
-        if (!made) throw std::runtime_error("Temporary directory setup failed");
-        path = made;
-    }
-    ~Sandbox() {
-        std::error_code error;
-        std::filesystem::remove_all(path,error);
-    }
-    std::filesystem::path path;
-};
-
-void check(bool condition, std::string_view what) {
-    if (!condition) throw std::runtime_error(std::string(what));
-}
-
-template <typename Error, typename Function>
-void rejects(Function run, std::string_view what) {
-    try { run(); }
-    catch (const Error&) { return; }
-    throw std::runtime_error(std::string(what));
-}
-
-Seconds utc(int year, unsigned month, unsigned day, int hour, int minute, int second = 0) {
-    using namespace std::chrono;
-    return duration_cast<seconds>((sys_days{std::chrono::year{year} / month / day} +
-        hours{hour} + minutes{minute} + seconds{second}).time_since_epoch()).count();
-}
-
-void write(const std::filesystem::path& file, const std::string& data) {
-    std::ofstream output(file);
-    output << data;
-    if (!output) throw std::runtime_error("Fixture write failed");
-}
-
-Json botConfig(std::string model = "fixture-model") {
-    return {{"environmentId","env-canonical"},{"projectId","project-canonical"},{"modelProvider","chatgpt"},
-        {"model",model},{"runTimeoutSeconds",999},
-        {"session",{{"model","child-model"},{"providerInstanceId","child-provider"},{"runtimeMode","auto"},
-            {"workspaceStrategy",{{"kind","worktree"},{"remote","origin"},{"branch","main"}}}}},
-        {"cron",Json::array()}};
-}
-
-void createBot(const std::filesystem::path& path, const Json& config, std::string soul, std::string memory) {
-    std::filesystem::create_directories(path);
-    write(path / "config.json",config.dump());
-    write(path / "SOUL.md",soul);
-    write(path / "MEMORY.md",memory);
-}
-
-void cronSyntaxAndTimeZones() {
-    const Cron local("0 9 * * 1-5","Asia/Tokyo");
-    check(local.matches(utc(2026,11,20,0,0)), "weekday in the configured IANA timezone");
-    check(!local.matches(utc(2026,11,21,0,0)), "skip Saturday");
-    const Cron listsAndSteps("5,10-22/4 2/3 * 11 7","Etc/UTC");
-    check(listsAndSteps.matches(utc(2026,11,22,5,14)), "list/range/step/Sunday alias");
-    check(!listsAndSteps.matches(utc(2026,11,22,5,15)), "minute step mismatch");
-    const Cron eitherDay("0 0 21 * 1","Etc/UTC");
-    check(eitherDay.matches(utc(2026,11,21,0,0)), "day-of-month alternative");
-    check(eitherDay.matches(utc(2026,11,23,0,0)), "day-of-week alternative");
-    check(!eitherDay.matches(utc(2026,11,22,0,0)), "neither eligible day");
-    rejects<Conflict>([] { Cron("1 2 * * * *","Etc/UTC"); },"six fields accepted");
-    rejects<Conflict>([] { Cron("*/0 2 * * *","Etc/UTC"); },"zero divisor accepted");
-    rejects<Conflict>([] { Cron("0 24 * * *","Etc/UTC"); },"hour 24 accepted");
-    rejects<Conflict>([] { Cron("1,,2 0 * * *","Etc/UTC"); },"empty list element accepted");
-    rejects<Conflict>([] { Cron("* * * * *","Not/A_Zone"); },"unknown time zone accepted");
-}
-
-void cronIntakeAndRestart() {
-    Sandbox temp;
-    const auto folder = temp.path / "bots" / "release";
-    auto config = botConfig();
-    config["cron"] = Json::array({
-        {{"id","spring"},{"schedule","30 2 8 3 *"},{"timezone","America/New_York"},{"request","Gap"}},
-        {{"id","fall"},{"schedule","30 1 1 11 *"},{"timezone","America/New_York"},{"request","Overlap"}},
-    });
-    createBot(folder,config,"SOUL","MEMORY");
-    Bots bots(temp.path / "bots");
-    const auto db = temp.path / "tasks.db";
-    const auto report = [](std::string_view id,std::string_view error) {
-        throw std::runtime_error(std::string(id) + ": " + std::string(error));
-    };
-
-    {
-        Store store(db);
-        Scheduler spring(bots,store,utc(2026,3,8,6,0),report);
-        spring.tick(utc(2026,3,8,9,0));
-        check(store.tasks().empty(),"nonexistent spring local time was submitted");
-        Scheduler fall(bots,store,utc(2026,11,1,5,0),report);
-        fall.tick(utc(2026,11,1,7,0));
-        fall.tick(utc(2026,11,1,7,0));
-        const auto tasks = store.tasks();
-        check(tasks.size() == 2,"both fall-back instants should submit exactly once");
-        check(tasks[0]["scheduledAt"] == utc(2026,11,1,6,30) &&
-              tasks[1]["scheduledAt"] == utc(2026,11,1,5,30),"fall offsets did not produce separate UTC instants");
-        check(tasks[0]["blockedBy"]["id"] == tasks[1]["id"],"cron must participate in the same project queue");
-        Scheduler repeated(bots,store,utc(2026,11,1,6,30),report);
-        repeated.tick(utc(2026,11,1,6,30));
-        check(store.tasks().size() == 2,"duplicate scheduled UTC instant registered after restart");
-    }
-    {
-        Store store(db);
-        Scheduler resumed(bots,store,utc(2027,11,1,5,30,1),report);
-        resumed.tick(utc(2027,11,1,5,35));
-        check(store.tasks().size() == 2,"downtime schedule should be skipped and existing rows preserved");
-    }
-}
-
 class NotesModel final : public Model {
 public:
     std::vector<ModelInput> inputs;
@@ -174,13 +63,14 @@ void notesAndRoutingOnRestart() {
     createBot(folder / "first",botConfig(),"First version","First memory");
     createBot(folder / "second",botConfig(),"Second version","Second-only memory");
     const Bots bots(folder);
-    const auto notes = [&](std::string_view bot) { return bots.notes(bot); };
+    const auto soul = [&](std::string_view bot) { return bots.soul(bot); };
+    const auto seed = [&](std::string_view bot) { return bots.initialMemory(bot); };
     NotesModel model;
     NotesT3 t3;
     Id firstId, secondId, waitId;
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
+        Store store(db,seed);
+        Runtime runtime(store,model,t3,soul);
         for (auto bot : {"first","second"})
             store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
@@ -194,10 +84,10 @@ void notesAndRoutingOnRestart() {
             "same-project tasks must queue across Bots");
     }
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
-        store.operate(firstId,waitId,"answer",{{"text","main"}});
-        rejects<Conflict>([&] { store.operate(firstId,waitId,"answer",{{"text","old answer"}}); },"duplicate answer accepted");
+        Store store(db,seed);
+        Runtime runtime(store,model,t3,soul);
+        store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","main"}});
+        rejects<Conflict>([&] { store.operate(localOwner,TaskTarget::from(store.task(firstId),waitId),"answer",{{"text","old answer"}}); },"duplicate answer accepted");
         runtime.tick();
         runtime.tick();
         check(store.task(firstId)["state"] == "running" && store.task(firstId)["doneWhen"] == "Evidence required before edit",
@@ -214,8 +104,9 @@ void notesAndRoutingOnRestart() {
     createBot(folder / "first",botConfig("new-model"),"New SOUL would now ask for something different","First updated memory");
     t3.finished = true;
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
+        Store store(db,seed);
+        store.memory({"fixture",true},"first","apply_memory_edit",{{"baseVersion",0},{"content","First updated memory"}});
+        Runtime runtime(store,model,t3,soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
         check(store.task(firstId)["state"] == "completed","first Bot did not complete with its original criterion");
         check(store.task(secondId)["state"] == "sending","next task did not begin when the first task closed");
@@ -288,7 +179,11 @@ void notesAcrossConversationAndWork() {
     createBot(folder / "first",botConfig("first-model"),first.soul + "界tail",first.memory + "tail");
     createBot(folder / "second",botConfig("second-model"),second.soul,second.memory);
     const Bots bots(folder);
-    Store store(temp.path / "tasks.db");
+    Store store(temp.path / "tasks.db",[&](std::string_view bot) {
+        auto memory = bots.initialMemory(bot);
+        if (!memory.empty()) memory += std::string(64,'X');
+        return memory;
+    });
     for (auto bot : {"first","second"})
         store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
     NotesT3 t3;
@@ -296,10 +191,9 @@ void notesAcrossConversationAndWork() {
     std::optional<std::string> noteReadError;
     Runtime runtime(store,model,t3,[&](std::string_view botId) {
         if (noteReadError) throw Conflict(*noteReadError);
-        auto notes = bots.notes(botId);
-        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
-        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
-        return notes;
+        auto soul = bots.soul(botId);
+        if (!soul.empty()) soul += std::string(64,'X');
+        return soul;
     });
     const auto expectedNotes = [](BotNotes notes) {
         if (!notes.soul.empty()) notes.soul += std::string(64,'X');
@@ -318,7 +212,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto completeTask = [&](const Intake& bot, const BotNotes& notes, std::string_view expectedReport) -> Id {
         const auto start = model.requests.size();
-        store.receive(bot,"new-work","Collect the validation evidence");
+        store.receive(localOwner,bot,"new-work","Collect the validation evidence");
         runtime.runConversations();
         const auto tasks = store.tasks(bot.botId);
         check(tasks.size() == 1,"the request should create one Task for this Bot");
@@ -337,7 +231,7 @@ void notesAcrossConversationAndWork() {
     };
     const auto askAboutResult = [&](const Intake& bot, Id task, std::string_view key) -> Id {
         const Id result = store.latestTaskResult(task).at("id");
-        return store.receive(bot,key,"Why does that evidence support the result?",result).at("messageId");
+        return store.receive(localOwner,bot,key,"Why does that evidence support the result?",result).at("messageId");
     };
     const auto checkResultAnswer = [&](const Intake& bot, Id task, Id question,
                                        const BotNotes& notes, std::string_view expectedReply) {
@@ -367,17 +261,19 @@ void notesAcrossConversationAndWork() {
     const auto edited = askAboutResult(firstIntake,firstTask,"edited-notes");
     first = {"Use the verified report.","Lead with the evidence."};
     write(folder / "first" / "SOUL.md",first.soul);
-    write(folder / "first" / "MEMORY.md",first.memory);
-    checkResultAnswer(firstIntake,firstTask,edited,expectedNotes(first),std::string(explanation) + " " + conclusion);
+    const auto stored = expectedNotes(first);
+    store.memory({"fixture",true},"first","apply_memory_edit",{{"baseVersion",0},{"content",stored.memory}});
+    checkResultAnswer(firstIntake,firstTask,edited,stored,std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake,firstTask,"deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
     std::filesystem::remove(folder / "first" / "MEMORY.md");
-    checkResultAnswer(firstIntake,firstTask,deleted,{},explanation);
+    std::filesystem::create_directory(folder / "first" / "MEMORY.md");
+    checkResultAnswer(firstIntake,firstTask,deleted,{"",stored.memory},std::string(explanation) + " " + conclusion);
 
     const auto beforeFailure = model.requests.size();
     const auto originalRequest = "Collect the missing release evidence";
     noteReadError = std::string("Unable to read SOUL.md: ") + static_cast<char>(0xff);
-    store.receive(firstIntake,"unreadable-notes",originalRequest);
+    store.receive(localOwner,firstIntake,"unreadable-notes",originalRequest);
     runtime.runConversations();
     const auto failure = store.conversation(firstIntake.botId).back().at("data");
     check(model.requests.size() == beforeFailure && store.tasks(firstIntake.botId).size() == 1 &&
@@ -386,7 +282,7 @@ void notesAcrossConversationAndWork() {
           "an unreadable note must prompt repair without calling the model or creating work");
 
     noteReadError.reset();
-    store.receive(firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
+    store.receive(localOwner,firstIntake,"repaired-notes","Please retry",failure.at("messageId"));
     runtime.runConversations();
     const auto tasks = store.tasks(firstIntake.botId);
     check(model.requests.size() == beforeFailure + 2 &&
@@ -449,15 +345,20 @@ void responseContract() {
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
-        Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+        Json::array({"reason","instruction"}),"saved requested criteria must not require model authorship");
     check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
-                   "message_session","interrupt_session","read_result","find_tasks","reply","list_grants",
+                   "record_task_blocker","withdraw_task_question",
+                   "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
+                   "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
+                   "expand_context","continue_fresh_session","list_grants",
                    "request_access","list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
+                   "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
+                   "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger",
                    "flock_session_search","flock_session_events"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
@@ -466,7 +367,15 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 20 &&
+    check(turn.at("tools").at(0).at("tools").size() == input.tools.size() &&
+          turnTool("start_workflow")["properties"]["stages"]["items"]["required"] == Json::array({"stageId","role"}) &&
+          turnTool("workflow_status")["required"].back() == "workflowId" &&
+          turnTool("instruct_workflow_stage")["required"].back() == "instruction" &&
+          turnTool("stop_workflow_stage")["required"].back() == "stageId" &&
+          turnTool("stop_workflow")["required"].back() == "workflowId" &&
+          turnTool("compact_conversation")["required"].back() == "summary" &&
+          turnTool("expand_context")["properties"].contains("compactionId") &&
+          turnTool("continue_fresh_session")["required"].back() == "taskId" &&
           turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
@@ -477,6 +386,10 @@ void responseContract() {
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");
+    check(turnTool("record_task_blocker")["required"] == Json::array({"reason","taskId","generation","blockerReason"}) &&
+          turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
+          turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
+          "blocker and withdrawal schemas must expose their exact task targets");
     for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
@@ -485,6 +398,18 @@ void responseContract() {
           turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}) &&
           turnTool("request_access").at("properties").at("resourceKind").at("enum").size()==resourceOperations().size(),
           "access request and settings schemas do not match dispatch");
+    const std::map<std::string,Json> memoryAutomationRequired{
+        {"read_memory",{"reason"}}, {"memory_history",{"reason"}},
+        {"propose_memory_edit",{"reason","baseVersion","content","rationale"}},
+        {"apply_memory_edit",{"reason","baseVersion"}},
+        {"revert_memory_edit",{"reason","baseVersion","revisionId"}},
+        {"create_schedule",{"reason","request","cron","timezone"}}, {"list_schedules",{"reason"}},
+        {"remove_schedule",{"reason","id"}}, {"create_reminder",{"reason","request","fireAt","timezone"}},
+        {"create_trigger",{"reason","request","source"}}};
+    for (const auto& [name,required] : memoryAutomationRequired)
+        check(turnTool(name).at("required") == required,"memory or automation schema does not match dispatch");
+    check(turnTool("apply_memory_edit")["properties"]["baseVersion"]["minimum"] == 0 &&
+          turnTool("create_trigger")["properties"]["eventFilter"]["type"] == "object","incorrect schema constraints");
     const auto& search = turnTool("flock_session_search");
     const auto& events = turnTool("flock_session_events");
     check(search.at("required") == Json::array({"reason"}) && search.at("properties").size() == 8 &&
@@ -500,7 +425,8 @@ void responseContract() {
               !fields.contains("botId"),"Session tool bounds or authenticated identity changed");
     }
     const auto modelCall = [](std::string_view tool, const Json& args) {
-        return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"arguments",args.dump()}}});
+        return Json::array({{{"type","function_call"},{"name",tool},{"namespace","flock"},{"status","completed"},
+                             {"arguments",args.dump()}}});
     };
     const Json searchArgs{{"reason","Find yesterday’s staging investigation"},{"query","staging"},
                           {"project","Release"},{"fromTime","2026-11-21T00:00:00Z"},{"limit",2}};
@@ -520,9 +446,36 @@ void responseContract() {
           turnPrompt.find("ask using their titles and times, never internal IDs") != std::string::npos,
           "conversation instructions must scope Bot notes to the user's authorized request");
     check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
+    const std::map<std::string,Json> requiredChannelArgs{
+        {"channel_edit_message",{"reason","externalMessageId","text"}},
+        {"channel_react",{"reason","reaction"}},
+        {"channel_send_attachment",{"reason"}},
+        {"read_channel_attachment",{"reason","attachmentId"}},
+        {"publish_artifact",{"reason","title","html"}},
+        {"request_local_machine_connection",{"reason","threadId","runId","machineId","rules"}}
+    };
+    input.tools.clear();
+    for (const auto& [name,args] : requiredChannelArgs) input.tools.push_back(name);
+    input.images = {{1,{},"image/png","YQ=="}};
+    const auto channelRequest = responseRequest(input);
+    for (const auto& function : channelRequest.at("tools").at(0).at("tools")) {
+        const auto name = function.at("name").get<std::string>();
+        const auto& schema = function.at("parameters");
+        check(schema.at("required") == requiredChannelArgs.at(name),"Channel tool required arguments");
+        if (name == "request_local_machine_connection")
+            check(schema.at("properties").at("rules").at("items").at("required") == Json::array({"operation","path"}),
+                  "Local approval rule schema");
+    }
+    const auto content = channelRequest.at("input").at(0).at("content");
+    check(content.at(0).at("type") == "input_text" && content.at(1).at("type") == "input_image" &&
+          content.at(1).at("image_url") == "data:image/png;base64,YQ==","Screenshot did not enter the Responses image input");
+    input.images.clear();
     input.event = {{"kind","intake"}};
 
+    input.task.erase("requestedDoneWhen");
+    input.needsDoneWhen = true;
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
     const auto peerContext = requestContext(peerRequest);
@@ -544,17 +497,19 @@ void responseContract() {
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
     const auto& reply = parameters(peerRequest,"reply_to_bot");
-    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","answer","result","failed"} &&
+    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","result","failed"} &&
         reply["required"].get<Names>() == Names{"reason","kind","text"},
         "peer replies must specify their kind and text");
     const auto& evidence = parameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
+    input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
     check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
+    input.canForwardUserMessage = true;
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
     const auto forwardRequest = responseRequest(input);
     const auto& forward = parameters(forwardRequest,"send_bot_message");
@@ -569,6 +524,13 @@ void responseContract() {
     const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),completeRequest).calls.at(0);
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
+    for (const auto* key : {"namespace","status"}) {
+        auto incomplete = call;
+        incomplete.erase(key);
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),completeRequest); },"missing provider qualifier");
+        incomplete[key] = nullptr;
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),completeRequest); },"null provider qualifier");
+    }
     rejects<ModelError>([&] { responseDecision(Json::array({call,call}),completeRequest); },"multiple tools accepted");
     rejects<ModelError>([&] { responseDecision(Json::array({call}),forwardRequest); },"state-invalid tool accepted");
     rejects<ModelError>([&] { responseDecision(Json::array(),completeRequest); },"missing tool accepted");
@@ -581,9 +543,9 @@ public:
     Decision choose(const ModelInput& input) {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
-            return {"follow_up",{{"instruction","Add the required test"}},"A regression test is missing."};
+            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
         }
-        return {"complete",{{"report","Existing tests passed"}},"The required existing tests passed."};
+        return {"complete",{{"report","All existing checks succeeded"}},"The required existing tests passed."};
     }
 };
 
@@ -627,7 +589,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     } changes;
     auto t3 = makeDemoT3();
     const auto demo = makeDemoModel();
-    const auto notes = [](auto) { return BotNotes{}; };
+    const auto notes = [](auto) { return std::string{}; };
     const Intake intake{"demo","Measure the result","local","project"};
     const auto tickUntil = [](Runtime& runtime,const auto& ready,std::string_view message) {
         for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
@@ -638,7 +600,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "change_task";
         changes.args = {{"taskId",task},{"doneWhen","Confirm the output"}};
-        store.receive(intake,"criteria","Completion criteria: Confirm the output");
+        store.receive(localOwner,intake,"criteria","Completion criteria: Confirm the output");
         routing.runConversations();
     }
     check(store.task(task)["doneWhen"] == "" && store.task(task)["requestedDoneWhen"] == "Confirm the output",
@@ -654,7 +616,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
         Runtime routing(store,changes,*t3,notes);
         changes.tool = "send_to_task";
         changes.args = {{"taskId",task}};
-        store.receive(intake,"follow-up","Include the exact sample count");
+        store.receive(localOwner,intake,"follow-up","Include the exact sample count");
         routing.runConversations();
     }
     {
@@ -681,7 +643,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
-    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
     const Intake intake{"demo","Measure the result","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
@@ -691,10 +653,10 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
             if (row["kind"] == "conversation_reply" && row["data"]["replyToMessageId"] == message) return row["data"];
         return Json(nullptr);
     };
-    const auto question = store.receive(intake,"explain","What did it find?",result).at("messageId").get<Id>();
+    const auto question = store.receive(localOwner,intake,"explain","What did it find?",result).at("messageId").get<Id>();
     runtime.runConversations();
     const auto explanation = replyTo(question);
-    const auto again = store.receive(intake,"again","Explain again",explanation.at("messageId").get<Id>())
+    const auto again = store.receive(localOwner,intake,"again","Explain again",explanation.at("messageId").get<Id>())
         .at("messageId").get<Id>();
     runtime.runConversations();
     check(store.tasks("demo").size() == 1 && replyTo(again).at("text") == explanation.at("text"),
@@ -707,13 +669,13 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
-    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
     const Intake intake{"demo","ask: Which dataset should I use?","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
     const auto question = store.task(task).at("wait").at("messageId").get<Id>();
 
-    store.receive(intake,"dataset-answer","Use the release dataset",question);
+    store.receive(localOwner,intake,"dataset-answer","Use the release dataset",question);
     runtime.runConversations();
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
     const auto history = store.history(task);
@@ -760,12 +722,11 @@ void botProfilesAndAvatars() {
     const auto cards = bots.cards();
     check(cards.size() == 3,"all created Bots should appear in cards()");
 
-    // Scheduler ignores Bots without cron schedules instead of failing on missing execution config.
     Store store(temp.path / "scheduler.db");
-    Scheduler scheduler(bots,store,utc(2026,11,21,0,0),[](std::string_view id,std::string_view err) {
+    bots.syncSchedules(store,utc(2026,11,21,0,0),[](std::string_view id,std::string_view err) {
         throw std::runtime_error(std::string(id) + ": " + std::string(err));
     });
-    scheduler.tick(utc(2026,11,21,0,2));
+    store.fireDueAutomations(utc(2026,11,21,0,2));
 
     // Upload a valid PNG avatar, preserve it on name-only edit, replace with GIF, then switch to icon.
     const std::string pngBytes = std::string("\x89PNG\r\n\x1a\n",8) + std::string(16,'\x01');
@@ -773,13 +734,13 @@ void botProfilesAndAvatars() {
     const auto uploaded = bots.updateProfile("scout",{
         {"name","Scout Prime"},
         {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/png",pngBytes});
+    },AvatarImage{pngBytes});
     check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" &&
           !uploaded.at("avatar").at("version").get<std::string>().empty(),
           "uploaded PNG avatar metadata was not saved");
     const auto savedPng = bots.avatarImage("scout");
-    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+    check(savedPng && savedPng->format().contentType == "image/png" && savedPng->bytes() == pngBytes,
           "stored PNG bytes did not match upload");
 
     // Rename without re-uploading keeps the existing image.
@@ -795,13 +756,13 @@ void botProfilesAndAvatars() {
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
         {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/gif",gifBytes});
+    },AvatarImage{gifBytes});
     check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
           std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "replacing uploaded avatar did not clean up previous image file");
     const auto savedGif = bots.avatarImage("scout");
-    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+    check(savedGif && savedGif->format().contentType == "image/gif" && savedGif->bytes() == gifBytes,
           "replaced GIF bytes did not match");
 
     // Switching back to shape removes uploaded file.
@@ -813,13 +774,6 @@ void botProfilesAndAvatars() {
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "switching from upload to shape did not remove stored image file");
 
-    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
-    rejects<Conflict>([&] {
-        bots.updateProfile("scout",{
-            {"name","Scout"},
-            {"avatar",{{"kind","upload"}}},
-        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
-    },"SVG payload accepted as avatar image");
     rejects<Conflict>([&] {
         bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
     },"blank Bot name accepted");
@@ -835,8 +789,11 @@ void botProfilesAndAvatars() {
     });
     const auto loaded = bots.get("release");
     check(loaded.name == "Release Bot" && loaded.environmentId == "env-canonical" &&
-          loaded.projectId == "project-canonical" && loaded.avatar.at("icon") == "compass",
+          loaded.projectId == "project-canonical",
           "editing profile altered existing Bot execution configuration");
+    check(std::ranges::any_of(bots.cards(),[](const Json& card) {
+        return card.at("id") == "release" && card.at("avatar").at("icon") == "compass";
+    }),"updated Bot card did not retain its icon");
 
     // A name-only update keeps a hand-written avatar and leaves files the editor did not write.
     const auto customDir = temp.path / "bots" / "custom";
@@ -851,7 +808,13 @@ void botProfilesAndAvatars() {
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
     });
-    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+    const auto customImage = pngBytes + "new upload";
+    bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",{{"kind","upload"}}}},AvatarImage{customImage});
+    const auto reopened = Bots(temp.path / "bots").avatarImage("custom");
+    std::ifstream spare(customDir / "avatar.png",std::ios::binary);
+    check(reopened && reopened->bytes() == customImage &&
+          std::string(std::istreambuf_iterator<char>(spare),{}) == pngBytes,
+          "upload failed to persist the new image and preserve the unrelated image");
 
     // A save that would exceed the config read limit fails before the file changes.
     const auto bigDir = temp.path / "bots" / "big";
@@ -868,8 +831,7 @@ void botProfilesAndAvatars() {
 
 int main() {
     try {
-        cronSyntaxAndTimeZones();
-        cronIntakeAndRestart();
+        configuredSchedules();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();

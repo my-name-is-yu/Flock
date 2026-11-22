@@ -1,4 +1,5 @@
 #include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 #include "bot_tools.hpp"
 #include "model.hpp"
@@ -179,11 +180,11 @@ struct Fixture {
         store = std::make_unique<Store>(home/"state.db");
         RuntimeOptions options;
         options.botTools = tools;
-        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; },options);
+        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; },options);
     }
     Intake intake(std::string bot = "alpha", Id limit = 20) const {
         return {std::move(bot),"","test-environment","private-project",
-                {{"modelCallLimit",limit},{"model","test"},{"modelProvider","chatgpt"}},{},0};
+                {{"modelCallLimit",limit},{"model","test"},{"modelProvider","chatgpt"}}};
     }
     void grant(Scope scope, std::string_view bot = "alpha") {
         store->access().resourceGrant(owner,bot,scope,GrantChange::grant);
@@ -191,7 +192,7 @@ struct Fixture {
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
         model.seen = nullptr;
-        lastMessage = store->receive(intake(std::move(bot),budget),std::to_string(++seq),"Check the fixture").at("messageId");
+        lastMessage = store->receive(owner,intake(std::move(bot),budget),std::to_string(++seq),"Check the fixture").at("messageId");
         runtime->runConversations();
         return model.seen;
     }
@@ -200,10 +201,15 @@ struct Fixture {
         check(steps.is_array() && steps.size() == 1,"Expected one tool result");
         return steps[0].at("result");
     }
+    void approvePaused(const Json& pause) {
+        const Id wait = pause.at("messageId");
+        store->decideInbox(owner,{"alpha",InboxKind::conversation_model_budget,pause.at("replyToMessageId"),
+                                  wait,0,0,wait},"approve");
+    }
     void approve() {
         const auto paused = store->pausedConversations("alpha");
         check(paused.size() == 1,"Expected one paused turn");
-        store->approveMessageModelCall("alpha",paused[0].at("messageId"));
+        approvePaused(paused.at(0));
         runtime->runConversations();
     }
     std::string sql(const std::string& query) const {
@@ -443,7 +449,7 @@ void externalTools(Fixture& f) {
         {{"name",secretMarker},{"mimeType","audio/mpeg"},{"dataBase64","SUQzdmF1bHQtb25seS1tYXJrZXI="}}
     });
     f.model.next = {call("reply",{{"text","Message received."}})};
-    const auto message = f.store->receive(f.intake(),"media","Please inspect these photos and audio",0,media).at("messageId");
+    const auto message = f.store->receive(owner,f.intake(),"media","Please inspect these photos and audio",0,media).at("messageId");
     f.runtime->runConversations();
     const auto image = call("inspect_attachment",{{"messageId",message},{"attachmentId","1"}});
     const auto audio = call("inspect_attachment",{{"messageId",message},{"attachmentId","2"}});
@@ -468,7 +474,7 @@ void externalTools(Fixture& f) {
     const auto opaque = f.run(call("inspect_attachment",{{"messageId",message},{"attachmentId","4"}}));
     check(opaque.at("ok") == true && opaque.at("data").at("name") == secretMarker,
           "Attachment upload or inspection revealed a match against another Bot's vault");
-    check(f.store->receipt("alpha","media","Please inspect these photos and audio",0,media).has_value(),
+    check(f.store->receipt(owner,"alpha","media","Please inspect these photos and audio",0,media).has_value(),
           "Attachment receipt was not idempotent");
     const auto jpeg = Json::array({
         {{"name","pixel.jpg"},{"mimeType","image/jpeg"},
@@ -478,7 +484,7 @@ void externalTools(Fixture& f) {
         {{"name","corrupt.jpg"},{"mimeType","image/jpeg"},{"dataBase64","/9j/4AAQSkZJRgABAQAAAQABAAA="}}
     });
     f.model.next = {call("reply",{{"text","Message received."}})};
-    const auto pictures = f.store->receive(f.intake(),"jpeg","Please inspect these JPEGs",0,jpeg).at("messageId");
+    const auto pictures = f.store->receive(owner,f.intake(),"jpeg","Please inspect these JPEGs",0,jpeg).at("messageId");
     f.runtime->runConversations();
     const auto jpegViews = f.batch({call("inspect_attachment",{{"messageId",pictures},{"attachmentId","1"}}),
                                     call("inspect_attachment",{{"messageId",pictures},{"attachmentId","2"}})});
@@ -570,10 +576,10 @@ void approvalWhileAnotherTurnIsInferring(Fixture& f) {
     f.grant({"web","public","search"});
     const auto search = [](std::string query) { return call("web_search",{{"query",query}}); };
     f.batch({search("older")},1);
-    const auto paused = f.store->pausedConversations("alpha").at(0).at("messageId").get<Id>();
+    const auto paused = f.store->pausedConversations("alpha").at(0);
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (input.event.at("messageId") == f.lastMessage && input.event.at("turn").empty())
-            f.store->approveMessageModelCall("alpha",paused);
+            f.approvePaused(paused);
     };
     f.batch({search("newer")});
     f.model.beforeTurn = {};

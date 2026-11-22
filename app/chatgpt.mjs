@@ -10,6 +10,7 @@ const directScope = "chatgpt.tokens.use.direct";
 const scopes = `openid profile email offline_access resource.invoke ${directScope}`;
 const callbackPath = "/auth/callback";
 const maxResponse = 4 * 1024 * 1024;
+const maxRequest = 8 * 1024 * 1024;
 const random = () => randomBytes(32).toString("base64url");
 const [operation, directory, inheritedLock] = process.argv.slice(2);
 const lockDescriptor = Number(inheritedLock);
@@ -76,7 +77,8 @@ function remoteFailure(site, status, value, requestId) {
   const parameter = safeCode(error?.param ?? value?.param);
   const tag = [status ? `HTTP ${status}` : "", code, parameter ? `parameter ${parameter}` : "",
     safeCode(requestId) ? `request ${requestId}` : ""].filter(Boolean).join(", ");
-  const temporary = (status === 429 || status === 408 || status >= 500 || code.endsWith("_unavailable"))
+  const temporary = (status === 429 || status === 408 || (status >= 500 && status <= 599) ||
+    ["server_error", "rate_limit_exceeded", "service_unavailable"].includes(code))
     && code !== "subscription_sharing_usage_limit_exceeded";
   const guidance = code === "subscription_sharing_usage_limit_exceeded"
     ? " — review the app limit at https://chatgpt.com/settings/usage"
@@ -378,18 +380,23 @@ async function parseStream(body, requestId) {
     const payload = data.join("\n");
     data = [];
     if (payload === "[DONE]") return;
-    const event = JSON.parse(payload);
-    if (event.type === "response.completed") completed = event.response;
+    let event;
+    try { event = JSON.parse(payload); } catch { throw new Failure("Invalid JSON in ChatGPT response stream"); }
+    if (!event || typeof event.type !== "string") throw new Failure("Invalid ChatGPT response event");
+    if (event.type === "response.completed") {
+      if (!Array.isArray(event.response?.output)) throw new Failure("Invalid ChatGPT completion");
+      completed = event.response;
+    }
     if (event.type === "response.incomplete" || event.type === "response.failed" || event.type === "error") {
       const failure = event.type === "response.incomplete"
-        ? new Failure("ChatGPT returned an incomplete response", true)
+        ? new Failure("ChatGPT returned an incomplete response")
         : remoteFailure("ChatGPT Responses API", 0, event.response ?? event, requestId);
       failure.usage = event.response?.usage ?? event.usage;
       throw failure;
     }
   }
   try {
-    for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
+    for await (const chunk of body.pipeThrough(new TextDecoderStream("utf-8", { fatal: true }))) {
       received += chunk.length;
       if (received > maxResponse) throw new Failure("ChatGPT response exceeded the transport limit");
       text += chunk;
@@ -402,7 +409,8 @@ async function parseStream(body, requestId) {
     }
   } catch (error) {
     if (error instanceof Failure) throw error;
-    throw new Failure("ChatGPT response stream was interrupted or malformed", true);
+    if (error.code === "ERR_ENCODING_INVALID_ENCODED_DATA") throw new Failure("Invalid UTF-8 in ChatGPT response stream");
+    throw new Failure("ChatGPT response stream was interrupted", true);
   }
   throw new Failure("ChatGPT stream ended before a completed response", true);
 }
@@ -415,7 +423,7 @@ async function infer(payload) {
   }, 90_000);
   const mediaType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
   if (!response.body || (mediaType && mediaType !== "text/event-stream")) {
-    throw new Failure("ChatGPT did not return the expected response stream", true);
+    throw new Failure("ChatGPT did not return the expected response stream");
   }
   const completed = await parseStream(response.body, response.headers.get("x-request-id"));
   return { output: completed.output, usage: completed.usage };
@@ -424,9 +432,11 @@ async function infer(payload) {
 try {
   if (!locked) throw new Failure("Flock's ChatGPT transport requires an inherited credential lock");
   let payload = "";
+  let requestBytes = 0;
   for await (const chunk of process.stdin.setEncoding("utf8")) {
+    requestBytes += Buffer.byteLength(chunk);
+    if (requestBytes > maxRequest) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
     payload += chunk;
-    if (payload.length > maxResponse) throw new Failure("Flock's ChatGPT request exceeded the transport limit");
   }
   const input = JSON.parse(payload);
   let result;

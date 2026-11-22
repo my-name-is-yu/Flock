@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/session_read.hpp"
 
 #include <iostream>
@@ -157,15 +157,15 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir/"state.db");
-        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     }
     Intake intake(std::string bot) {
-        return {std::move(bot),"Investigate staging",env,"release",Json::object(),{},0};
+        return {std::move(bot),"Investigate staging",env,"release",Json::object()};
     }
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
         model.next = {std::move(tool),std::move(args),"Inspect the requested investigation"};
-        store->receive(intake(std::move(bot)),std::to_string(++sequence),
+        store->receive(localOwner,intake(std::move(bot)),std::to_string(++sequence),
                        "Where did yesterday’s staging investigation fail?");
         runtime->runConversations();
         check(!model.result.is_null(),"conversation did not dispatch tool");
@@ -371,13 +371,15 @@ void redactionAndResumedHistory() {
         f.model.result = nullptr;
         auto intake = f.intake("alpha");
         intake.config["modelCallLimit"] = 1;
-        f.store->receive(intake,std::to_string(++f.sequence),"Look for the failure");
+        const auto receipt = f.store->receive(localOwner,intake,std::to_string(++f.sequence),"Look for the failure");
         f.runtime->runConversations();
         const auto paused = f.store->pausedConversations("alpha");
         check(paused.size() == 1 && f.model.result.is_null(),"turn did not pause after reading evidence");
         revoke();
         f.restart();
-        f.store->approveMessageModelCall("alpha",paused.front().at("messageId").get<Id>());
+        const Id pauseId = paused.front().at("messageId");
+        f.store->decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
+                             "approve");
         f.runtime->runConversations();
         check(f.model.result.dump() == missing.dump(),"reopened turn exposed inaccessible cached evidence");
     };

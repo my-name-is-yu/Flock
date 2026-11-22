@@ -1,4 +1,4 @@
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 #include "flock/t3_mcp.hpp"
 
 #include <algorithm>
@@ -154,7 +154,7 @@ int profile(Store& store,T3& t3, Id id, std::string_view mode) {
     unsigned modelCalls = 0;
     if (mode == "wait") {
         TestModel model;
-        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
         for (int i = 0; i < 5; ++i) runtime.tick();
         modelCalls = model.calls;
         if (modelCalls || store.task(id).at("state") != "running")
@@ -231,7 +231,7 @@ int main(int argc, char** argv) {
             std::cout << Json{{"task",store.task(id)},{"history",store.history(id,0,200)}}.dump(2) << '\n';
         } else if (operation == "operate" && (argc == 6 || argc == 7)) {
             Store store(argv[2]);
-            store.operate(std::stoll(argv[3]),std::stoll(argv[4]),argv[5],argc == 7 ? Json::parse(argv[6]) : Json::object());
+            store.operate(localOwner,TaskTarget::from(store.task(std::stoll(argv[3])),std::stoll(argv[4])),argv[5],argc == 7 ? Json::parse(argv[6]) : Json::object());
         } else if (operation == "inspect" && argc == 5) {
             Store store(argv[2]);
             auto t3 = makeT3Mcp(argv[3]);
@@ -253,7 +253,7 @@ int main(int argc, char** argv) {
             const auto id = std::stoll(argv[4]);
             RuntimeOptions options;
             if (store.task(id).at("request") == "measurement-read-resume") options.sessionRead = "on_demand";
-            Runtime runtime(store,model,adapter,[](std::string_view) { return BotNotes{"Validate the acceptance fixture",""}; },options);
+            Runtime runtime(store,model,adapter,[](std::string_view) { return std::string("Validate the acceptance fixture"); },options);
             std::string previous;
             const auto end = std::chrono::steady_clock::now() + 5min;
             do {

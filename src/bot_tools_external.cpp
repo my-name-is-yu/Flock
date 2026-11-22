@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 #include "workspace_internal.hpp"
 
 #include <algorithm>
@@ -189,7 +190,8 @@ void Store::Impl::authorizeBotToolHistory(std::string_view bot, Id message, Mode
             });
         }
     }
-    input.images = inspectedImages(bot,message,steps);
+    auto images = inspectedImages(bot,message,steps);
+    input.images.insert(input.images.end(),std::make_move_iterator(images.begin()),std::make_move_iterator(images.end()));
 }
 
 std::string webHost(std::string_view url) {
@@ -250,6 +252,12 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
 
 Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     const auto& args = call.args;
+    {
+        std::lock_guard lock(mutex);
+        const auto message = loadTurnMessage(ctx.messageId);
+        if (!message.channelScope.empty() || !Access(*this).permitsPerson(message.actor,ctx.bot,Role::decide))
+            throw DecisionDenied{};
+    }
     const auto grant = authorizedBotToolScope(ctx.bot,call);
     if (!grant) throw Conflict("Bot tool access denied");
     if (call.tool.starts_with("workspace_")) {
@@ -275,10 +283,10 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
         }
     } else if (call.tool == "skill_read") {
         const auto [root,relative] = skillFile(ctx,*grant,args,path);
-        content = readToolFile(root,relative,sessionRedactor());
+        content = readToolFile(root,relative,sharedRedactor());
     } else content = inspectAttachment(ctx.bot,ctx.messageId,args);
     const bool failed = call.tool == "mcp_call_tool" && content.is_object() && content.value("isError",false);
-    const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sessionRedactor();
+    const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();
     if (call.tool == "web_fetch" && content.value("truncated",false))
         content["text"] = scrub.text(field(content,"text"),true);
     auto data = scrub.payload(content);
