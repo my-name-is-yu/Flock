@@ -108,8 +108,13 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", false}});
         const auto launches = effects("t3_thread_launch");
         check(launches.size() == 1, "launch reconciliation creates no additional T3 threads");
-        check(launches.at(0).at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
+        const auto& args = launches.at(0);
+        check(args.at("clientRequestId") == launch.actionId &&
+              args.at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
               "T3 receives the original launch instruction followed by one canonical marker");
+        check(!args.contains("modelSelection") && !args.contains("runtimeMode") &&
+              !args.contains("workspaceStrategy") && !args.contains("interactionMode"),
+              "T3 uses its defaults when Session settings are omitted");
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);

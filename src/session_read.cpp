@@ -462,6 +462,8 @@ Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channel
         return scopedResult(failure(error.what()));
     } catch (const SessionReadTimeout&) {
         return scopedResult(failure(searchTimedOut));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception&) {
         return scopedResult(failure("Session evidence could not be read"));
     }

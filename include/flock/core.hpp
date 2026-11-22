@@ -206,6 +206,9 @@ class LocalMachine;
 enum class ChannelKind;
 struct ChannelResource;
 struct VerifiedChannelMessage;
+namespace conversation { enum class PrincipalSource; }
+// An absent result means the person is unavailable. Otherwise the value is their current root authority.
+using WebIdentityResolver = std::function<std::optional<bool>(std::string_view personId)>;
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
@@ -237,6 +240,9 @@ public:
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());
+    // Refers to a person in the current Web identity directory when the Runtime executes the turn.
+    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
+                    Id replyToMessageId = 0, const Json& attachments = Json::array());
     std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
                                 std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
@@ -284,6 +290,7 @@ public:
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
+    void setWebIdentityResolver(WebIdentityResolver);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
@@ -296,7 +303,7 @@ public:
 
 private:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&,
+                 Id replyToMessageId, conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
                  const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
@@ -314,6 +321,7 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
+    std::function<void(std::string_view)> storageContention = {};
 };
 class Runtime {
 public:
@@ -327,6 +335,8 @@ public:
     // eligible projects independently and returns immediately.
     void tick();
     void tickConcurrent();
+    // Let admitted work settle while stopping further dispatch.
+    void requestStop();
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;

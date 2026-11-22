@@ -862,6 +862,18 @@ void peerWorkAndRestart() {
     check(f.store->tasks("beta").size() == 1 && f.t3.launches == 1 && f.t3.reads == 1 &&
           f.task(root)["additionalUsed"] == 0 && f.logs(root,"user_answer") == 1 && f.logs(root,"completed") == 1,
           "restart duplicated the recipient, Session, evidence read, user answer or completion");
+    const auto result = f.botMessages("alpha").back();
+    const auto completion = f.store->latestTaskResult(root).at("data");
+    check(!completion.contains("source") && completion.at("dependency") == Json{
+              {"exchangeId",result.at("exchangeId")},{"messageId",result.at("messageId")},{"taskId",recipient},
+              {"botId","beta"},{"requestKind","work"},{"status","completed"}},
+          "the completion did not retain the peer result as its dependency");
+    check(completion.at("evidenceRefs") == Json::array({
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","final-answer"},
+               {"kind","peer_report"},{"messageId",result.at("messageId")}},
+              {{"environmentId","e"},{"threadId","thread-1"},{"runId","run-1-result"},{"itemId","item-1"},
+               {"kind","session_read"},{"messageId",result.at("messageId")}}}),
+          "the completion lost the scoped references for the peer report and history item");
     const struct Message {
         const char* type;
         const char* from;
@@ -930,6 +942,33 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     const auto& wait = paused.at("wait");
     check(wait.at("attempted") == "send_bot_message" && wait.at("decisionReason") == "Use the configured verifier" &&
           wait.at("usage") == Json{{"total_tokens",37}},"the peer budget wait lost the proposed action or its usage");
+}
+
+void peerCompletionKeepsEvidenceWithinTheReadGrant() {
+    Fixture f;
+    f.allowBeta();
+    const auto sender = f.submit("Decide whether the PR can ship");
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto kind = input.event.at("kind");
+        if (input.task.at("id") == sender) {
+            if (kind == "intake") return botRequest("beta","work","Verify the PR");
+            return complete();
+        }
+        if (kind == "bot_request") return work();
+        return botReply("result","Verified the PR");
+    };
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    f.reach(recipient,"running");
+    f.store->access().resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    f.t3.finish("run-1");
+    f.reach(recipient,"completed");
+    f.restart();
+    f.reach(sender,"completed");
+    const auto completion = f.store->latestTaskResult(sender).at("data");
+    check(completion.at("dependency").at("taskId") == recipient &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "completion exposed peer Run provenance outside its Session read grant");
 }
 
 void checkPeerClarificationAfterRun(std::string_view readMode) {
@@ -1473,6 +1512,11 @@ void peerConsultationAndPermission() {
     check(messages.size() == 2 && messages.front().at("text") == "What is the release policy?" &&
           messages.back().at("fromBotId") == "beta" && messages.back().at("text") == "Require a verified PR",
           "consultation did not record the corresponding request and response");
+    const auto completion = f.store->latestTaskResult(consultation).at("data");
+    check(completion.at("dependency").at("messageId") == messages.back().at("messageId") &&
+          completion.at("dependency").at("requestKind") == "consult" &&
+          completion.at("evidenceRefs").empty() && !completion.contains("source"),
+          "the consultation lost its peer dependency or attributed the reply to a Session");
 }
 
 void requestedCriteriaApplyToFirstPeerWork() {
@@ -1774,9 +1818,13 @@ void prefillPersistenceFailureDoesNotProceed() {
           f.t3.reads == 1 && f.logs(source,"report") == 1,
           "test did not reach a settled report with an incoming peer result");
     setSessionReadJournalFailure(f.directory/"state.db",true);
-    f.runtime->tick();
-    check(f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
-          f.logs(source,"model_failure") == 1 && f.logs(source,"completed") == 0 &&
+    bool storageFailure = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        storageFailure = std::string_view(error.what()) == "injected journal failure";
+    }
+    check(storageFailure && f.t3.reads == 2 && f.model.calls == 3 && f.logs(source,"session_read") == 1 &&
+          f.logs(source,"model_failure") == 0 && f.logs(source,"completed") == 0 &&
           f.task(source)["state"] == "deciding",
           "the model proceeded with a prefill excerpt that SQLite did not durably save");
     setSessionReadJournalFailure(f.directory/"state.db",false);
@@ -1855,6 +1903,154 @@ void peerProjectCycle() {
     const auto messages = f.botMessages("alpha");
     check(messages.size() == 2 && messages.back()["status"] == "failed" && f.logs(alpha,"completed") == 0,
           "the original exchange hid the failed outcome or completed the sender's work");
+}
+
+struct PeerMoveCycleFixture : Fixture {
+    const Intake verifier{"beta","","cloud","p",
+        {{"conversationEnvironments",{{"desktop","e"},{"remote","remote"},{"backup","backup"}}}}};
+    Intake specialist{"alpha","","e","p",verifier.config};
+    Id desktopSender = 0, cloudRecipient = 0, remoteSender = 0;
+
+    PeerMoveCycleFixture() {
+        peers["alpha"] = {{"Verifier",verifier}};
+        model.script = [&](const ModelInput& input) -> Decision {
+            const auto& kind = input.event.at("kind");
+            if (kind == "intake") {
+                if (input.task.at("id") == desktopSender) return botRequest("beta","work","Verify the release");
+                check(input.task.at("id") == remoteSender,"Unexpected task intake");
+                return botRequest("alpha","work","Check the deployment");
+            }
+            if (kind == "bot_request") return work();
+            if (kind == "bot_result") return input.event.at("status") == "completed" ? complete() : ask();
+            if (kind == "result" && input.task.contains("userInstructions")) return work("delegate",false);
+            check(kind == "result","Unexpected recipient event");
+            return botReply("result","Verification complete");
+        };
+        desktopSender = submit("Release check");
+        reach(desktopSender,"peer_waiting");
+        cloudRecipient = store->tasks("beta").front().at("id");
+        reach(cloudRecipient,"running");
+    }
+
+    void startRemoteSender(std::string destination = "e") {
+        specialist.environmentId = std::move(destination);
+        peers["beta"] = {{"Specialist",specialist}};
+        remoteSender = store->submit({"beta","Deployment check","remote","p"});
+    }
+
+    Json move(Id recipient, const Intake& routing, std::string_view environment) {
+        constexpr auto revision = "Check the deployment logs";
+        const auto decideWork = model.script;
+        Json result;
+        model.script = [&](const ModelInput& input) {
+            if (input.event.at("kind") != "conversation_turn") return decideWork(input);
+            if (!input.event.at("turn").empty()) result = input.event.at("turn").back().at("result");
+            return converse(input,"change_task",recipient,{{"environment",environment},{"doneWhen",revision}});
+        };
+        const std::string instruction = "Move the verification to " + std::string(environment) + " and " + revision;
+        store->receive(localOwner,routing,instruction,instruction);
+        runtime->runConversations();
+        model.script = decideWork;
+        return result;
+    }
+};
+
+void cyclicPeerMoveIsRejected() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender();
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
+    const auto originalRun = f.task(f.cloudRecipient).at("activeRun");
+    const auto rejected = f.move(f.cloudRecipient,f.verifier,"remote");
+    check(rejected.at("ok") == false && rejected.at("error").get<std::string>().find("project queues") != std::string::npos,
+          "the conversation admitted a move that cycles back to the sender's queue");
+    f.restart();
+    check(f.task(f.cloudRecipient).at("activeRun") == originalRun && f.task(f.cloudRecipient).at("doneWhen") == Evidence &&
+          f.logs(f.cloudRecipient,"instruction_accepted") == 0 && f.task(queued).at("blockedBy").at("id") == f.desktopSender,
+          "the rejected move changed the run, criteria, or exchange after restart");
+
+    check(f.move(f.cloudRecipient,f.verifier,"desktop").at("effect") == "replanning",
+          "the recipient could not move into the sender's own queue");
+    f.restart();
+    f.t3.finish(originalRun.at("runId"));
+    for (int tick = 0; tick < 12 && f.t3.launches == 1; ++tick) f.runtime->tick();
+    check(f.t3.launches == 2 && f.t3.interrupts == 0 && f.t3.seen.back().environmentId == "e" &&
+          f.task(queued).at("blockedBy").at("id") == f.cloudRecipient,
+          "the valid move did not inherit its sender's slot and launch once");
+    f.t3.finish("run-2");
+    f.reach(f.desktopSender,"completed");
+    f.reach(queued,"running");
+    f.t3.finish("run-3");
+    f.reach(f.remoteSender,"completed");
+    check(f.logs(f.cloudRecipient,"peer_completed") == 1 && f.logs(queued,"peer_completed") == 1,
+          "the valid move did not let both original exchanges close once");
+}
+
+void pendingPeerMovePreventsNewExchange() {
+    PeerMoveCycleFixture f;
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("effect") == "replanning",
+          "the first move could not reserve a free destination");
+    f.restart();
+    f.startRemoteSender();
+    f.wait(f.remoteSender,"model_failure");
+    check(f.task(f.remoteSender).at("wait").at("text").get<std::string>().find("project queues") != std::string::npos &&
+          f.store->tasks("alpha").size() == 1 && f.botMessages("alpha").size() == 1,
+          "a new exchange was opened against the already accepted destination");
+}
+
+void pendingPeerMovePreventsAnotherMove() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender("backup");
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
+          "the first move could not reserve the desktop destination");
+    check(f.move(f.remoteSender,f.verifier,"backup").at("effect") == "replanning",
+          "the sender could not request a move for after its exchange");
+    f.restart();
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("ok") == false &&
+          f.logs(f.cloudRecipient,"instruction_accepted") == 0 && f.logs(backupRecipient,"instruction_accepted") == 1,
+          "the second move introduced a cycle against an already accepted move");
+}
+
+void cancelledPeerMoveFreesItsPendingDestination() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender("backup");
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto backupRecipient = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(f.cloudRecipient,f.verifier,"remote").at("effect") == "replanning",
+          "the first move could not reserve the remote destination");
+    f.store->operate(localOwner,TaskTarget::from(f.task(f.cloudRecipient),0),"cancel");
+    check(f.task(f.cloudRecipient).at("state") == "cancelling" &&
+          f.move(backupRecipient,f.specialist,"desktop").at("effect") == "replanning",
+          "a cancelling recipient retained its abandoned destination");
+}
+
+void recoverLegacyPeerMoveCycle() {
+    PeerMoveCycleFixture f;
+    f.startRemoteSender();
+    f.reach(f.remoteSender,"peer_waiting");
+    const auto queued = f.store->tasks("alpha").front().at("id").get<Id>();
+    check(f.move(f.cloudRecipient,f.verifier,"backup").at("ok") == true,"could not prepare the legacy move");
+    f.t3.finish("run-1");
+    f.runtime->tick();
+    f.runtime.reset();
+    // Seed the destination that the old runtime could persist after releasing the original queue.
+    const auto legacyMove = "UPDATE tasks SET data=json_set(data,'$.pendingEnvironmentId','remote',"
+        "'$.environmentReleased',json('true')) WHERE id=" + std::to_string(f.cloudRecipient);
+    executeSql(f.directory/"state.db",legacyMove.c_str());
+    f.restart();
+    f.reach(f.cloudRecipient,"cancelled");
+    f.wait(f.desktopSender,"user_question");
+    const auto messages = f.botMessages("alpha");
+    check(messages.back().at("status") == "cancelled" && f.t3.launches == 1 &&
+          f.task(f.cloudRecipient).at("environmentId") == "cloud",
+          "legacy recovery lost the exchange outcome or sent work to an unsafe destination");
+    f.store->operate(localOwner,TaskTarget::from(f.task(f.desktopSender),0),"cancel");
+    f.reach(queued,"running");
+    f.t3.finish("run-2");
+    f.reach(f.remoteSender,"completed");
+    check(f.logs(f.cloudRecipient,"cancelled") == 1,"the legacy recipient was cancelled more than once");
 }
 
 void peerCancelWhileQueued() {
@@ -1984,6 +2180,7 @@ int main() {
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
+            {"Peer completion evidence follows the Session read grant",peerCompletionKeepsEvidenceWithinTheReadGrant},
             {"Bot clarification after a settled Run",peerClarificationAfterRun},
             {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
             {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
@@ -2005,6 +2202,11 @@ int main() {
             {"Fresh result prefill failure",freshResultSurvivesUnavailableHistory},
             {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
+            {"Cyclic recipient move is rejected",cyclicPeerMoveIsRejected},
+            {"Accepted peer move constrains new exchanges",pendingPeerMovePreventsNewExchange},
+            {"Accepted peer move constrains other moves",pendingPeerMovePreventsAnotherMove},
+            {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
+            {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {

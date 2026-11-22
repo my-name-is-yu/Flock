@@ -154,7 +154,8 @@ class Fixture(BaseHTTPRequestHandler):
             {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
              "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
         ]
-        if (name in ("t3_thread_read", "t3_thread_list", "t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+        if (name in ("t3_project_read", "t3_thread_read", "t3_thread_list", "t3_thread_launch",
+                     "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
@@ -171,14 +172,11 @@ class Fixture(BaseHTTPRequestHandler):
             return {"id": "project", "code": "project-code", "title": "Release Pipeline", "defaultModelSelection": None}
         if name == "t3_thread_launch":
             assert args["projectId"] == "project"
-            assert "modelSelection" not in args and "workspaceStrategy" not in args
+            assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
             if self.server.peer_recovery:
                 state["launches"].append(args["clientRequestId"])
                 assert len(state["launches"]) == 1, "Runtime sent a second launch"
                 assert "Verify the fixture" in args["message"]
-            else:
-                assert args["clientRequestId"] == "flock-action-0123"
-                assert args["message"].count("[Flock action") == 1
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}

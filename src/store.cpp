@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,8 +12,11 @@
 
 namespace flockv0 {
 namespace {
-[[noreturn]] void sqlError(sqlite3* db) { throw std::runtime_error(sqlite3_errmsg(db)); }
+[[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
 }
+StorageError::StorageError(sqlite3* db)
+    : std::runtime_error(sqlite3_errmsg(db)), code_(sqlite3_errcode(db) & 0xff) {}
+
 Statement::Statement(sqlite3* db, const char* sql, const Json& values) {
     if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) sqlError(db);
     try {
@@ -283,6 +287,35 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
                       " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
+}
+
+bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
+    // A sender cannot move until its exchange closes. Reserve a recipient's pending destination
+    // while retaining the current dependency until the recipient releases that queue.
+    return query(R"SQL(
+WITH RECURSIVE source(env,project) AS (
+  SELECT environment_id,project_id FROM tasks WHERE id=?1
+), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
+  SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
+         CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
+              THEN json_extract(r.data,'$.pendingEnvironmentId') END,
+         COALESCE(json_extract(r.data,'$.environmentReleased'),0)
+  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
+  WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
+), dependencies(source_env,source_project,target_env,target_project) AS (
+  SELECT source_env,source_project,current_env,target_project FROM work_routes
+  WHERE NOT released
+  UNION ALL
+  SELECT source_env,source_project,pending_env,target_project FROM work_routes
+  WHERE pending_env IS NOT NULL
+), reachable(env,project) AS (
+  SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
+  UNION
+  SELECT target_env,target_project FROM dependencies JOIN reachable
+    ON source_env=env AND source_project=project
+)
+SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
+)SQL",{sender,environment,project}).next();
 }
 
 bool Store::Impl::replanReady(const Json& task) const {
@@ -559,16 +592,9 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
             const auto action = outbox(task);
-            const auto& session = data["session"];
-            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready") || !session.is_object())
+            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready"))
                 throw Conflict("Session settings can only be corrected before an unsent action");
-            for (auto item = session.begin(); item != session.end(); ++item) {
-                if ((item.key() == "workspaceStrategy" && item->is_object()) ||
-                    ((item.key() == "model" || item.key() == "providerInstanceId" || item.key() == "runtimeMode") &&
-                     item->is_string())) continue;
-                throw Conflict("Invalid Session setting");
-            }
-            task["config"]["session"] = session;
+            task["config"]["session"] = normalizeSessionSettings(data["session"]);
         }
         if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
         else {

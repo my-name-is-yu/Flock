@@ -22,6 +22,12 @@ header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
 identity for initial grants. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
 
+Queued and resumed shared Web messages use the sender's current identity and
+Bot access. If a person has multiple credentials, their queued messages have
+root authority only when all of those credentials currently have `adminRoot`.
+Send the message again if it was queued before Flock recorded the source of
+shared Web messages and is rejected after an upgrade.
+
 An administrator can GET `/api/access?bot=ID` and POST to `/api/access/person`,
 `resource`, `decision`, `secret` and `bot-change` under the same prefix. These
 routes require the usual same-origin JSON mutation headers. Grant mutations use

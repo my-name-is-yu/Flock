@@ -71,6 +71,15 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto environment = verifiedEnvironment(task,routing,change->environment);
+        const bool destinationChanged = !environment.empty() &&
+            environment != task.value("pendingEnvironmentId",field(task,"environmentId"));
+        if (destinationChanged) {
+            const auto id = task.at("id").get<Id>();
+            const auto peer = peerExchange(id);
+            if (peer && peer->recipient == id && peer->kind == "work" &&
+                peerWorkRouteWouldCycle(peer->sender,environment,field(task,"projectId")))
+                throw Conflict("This destination would make project queues wait for one another");
+        }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
         if (criteriaChanged || intentChanged) {
@@ -81,11 +90,12 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
                     task["requestedDoneWhen"] = done;
                     task["criteriaSourceMessageId"] = messageId;
                 }
+                journal(task.at("id"),"task_contract_changed",{{"messageId",messageId}});
             }
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
         }
-        if (!environment.empty() && environment != task.value("pendingEnvironmentId",field(task,"environmentId"))) {
+        if (destinationChanged) {
             task["pendingEnvironmentId"] = environment;
             conflicting = true;
         }
