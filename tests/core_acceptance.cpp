@@ -262,7 +262,7 @@ void invalidDecisions() {
     f.runtime->tick();
     f.restart();
     const auto wait = f.wait(id,"model_failure");
-    check(f.model.calls == 3 && f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
+    check(f.model.calls == 5 && f.logs(id,"model_failure") == 3 && f.logs(id,"tool_error") == 2 && f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
     f.store->operate(id,wait,"retry");
     f.rejects(id,wait,"retry");
     f.model.script = [](const ModelInput&) { return work(); };
@@ -278,6 +278,52 @@ void invalidDecisions() {
     f.model.script = [](const ModelInput&) { return work(); };
     f.wait(id,"model_failure");
     check(f.t3.launches == 1 && f.task(id)["doneWhen"] == Evidence,"doneWhen overwritten");
+}
+
+void correctInvalidTaskArguments() {
+    Fixture f;
+    const auto id = f.submit();
+    const Json badArgs = {{"question","Which branch?"},{"choices",12}};
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (f.model.calls == 1) return {"ask_user",badArgs,"Need a branch"};
+        const auto& feedback = input.event.at("decisionFeedback");
+        check(feedback.size() == 1 && feedback[0].at("tool") == "ask_user" && feedback[0].at("args") == badArgs &&
+              feedback[0].at("result").at("ok") == false &&
+              feedback[0].at("result").at("error") == "Expected up to twelve short textual choices",
+              "model did not receive the rejected arguments and validation result");
+        return ask();
+    };
+    f.reach(id,"deciding");
+    f.runtime->tick();
+    f.restart();
+    f.wait(id,"user_question");
+    check(f.model.calls == 2 && !f.logs(id,"model_failure") && f.logs(id,"decision") == 1,
+          "correcting an invalid tool call consumed a model-failure strike");
+}
+
+void replayQuestionDecision() {
+    for (const bool stillOpen : {true,false}) {
+        Fixture f;
+        const auto id = f.store->submit({"alpha","Use main","e","p",{{"modelCallLimit",2}}});
+        f.model.script = [&](const ModelInput& input) {
+            if (input.event.at("kind") == "intake") return work();
+            // Lose T3 visibility at the post-inference liveness check, before any reply can commit.
+            f.t3.runs.at("run-1").kind = Observation::Kind::Unavailable;
+            return reply();
+        };
+        f.reach(id,"running");
+        f.t3.question("run-1");
+        f.reach(id,"deciding");
+        f.runtime->tick();
+        check(f.model.calls == 2 && f.task(id)["state"] == "deciding" && !f.t3.replies,
+              "reply did not stop between inference and effect");
+        f.restart();
+        if (stillOpen) f.t3.question("run-1");
+        else f.t3.runs.at("run-1") = {};
+        f.reach(id,"running");
+        check(f.model.calls == 2 && f.t3.replies == int(stillOpen) && !f.task(id).contains("pendingDecision"),
+              "restart repeated inference or applied a stale question reply");
+    }
 }
 
 void ambiguityAndFailure() {
@@ -454,6 +500,21 @@ void waitsExpireWithReality() {
     f.reach(id,"completed");
     check(f.t3.replies==0 && f.logs(id,"user_answer")==0 && f.t3.seen.size()==1,
           "stale waiting operation executed");
+}
+
+void failedPreflightIsUnsent() {
+    Fixture f;
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.t3.onPreflight = [] { throw ModelError("Missing T3 settings",false); };
+    const auto wait = f.wait(id,"settings");
+    check(f.t3.seen.empty() && f.logs(id,"send_started") == 0,"failed preflight started a delivery");
+    f.restart();
+    f.t3.onPreflight = {};
+    f.store->operate(id,wait,"reconcile");
+    f.reach(id,"running");
+    check(f.t3.launches == 1 && f.t3.reconciles == 0 && f.logs(id,"send_started") == 1,
+          "preflight failure did not leave one unsent action");
 }
 
 void recoveredDelivery() {
@@ -991,7 +1052,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
 
     f.t3.finish("run-1");
     for (int step = 0; step < 12 && !attemptedFailure; ++step) f.runtime->tick();
-    check(attemptedFailure && !f.task(recipient).contains("deferredTerminal") && f.logs(recipient,"model_failure") == 1 &&
+    check(attemptedFailure && !f.task(recipient).contains("deferredTerminal") && f.logs(recipient,"tool_error") == 1 &&
           !f.logs(recipient,"peer_completed"),"failed reply bypassed the outstanding revision before deferral");
     for (int step = 0; step < 24 && f.t3.follows == 0; ++step) f.runtime->tick();
     check(f.t3.follows == 1 && f.t3.seen.size() == 2 && f.t3.seen.back().tool == "follow_up" &&
@@ -1119,7 +1180,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
           alphaMessages.back()["evidence"][0]["environmentId"] == (moves ? "cloud" : "e") &&
           alphaMessages.back()["evidence"][0]["runId"] == "run-2-result" &&
           f.logs(recipient,"peer_completed") == 1 && f.logs(sender,"completed") == 1 &&
-          f.logs(recipient,"model_failure") == 1 && f.logs(sender,"model_failure") == 0 &&
+          f.logs(recipient,"tool_error") == 1 && f.logs(sender,"model_failure") == 0 &&
           f.task(sender)["wait"].is_null() && f.task(recipient)["wait"].is_null(),
           "the revised result did not close the same exchange once without model-failure waits");
 }
@@ -1247,7 +1308,7 @@ void peerConsultationAndPermission() {
         return botRequest("gamma","consult","What is the release policy?");
     };
     f.wait(denied,"model_failure");
-    check(deniedAttempts == 3 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
+    check(deniedAttempts == 6 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
           "an unlisted recipient received a message or the available send tool was not exercised");
     f.store->operate(denied,0,"cancel");
     f.reach(denied,"cancelled");
@@ -1737,7 +1798,9 @@ void inferenceInvalidatedByCancel() {
 
 int main() {
     for (const auto& [name,run] : std::vector<std::pair<const char*, void(*)()>>{
-            {"invalid decisions",invalidDecisions},{"clarification and failure",ambiguityAndFailure},
+            {"invalid decisions",invalidDecisions},{"correct invalid task arguments",correctInvalidTaskArguments},
+            {"failed preflight",failedPreflightIsUnsent},
+            {"replay saved question decision",replayQuestionDecision},{"clarification and failure",ambiguityAndFailure},
             {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
             {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},

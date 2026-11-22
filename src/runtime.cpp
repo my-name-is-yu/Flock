@@ -135,6 +135,7 @@ struct Runtime::Impl {
         Transaction transaction(db.db);
         auto task = db.load(id);
         if (!fn(task)) return false;
+        task.erase("pendingDecision");
         db.save(task);
         transaction.commit();
         if (saved) *saved = std::move(task);
@@ -143,7 +144,8 @@ struct Runtime::Impl {
 
     template<class F> bool change(const Json& snapshot, F fn, Json* saved = nullptr) {
         return changeTask(snapshot["id"],[&](Json& task) {
-            return task["generation"] == snapshot["generation"] && fn(task);
+            return task["generation"] == snapshot["generation"] && task["eventId"] == snapshot["eventId"] &&
+                   revision(task) == revision(snapshot) && fn(task);
         },saved);
     }
 
@@ -520,18 +522,25 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         return !prior.next();
     }
 
+    enum class DeliveryOutcome { Accepted, DefinitelyUnsent, Unknown };
+
     void applyDelivery(Id id, const Json& action, Delivery outcome) {
         changeTask(id,[&](Json& task) {
             if (task["actionId"] != action["id"] || terminal(task)) return false;
             const bool cancelling = task["state"] == "cancelling";
             const bool reply = action["tool"] == "answer_session_question";
-            if (outcome.kind == Delivery::Kind::Accepted && !reply && hasRun(outcome.run) &&
-                !assignedRunMatches(task,action,outcome.run)) {
-                outcome.kind = Delivery::Kind::Unknown;
-                outcome.detail = "The returned Run does not match the assigned work";
-                outcome.run = {};
-            }
-            if (outcome.kind == Delivery::Kind::Accepted && (reply || hasRun(outcome.run))) {
+            DeliveryOutcome delivery = DeliveryOutcome::Unknown;
+            if (outcome.kind == Delivery::Kind::Accepted) {
+                if (reply || (hasRun(outcome.run) && assignedRunMatches(task,action,outcome.run)))
+                    delivery = DeliveryOutcome::Accepted;
+                else {
+                    outcome.detail = "The returned Run does not identify the assigned work";
+                    outcome.run = {};
+                }
+            } else if (outcome.definitelyUnsent || outcome.kind == Delivery::Kind::NotAccepted)
+                delivery = DeliveryOutcome::DefinitelyUnsent;
+
+            if (delivery == DeliveryOutcome::Accepted) {
                 db.exec("UPDATE outbox SET phase='accepted' WHERE id=?", {action["id"]});
                 db.clearWait(task,"delivery_confirmed");
                 if (reply) db.unlockQuestion(task,"answered");
@@ -559,7 +568,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (!cancelling) task["state"] = "running";
                 return true;
             }
-            if (outcome.kind == Delivery::Kind::Unknown && !outcome.run.threadId.empty() &&
+            if (delivery == DeliveryOutcome::Unknown && !outcome.run.threadId.empty() &&
                 action["phase"] == "ready" && !reply && !cancelling) {
                 auto saved = action;
                 saved.erase("phase");
@@ -573,8 +582,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                                 outcome.kind == Delivery::Kind::Settings ? "settings" : "unknown_delivery";
             const auto detail = outcome.detail.empty() ? "The assigned side effect could not be confirmed" :
                                                          bounded(outcome.detail,2048);
-            const bool retryableDelivery = outcome.kind == Delivery::Kind::NotAccepted || outcome.definitelyUnsent;
-            if (retryableDelivery) {
+            if (delivery == DeliveryOutcome::DefinitelyUnsent) {
                 db.exec("UPDATE outbox SET phase=? WHERE id=?", {cancelling ? "closed" : "ready",action["id"]});
                 if (!reply) task["deadline"] = 0;
                 if (cancelling) {
@@ -583,12 +591,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 }
             }
             if (cancelling) {
-                if (field(task,"cancellationDetail") == detail && !retryableDelivery) return false;
+                if (field(task,"cancellationDetail") == detail && delivery == DeliveryOutcome::Unknown) return false;
                 task["cancellationDetail"] = detail;
                 db.journal(id,"cancelling",{{"detail",detail},{"actionId",action["id"]}});
             } else if (field(task["wait"],"reason") != reason || field(task["wait"],"text") != detail) {
                 db.wait(task,reason,{{"text",detail}});
-            } else if (!retryableDelivery) return false;
+            } else if (delivery == DeliveryOutcome::Unknown) return false;
             return true;
         });
     }
@@ -597,24 +605,32 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
         Delivery outcome;
-        try {
-            if (action["phase"] == "started") {
-                outcome = t3.reconcile(cmd);
-            } else {
-                if (const auto stop = t3.preflight(cmd)) {
-                    applyDelivery(id,action,*stop);
-                    return;
-                }
-                cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
-                if (!change(task,[&](Json& current) {
-                    db.exec("UPDATE outbox SET phase='started',auth_generation=? WHERE id=?", {cmd.authGeneration,action["id"]});
-                    if (cmd.tool != "answer_session_question" && current["deadline"] == 0)
-                        current["deadline"] = options.clock() + current["config"].value("runTimeoutSeconds",1800);
-                    db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
-                    return true;
-                })) return;
-                outcome = t3.send(cmd);
+        const bool firstSend = action["phase"] == "ready";
+        if (firstSend) {
+            std::optional<Delivery> stopped;
+            try {
+                stopped = t3.preflight(cmd);
+                if (!stopped) cmd.authGeneration = t3.authGeneration(cmd.environmentId,cmd.config);
+            } catch (const std::exception& error) {
+                stopped = Delivery{Delivery::Kind::Settings,{},error.what(),true};
             }
+            if (stopped) {
+                stopped->definitelyUnsent = true;
+                return applyDelivery(id,action,*stopped);
+            }
+            if (!change(task,[&](Json& current) {
+                if (current["actionId"] != action["id"]) return false;
+                db.exec("UPDATE outbox SET phase='started',auth_generation=? WHERE id=? AND phase='ready'",
+                        {cmd.authGeneration,action["id"]});
+                if (!sqlite3_changes(db.db)) return false;
+                if (cmd.tool != "answer_session_question" && current["deadline"] == 0)
+                    current["deadline"] = options.clock() + current["config"].value("runTimeoutSeconds",1800);
+                db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
+                return true;
+            })) return;
+        } else if (action["phase"] != "started") return;
+        try {
+            outcome = firstSend ? t3.send(cmd) : t3.reconcile(cmd);
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
@@ -673,6 +689,25 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             db.journal(current["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
             current["feedback"] = why;
             if (attempts >= 3) db.wait(current,"model_failure",{{"text",why}});
+            return true;
+        });
+    }
+
+    static constexpr int maxToolErrors = 6;
+
+    void rejectDecision(const Json& task, const Json& event, const Decision& decision, std::string_view message) {
+        change(task,[&](Json& current) {
+            const auto why = bounded(message,2048);
+            Json entry = {{"tool",bounded(decision.tool,128)},{"result",{{"ok",false},{"error",why}}},
+                          {"eventId",event.at("id")}};
+            const auto args = decision.args.dump();
+            if (args.size() <= 2048) entry["args"] = decision.args;
+            else entry["argumentsExcerpt"] = bounded(args,2048);
+            db.journal(current["id"],"tool_error",entry);
+            db.exec("UPDATE events SET failures=0,retry_at=0 WHERE id=?",{event["id"]});
+            current["feedback"] = why;
+            if (event.at("decisionFeedback").size() + 1 >= maxToolErrors)
+                db.wait(current,"model_failure",{{"text",why}});
             return true;
         });
     }
@@ -1113,7 +1148,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         // Protocol bookkeeping must not invalidate a conversation's task generation.
         const Json deferred = {{"eventId",eventId},{"generation",current["generation"]},{"revisionId",revision(current)},
             {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
-        db.exec("UPDATE tasks SET data=json_set(data,'$.deferredTerminal',json(?)) WHERE id=?",{deferred,current["id"]});
+        db.exec("UPDATE tasks SET data=json_set(json_remove(data,'$.pendingDecision'),'$.deferredTerminal',json(?)) WHERE id=?",{deferred,current["id"]});
         return true;
     }
 
@@ -1124,6 +1159,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         auto current = db.load(id);
         if (current["generation"] != snapshot["generation"] || current["eventId"] != event["id"] ||
             revision(current) != revision(snapshot) || current["state"] != "deciding") return;
+        current.erase("pendingDecision");
         if (decision.tool == "reply_to_bot") {
             if (replyPeer(current,event,decision,actionId())) db.save(current);
         } else {
@@ -1254,6 +1290,91 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             target["requestId"] == observed.question.requestId;
     }
 
+    std::optional<Decision> savedDecision(const Json& task, const Json& event) {
+        auto saved = task.find("pendingDecision");
+        if (saved == task.end() || saved->at("eventId") != event.at("id") ||
+            saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
+            return std::nullopt;
+        return Decision{saved->at("tool"),saved->at("args"),saved->at("reason"),saved->at("usage")};
+    }
+
+    std::optional<Decision> inferDecision(const Json& task, Json event, const Json& history,
+            const std::vector<std::string>& tools, const Json& pending, Json choices,
+            const std::optional<PeerExchange>& peer) {
+        const auto prefill = prefillHistory(task,event);
+        if (prefill == PrefillResult::Persisted) return std::nullopt;
+        if (prefill == PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
+        const auto bot = notes(field(task,"botId"));
+        Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",field(task,"intent")},
+            {"doneWhen",task["doneWhen"]},
+            {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
+        if (task.contains("sourceMessageId")) summary["sourceMessageId"] = task.at("sourceMessageId");
+        if (task.contains("requestedDoneWhen")) summary["requestedDoneWhen"] = task.at("requestedDoneWhen");
+        if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
+        if (hasPending(task)) {
+            summary["userInstructions"] = pending;
+            summary["pendingInstructionCount"] = task.at("pendingInstructions").size();
+        }
+        if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
+        if (!choices.empty()) summary["peers"] = std::move(choices);
+        if (std::ranges::find(tools,"send_bot_message") != tools.end()) {
+            std::lock_guard lock(db.mutex);
+            auto forwarded = forwardableUserMessage(task);
+            if (!forwarded.is_null()) summary["forwardableUserMessage"] = std::move(forwarded);
+        }
+        if (peer) summary["peer"] = {{"exchangeId",peer->id},{"requestKind",peer->kind},
+            {"replyKinds",replyKinds(task,*peer)},{"phase",peer->phase},{"role",peer->sender == task["id"] ? "sender" : "recipient"}};
+        const auto evidence = event["evidence"];
+        const bool canReadHistory = std::ranges::find(tools,"session_read") != tools.end() ||
+                                    std::ranges::find(tools,"read_bot_evidence") != tools.end();
+        summary["remainingEvidenceReads"] = canReadHistory ? 3 - evidence.size() : 0;
+        event.erase("evidence");
+        event.erase("consumed");
+        Id attempt = 0;
+        {
+            std::lock_guard lock(db.mutex);
+            Transaction transaction(db.db);
+            auto current = db.load(task["id"]);
+            if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
+                revision(current) != revision(task) || current["state"] != "deciding")
+                return std::nullopt;
+            const auto budget = db.taskModelBudget(current);
+            attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+            if (!attempt) {
+                db.wait(current,"model_budget",{{"text",
+                    "The model call limit is exhausted. Approve one more model call to continue."}});
+                db.save(current);
+            }
+            transaction.commit();
+        }
+        if (!attempt) return std::nullopt;
+        const auto recordUsage = [&](const Json& usage) {
+            if (!usage.empty()) db.exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attempt});
+        };
+        Decision decision;
+        try {
+            decision = model.decide({summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
+                                     needsDoneWhen(task),summary.contains("forwardableUserMessage")});
+        } catch (const ModelError& error) {
+            std::lock_guard lock(db.mutex);
+            recordUsage(error.usage);
+            throw;
+        }
+        // Bookkeeping must not advance the generation observed by conversation turns.
+        const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
+            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        recordUsage(decision.usage);
+        db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
+                " WHERE id=? AND state='deciding' AND generation=? AND json_extract(data,'$.eventId')=?",
+                {saved,task["id"],task["generation"],event["id"]});
+        const bool savedForEvent = sqlite3_changes(db.db) != 0;
+        transaction.commit();
+        if (!savedForEvent) return std::nullopt;
+        return decision;
+    }
+
     void decide(const Json& task) {
         if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
         Json event, history = Json::array();
@@ -1274,6 +1395,12 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
                     auto report = settledSessionReport(task);
                     if (!report.is_null()) event["sessionResult"] = std::move(report);
                 }
+                auto errors = db.query(R"SQL(
+SELECT data FROM journal WHERE task_id=? AND kind='tool_error' AND json_extract(data,'$.eventId')=?
+AND id>coalesce((SELECT max(id) FROM journal WHERE task_id=? AND kind='model_retry'),0) ORDER BY id
+)SQL",{task["id"],event["id"],task["id"]});
+                event["decisionFeedback"] = Json::array();
+                while (errors.next()) event["decisionFeedback"].push_back(errors.json(0));
                 auto rows = db.query(R"SQL(
 SELECT id,kind,data,json_extract(data,'$.run.threadId'),json_extract(data,'$.resultRunId'),
        json_extract(data,'$.itemId'),coalesce(json_extract(data,'$.environmentId'),json_extract(data,'$.run.environmentId')) FROM journal WHERE task_id=?
@@ -1311,59 +1438,19 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             auto tools = available(task,event,peer,!choices.empty(),canRead);
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
-            const auto prefill = prefillHistory(task,event);
-            if (prefill == PrefillResult::Persisted) return;
-            if (prefill == PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
-            const auto bot = notes(field(task,"botId"));
-            Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",field(task,"intent")},
-                {"doneWhen",task["doneWhen"]},
-                {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
-            if (task.contains("sourceMessageId")) summary["sourceMessageId"] = task.at("sourceMessageId");
-            if (task.contains("requestedDoneWhen")) summary["requestedDoneWhen"] = task.at("requestedDoneWhen");
-            if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
-            if (hasPending(task)) {
-                summary["userInstructions"] = pending;
-                summary["pendingInstructionCount"] = task.at("pendingInstructions").size();
-            }
-            if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
-            if (!choices.empty()) summary["peers"] = std::move(choices);
-            if (std::ranges::find(tools,"send_bot_message") != tools.end()) {
-                std::lock_guard lock(db.mutex);
-                auto forwarded = forwardableUserMessage(task);
-                if (!forwarded.is_null()) summary["forwardableUserMessage"] = std::move(forwarded);
-            }
-            if (peer) summary["peer"] = {{"exchangeId",peer->id},{"requestKind",peer->kind},
-                {"replyKinds",replyKinds(task,*peer)},{"phase",peer->phase},{"role",peer->sender == task["id"] ? "sender" : "recipient"}};
-            const auto evidence = event["evidence"];
-            const bool canReadHistory = std::ranges::find(tools,"session_read") != tools.end() ||
-                                        std::ranges::find(tools,"read_bot_evidence") != tools.end();
-            summary["remainingEvidenceReads"] = canReadHistory ? 3 - evidence.size() : 0;
-            event.erase("evidence");
-            event.erase("consumed");
-            Id attempt = 0;
-            {
-                std::lock_guard lock(db.mutex);
-                Transaction transaction(db.db);
-                auto current = db.load(task["id"]);
-                if (current["generation"] != task["generation"]) return;
-                const auto budget = db.taskModelBudget(current);
-                attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
-                if (!attempt) {
-                    db.wait(current,"model_budget",{{"text",
-                        "The model call limit is exhausted. Approve one more model call to continue."}});
-                    db.save(current);
-                }
-                transaction.commit();
-            }
-            if (!attempt) return;
-            const Decision decision = db.callModel(model,
-                {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
-            event["evidence"] = evidence;
+            auto decision = savedDecision(task,event);
+            if (!decision)
+                decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
+            if (!decision) return;
             if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
-            if (!decision.args.is_object() || decision.args.dump().size() > 20000 || !present(decision.reason,4000) ||
-                std::find(tools.begin(),tools.end(),decision.tool) == tools.end())
-                throw Conflict("Return exactly one permitted action, valid arguments and a reason");
-            accept(task,event,decision);
+            try {
+                if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
+                    std::ranges::find(tools,decision->tool) == tools.end())
+                    throw Conflict("Return exactly one permitted action, valid arguments and a reason");
+                accept(task,event,*decision);
+            } catch (const Conflict& error) {
+                rejectDecision(task,event,*decision,error.what());
+            }
         } catch (const ModelError& e) {
             failure(task,event,e.what(),e.transient);
         } catch (const std::exception& e) {
