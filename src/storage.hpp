@@ -151,6 +151,7 @@ struct Store::Impl {
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
     std::vector<std::string> gitCredentials;
+    Id gitRedactionEpoch = 0;
     void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
                       std::string_view title, std::string_view prompt);
     Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
@@ -161,7 +162,7 @@ struct Store::Impl {
     void approveMessageModelCall(Id message, Id pause);
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
-    SecretRedactor redactor(std::string_view bot) const;
+    SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
     Json accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);

@@ -1,4 +1,4 @@
-#include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -165,7 +165,9 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
 }
 
 CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
-    const auto scrub = redactor(bot);
+    Json revision;
+    const bool conversation = input.event.contains("turn") && input.event.value("kind","") == "conversation_turn";
+    const auto scrub = redactor(bot,conversation ? &revision : nullptr);
     CheckedModelTurn checked;
     try {
         auto safe = input;
@@ -176,6 +178,7 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         safe.config = scrub.record(input.config,SecretRedactor::Fields::external);
         safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
+        if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"),revision);
         auto turn = model.decide(safe);
         checked.calls.reserve(turn.calls.size());
         for (auto& call : turn.calls)

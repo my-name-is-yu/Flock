@@ -37,11 +37,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(flock_workspace_supervisor PRIVATE ${LIBSECCOMP_LIBRARY})
 endif()
 
-add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
+add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
                        src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
-                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp
+                       src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
                        src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -133,6 +133,7 @@ if(BUILD_TESTING AND TARGET flock_app_support)
   target_link_libraries(flock_bot_tools_sandbox PRIVATE flock_app_support)
   target_compile_options(flock_bot_tools_sandbox PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_bot_tools_sandbox COMMAND flock_bot_tools_sandbox)
+  add_test(NAME flock_tool_history_projection COMMAND flock_bot_tools_sandbox --tool-history)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME flock_bot_tools_mcp COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/bot_tools_mcp.py" $<TARGET_FILE:flock_bot_tools_sandbox>)
