@@ -871,7 +871,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         }
         const bool moved = task.value("newSessionRequired",false);
         if (moved || task["lastRun"].is_null() || task["lastRun"].at("revisionId") != revision(task)) {
-            const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
+            const auto criteria = effectiveDoneWhen(task);
             instruction += "\n\nTask intent:\n" + taskIntent(task) +
                 "\n\nCompletion criteria:\n" + criteria;
             overhead += std::max<std::size_t>(criteria.size(),8000) - criteria.size();

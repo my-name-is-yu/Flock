@@ -21,7 +21,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     if (resume) {
         const auto priorId = source.at("taskId").get<Id>();
         const auto prior = load(priorId);
-        const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen"));
+        const auto criteria = effectiveDoneWhen(prior);
         if (!criteria.empty()) task["requestedDoneWhen"] = criteria;
         const auto pending = prior.value("cancelledInstructions",Json::array());
         std::set<std::pair<Id,int>> pendingIds;
@@ -67,7 +67,7 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
     bool conflicting = task.value("replanning",false);
     if (change) {
         const auto oldIntent = field(task,"intent");
-        const auto oldDone = task.value("requestedDoneWhen",field(task,"doneWhen"));
+        const auto oldDone = effectiveDoneWhen(task);
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto environment = verifiedEnvironment(task,routing,change->environment);

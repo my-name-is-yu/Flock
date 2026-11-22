@@ -551,21 +551,21 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     wrongThread["threadRef"] = "another-thread";
     rejects([&] { store.receiveChannel(channel,"fixture-auth",wrongThread,intake); });
 
-    bool answered = false;
+    const auto recordedChoice = [&](const Json& task, const Json& receipt) {
+        return std::ranges::any_of(store.history(task.at("id"),0,200),[&](const Json& event) {
+            const auto& data = event.at("data");
+            return event.at("kind") == "user_answer" && data.at("text") == "Yes" &&
+                   data.at("messageId") == receipt.at("messageId") && data.at("waitId") == task.at("wait").at("id");
+        });
+    };
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        const auto& anchor = input.event.at("replyTo");
-        check(anchor.at("taskId") == first.at("id") && anchor.at("messageId") == first.at("wait").at("messageId") &&
-              anchor.at("waitId") == first.at("wait").at("id"),"Posted choice lost its exact journal target");
-        const auto& turn = input.event.at("turn");
-        if (turn.empty()) return answerQuestion(second,"Yes");
-        check(turn.at(0).at("result").at("ok") == false,"Selection was applied to the other open question");
-        if (turn.size() == 1) return answerQuestion(first,"Yes");
-        answered = turn.at(1).at("result").at("ok") == true;
-        return reply("Answer received.");
+        if (input.event.at("turn").empty()) return answerQuestion(second,"No");
+        return reply("Done.");
     };
     const auto receipt = store.receiveChannel(channel,"fixture-auth",answer,intake);
     runtime.runConversations();
-    check(answered && store.task(second.at("id")).at("state") == "waiting","Only the selected question should be answered");
+    check(recordedChoice(first,receipt) && store.task(second.at("id")).at("wait") == second.at("wait"),
+          "Only the selected question should receive the exact choice");
     check(store.receiveChannel(channel,"fixture-auth",answer,intake) == receipt,"Choice replay changed the receipt");
     answer["replyToExternalMessageId"] = secondPost;
     rejects([&] { store.receiveChannel(channel,"fixture-auth",answer,intake); });
@@ -578,20 +578,13 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     auto followup = event("choice-thread","answer-clarification","Yes");
     followup["replyToExternalMessageId"] = transport->effects.back().at("externalMessageId");
 
-    bool followed = false;
     model.decideNext = [&](const ModelInput& input) -> Decision {
-        const auto& anchor = input.event.at("replyTo");
-        check(anchor.at("kind") == "bot_message" &&
-              anchor.at("inReplyTo").at("replyToMessageId") == second.at("wait").at("messageId"),
-              "Clarification reply lost the channel question it followed");
-        const auto& turn = input.event.at("turn");
-        if (turn.empty()) return answerQuestion(second,"Yes");
-        followed = turn.at(0).at("result").at("ok") == true;
-        return reply("Answer received.");
+        if (input.event.at("turn").empty()) return answerQuestion(second,"No");
+        return reply("Done.");
     };
-    store.receiveChannel(channel,"fixture-auth",followup,intake);
+    const auto followed = store.receiveChannel(channel,"fixture-auth",followup,intake);
     runtime.runConversations();
-    check(followed && store.task(second.at("id")).at("state") != "waiting",
+    check(recordedChoice(second,followed) && store.task(second.at("id")).at("wait").is_null(),
           "Reply to a Bot clarification could not answer its original question");
 }
 

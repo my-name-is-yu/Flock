@@ -6,12 +6,17 @@
 #include <limits>
 
 namespace flockv0::conversation {
+struct QuestionAnchor {
+    Id messageId, taskId, waitId;
+    bool matchesChoice;
+};
+
 struct Message {
     Id id = 0, replyTo = 0;
     std::string bot, text, channelScope;
     Json routing;
     Person actor;
-    Id questionMessageId = 0, questionTaskId = 0;
+    std::optional<QuestionAnchor> question;
 };
 }
 

@@ -353,7 +353,9 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         integer("messageId","The result's messageId.",true);
         fields["offset"] = {{"type","integer"},{"minimum",0},{"description","The nextOffset from the previous chunk."}};
     } else if (name == "find_tasks") {
-        description = "Search this Bot's tasks, including older ones missing from task.tasks.";
+        description = "Search this Bot's tasks, including older ones missing from task.tasks. "
+                      "Supply taskId to read one task's full current intent and completion criteria.";
+        integer("taskId","Read the full contract of this task instead of searching a list.");
         text("query","Text to find in task requests. Omit to list the newest tasks.",false);
         integer("before","The before cursor from the previous page.");
     } else if (name == "flock_session_search" || name == "flock_session_events") {
@@ -615,11 +617,13 @@ safe point, change_task changes its intent, criteria, or environment, answer_tas
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
 blocks an active task and withdraw_task_question when an open question no longer needs an answer. message_session delivers a note to a running
 Session immediately, and interrupt_session interrupts that Run without closing the task. read_result and find_tasks let you inspect results and older
-tasks. Each result appears in event.turn. If a
+tasks. The current task's doneWhen takes precedence over older criteria in history. If intentTruncated or
+doneWhenTruncated is true, use find_tasks with the taskId to read the full contract before changing it.
+Omit unchanged fields in change_task. Each result appears in event.turn. If a
 result says delivery is unknown, check the target before repeating the action. When a
 result says stale, read the current state it returns and decide again. When you need more information,
-ask in reply instead of guessing. A message that replies to a task question and matches one of its
-choices is only that answer, even when the choice reads like a command. Do not also act on its wording.
+ask in reply instead of guessing. Flock handles exact anchored task-question choices directly. If the
+user is selecting a choice in a freeform reply, treat that choice as an answer even if it reads like a command.
 Approvals for extra runs and model calls are the user's own controls.
 When the user asks you to remember something, read the document, propose the change and apply it
 when the user's request authorizes the edit. If the version changes, reread and review the proposed

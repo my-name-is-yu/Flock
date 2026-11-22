@@ -30,6 +30,7 @@ bool terminal(const Json&);
 Json questionTarget(const Json&);
 std::string actionId();
 std::string taskIntent(const Json& task);
+std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
@@ -187,7 +188,8 @@ struct Store::Impl {
     bool authorizeTurn(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
-    Json taskState(const Json& task, const conversation::Message&) const;
+    void resolveOfferedAnswer(const conversation::Message&);
+    Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<ModelImage>& images);
     Json gitConversationTool(GitHost*, const conversation::Message&, int step, const Decision&);
