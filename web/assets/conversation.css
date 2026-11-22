@@ -1,4 +1,4 @@
-.main { --conversation-top: 1rem; }
+.main { --conversation-top: 1rem; --jump-to-latest-space: 4rem; }
 
 .conversation-header { position: relative; z-index: 3; height: var(--header-height); box-shadow: inset 0 -1px var(--hairline); }
 .header-inner {
@@ -76,6 +76,10 @@
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
   position: relative;
+  scroll-padding-block-start: calc(var(--conversation-top) + .5rem + var(--find-overlap, 0px));
+}
+.conversation.viewing-source, .main:has(.conversation-find:not([hidden])) .conversation {
+  scroll-padding-block-end: var(--jump-to-latest-space);
 }
 .conversation { scroll-padding-block-start: calc(var(--conversation-top) + .5rem); }
 .conversation.follow-newest { overflow-anchor: none; }
@@ -89,7 +93,10 @@
 .jump-to-latest:hover { background: var(--hover); }
 .jump-to-latest svg { width: 1rem; height: 1rem; }
 .msg :focus-visible { scroll-margin-block: .5rem; }
-.conversation-inner { max-width: var(--content-width); margin-inline: auto; padding: calc(var(--conversation-top) + .2rem) clamp(1rem, 4vw, 2rem) 1.4rem; }
+.conversation-inner {
+  max-width: var(--content-width); margin-inline: auto;
+  padding: calc(var(--conversation-top) + .2rem + var(--find-overlap, 0px)) clamp(1rem, 4vw, 2rem) 1.4rem;
+}
 .main:has(> .composer-container:not([hidden])) .conversation-inner:not(:has(> .timeline > .empty-state)) {
   min-height: 100%;
   display: flex; flex-direction: column; justify-content: safe flex-end;
@@ -101,7 +108,7 @@
 }
 .older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
 /* Keep the last opened message clear of the floating Jump to latest control. */
-.viewing-source .timeline { padding-block-end: 4rem; }
+.viewing-source .timeline { padding-block-end: var(--jump-to-latest-space); }
 .conversation-source-target .bubble { outline: 2px solid transparent; outline-offset: 3px; animation: source-highlight 2.4s ease-out; }
 @keyframes source-highlight { 0%, 40% { outline-color: var(--accent); } }
 
