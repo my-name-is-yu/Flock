@@ -39,6 +39,11 @@
   border-radius: var(--radius-lg);
   background: var(--overlay);
   box-shadow: var(--shadow-lg);
+  transform-origin: top right;
+  transition: opacity .18s ease-out, transform .22s cubic-bezier(0.22, 1.15, 0.36, 1);
+}
+@starting-style {
+  .conversation-find { opacity: 0; transform: translateY(-8px); }
 }
 .main:has(#profile-identity:not([hidden])) > .conversation-find { --find-panel-top: 3.3rem; }
 .find-bar { display: flex; align-items: center; gap: .15rem; }
@@ -84,8 +89,21 @@
   border-radius: var(--radius-sm);
   background: transparent;
   text-align: start;
+  transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+}
+.find-match > * {
+  animation: find-match-in .18s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+.find-results li:nth-child(2) .find-match > * { animation-delay: 25ms; }
+.find-results li:nth-child(3) .find-match > * { animation-delay: 50ms; }
+.find-results li:nth-child(4) .find-match > * { animation-delay: 75ms; }
+.find-results li:nth-child(5) .find-match > * { animation-delay: 100ms; }
+@keyframes find-match-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
 }
 .find-match:hover { background: var(--hover); }
+.find-match:active { transform: scale(.985); }
 .find-match[aria-current="true"] { background: var(--accent-soft); }
 .find-match-meta { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; font-size: var(--text-xs); }
 .find-match-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
@@ -97,4 +115,10 @@
 
 @media (max-width: 700px) {
   .find-results { max-height: min(15rem, 26dvh); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .conversation-find { transition: none; }
+  @starting-style { .conversation-find { opacity: 1; transform: none; } }
+  .find-match:active { transform: none; }
+  .find-match > * { animation: none; }
 }

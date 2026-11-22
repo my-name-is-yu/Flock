@@ -73,6 +73,33 @@ function colorNameFor(hex) {
   return match ? match[0] : normalized.toUpperCase();
 }
 
+const EASE_OUT_EXPO = 'cubic-bezier(0.23, 1, 0.32, 1)';
+const EASE_SPRING = 'cubic-bezier(0.22, 1, 0.36, 1)';
+const reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-reduced-motion: reduce)')
+  : null;
+const activeAnimations = new WeakMap();
+
+function prefersReducedMotion() {
+  return Boolean(reducedMotionQuery?.matches);
+}
+
+function runAnimation(element, keyframes, options) {
+  if (!element || prefersReducedMotion() || typeof element.animate !== 'function') return null;
+  const previous = activeAnimations.get(element);
+  if (previous) {
+    try { previous.cancel(); } catch {}
+  }
+  const anim = element.animate(keyframes, options);
+  activeAnimations.set(element, anim);
+  const cleanup = () => {
+    if (activeAnimations.get(element) === anim) activeAnimations.delete(element);
+  };
+  anim.onfinish = cleanup;
+  anim.oncancel = cleanup;
+  return anim;
+}
+
 export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   dialog.innerHTML = `
     <section class="studio-start" id="studio-start" hidden>
@@ -108,9 +135,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
 
         <div class="studio-bar">
           <div class="studio-tabs" id="studio-tabs" role="group" aria-label="Avatar source">
-            <button type="button" data-kind="shape" aria-pressed="true">Shapes</button>
-            <button type="button" data-kind="icon" aria-pressed="false">Icons</button>
-            <button type="button" data-kind="upload" aria-pressed="false">Upload</button>
+            <button type="button" data-kind="shape" data-label="Shapes" aria-pressed="true">Shapes</button>
+            <button type="button" data-kind="icon" data-label="Icons" aria-pressed="false">Icons</button>
+            <button type="button" data-kind="upload" data-label="Upload" aria-pressed="false">Upload</button>
           </div>
           <button type="button" id="studio-shuffle" class="icon-button studio-shuffle" aria-label="Shuffle appearance" title="Shuffle appearance">${uiIcon('shuffle')}</button>
         </div>
@@ -269,6 +296,97 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     });
   }
 
+  function popHeroAvatar() {
+    runAnimation(
+      els.heroAvatar,
+      [
+        { transform: 'scale(0.92)' },
+        { transform: 'scale(1.04)', offset: 0.58 },
+        { transform: 'scale(1)' },
+      ],
+      { duration: 280, easing: EASE_SPRING },
+    );
+  }
+
+  function animateShuffleIcon() {
+    runAnimation(
+      els.shuffle.querySelector('svg'),
+      [
+        { transform: 'rotate(0deg) scale(1)' },
+        { transform: 'rotate(180deg) scale(1.16)', offset: 0.52 },
+        { transform: 'rotate(372deg) scale(0.96)', offset: 0.82 },
+        { transform: 'rotate(360deg) scale(1)' },
+      ],
+      { duration: 380, easing: EASE_SPRING },
+    );
+  }
+
+  function animateDiceIcon() {
+    runAnimation(
+      els.randomName.querySelector('svg'),
+      [
+        { transform: 'rotate(0deg) scale(1)' },
+        { transform: 'rotate(-20deg) scale(1.14) translateY(-1px)', offset: 0.22 },
+        { transform: 'rotate(24deg) scale(1.16) translateY(0px)', offset: 0.5 },
+        { transform: 'rotate(-10deg) scale(1.04)', offset: 0.76 },
+        { transform: 'rotate(0deg) scale(1)' },
+      ],
+      { duration: 360, easing: EASE_SPRING },
+    );
+    runAnimation(
+      els.nameInput,
+      [
+        { opacity: 0.55, transform: 'translateY(2px) scale(0.985)' },
+        { opacity: 1, transform: 'none' },
+      ],
+      { duration: 180, easing: EASE_OUT_EXPO },
+    );
+  }
+
+  function animatePanelEnter(panel, duration = 210) {
+    runAnimation(
+      panel,
+      [
+        { opacity: 0, transform: 'translateY(6px)' },
+        { opacity: 1, transform: 'none' },
+      ],
+      { duration, easing: EASE_OUT_EXPO },
+    );
+  }
+
+  function animateGalleryChoices() {
+    if (prefersReducedMotion()) return;
+    const choices = els.gallery.querySelectorAll('.studio-choice');
+    choices.forEach((choice, index) => {
+      const selected = choice.getAttribute('aria-pressed') === 'true';
+      runAnimation(
+        choice,
+        [
+          { opacity: 0, transform: 'scale(0.9) translateY(4px)' },
+          { opacity: 1, transform: selected ? 'scale(1.08) translateY(-1px)' : 'scale(1.03) translateY(-1px)', offset: 0.72 },
+          { opacity: 1, transform: selected ? 'scale(1.05)' : 'none' },
+        ],
+        {
+          duration: 240,
+          delay: index * 22,
+          easing: EASE_OUT_EXPO,
+          fill: 'backwards',
+        },
+      );
+    });
+  }
+
+  function animateColorName() {
+    runAnimation(
+      els.colorName,
+      [
+        { opacity: 0.35, transform: 'translateY(2px)' },
+        { opacity: 1, transform: 'none' },
+      ],
+      { duration: 160, easing: EASE_OUT_EXPO },
+    );
+  }
+
   function saveLabel() {
     if (saving) return mode === 'edit' ? 'Saving…' : 'Creating…';
     return mode === 'edit' ? 'Save' : 'Create';
@@ -318,9 +436,10 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     }
   }
 
-  function renderGallery() {
+  function renderGallery({ animateChoices = false } = {}) {
     const kind = state.kind;
-    if (renderedGalleryKind !== kind) {
+    const kindChanged = renderedGalleryKind !== kind;
+    if (kindChanged) {
       els.gallery.replaceChildren();
       const entries = kind === 'shape' ? AVATAR_SHAPES : AVATAR_ICONS;
       if (kind !== 'upload') {
@@ -343,7 +462,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       const value = btn.dataset.value;
       const selected = (kind === 'shape' ? state.shape : state.icon) === value;
       btn.setAttribute('aria-pressed', String(selected));
-      if (renderedGalleryKind !== kind || renderedGalleryColor !== state.color) {
+      if (kindChanged || renderedGalleryColor !== state.color) {
         const optionAvatar = kind === 'shape'
           ? { kind: 'shape', example: value, color: state.color }
           : { kind: 'icon', icon: value, color: state.color };
@@ -353,14 +472,40 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     renderedGalleryKind = kind;
     renderedGalleryColor = state.color;
     els.gallery.hidden = kind === 'upload';
+    if ((kindChanged || animateChoices) && kind !== 'upload') {
+      animateGalleryChoices();
+    }
   }
 
-  function renderAppearance() {
+  function syncTabsIndicator(animate = false) {
+    const active = els.tabs.querySelector('button[aria-pressed="true"]');
+    if (!active || !active.offsetWidth) return;
+    const x = `${active.offsetLeft}px`;
+    const w = `${active.offsetWidth}px`;
+    const wasReady = els.tabs.classList.contains('seg-ready');
+    if (wasReady && els.tabs.style.getPropertyValue('--seg-x') === x && els.tabs.style.getPropertyValue('--seg-w') === w) {
+      return;
+    }
+    if (animate && wasReady && !prefersReducedMotion()) {
+      if (!els.tabs.classList.contains('seg-animated')) {
+        els.tabs.classList.add('seg-animated');
+        void els.tabs.offsetWidth;
+      }
+    } else {
+      els.tabs.classList.remove('seg-animated');
+    }
+    els.tabs.style.setProperty('--seg-x', x);
+    els.tabs.style.setProperty('--seg-w', w);
+    els.tabs.classList.add('seg-ready');
+  }
+
+  function renderAppearance({ animateTabSwitch = false, prevKind = state.kind, animateChoices = false } = {}) {
     els.studio.style.setProperty('--avatar-color', state.color);
     for (const tab of els.tabs.querySelectorAll('button[data-kind]')) {
       tab.setAttribute('aria-pressed', String(tab.dataset.kind === state.kind));
     }
-    renderGallery();
+    syncTabsIndicator(animateTabSwitch);
+    renderGallery({ animateChoices });
     renderPreviews();
     renderTextPreview();
 
@@ -376,17 +521,38 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     const hasImage = !!currentPreviewImageUrl();
     els.removeUpload.hidden = !hasImage;
     els.uploadLabel.textContent = hasImage ? (state.filename || 'Uploaded image') : 'Choose an image';
+
+    if (animateTabSwitch) {
+      if (state.kind === 'upload') {
+        animatePanelEnter(els.uploadPanel, 220);
+      } else {
+        animatePanelEnter(els.gallery, 200);
+        if (prevKind === 'upload') animatePanelEnter(els.colorField, 220);
+      }
+    }
   }
 
-  function setStep(next) {
+  function setStep(next, { animate = true } = {}) {
+    const prevStep = step;
     step = next;
     els.start.hidden = step !== 'start';
     els.studio.hidden = step !== 'editor';
     dialog.setAttribute('aria-labelledby', step === 'start' ? 'studio-start-title' : 'studio-title');
     setSubmitError('');
     if (step === 'start') {
+      els.tabs.classList.remove('seg-animated');
       destroyHero();
       onDraft?.(null);
+      if (animate && prevStep === 'editor') {
+        runAnimation(
+          els.start,
+          [
+            { opacity: 0, transform: 'translateX(-18px)' },
+            { opacity: 1, transform: 'translateX(0)' },
+          ],
+          { duration: 220, easing: EASE_OUT_EXPO },
+        );
+      }
       const chosen = els.start.querySelector(`[data-preset="${state.role}"]`) ?? els.start.querySelector('[data-preset]');
       chosen.focus({ preventScroll: true });
       return;
@@ -394,7 +560,18 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.title.textContent = mode === 'edit' ? 'Edit appearance' : 'New bot';
     els.cancel.textContent = mode === 'edit' ? 'Cancel' : 'Back';
     els.nameInput.value = state.name;
-    renderAppearance();
+    const enteringFromStart = animate && prevStep === 'start';
+    renderAppearance({ animateChoices: enteringFromStart });
+    if (enteringFromStart) {
+      runAnimation(
+        els.studio,
+        [
+          { opacity: 0, transform: 'translateX(18px)' },
+          { opacity: 1, transform: 'translateX(0)' },
+        ],
+        { duration: 220, easing: EASE_OUT_EXPO },
+      );
+    }
     els.nameInput.focus({ preventScroll: true });
     if (mode === 'create') els.nameInput.select();
   }
@@ -430,6 +607,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       setUploadError('');
       setSubmitError('');
       renderAppearance();
+      popHeroAvatar();
     };
     img.src = candidateUrl;
   }
@@ -531,15 +709,18 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.nameInput.value = state.name;
     setSubmitError('');
     renderTextPreview();
+    animateDiceIcon();
   });
 
   els.tabs.addEventListener('click', (event) => {
     const kind = event.target.closest('button[data-kind]')?.dataset.kind;
     if (!kind || kind === state.kind) return;
+    const prevKind = state.kind;
     state.kind = kind;
     state.lookChanged = true;
     setSubmitError('');
-    renderAppearance();
+    renderAppearance({ animateTabSwitch: true, prevKind });
+    popHeroAvatar();
   });
   els.tabs.addEventListener('keydown', (event) => arrowNavigate(els.tabs, 'button[data-kind]', event));
 
@@ -551,16 +732,20 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
+    popHeroAvatar();
   });
   els.gallery.addEventListener('keydown', (event) => arrowNavigate(els.gallery, 'button[data-value]', event));
 
   els.colors.addEventListener('click', (event) => {
     const swatch = event.target.closest('button[data-color]');
     if (!swatch) return;
+    const changed = state.color.toLowerCase() !== swatch.dataset.color.toLowerCase();
     state.color = swatch.dataset.color;
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
+    popHeroAvatar();
+    if (changed) animateColorName();
   });
   els.colors.addEventListener('keydown', (event) => arrowNavigate(els.colors, 'button[data-color]', event));
 
@@ -576,6 +761,9 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     state.lookChanged = true;
     setSubmitError('');
     renderAppearance();
+    animateShuffleIcon();
+    popHeroAvatar();
+    animateColorName();
   });
 
   els.photo.addEventListener('change', (event) => {
@@ -598,6 +786,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
   els.removeUpload.addEventListener('click', () => {
     uploadGeneration++;
     revokeObjectUrl();
+    const prevKind = state.kind;
     state.uploadFile = null;
     state.uploadPreviewUrl = '';
     state.existingImageUrl = '';
@@ -608,13 +797,19 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
     els.photo.value = '';
     setUploadError('');
     setSubmitError('');
-    renderAppearance();
+    renderAppearance({ animateTabSwitch: prevKind !== 'shape', prevKind });
+    popHeroAvatar();
   });
 
   els.save.addEventListener('click', () => void saveProfile());
 
+  window.addEventListener('resize', () => {
+    if (dialog.open && step === 'editor') syncTabsIndicator(false);
+  });
+
   dialog.addEventListener('close', () => {
     uploadGeneration++;
+    els.tabs.classList.remove('seg-animated');
     destroyHero();
     revokeObjectUrl();
     els.photo.value = '';
@@ -657,7 +852,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       filename: '',
     };
     if (!dialog.open) dialog.showModal();
-    setStep('start');
+    setStep('start', { animate: false });
   }
 
   function openEdit(bot, { bots = [], origin = document.activeElement } = {}) {
@@ -689,7 +884,7 @@ export function createBotEditor(dialog, { api, onSaved, onCancel, onDraft }) {
       lookChanged: false,
     };
     if (!dialog.open) dialog.showModal();
-    setStep('editor');
+    setStep('editor', { animate: false });
   }
 
   return { openCreate, openEdit };
