@@ -1671,13 +1671,13 @@ function conversationRows(data, events, keep, source) {
     previous = event;
   });
   appendPeerMessages();
-  if (!rows.length) {
-    const loaded = !!data || (!view && listLoaded);
-    rows.push(keep('empty', [!!data, loaded, !bots.length, botVersion], () => {
+  // A new chat stays blank: the header already shows the Bot's avatar and name.
+  if (!rows.length && !data) {
+    const loaded = !view && listLoaded;
+    rows.push(keep('empty', [loaded, !bots.length], () => {
       const empty = node('div', 'empty-state');
-      if (data?.bot) empty.append(avatar(data.bot));
-      empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
-      if (!data && loaded && !bots.length) {
+      empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
+      if (loaded && !bots.length) {
         empty.append(node('p', null, 'Create a Bot to get started.'));
         empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       }
