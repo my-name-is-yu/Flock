@@ -629,7 +629,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+    releaseModelCall(takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
@@ -672,7 +672,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id)) return false;
     if (message.routing.contains("gitEvent")) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+        releaseModelCall(takeReservedConversationCall(message.id));
         exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
@@ -872,37 +872,44 @@ LIMIT 1
                 return;
             }
             ModelInput input;
-            Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (shutdown.stop_requested()) return;
                 if (!authorizeTurn(message)) { transaction.commit(); return; }
+                if (!query(R"SQL(
+SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
+ SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
+)SQL",{messageModelBudget(id),id}).next()) {
+                    pauseTurn(message);
+                    transaction.commit();
+                    return;
+                }
                 std::vector<ModelImage> images;
                 auto [offered,machines] = available();
                 const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
-                attempt = takeReservedConversationCall(id);
-                if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
-                if (!attempt) pauseTurn(message);
-                else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                          " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                 transaction.commit();
             }
-            if (!attempt) return;
-            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
+            ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);
-                    const bool allowed = authorizeTurn(message) && !shutdown.stop_requested();
-                    if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
+                    if (shutdown.stop_requested()) return;
+                    if (!authorizeTurn(message)) { transaction.commit(); return; }
+                    auto& attempt = checkpoint.attempt;
+                    attempt = takeReservedConversationCall(id);
+                    if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                    if (!attempt) pauseTurn(message);
+                    else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
+                              " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                     transaction.commit();
-                    if (!allowed) return;
+                    if (!attempt) return;
                 }
                 auto response = callModel(message.bot,model,input,0);
                 checkpoint.usage = std::move(response.usage);

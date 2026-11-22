@@ -224,6 +224,10 @@ struct Runtime::Impl {
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
+        try { persistTaskInferences(); }
+        catch (const std::exception& error) {
+            std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
+        }
         try { db.stopWorkspace(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
@@ -2592,10 +2596,8 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
-            auto reserved = db.query("SELECT reserved_attempt FROM events WHERE id=?",{event["id"]});
-            if (reserved.next()) attempt = reserved.number(0);
-            if (attempt) db.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event["id"]});
-            else attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
+            attempt = db.takeReservedTaskCall(event["id"]);
+            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
                     "The model call limit is exhausted. Approve one more model call to continue."}});
