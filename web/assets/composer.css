@@ -32,10 +32,6 @@
 .notice { flex: 1; min-width: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; transition: opacity .4s ease; }
 .notice.error { color: var(--danger); }
 .notice.fading { opacity: 0; }
-.send-hint { font-size: var(--text-xs); line-height: 1.4; color: var(--text-3); }
-.send-hint span { white-space: nowrap; }
-.composer.can-send:focus-within .send-hint { color: var(--text-2); }
-.notice:not(:empty) + .send-hint { display: none; }
 
 .send { position: relative; flex: none; display: grid; place-items: center; width: 2.1rem; height: 2.1rem; padding: 0; border: 0; border-radius: var(--radius-full); background: var(--accent-fill); color: var(--on-accent); transition: background-color .15s ease, color .15s ease; }
 .send:hover:not(:disabled) { background: var(--accent-fill-hover); }
@@ -49,9 +45,6 @@
 }
 @keyframes send-spin { to { transform: rotate(1turn); } }
 
-@media (hover: none) and (pointer: coarse) {
-  .send-hint { display: none; }
-}
 @media (max-width: 700px) {
   .composer-container {
     padding-left: max(.75rem, env(safe-area-inset-left));
