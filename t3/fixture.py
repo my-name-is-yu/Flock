@@ -121,9 +121,16 @@ class Fixture(BaseHTTPRequestHandler):
     def tool(self, name, args):
         state = self.server.state
         scenario = state.get("scenario", "settled")
-        questions = [{"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
-                      "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
-                                                              {"label": "blue", "description": ""}]}]
+        questions = [
+            {"id": "color", "header": "Colors", "question": "Which colors?", "multiSelect": True,
+             "allowCustomAnswer": False, "options": [{"label": "Green", "value": "green", "description": ""},
+                                                     {"label": "　blue　", "description": ""}]},
+            {"id": "note", "header": "Note", "question": "Any notes?", "options": [], "required": False},
+            {"id": "message", "header": "Message", "question": "Edit the message", "options": [],
+             "initialAnswer": "Proposed message"},
+            {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
+             "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
+        ]
         if (name in ("t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
@@ -187,7 +194,7 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["requestId"] == "request" and scenario in ("question", "ambiguous", "race")
             if action == "read":
                 return {"requestId": "request", "questions": questions}
-            assert action == "respond" and scenario != "ambiguous" and args["answers"] == {"color": ["green", "blue"]}
+            assert action == "respond" and scenario != "ambiguous"
             state["scenario"] = "running"
             if scenario == "race":
                 return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request",
@@ -201,32 +208,10 @@ class Fixture(BaseHTTPRequestHandler):
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
                                              "pendingRequestCount": count}
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
-        if scenario.endswith("-result"):
-            recent.insert(0, {"runId": "later", "ordinal": 2, "status": "completed"})
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
-        if scenario == "delegated-result":
-            rows.extend([self.item(thread_id, 2, "root", "subagent", "done") | {"subagentId": "child-task"},
-                         self.item(thread_id, 3, "later", "user_message", "Delegated task child-task [completed]",
-                                   source="server"),
-                         self.item(thread_id, 4, "later", "assistant_message", "delegated report")])
-        elif scenario in ("notification-result", "mixed-result", "shortened-result"):
-            label = "Owned delegate"
-            summary_label = label
-            if scenario == "shortened-result":
-                prefix = "Read notes.md and identify which action items are assigned to "
-                label = prefix + "the..."
-                summary_label = prefix + "the release owner…"
-            rows.extend([self.item(thread_id, 2, "root", "subagent", "done") |
-                         {"subagentId": "child-task", "title": label},
-                         self.item(thread_id, 3, "later", "notification", f'Delegated task "{summary_label}" finished') |
-                         {"creationSource": None, "createdBy": None}])
-            if scenario == "mixed-result":
-                rows.append(self.item(thread_id, 4, "later", "user_message", "simultaneous manual input", source="web"))
-            rows.append(self.item(thread_id, 5, "later", "assistant_message", "delegated report"))
-        elif scenario == "manual-result":
-            rows.extend([self.item(thread_id, 2, "later", "user_message", "manual request", source="web"),
-                         self.item(thread_id, 3, "later", "assistant_message", "manual result")])
+        if scenario.endswith("-result"):
+            self.result_history(thread_id, scenario, recent, rows)
         if scenario in ("question", "ambiguous", "race"):
             rows.append(self.item(thread_id, 5, "root", "user_input_request", json.dumps(questions), status="waiting"))
         if scenario == "ambiguous":
@@ -260,15 +245,50 @@ class Fixture(BaseHTTPRequestHandler):
             end = min(start + 2 * limit_chars, len(text))
             if end < len(text) and 0xD800 <= int.from_bytes(text[end - 2:end], "little") <= 0xDBFF:
                 end -= 2
-                if row["itemId"] == "unicode":
-                    state.setdefault("effects", {}).setdefault("unicode_split_avoided", []).append({
-                        "offset": offset, "limit": limit_chars, "nextOffset": end // 2})
             row["textTruncated"] = end < len(text)
             row["nextTextOffset"] = end // 2 if row["textTruncated"] else None
             row["text"] = text[start:end].decode("utf-16-le")
         return {"thread": summary, "recentRuns": recent, "items": page, "hasMore": len(matches) > limit,
                 "nextPosition": page[-1]["position"] if page else None,
                 "earlierPosition": page[0]["position"] if "beforePosition" in args and len(matches) > limit else None}
+
+    def result_history(self, thread_id, scenario, recent, rows):
+        def add(run, kind, text, source="provider", **fields):
+            rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
+
+        def child(run, task, title):
+            add(run, "subagent", "done", subagentId=task, title=title)
+
+        def notice(run, title):
+            add(run, "notification", f'Delegated task "{title}" finished', source=None, createdBy=None)
+
+        if scenario in ("nested-result", "reused-result"):
+            recent.insert(0, {"runId": "middle", "ordinal": 2, "status": "completed"})
+        recent.insert(0, {"runId": "later", "ordinal": len(recent) + 1, "status": "completed"})
+
+        title = "Owned delegate"
+        if scenario == "manual-result":
+            add("later", "user_message", "manual request", source="web")
+        elif scenario == "server-input-result":
+            child("root", "child-task", title)
+            add("later", "user_message", "Delegated task child-task [completed]", source="server")
+        elif scenario == "shortened-result":
+            prefix = "Read notes.md and identify which action items are assigned to "
+            child("root", "child-task", prefix + "the...")
+            notice("later", prefix + "the release owner…")
+        else:
+            child("root", "child-task", title)
+            if scenario == "ambiguous-title-result":
+                child("unrelated", "other-task", title)
+            if scenario in ("nested-result", "reused-result"):
+                notice("middle", title)
+                if scenario == "nested-result":
+                    title = "Review follow-up"
+                    child("middle", "grandchild-task", title)
+            notice("later", title)
+            if scenario == "mixed-result":
+                add("later", "user_message", "simultaneous manual input", source="web")
+        add("later", "assistant_message", "later report")
 
     @staticmethod
     def summary(thread_id):

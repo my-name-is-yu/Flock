@@ -1,6 +1,3 @@
-// Opt-in evaluation of conversation turns with a live model. It is not part of ctest.
-// Usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]
-// Offline check: flock_live_conversation --self-test
 #include "flock/core.hpp"
 #include "model.hpp"
 
@@ -42,7 +39,6 @@ struct Directory {
     ~Directory() { std::filesystem::remove_all(path); }
 };
 
-// The conversation uses the live model. Task decisions stay scripted so each scenario starts from known state.
 struct Mixed : Model {
     Model& live;
     std::map<Id,Json> questions;

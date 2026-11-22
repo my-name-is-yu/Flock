@@ -17,11 +17,13 @@ endif()
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
                        src/model_budget.cpp src/runtime.cpp)
 target_include_directories(flock_core PUBLIC include)
+target_sources(flock_core PRIVATE src/bot_profile.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
+target_sources(flock_core PRIVATE src/session_question.cpp)
 target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
