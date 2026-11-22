@@ -127,7 +127,7 @@ struct Sessions : T3 {
 };
 
 Intake intake(std::string bot, std::string text, std::string project, Json config = Json::object()) {
-    return {std::move(bot),std::move(text),"sandbox",std::move(project),std::move(config),{},0};
+    return {std::move(bot),std::move(text),"sandbox",std::move(project),std::move(config)};
 }
 
 Json row(const Json& rows, std::string_view key, const Json& value) {
@@ -173,7 +173,7 @@ void exercise(const std::filesystem::path& path) {
     sessions.questionProject = "question";
     RuntimeOptions options;
     options.clock = [&] { return now; };
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options);
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options);
     for (int step = 0; step < 12; ++step) runtime.tick();
     check(store.task(unknown).at("wait").at("reason") == "unknown_delivery","fixture did not pause on delivery");
 
@@ -377,7 +377,7 @@ void chatDecision(const std::filesystem::path& path) {
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; });
     for (int step = 0; step < 6; ++step) runtime.tick();
     script.managed = taskId;
     store.receive(alice,routing,"report-blocker","The question is blocking");

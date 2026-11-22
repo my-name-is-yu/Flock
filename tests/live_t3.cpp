@@ -153,7 +153,7 @@ int profile(Store& store,T3& t3, Id id, std::string_view mode) {
     unsigned modelCalls = 0;
     if (mode == "wait") {
         TestModel model;
-        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
         for (int i = 0; i < 5; ++i) runtime.tick();
         modelCalls = model.calls;
         if (modelCalls || store.task(id).at("state") != "running")
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
             const auto id = std::stoll(argv[4]);
             RuntimeOptions options;
             if (store.task(id).at("request") == "measurement-read-resume") options.sessionRead = "on_demand";
-            Runtime runtime(store,model,adapter,[](std::string_view) { return BotNotes{"Validate the acceptance fixture",""}; },options);
+            Runtime runtime(store,model,adapter,[](std::string_view) { return std::string("Validate the acceptance fixture"); },options);
             std::string previous;
             const auto end = std::chrono::steady_clock::now() + 5min;
             do {

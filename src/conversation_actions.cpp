@@ -13,7 +13,7 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     const auto destination = environment.empty() ? field(routing,"environmentId")
         : verifiedEnvironment(routing,routing,environment);
     const auto id = submit({std::string(bot),std::string(request),destination,field(routing,"projectId"),
-                            routing.at("config"),{},0},messageId,source);
+                            routing.at("config")},messageId,source);
     auto task = load(id);
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});

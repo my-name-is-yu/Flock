@@ -1,6 +1,7 @@
 #pragma once
 #include "flock/board_inbox.hpp"
 #include "flock/channels.hpp"
+#include "flock/memory_automation.hpp"
 #include <map>
 #include <mutex>
 #include <sqlite3.h>
@@ -61,9 +62,12 @@ private:
     std::vector<std::string> values_;
 };
 
+Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
+    const MemorySeed memorySeed;
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
@@ -91,6 +95,22 @@ struct Store::Impl {
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
     void initializeAccessSchema();
+    void initializeMemorySchema();
+    void initializeAutomationSchema();
+    BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
+    void createMemory(std::string_view key, std::string_view bot, std::string_view id,
+                      std::string_view content, Seconds now);
+    std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
+    Json memory(std::string_view bot, const Person*, std::string_view operation, const Json&,
+                Seconds now);
+    Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
+    Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
+    void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
+    Json automations(std::string_view bot, Id before) const;
+    Json cancelAutomation(std::string_view bot, Id id);
+    void fireDueAutomations(Seconds now);
+    void fireAutomation(Id, const Statement&, Seconds now);
+    SecretRedactor sharedRedactor() const;
     void initializeBoardInboxSchema();
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
@@ -101,10 +121,9 @@ struct Store::Impl {
     Json accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
-    SecretRedactor sessionRedactor() const;
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;
-    explicit Impl(std::filesystem::path path);
+    explicit Impl(std::filesystem::path path, MemorySeed);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
@@ -122,14 +141,14 @@ struct Store::Impl {
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Decision callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
-    bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
+    bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
     bool turnPending(Id messageId) const;
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
     Json taskState(const Json& task, const conversation::Message&) const;
-    Json turnInput(const conversation::Message&, int step, std::vector<std::string>& images) const;
-    Json applyTurnTool(const conversation::Message&, int step, const Decision&);
+    Json turnInput(const conversation::Message&, int step, Seconds now, std::vector<std::string>& images);
+    Json applyTurnTool(const conversation::Message&, int step, const Decision&, Seconds now);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
     void pauseTurn(const conversation::Message&);
     Json ownTask(Id taskId, const conversation::Message&) const;
@@ -142,7 +161,7 @@ struct Store::Impl {
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
-              RequestJournal requestJournal = RequestJournal::record);
+              RequestJournal requestJournal = RequestJournal::record, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;

@@ -201,13 +201,13 @@ struct Fixture {
         store = std::make_unique<Store>(dir/"state.db");
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
-            return BotNotes{};
+            return std::string{};
         },RuntimeOptions{[this] { return now; }});
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
                    std::string project = "project") {
         return {std::move(bot),std::move(request),std::move(environment),std::move(project),
-            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}, {},0};
+            {{"conversationEnvironments",{{"クラウドMac","cloud"},{"ローカルMac","desktop"}}}}};
     }
     Json enqueue(std::string_view key,std::string_view text,Id replyTo = 0) {
         Store httpWriter(dir/"state.db");

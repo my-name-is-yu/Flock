@@ -226,6 +226,7 @@ public:
             error(res,404,"settings_not_found");
         });
         web::accessRoutes(server_,store_,callbacks_);
+        web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
@@ -384,9 +385,12 @@ private:
             return HandlerResult::Handled;
         }
         if (req.method == "GET" || req.method == "HEAD") return HandlerResult::Unhandled;
-        if (req.method != "POST") error(res,405,"method_not_allowed");
-        else if (!sameOrigin || req.get_header_value_count("X-Flock-Action") != 1 ||
+        const bool deleting = req.method == "DELETE" && req.path == "/api/schedules";
+        const bool machine = req.path.starts_with("/api/webhooks/") && origins == 0 && !req.has_header("Sec-Fetch-Site");
+        if (req.method != "POST" && !deleting) error(res,405,"method_not_allowed");
+        else if ((!sameOrigin && !machine) || req.get_header_value_count("X-Flock-Action") != 1 ||
                  req.get_header_value("X-Flock-Action") != "1") error(res,403,"invalid_origin");
+        else if (deleting) return HandlerResult::Unhandled;
         else if (req.get_header_value_count("Content-Type") != 1 ||
                  req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
         else if (req.path != "/api/bots" && req.path != "/api/bots/profile") {
@@ -555,8 +559,6 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                intake.scheduleId.clear();
-                intake.scheduledAt = 0;
                 if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }

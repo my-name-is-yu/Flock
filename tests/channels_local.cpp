@@ -89,7 +89,7 @@ struct RecordedTransport final : ChannelTransport {
 };
 
 Intake intake(std::string_view bot, std::string_view text) {
-    return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}},{},0};
+    return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}}};
 }
 
 void grant(Store& store, std::string_view bot) {
@@ -136,7 +136,7 @@ void channels(const std::filesystem::path& database) {
     Script model;
     SessionAdapter t3;
     auto transport = std::make_shared<RecordedTransport>();
-    const auto notes = [](auto) { return BotNotes{}; };
+    const auto notes = [](auto) { return std::string{}; };
     const auto slack = ChannelKind::slack, imessage = ChannelKind::imessage;
     auto screenshot = event("slack-thread","same-id","What is in this screenshot?");
     screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
@@ -311,7 +311,7 @@ void taskUpdates(const std::filesystem::path& database) {
     grant(store,"release");
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     auto original = event("private-origin","start","Start the private release task");
     auto publish = event("private-origin","publish","Publish the preview");
 
@@ -398,7 +398,7 @@ void sessionEvidence(const std::filesystem::path& database) {
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
     store.access().resourceGrant(root,"release",Scope::sessionRead("env","shared-from-web"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     model.decideNext = [](const ModelInput& input) -> Decision {
         if (input.event.at("turn").empty()) return {"start_task",{{"request","Private task"}},{}};
         return reply("Started");
@@ -416,6 +416,12 @@ void sessionEvidence(const std::filesystem::path& database) {
         }
         if (input.event.at("text") == "Count events")
             return {"flock_session_events",{{"sessionRef",ref},{"operation","counts"}},{}};
+        if (input.event.at("text") == "Read memory") {
+            check(std::ranges::find(input.tools,"read_memory") == input.tools.end() &&
+                  std::ranges::find(input.tools,"create_schedule") == input.tools.end(),
+                  "Bot-wide memory or scheduling was offered in a channel thread");
+            return {"read_memory",Json::object(),{}};
+        }
         return {"flock_session_search",Json::object(),{}};
     };
     const auto call = [&](std::string thread, std::string id, std::string request) {
@@ -435,6 +441,8 @@ void sessionEvidence(const std::filesystem::path& database) {
     check(call("other-thread","search","Search Sessions").at("sessions").empty(),"Session search crossed channel threads");
     check(call("other-thread","count","Count events").at("ok") == false && t3.evidenceReads.empty(),
           "A Session reference bypassed channel scope");
+    check(call("private-origin","memory","Read memory").at("ok") == false,
+          "An unlisted tool could access Bot-wide memory in a channel thread");
 }
 
 void taskQuestionChoices(const std::filesystem::path& database) {
@@ -447,7 +455,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     grant(store,"release");
     const auto channel = ChannelKind::slack;
     store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     t3.observeRun = [](const RunRef& run) {
         Observation observed;
         observed.kind = Observation::Kind::Question;
@@ -534,7 +542,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     store.connectLocalMachine("laptop",hostLocalMachine(owner.id));
     Script model;
     SessionAdapter t3;
-    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     int project = 0;
     const auto session = [&](auto bot) {
         auto route = intake(bot,"Prepare");

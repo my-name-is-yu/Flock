@@ -164,7 +164,7 @@ SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
 )SQL",{bot,bot}),secrets);
 }
 
-SecretRedactor Store::Impl::sessionRedactor() const {
+SecretRedactor Store::Impl::sharedRedactor() const {
     std::lock_guard lock(mutex);
     return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets);
 }

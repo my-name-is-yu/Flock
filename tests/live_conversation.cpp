@@ -108,14 +108,14 @@ struct Scene {
     Json config;
     Scene(Mixed& mixed, const std::string& slug)
         : store(directory.path / "state.db"), model(mixed),
-          runtime(store,model,t3,[](std::string_view) { return BotNotes{}; }),
+          runtime(store,model,t3,[](std::string_view) { return std::string{}; }),
           config({{"modelProvider","chatgpt"},{"model",slug},{"conversationEnvironments",{{"cloud Mac","cloud"}}}}) {
         for (const auto* environment : {"desktop","cloud"})
             store.access().resourceGrant({"fixture",true},"release",{"environment",environment,"launch"},GrantChange::grant);
     }
 
     Intake intake(std::string request = {}, std::string project = "project") const {
-        return {"release",std::move(request),"desktop",std::move(project),config,{},0};
+        return {"release",std::move(request),"desktop",std::move(project),config};
     }
     void reach(Id id, std::string_view expected) {
         constexpr int tickLimit = 20;

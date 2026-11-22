@@ -169,7 +169,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
 #ifndef FLOCK_WITH_T3
     if (!fixed) throw Conflict("This build does not include the T3 adapter. Use --fixed for the local demo.");
 #endif
-    auto store = openStore(home);
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     if (fixed) {
@@ -182,9 +182,12 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
 #endif
-    const auto startedAt = unixTime();
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
-    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
+    options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
+    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
+    bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
+        std::cerr << "Flock Bot " << id << ": " << error << '\n';
+    });
 #ifdef FLOCK_WITH_WEB
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
@@ -197,6 +200,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         options.peers,
         {},
         [&](const BotChange& change) { bots.apply(change); },
+        options.clock,
     };
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
@@ -212,14 +216,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
-    Scheduler schedule(bots,store,startedAt,[](std::string_view id,std::string_view error) {
-        std::cerr << "Flock Bot " << id << ": " << error << '\n';
-    });
     while (!stopRequested) {
-        try { schedule.tick(unixTime()); }
-        catch (const std::exception& error) {
-            std::cerr << "Unable to submit scheduled tasks: " << error.what() << '\n';
-        }
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }

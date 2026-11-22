@@ -8,11 +8,11 @@ void boardInboxEndpoints(const std::filesystem::path& path) {
     access.resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
     access.personGrant(owner,"release","reviewer",Role::decide,GrantChange::grant);
     access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
-    const auto release = store.submit({"release","Draft notes","local-env","release",Json::object(),{},0});
-    store.submit({"triage","Private request","linked env","triage",Json::object(),{},0});
+    const auto release = store.submit({"release","Draft notes","local-env","release"});
+    store.submit({"triage","Private request","linked env","triage"});
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,{});
     tick(runtime,3);
     t3.observations["thread-release"].kind = Observation::Kind::Question;
     t3.observations["thread-release"].question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};

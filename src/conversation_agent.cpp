@@ -38,7 +38,9 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "cancel_task","message_session","interrupt_session","read_result",
                                          "find_tasks","flock_session_search","flock_session_events","reply"};
 const std::vector<std::string> webTools{"list_grants","request_access","list_secrets","request_secret_input",
-    "list_connections","check_environment_readiness","update_bot_settings","request_bot_change"};
+    "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
+    "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
+    "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -218,7 +220,7 @@ Json sourceRef(const Json& result) {
 }
 }
 
-Json Store::Impl::turnInput(const Message& message, int step, std::vector<std::string>& images) const {
+Json Store::Impl::turnInput(const Message& message, int step, Seconds now, std::vector<std::string>& images) {
     Json tasks = Json::array();
     std::set<Id> listed;
     const auto latestResult = [&](Id taskId) -> Json {
@@ -385,10 +387,21 @@ ORDER BY j.id DESC LIMIT ?
         if (args.is_object() && decision["tool"] == "channel_send_attachment") args.erase("contentBase64");
         if (args.is_object() && decision["tool"] == "publish_artifact") args.erase("html");
         auto result = channelToolStatus(message.id,message.bot,steps.json(1),&images);
+        if (args.is_object() && args.contains("docId")) {
+            const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
+            if (!Access(*this).permits(message.bot,{"shared_memory",field(args,"docId"),reading ? "read" : "write"},true)) {
+                args = Json::object();
+                result = {{"ok",false},{"error","Memory access denied"}};
+            } else {
+                const auto scrub = sharedRedactor();
+                args = scrub.record(std::move(args));
+                result = scrub.record(std::move(result));
+            }
+        }
         turn.push_back({{"tool",decision.at("tool")},{"args",std::move(args)},{"result",std::move(result)}});
     }
     Json event{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-               {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
+               {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
     event.update(channel);
     Json machines = Json::array();
     for (const auto& [id,machine] : localMachines)
@@ -398,7 +411,8 @@ ORDER BY j.id DESC LIMIT ?
                      {"localMachines",std::move(machines)}}},{"event",std::move(event)},{"history",std::move(history)}};
 }
 
-Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision) {
+Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
+                                Seconds now) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -407,8 +421,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (auto result = channelTool(message.id,bot,decision); !result.is_null()) return result;
     if (auto result = localMachineTool(bot,message.channelScope,decision); !result.is_null()) return result;
     if (std::ranges::find(webTools,tool) != webTools.end()) {
-        if (!message.channelScope.empty()) throw ToolError("Use Flock Web to manage Bot access and settings");
+        if (!message.channelScope.empty()) throw ToolError("Use Flock Web to manage Bot settings, memory, or schedules");
         auto result = accessTool(bot,message.id,routing,decision);
+        if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
+        if (result.is_null()) result = automationTool(bot,routing,decision,now);
+        if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;
     }
@@ -677,7 +694,8 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes) {
+bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
+                          const std::function<Seconds()>& clock) {
     Message message;
     {
         std::lock_guard lock(mutex);
@@ -705,17 +723,6 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         if (authorizedTurn()) finishTurn(message,std::move(text),nullptr,route);
         transaction.commit();
     };
-    BotNotes botNotes;
-    try {
-        botNotes = notes(message.bot);
-    } catch (const std::exception& error) {
-        const auto diagnostic = Json::parse(Json(error.what()).dump(
-            -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
-        finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
-                  : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
-               "error");
-        return true;
-    }
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
@@ -736,6 +743,18 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             transaction.commit();
         }
         if (!decision) {
+            const auto now = clock();
+            BotNotes botNotes;
+            try {
+                botNotes = loadNotes(message.bot,soul,now);
+            } catch (const std::exception& error) {
+                const auto diagnostic = Json::parse(Json(error.what()).dump(
+                    -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
+                finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
+                          : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
+                       "error");
+                return true;
+            }
             ModelInput input;
             Id attempt = 0;
             {
@@ -743,7 +762,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 Transaction transaction(db);
                 if (!authorizedTurn()) { transaction.commit(); return true; }
                 std::vector<std::string> images;
-                const auto context = turnInput(message,step,images);
+                const auto context = turnInput(message,step,now,images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = turnTools,.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
@@ -866,7 +885,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         } else if (result.is_null()) {
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,*decision);
+                result = applyTurnTool(message,step,*decision,clock());
                 exec("RELEASE turn_tool");
             } catch (const std::exception& error) {
                 exec("ROLLBACK TO turn_tool");

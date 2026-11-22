@@ -13,8 +13,9 @@ build/app/flock --help
 Flock selects its state directory with `--home DIRECTORY`, then `FLOCK_HOME`,
 then `~/.config/flock`. Set up each Bot in `bots/<botId>/` under that directory.
 Place its role and decision criteria in `SOUL.md` and its task-independent
-notes in `MEMORY.md`. Flock reloads those two files at each decision. Intake
-records the selected model and Session settings for each task.
+starting notes in `MEMORY.md`. Each decision reads the current `SOUL.md` and
+the latest private memory in SQLite. Intake records the selected model and
+Session settings for each task.
 
 Example `bots/release/config.json`
 
@@ -51,10 +52,24 @@ and Verifier can reply within that request. Set `allowedBots` on Verifier
 separately if it should also initiate new requests to Release. When a request
 needs a Session, the receiving Bot uses its own configured route and settings.
 
-Omit `cron` or set it to an empty array for a manual-only Bot. Cron uses five
-numeric fields with wildcards, lists, ranges, and steps. In the weekday field,
-both 0 and 7 mean Sunday. Schedules use the configured IANA timezone and
-register each matching UTC minute during Runtime operation.
+Flock syncs configured `cron` entries into SQLite when Runtime starts. Keep each
+entry's `id` stable to preserve its next occurrence. Omit `cron` or use an empty
+array to deactivate configured schedules. Restoring an entry resumes it on its
+next scheduled occurrence. A schedule canceled through Flock stays canceled
+across syncs. Cron accepts five numeric fields with wildcards, lists, ranges,
+and steps. In the weekday field, 0 and 7 both mean Sunday.
+
+A missed reminder fires once on restart. Missed recurring occurrences produce
+one task with their first and last scheduled times and occurrence count, then
+resume according to the configured IANA timezone. Scheduling supports dates
+through 2199.
+
+Ask a Bot in its conversation to remember a convention, manage a schedule or
+reminder, or follow up on a webhook. Flock imports `MEMORY.md` on the first
+private memory access. SQLite supplies private memory for conversation and task
+decisions from then on. Use the memory tools or Web API to edit it. Shared
+playbooks and text documents use an explicit document ID and require a Bot grant
+for the requested `shared_memory` operation.
 
 ## Connect and run
 

@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
             check(pending.at("state") == "sending" && pending.at("runs").empty(),
                   "the accepted launch must still be unconfirmed when recovery starts");
         }
-        Runtime runtime(store,model,*adapter,[](std::string_view) { return BotNotes{}; },options);
+        Runtime runtime(store,model,*adapter,{},options);
         for (int tick = 0; tick < 20; ++tick) runtime.tick();
         check(phase == "recover","T3 sent back a response before the Runtime was killed");
 

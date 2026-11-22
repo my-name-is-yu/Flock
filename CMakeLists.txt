@@ -14,9 +14,21 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
+function(flock_fetch_cctz)
+  set(BUILD_TESTING OFF)
+  set(BUILD_TOOLS OFF)
+  set(BUILD_EXAMPLES OFF)
+  FetchContent_Declare(cctz
+    URL https://codeload.github.com/google/cctz/tar.gz/refs/tags/v2.5
+    URL_HASH SHA256=47d2d68e7cb5af3296dc7e69b0f4a765589f1b2f4af4b9c42e772414c428b421)
+  FetchContent_MakeAvailable(cctz)
+endfunction()
+flock_fetch_cctz()
+
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
                        src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp)
+                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
+                       src/memory_store.cpp src/automation.cpp src/cron.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
 if(TARGET SQLite3::SQLite3)
@@ -25,11 +37,15 @@ else()
   target_link_libraries(flock_core PUBLIC SQLite::SQLite3)
 endif()
 target_sources(flock_core PRIVATE src/session_question.cpp)
-target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json)
+target_link_libraries(flock_core PUBLIC nlohmann_json::nlohmann_json cctz::cctz)
 target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(flock_memory_automation tests/memory_automation.cpp)
+  target_link_libraries(flock_memory_automation PRIVATE flock_core)
+  target_compile_options(flock_memory_automation PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_memory_automation COMMAND flock_memory_automation)
   add_executable(flock_channels_local tests/channels_local.cpp)
   target_link_libraries(flock_channels_local PRIVATE flock_core)
   target_compile_options(flock_channels_local PRIVATE -Wall -Wextra -Wpedantic)

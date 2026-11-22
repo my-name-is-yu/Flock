@@ -2,31 +2,15 @@
 #include "flock/access.hpp"
 
 #include "flock/bot_profile.hpp"
+#include "flock/memory_automation.hpp"
 
-#include <bitset>
 #include <mutex>
 #include <optional>
 
 namespace flockv0::app {
-class Cron {
-public:
-    Cron(std::string expression, std::string timezone);
-    bool matches(Seconds utc) const;
-private:
-    std::bitset<60> minutes_, hours_, days_, months_, weekdays_;
-    bool anyDay_, anyWeekday_;
-    std::string timezone_;
-};
-
-struct Schedule {
-    std::string id, request;
-    Cron cron;
-};
-
 struct Bot {
     std::string id, name, environmentId, projectId;
     Json settings = Json::object();
-    std::vector<Schedule> schedules;
     std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;
 };
@@ -36,14 +20,15 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
-    std::optional<Bot> scheduled(std::string_view id) const;
-    BotNotes notes(std::string_view id) const;
+    std::string soul(std::string_view id) const;
+    std::string initialMemory(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;
     Json cards() const;
     void apply(const BotChange&);
     Json create(const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     Json updateProfile(std::string_view id, const Json& profile, const std::optional<AvatarImage>& image = std::nullopt);
     std::optional<AvatarImage> avatarImage(std::string_view id) const;
+    void syncSchedules(Store&, Seconds now, const std::function<void(std::string_view,std::string_view)>& report) const;
 private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;
@@ -51,15 +36,4 @@ private:
     Json cardLocked(std::string_view id) const;
 };
 
-class Scheduler {
-public:
-    using ErrorReporter = std::function<void(std::string_view id, std::string_view error)>;
-    Scheduler(const Bots&, Store&, Seconds startedAt, ErrorReporter);
-    void tick(Seconds now);
-private:
-    const Bots& bots_;
-    Store& store_;
-    Seconds next_;
-    ErrorReporter report_;
-};
 }

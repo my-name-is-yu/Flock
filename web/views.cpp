@@ -25,6 +25,14 @@ void copyFields(Json& output, const Json& source, std::initializer_list<const ch
     }
 }
 
+void copyTrigger(Json& output, const Json& source) {
+    const auto trigger = source.find("trigger");
+    if (trigger == source.end() || !trigger->is_object()) return;
+    copyFields(output["trigger"] = Json::object(),*trigger,
+               {"triggerKind","triggerId","targetTime","coveredFrom","coveredTo","occurrenceCount",
+                "firedAt","timezone","label","source"});
+}
+
 // The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.
 std::string threadSegment(std::string_view id) {
     constexpr std::string_view hex = "0123456789ABCDEF";
@@ -149,8 +157,10 @@ Json eventView(const Json& event) {
     const auto& data = event.at("data");
     Json details = Json::object();
     if (kind == "waiting") details = waitView(data);
-    else if (kind == "request") copyFields(details,data,{"text","source","scheduleId","scheduledAt","messageId"});
-    else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
+    else if (kind == "request") {
+        copyFields(details,data,{"text","source","messageId"});
+        copyTrigger(details,data);
+    } else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "cancelled") copyFields(details,data,{"request"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
     else if (kind == "completed") {
@@ -361,6 +371,7 @@ Json sessions(Store& store, std::string_view bot, Id before) {
 Json taskDetail(const Json& task, const Json& latestResult) {
     auto result = taskSummary(task);
     copyFields(result,task,{"doneWhen","intent","blockerReason"});
+    copyTrigger(result,task);
     result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
     auto& revisions = result["revisions"] = Json::array();
     if (task.contains("revisions") && task["revisions"].is_array()) {

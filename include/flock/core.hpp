@@ -31,8 +31,6 @@ Id modelCallLimit(const Json& config);
 struct Intake {
     std::string botId, request, environmentId, projectId;
     Json config = Json::object();
-    std::string scheduleId{};
-    Seconds scheduledAt = 0;
 };
 using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
 // Prepare a reconciliation from a Store::task snapshot and the current Bot configuration.
@@ -179,6 +177,8 @@ public:
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
 struct Person;
+struct ConfiguredSchedule;
+struct ScheduleImportError;
 struct InboxTarget;
 struct BotChange;
 struct TaskTarget {
@@ -194,12 +194,23 @@ struct ChannelResource;
 struct VerifiedChannelMessage;
 class Store {
 public:
-    explicit Store(std::filesystem::path database);
+    using MemorySeed = std::function<std::string(std::string_view)>;
+    explicit Store(std::filesystem::path database, MemorySeed = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
     Access access();
+    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
+    Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
+    Json automations(const Person&, std::string_view bot, Id before = 0) const;
+    Json cancelAutomation(const Person&, std::string_view bot, Id id);
+    [[nodiscard]] std::vector<ScheduleImportError> syncSchedules(
+        std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
+    void pruneAutomations(const std::vector<std::string>& configuredBots);
+    void fireDueAutomations(Seconds now);
+    Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
+                        const Json& event, Seconds now);
     Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
@@ -277,11 +288,12 @@ struct RuntimeOptions {
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
     std::function<std::vector<PeerBot>(std::string_view)> peers = {};
+    std::function<void(std::string_view)> automationError = {};
 };
 class Runtime {
 public:
-    using NotesLoader = std::function<BotNotes(std::string_view)>;
-    Runtime(Store&, Model&, T3&, NotesLoader, RuntimeOptions = {});
+    using SoulLoader = std::function<std::string(std::string_view)>;
+    Runtime(Store&, Model&, T3&, SoulLoader, RuntimeOptions = {});
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;

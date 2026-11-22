@@ -23,11 +23,11 @@ struct SearchModel final : Model {
 void deletedSessionSearch(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture) {
     Store store(database);
     SearchModel model;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     for (const auto* thread : {"deleted","manual"})
         store.access().resourceGrant({"root",true},"release",Scope::sessionRead("env-1",thread),GrantChange::grant);
 
-    const Intake intake{"release","Investigate staging","env-1","project",Json::object(),{},0};
+    const Intake intake{"release","Investigate staging","env-1","project",Json::object()};
     int sequence = 0;
     const auto call = [&](std::string tool, Json args) {
         model.result = nullptr;

@@ -70,7 +70,7 @@ struct Runtime::Impl {
     Access access;
     Model& model;
     T3& t3;
-    NotesLoader notes;
+    SoulLoader soul;
     RuntimeOptions options;
     std::future<void> channelWorker;
     int lockFd = -1;
@@ -78,15 +78,17 @@ struct Runtime::Impl {
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
-    Impl(Store& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
+    void fireDueAutomations() {
+        try { db.fireDueAutomations(options.clock()); }
+        catch (const std::exception& error) {
+            if (!options.automationError) throw;
+            options.automationError(error.what());
+        }
+    }
+
+    Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : db(*store.p_), access(store.access()), model(m), t3(adapter),
-          notes([load = std::move(loader)](std::string_view botId) {
-              constexpr auto limit = 8192;
-              auto bot = load(botId);
-              bot.soul = bounded(bot.soul,limit);
-              bot.memory = bounded(bot.memory,limit);
-              return bot;
-          }), options(std::move(opts)) {
+          soul(std::move(loader)), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
@@ -1028,8 +1030,6 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             ensureNoRouteCycle(sender,peer.intake);
         }
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
-        peer.intake.scheduleId.clear();
-        peer.intake.scheduledAt = 0;
         const auto id = db.submit(peer.intake,0,nullptr,RequestJournal::skip);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
@@ -1292,7 +1292,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         const auto prefill = prefillHistory(task,event);
         if (prefill == PrefillResult::Persisted) return std::nullopt;
         if (prefill == PrefillResult::UnavailableWithSettledReport) event["historyUnavailable"] = true;
-        const auto bot = notes(field(task,"botId"));
+        const auto bot = db.loadNotes(field(task,"botId"),soul,options.clock());
         Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",taskIntent(task)},
             {"doneWhen",task["doneWhen"]},
             {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
@@ -1303,6 +1303,7 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             summary["userInstructions"] = pending;
             summary["pendingInstructionCount"] = task.at("pendingInstructions").size();
         }
+        if (task.contains("trigger")) summary["trigger"] = task.at("trigger");
         if (task.contains("sourceResultRefs")) summary["sourceResultRefs"] = task["sourceResultRefs"];
         if (!choices.empty()) summary["peers"] = std::move(choices);
         if (std::ranges::find(tools,"send_bot_message") != tools.end()) {
@@ -1458,25 +1459,27 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     }
 };
 
-Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(store,model,t3,std::move(notes),std::move(options))) {}
+Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
+    : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
     p_->db.deliverChannels();
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock)) break;
     }
     p_->db.deliverChannels();
 }
 void Runtime::tick() {
+    p_->fireDueAutomations();
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit))
-        p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
+        p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
     for (auto id : p_->nextProjects(Impl::batchLimit)) p_->step(id);
     p_->db.deliverChannels();
 }
 void Runtime::tickConcurrent() {
+    p_->fireDueAutomations();
     const auto collect = [](auto& workers) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -1499,7 +1502,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
                 }));
             }
         }

@@ -156,10 +156,10 @@ struct Fixture {
     void restart() {
         runtime.reset();
         store = std::make_unique<Store>(dir/"state.db");
-        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+        runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     }
     Intake intake(std::string bot) {
-        return {std::move(bot),"Investigate staging",env,"release",Json::object(),{},0};
+        return {std::move(bot),"Investigate staging",env,"release",Json::object()};
     }
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;

@@ -82,7 +82,7 @@ public:
             after = anchor->target;
         }
 
-        const auto scrub = store_.sessionRedactor();
+        const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
         std::vector<SessionTarget> batch;
@@ -122,7 +122,7 @@ public:
             auto& items = result["sessions"];
             auto scopes = Json::array();
             if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
-            const auto latestScrub = store_.sessionRedactor();
+            const auto latestScrub = store_.sharedRedactor();
             SessionTarget last;
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
             bool truncated = unsearched != incomplete.end();
@@ -210,7 +210,7 @@ public:
         if (evidence.empty()) return;
         std::lock_guard lock(store_.mutex);
         Transaction transaction(store_.db,Transaction::Mode::read);
-        const auto scrub = store_.sessionRedactor();
+        const auto scrub = store_.sharedRedactor();
         for (const auto& [result,resourceAllowed] : evidence) {
             auto saved = std::move(*result);
             const auto allowed = resourceAllowed && std::ranges::all_of(saved.at("sessions"),[&](const Json& token) {
@@ -383,7 +383,7 @@ ORDER BY environment,thread LIMIT ?4
         Transaction transaction(store_.db);
         if (!permitted(target)) return scopedResult(failure(unavailable));
         Json result{{"ok",true},{"truncated",false},{"nextCursor",nullptr}};
-        format(*value,store_.sessionRedactor(),result);
+        format(*value,store_.sharedRedactor(),result);
         auto scopes = Json::array({issue(RefKind::session,target,nullptr)});
         transaction.commit();
         return scopedResult(std::move(result),std::move(scopes));
@@ -405,7 +405,7 @@ ORDER BY environment,thread LIMIT ?4
         }
         SessionEventFilter filter{kind,filters.from,filters.to,limit,after,{}};
         if (!filters.query.empty()) {
-            const auto scrub = store_.sessionRedactor();
+            const auto scrub = store_.sharedRedactor();
             filter.matchText = [scrub,query = filters.query](const SessionEvent& item) {
                 return session_read::contains(scrub.text(item.text,item.textTruncated),query) ||
                        session_read::contains(scrub.text(item.title),query);

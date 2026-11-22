@@ -99,7 +99,7 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
     expectedRequests.insert(earlierRequests.begin(),earlierRequests.end());
     for (int i = 0; i < 43; ++i) {
         const auto text = "Paged request " + std::to_string(i);
-        const auto id = cli.submit({"release",text,"local-env","release",Json::object(),"daily",1700000000 + i});
+        const auto id = cli.submit({"release",text,"local-env","release"});
         expectedRequests.emplace(id,text);
     }
 
@@ -132,8 +132,6 @@ void conversationPages(Browser& browser, Store& cli, Id release, Id next, Id tri
             const auto& data = event.at("data");
             check(request != expectedRequests.end() && data.at("text") == request->second,
                   "conversation returned an unexpected or repeated request");
-            if (task != release && task != next && !earlierRequests.contains(task))
-                check(data.at("source") == "cron" && data.at("scheduleId") == "daily","scheduled request lost its origin");
             expectedRequests.erase(request);
         }
         const auto before = page.at("olderBefore").get<Id>();
@@ -234,7 +232,7 @@ void peerHistory(const std::filesystem::path& path) {
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = fixturePeers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     const auto server = startWeb(store,0,callbacks());
     Browser browser(*server);
     seedPeerHistory(browser,runtime,t3);
@@ -318,7 +316,7 @@ void peerConversation(const std::filesystem::path& path) {
     Json history;
     {
         Store store(path);
-        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
         const auto empty = browser.get(primary);
@@ -389,7 +387,7 @@ void exercise(const std::filesystem::path& path) {
     store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
-    const auto notes = [](std::string_view) { return BotNotes{}; };
+    const auto notes = [](std::string_view) { return std::string{}; };
     auto runtime = std::make_unique<Runtime>(store,model,t3,notes);
     auto server = startWeb(store,0,callbacks());
     const auto port = server->port();
@@ -443,12 +441,12 @@ void exercise(const std::filesystem::path& path) {
     }),"question fixture did not cross a history page boundary");
 
     const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
-        {"environmentId","ignored"},{"projectId","ignored"},{"scheduleId","ignored"}},201).at("taskId").get<Id>();
+        {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
-    check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
+    check(cli.task(next)["environmentId"] == "local-env" && !cli.task(next).contains("trigger"),"client changed routing or schedule");
     const auto& visibleWait = afterSubmit.at("waits").at(0);
     Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
                   {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
@@ -584,7 +582,7 @@ void eventStream(const std::filesystem::path& path) {
 
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     unsigned changes = 0;
     readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
         if (changes == 3) {
@@ -634,7 +632,7 @@ void peerEventStream(const std::filesystem::path& path) {
     options.peers = fixturePeers;
     PeerModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     Browser stream(*server);
@@ -663,7 +661,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         return list;
     };
     cb.intake = [](std::string_view bot, std::string_view request) -> Intake {
-        return {std::string(bot),std::string(request),"local-env","proj",Json::object(),{},0};
+        return {std::string(bot),std::string(request),"local-env","proj",Json::object()};
     };
     cb.createBot = [&](const Json& profile, const std::optional<AvatarImage>& image) {
         const auto id = "bot-" + std::to_string(++counter);
