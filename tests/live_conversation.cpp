@@ -297,24 +297,37 @@ bool explainsCanary(const std::string& reply) {
     static const std::regex alternativeChoice(
         R"(\brollout_(?!canary\b)[a-z0-9_]+\b`?\s+(?:is\s+(?:recommended|preferred|selected)\b)"
         R"(|is\s+the\s+(?:recommended|preferred|selected|best)\s+(?:flag|option|choice)\b|should\s+be\s+used\b))");
-    static const std::regex percentage(R"(\b[0-9]+(?:\.[0-9]+)?\s*(?:%|percent\b))");
-    static const std::regex allowedPercentage(R"((?:5|100)\s*(?:%|percent))");
+    static const std::regex initialPercentage(
+        R"((\b(?:not|never|avoid|instead of|rather than)\s+)?\b)"
+        R"((?:(?:start(?:s|ing)?|begin(?:s|ning)?)(?:\s+out)?\s+(?:at|with|by rolling out to))"
+        R"(|(?:roll(?:s|ing)?\s+out\s+)?initially\s+(?:roll(?:s|ing)?\s+out\s+)?(?:to|for|at|with)))"
+        R"(\s+([0-9]+(?:\.[0-9]+)?)\s*(?:%|percent\b))");
     static const std::regex duration(R"(\b(?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?)\b)");
     static const std::regex allowedDuration(R"(24\s+hours?|(?:1|one|a)\s+day)");
-    static const std::regex wrongValue(
-        R"(\b(?:not|never|instead of|rather than|avoid)\b(?!\s+(?:use\s+)?`?rollout_(?!canary\b)))"
-        R"([^,;.!?\n]{0,40}\b(?:5\s*(?:%|percent)|rollout_canary|(?:one|a)\s+day|24\s+hours|everyone|all users))"
-        R"(|\b(?:never|not)\s+(?:expand|roll out|enable))");
+    static const std::regex rejectsCanary(
+        R"(\b(?:not|never|avoid|instead of|rather than)\s+(?:(?:use|using|enable|enabling)\s+)?(?:the\s+)?`?rollout_canary\b)"
+        R"((?!`?\s+(?:to|for)\b))");
+    static const std::string fullAudience =
+        R"(\b(?:(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|full rollout)\b|100\s*(?:%|percent\b)))";
+    static const std::regex rejectsExpansion(
+        R"(\b(?:not|never)\s+(?:expand|roll out|enable|use)\s+)"
+        R"((?:(?:it|the (?:flag|rollout)|`?rollout_canary`?)\s+)?(?:to|for)\s+)" + fullAudience +
+        R"((?!\s+(?:initially|at first|immediately|right away|until|during|for the first)\b))"
+        R"(|\bnever\s+expand\b(?=\s*(?:[.!?;]|$)|\s+beyond\b))"
+        R"(|\b(?:keep|stay|remain)\s+(?:it\s+)?at\s+5\s*(?:%|percent\b)\s+(?:permanently|indefinitely|forever)\b)");
     static const std::regex rollout(
         R"(\b5\s*(?:%|percent)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
         R"([\s\S]{0,160}?\b(?:24\s+hours?|(?:1|one|a)\s+day)\b)"
         R"([\s\S]{0,160}?\b(?:then|after(?:ward|wards| that)?|before|followed by)\b)"
-        R"([\s\S]{0,160}?\b(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|100\s*(?:%|percent)|full rollout))");
+        R"([\s\S]{0,160}?)" + fullAudience);
     if (!std::regex_search(text,canary) || !std::regex_search(text,rollout) ||
-        std::regex_search(text,wrongValue) || std::regex_search(text,directsAlternative) ||
-        std::regex_search(text,alternativeChoice)) return false;
-    for (auto it = std::sregex_iterator(text.begin(),text.end(),percentage); it != std::sregex_iterator(); ++it)
-        if (!std::regex_match(it->str(),allowedPercentage)) return false;
+        std::regex_search(text,rejectsCanary) || std::regex_search(text,rejectsExpansion) ||
+        std::regex_search(text,directsAlternative) || std::regex_search(text,alternativeChoice)) return false;
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),initialPercentage); it != std::sregex_iterator(); ++it) {
+        const bool negated = (*it)[1].matched;
+        const bool isFivePercent = (*it)[2] == "5";
+        if ((!negated && !isFivePercent) || (negated && isFivePercent)) return false;
+    }
     for (auto it = std::sregex_iterator(text.begin(),text.end(),duration); it != std::sregex_iterator(); ++it)
         if (!std::regex_match(it->str(),allowedDuration)) return false;
     return true;
@@ -374,6 +387,13 @@ void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing
     }
 }
 
+std::regex taskDenial(std::string_view action, std::string_view topic) {
+    return std::regex(
+        R"((?:\b(?:not|never|no|avoid|omit|exclude|skip|without|instead of|rather than)|n['’]t)\s+(?:(?:)"
+        + std::string(action) + R"()\s+)?(?:the\s+)?(?:third[- ]party\s+)?)" + std::string(topic)
+        + "|" + std::string(topic) + R"(\s+(?:is|are)\s+(?:optional|unnecessary|not required)\b)");
+}
+
 using Scenario = std::function<void(Scene&)>;
 
 const std::vector<std::pair<std::string,Scenario>> scenarios{
@@ -424,16 +444,20 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         const auto first = turn.after.begin();
         const auto second = std::next(first);
         checkActions(turn,{{"start_task",first->first},{"start_task",second->first}});
-        static const std::regex notes(R"(\brelease[- ]notes?\b)");
-        static const std::regex licenses(R"(\blicen[cs](?:e[sd]?|ing)\b)");
+        constexpr auto notesTopic = R"(\brelease[- ]notes?\b)";
+        constexpr auto licenseTopic = R"(\blicen[cs](?:e[sd]?|ing)\b)";
+        static const std::regex notes(notesTopic);
+        static const std::regex licenses(licenseTopic);
         static const std::regex audit(R"(\b(?:audit|review|check|inspect|verify|assess)\b)");
-        static const std::regex denial(
-            R"(\b(?:not|no|never|avoid|omit|exclude|skip|without|optional|unnecessary|instead of|rather than)\b|n['’]t\b)");
+        static const auto deniesNotes = taskDenial(
+            R"(writ(?:e|ing)|draft(?:ing)?|prepar(?:e|ing)|publish(?:ing)?|creat(?:e|ing))",notesTopic);
+        static const auto deniesAudit = taskDenial(
+            R"(audit(?:ing)?|review(?:ing)?|check(?:ing)?|inspect(?:ing)?|verif(?:y|ying)|assess(?:ing)?)",licenseTopic);
         const auto role = [&](const Json& task) {
             const auto request = lower(task.at("request").get<std::string>());
             const bool hasNotes = std::regex_search(request,notes);
             const bool hasLicenses = std::regex_search(request,licenses);
-            if (hasNotes == hasLicenses || std::regex_search(request,denial)) return "";
+            if (hasNotes == hasLicenses || std::regex_search(request,hasNotes ? deniesNotes : deniesAudit)) return "";
             if (hasNotes) return "release notes";
             return std::regex_search(request,audit) ? "license audit" : "";
         };
@@ -563,8 +587,16 @@ void selfTest() {
         test("new criteria",{criteria(text),done},"did not preserve the benchmark and require");
     test("new criteria",{criteria(columnConstraint,"Omit startup_p95_ms"),done},"did not queue a consistent criteria replan");
     test("two requests",{notes,audit,done});
+    test("two requests",{start("Write the release notes without changing source code"),audit,done});
+    test("two requests",{start("Do not write release notes"),audit,done},"one-to-one");
+    test("two requests",{notes,start("Do not audit the third-party licenses"),done},"one-to-one");
     test("two requests",{start("Write the release notes and audit the third-party licenses"),audit,done},"one-to-one");
     test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, then expand it to everyone.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone, including the remaining 95%.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "It does not expose all users initially.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "Do not enable rollout_canary for everyone initially.")});
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
                             "Unlike rollout_global, this limits initial exposure.")});
     test("explaining",{say("Use rollout_canary, not rollout_global, for 5% of users for a day, then expand to everyone.")});
@@ -578,9 +610,15 @@ void selfTest() {
                             "I recommend using rollout_immediate.")},"did not explain");
     test("explaining",{say("rollout_canary starts with 5% of users for a day, then expands to everyone. "
                             "rollout_immediate is the recommended option.")},"did not explain");
-    test("explaining",{say("Use rollout_canary for 50% of users for a week, then everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 50% of users for a day, then everyone.")},"did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then everyone. Start with 50%.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then everyone. Roll out initially to 100%.")},
+         "did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then never expand it to everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then do not expand to all users after a day.")},
+         "did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. Keep it at 5% permanently.")},
+         "did not explain");
     test("a note for running work reaches",{steer("Use the staging database"),done});
     test("a note for running work reaches",{steer("Use the staging database; do not stop the current run"),done});
     test("a note for running work reaches",{stagingAtSafePoint,done},"unexpected action");
