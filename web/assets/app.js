@@ -608,9 +608,9 @@ function activityRow(tag, className, title, status, statusClass) {
   row.append(heading, line);
   return row;
 }
-function sessionRow(task, session, status, live) {
+function sessionRow(task, session, status, tone = '') {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, tone);
   row.title = [task.request, task.createdAt ? `Started ${fullTime.format(task.createdAt * 1000)}` : ''].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
@@ -691,7 +691,7 @@ function renderActivity() {
     }
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
-    else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
+    elements['wait-list'].closest('section').hidden = !loading && !rows.length;
   }
   const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
   const active = data?.activeSessions ?? [];
@@ -706,12 +706,13 @@ function renderActivity() {
     const identity = key(run.taskId, run);
     if (activeKeys.has(identity)) continue;
     activeKeys.add(identity);
-    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state, true));
+    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
+      run.state === 'waiting' ? 'waiting' : 'live'));
   }
   const ended = [];
   for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
+      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended'));
     }
   }
   const rows = [];
@@ -729,7 +730,7 @@ function renderActivity() {
   list.setAttribute('aria-busy', loading);
   list.replaceChildren(...rows);
   if (loading) list.append(...skeletonRows(2));
-  else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
+  list.closest('section').hidden = !loading && !rows.length && more.hidden;
 }
 
 function beginReply(target, text = '') {
