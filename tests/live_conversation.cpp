@@ -80,7 +80,7 @@ struct Runs : T3 {
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return runs[run.runId]; }
-    void interrupt(const std::string&, const Json&, const RunRef& run) override { interrupted.push_back(run.runId); }
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef& run) override { interrupted.push_back(run.runId); return InterruptOutcome::Requested; }
     void finish(const std::string& run, std::string report) {
         runs.at(run) = {.kind = Observation::Kind::Finished, .question = {}, .status = "completed",
                         .report = std::move(report), .resultRunId = run, .itemId = "report-" + run,

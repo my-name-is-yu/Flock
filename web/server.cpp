@@ -198,7 +198,10 @@ public:
           }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
-        if (callbacks_.authenticate) store_.access().requireWebIdentity();
+        if (callbacks_.authenticate) {
+            store_.access().requireWebIdentity();
+            store_.setWebIdentityResolver(callbacks_.resolveIdentity);
+        }
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
         server_.new_task_queue = [] { return new httplib::ThreadPool(4,8,32); };
         server_.set_address_family(AF_INET)
@@ -588,6 +591,8 @@ private:
                 if (message) {
                     const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
                     if (previous) return json(res,201,*previous);
+                    if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                        return error(res,503,"message_identity_unavailable");
                 }
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
@@ -597,7 +602,12 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo,attachments));
+                if (message) {
+                    const auto receipt = callbacks_.authenticate
+                        ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
+                        : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
+                    return json(res,201,receipt);
+                }
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);

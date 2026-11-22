@@ -6,6 +6,8 @@
 #include <limits>
 
 namespace flockv0::conversation {
+enum class PrincipalSource { legacy = 0, trusted = 1, web = 2, channel = 3 };
+
 struct QuestionAnchor {
     Id messageId, taskId, waitId;
     bool matchesChoice;
@@ -15,7 +17,8 @@ struct Message {
     Id id = 0, replyTo = 0;
     std::string bot, text, channelScope;
     Json routing;
-    Person actor;
+    Person admittedActor;
+    PrincipalSource principalSource = PrincipalSource::legacy;
     std::optional<QuestionAnchor> question;
 };
 }

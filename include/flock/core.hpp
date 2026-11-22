@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -86,6 +87,12 @@ struct Question {
 std::string_view trimSessionQuestionText(std::string_view text);
 // Validate a model answer against the observed fields and encode it for Session submission.
 Json sessionQuestionAnswers(const Json& fields, const Json& answers);
+struct RunEvidence {
+    enum class Availability { Available, ReportUnavailable, DiagnosticUnavailable };
+    Availability availability = Availability::Available;
+    std::string report, itemId, detail;
+    bool truncated = false;
+};
 struct Observation {
     enum class Kind { Running, Question, ExternalInput, Finished, Unavailable } kind = Kind::Running;
     Question question;
@@ -93,6 +100,7 @@ struct Observation {
     bool truncated = false;
     bool settled = false; // True on Finished only after delegated work has settled.
     std::string detail;
+    RunEvidence::Availability evidence = RunEvidence::Availability::Available;
 };
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
@@ -112,6 +120,7 @@ struct Delivery {
     std::string detail;
     bool definitelyUnsent = false;
 };
+enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
@@ -136,6 +145,10 @@ struct SessionMetadata {
     std::string title, project, projectId, status, createdAt, updatedAt;
     std::vector<SessionPreview> messages;
     bool moreMessages = false;
+};
+using SessionReadDeadline = std::optional<std::chrono::steady_clock::time_point>;
+struct SessionReadTimeout : std::runtime_error {
+    SessionReadTimeout() : std::runtime_error("Session read deadline exceeded") {}
 };
 struct SessionAttachment {
     std::string id, name, mimeType;
@@ -171,9 +184,16 @@ public:
     virtual Delivery send(const Command&) = 0;
     virtual Delivery reconcile(const Command&) = 0;
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
-    virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
+    // Recover evidence for an already attributed terminal result without waiting on the Run again.
+    virtual RunEvidence readRunEvidence(const std::string&, const Json&, const RunRef&, std::string_view) {
+        RunEvidence evidence;
+        evidence.availability = RunEvidence::Availability::ReportUnavailable;
+        evidence.detail = "Run report is unavailable";
+        return evidence;
+    }
+    virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
-    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool) { return {}; }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
     virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
@@ -201,6 +221,9 @@ class LocalMachine;
 enum class ChannelKind;
 struct ChannelResource;
 struct VerifiedChannelMessage;
+namespace conversation { enum class PrincipalSource; }
+// An absent result means the person is unavailable. Otherwise the value is their current root authority.
+using WebIdentityResolver = std::function<std::optional<bool>(std::string_view personId)>;
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
@@ -232,6 +255,9 @@ public:
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());
+    // Refers to a person in the current Web identity directory when the Runtime executes the turn.
+    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
+                    Id replyToMessageId = 0, const Json& attachments = Json::array());
     std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
                                 std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
@@ -279,6 +305,7 @@ public:
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
+    void setWebIdentityResolver(WebIdentityResolver);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
@@ -291,7 +318,7 @@ public:
 
 private:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&,
+                 Id replyToMessageId, conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
                  const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
@@ -309,6 +336,7 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
+    std::function<void(std::string_view)> storageContention = {};
 };
 class Runtime {
 public:
@@ -322,6 +350,8 @@ public:
     // eligible projects independently and returns immediately.
     void tick();
     void tickConcurrent();
+    // Let admitted work settle while stopping further dispatch.
+    void requestStop();
 private:
     struct Impl;
     std::unique_ptr<Impl> p_;

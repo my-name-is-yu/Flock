@@ -15,12 +15,15 @@ struct Param {
 struct Tool {
     const char* description;
     std::vector<Param> params;
+    bool taskOnly = false;
 };
 
 const std::map<std::string_view,Tool>& specs() {
     static const std::map<std::string_view,Tool> tools{
         {"git_find_repos",{"Find repositories with a repository:read grant on the connected host.",
             {{"query","string","Optional case-insensitive substring of owner/repo.",false}}}},
+        {"git_read_result",{"Recover a saved Git read for this task. Read IDs are listed in event.gitReadRefs.",
+            {{"readId","integer","Exact saved Git read ID."}},true}},
         {"git_repo_info",{"Read repository details using repository:read.",{}}},
         {"git_open_pr",{"Open or recover the task's PR using repository:pr and repository:read on a separate head repository.",
             {{"baseRef","string","Exact base branch."},{"headRepo","string","Head owner/repo. Omit for the base repository.",false},
@@ -61,13 +64,16 @@ const std::map<std::string_view,Tool>& specs() {
 }
 }
 
-const std::vector<std::string>& gitTools() {
-    static const auto names = [] {
+const std::vector<std::string>& gitTools(bool conversation) {
+    const auto names = [](bool conversation) {
         std::vector<std::string> result;
-        for (const auto& [name,spec] : specs()) result.emplace_back(name);
+        for (const auto& [name,spec] : specs())
+            if (!conversation || !spec.taskOnly) result.emplace_back(name);
         return result;
-    }();
-    return names;
+    };
+    static const auto conversationNames = names(true);
+    static const auto taskNames = names(false);
+    return conversation ? conversationNames : taskNames;
 }
 bool isGitTool(std::string_view tool) { return specs().contains(tool); }
 
@@ -76,7 +82,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
     Json properties{{"host",{{"type","string"},{"description","Connected Git host, for example github.com."}}},
                     {"reason",{{"type","string"},{"description","Evidence and reason for the action."}}}};
     Json required = {"host","reason"};
-    if (name != "git_find_repos") {
+    if (name != "git_find_repos" && name != "git_read_result") {
         properties["repo"] = {{"type","string"},{"description","Exact owner/repo from the repository grant."}};
         required.push_back("repo");
         if (conversation) {
@@ -95,7 +101,15 @@ Json gitToolSchema(std::string_view name, bool conversation) {
     }
     if (name == "git_read_ci_logs") properties["maxBytes"]["maximum"] = 16384;
     if (name == "git_manage_issue") properties["page"]["maximum"] = 10000;
+    Json parameters{{"type","object"},{"properties",std::move(properties)},
+                    {"required",std::move(required)},{"additionalProperties",false}};
+    if (name == "git_manage_issue" && conversation) {
+        parameters["oneOf"] = Json::array({
+            {{"properties",{{"action",{{"enum",{"list","read","list_comments"}}}}}}},
+            {{"properties",{{"action",{{"enum",{"create","update"}}}}}},{"required",{"taskId"}}}
+        });
+    }
     return {{"type","function"},{"name",name},{"description",spec.description},{"strict",false},
-        {"parameters",{{"type","object"},{"properties",properties},{"required",required},{"additionalProperties",false}}}};
+            {"parameters",std::move(parameters)}};
 }
 }
