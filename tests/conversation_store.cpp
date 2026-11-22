@@ -75,6 +75,7 @@ Decision say(std::string text, Json suggestions = nullptr) {
 struct ScriptedModel : Model {
     std::function<Decision(const ModelInput&)> conversation;
     std::vector<ModelInput> turns;
+    std::string doneWhen = "Provide a fixture report";
 
     Decision decide(const ModelInput& input) override {
         if (input.event.value("kind","") == "conversation_turn") {
@@ -82,7 +83,7 @@ struct ScriptedModel : Model {
             return conversation(input);
         }
         if (input.event.at("kind") == "intake")
-            return {"delegate",{{"instruction","Run the fixture work"},{"doneWhen","Provide a fixture report"}},"Run the fixture"};
+            return {"delegate",{{"instruction","Run the fixture work"},{"doneWhen",doneWhen}},"Run the fixture"};
         check(input.event.at("kind") == "result","Unexpected execution fixture event");
         return {"complete",{{"report",input.event.at("report")}},"The fixture report exists"};
     }
@@ -513,10 +514,11 @@ void longResultsAreReadInChunks() {
           "A long result was not readable in UTF-8 safe chunks");
 }
 
-void escapedMessageLeavesRoomForReportReads() {
+void escapedMessagePreservesSearchAndReportReads() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
+    execution.model.doneWhen = std::string(2000,'c');
     const auto id = task(store,"Read a multilingual report");
     std::string report;
     for (int i = 0; i < 750; ++i) report += "報告\n" + std::to_string(i);
@@ -529,7 +531,15 @@ void escapedMessageLeavesRoomForReportReads() {
         check(input.event.at("text") == message && serialized.dump().size() <= Json(message).dump().size() + 2048,
               "Escaped message was shortened or its context exceeded the budget");
         const auto& steps = input.event.at("turn");
-        if (steps.empty()) return {"read_result",{{"messageId",result}},"Read"};
+        if (steps.empty()) return {"find_tasks",{{"query","multilingual"}},"Find the report"};
+        if (steps.back().at("tool") == "find_tasks") {
+            check(input.task.at("tasks").empty() && !steps.back().contains("args"),
+                  "Search result did not exercise compaction");
+            const auto& hit = steps.back().at("result").at("tasks").at(0);
+            const auto& messageId = hit.at("latestResult").at("messageId");
+            check(hit.at("taskId") == id && messageId == result,"Compacted search lost the result reference");
+            return {"read_result",{{"messageId",messageId}},"Read"};
+        }
         const auto& chunk = steps.back().at("result");
         const auto& text = chunk.at("text").get_ref<const std::string&>();
         check(chunk.at("offset") == received.size() && !text.empty() &&
@@ -542,7 +552,7 @@ void escapedMessageLeavesRoomForReportReads() {
         check(chunk.at("end") == (received.size() == report.size()),"Wrong end of report");
         if (chunk.at("end") == true) return say("Done");
         check(chunk.at("nextOffset") == received.size(),"Cursor advanced past visible text");
-        return {"read_result",{{"messageId",result},{"offset",chunk.at("nextOffset")}},"Continue"};
+        return {"read_result",{{"messageId",chunk.at("messageId")},{"offset",chunk.at("nextOffset")}},"Continue"};
     };
     const auto receipt = receive(store,"escaped",message);
     execution.runtime.runConversations();
@@ -626,7 +636,7 @@ int main() {
         taskApprovalReservesTheAttempt();
         serializedTurnBudgetIncludesPriorCalls();
         longResultsAreReadInChunks();
-        escapedMessageLeavesRoomForReportReads();
+        escapedMessagePreservesSearchAndReportReads();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         replyTargetsReachTheTurn();
         std::cout << "Conversation Store acceptance passed\n";

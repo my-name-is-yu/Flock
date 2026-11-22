@@ -214,8 +214,15 @@ void budgetTurnInput(Json& input) {
         Json summary = Json::object();
         for (const auto* key : {"ok","effect","delivery","taskId","messageId","revisionId","before"})
             if (result.contains(key)) summary[key] = result.at(key);
-        if (result.contains("tasks"))
-            for (const auto& task : result.at("tasks")) summary["taskIds"].push_back(task.at("taskId"));
+        if (result.contains("tasks")) {
+            auto& hits = summary["tasks"] = Json::array();
+            for (const auto& task : result.at("tasks")) {
+                Json hit = {{"taskId",task.at("taskId")}};
+                if (task.contains("latestResult"))
+                    hit["latestResult"] = {{"messageId",task.at("latestResult").at("messageId")}};
+                hits.push_back(std::move(hit));
+            }
+        }
         if (result.contains("error")) summary["error"] = bounded(field(result,"error"),120);
         Json reduced = {{"tool",bounded(field(entry,"tool"),64)},{"result",std::move(summary)}};
         bytes = bytes - entry.dump().size() + reduced.dump().size();
