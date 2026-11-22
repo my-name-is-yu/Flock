@@ -250,7 +250,7 @@ Json readBotConfig(const std::filesystem::path& file) {
     return config;
 }
 
-Bot configuredBot(std::string_view id, const Json& config) {
+Bot configuredBot(std::string_view id, const Json& config, std::vector<std::string>* scheduleErrors = nullptr) {
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
@@ -283,7 +283,15 @@ Bot configuredBot(std::string_view id, const Json& config) {
     if (!timeout.is_number_integer() || timeout.get<long double>() < 1 || timeout.get<long double>() > 2147483647)
         throw Conflict("runTimeoutSeconds must be a positive integer");
     bot.settings["runTimeoutSeconds"] = timeout.get<int>();
-    if (config.contains("session")) bot.settings["session"] = normalizeSessionSettings(config["session"]);
+    if (config.contains("session")) {
+        try { bot.settings["session"] = normalizeSessionSettings(config["session"]); }
+        catch (const Conflict& error) {
+            if (!scheduleErrors) throw;
+            scheduleErrors->push_back(error.what());
+            // Preserve the cron due time. This snapshot must stop at Session launch validation.
+            bot.settings["session"] = nullptr;
+        }
+    }
     const auto allowedBots = config.value("allowedBots",Json::array());
     if (!allowedBots.is_array()) throw Conflict("allowedBots must be an array of Bot IDs");
     std::set<std::string> allowedIds;
@@ -499,7 +507,7 @@ void Bots::syncSchedules(Store& store, Seconds now,
             const auto cron = config.value("cron",Json::array());
             if (!cron.is_array()) throw Conflict("cron must be an array");
             if (!cron.empty()) {
-                const auto bot = configuredBot(id,config);
+                const auto bot = configuredBot(id,config,&errors);
                 std::map<std::string_view,std::size_t> counts;
                 for (const auto& entry : cron) {
                     const auto key = entry.find("id");
