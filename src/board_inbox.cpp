@@ -246,7 +246,6 @@ WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
             addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
                       (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
                       changes.number(5));
-        // A Git review follows Task generations within its original revision.
         auto reviews = p_->query(R"SQL(
 SELECT p.id,p.task_id,t.generation,t.data,p.url,p.title,p.prompt,p.operation_id IS NOT NULL,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
