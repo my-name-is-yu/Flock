@@ -629,8 +629,8 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
-    exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
-         {reply,message.id});
+    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
 
@@ -672,14 +672,14 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id)) return false;
     if (message.routing.contains("gitEvent")) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
+        if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+        exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
     } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
     else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
@@ -737,10 +737,7 @@ UNION ALL SELECT 1 FROM conversation_steps WHERE message_id=?1 AND result IS NUL
     AND (decision IS NOT NULL OR effect IS NOT NULL)
 LIMIT 1
 )SQL",{id}).next()) {
-            if (authorizeTurn(message)) {
-                if (const auto attempt = takeReservedConversationCall(id)) releaseModelCall(messageModelBudget(id),attempt);
-                resolveOfferedAnswer(message);
-            }
+            if (authorizeTurn(message)) resolveOfferedAnswer(message);
             transaction.commit();
             return;
         }

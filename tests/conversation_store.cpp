@@ -765,6 +765,36 @@ void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
           "The approved call did not resume the paused turn exactly once");
 }
 
+void notesFailureReleasesUnusedApproval() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    auto limited = Fixture::bot();
+    limited.config["modelCallLimit"] = 1;
+    execution.model.conversation = [](const ModelInput&) -> Decision {
+        return {"start_task",{{"request","Write a release note"}},"Start it"};
+    };
+    const auto message = receive(store,"approval-notes","Write a release note",0,limited);
+    execution.runtime.runConversations();
+    const auto tasks = store.tasks("alpha");
+    const auto pauses = store.pausedConversations("alpha");
+    check(tasks.size() == 1 && pauses.size() == 1,"The turn did not start a task and pause for approval");
+    const Id pause = pauses.at(0).at("messageId");
+    store.decideInbox(localOwner,{"alpha",InboxKind::conversation_model_budget,message,pause,0,0,pause},"approve");
+
+    execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
+    execution.runtime.runConversations();
+    const auto failure = store.conversation("alpha",0,1).at(0).at("data");
+    check(execution.model.turns.size() == 1 && failure.at("route") == "error" &&
+          failure.at("replyToMessageId") == message,"The resumed turn did not fail before model dispatch");
+    check(fixture.count("SELECT count(*) FROM model_attempts WHERE message_id=" + std::to_string(message)) == 1,
+          "The failed turn consumed an unused approved call");
+
+    execution.notes = [](std::string_view) { return std::string{}; };
+    execution.reach(store,tasks.at(0).at("id"),"running");
+    check(execution.t3.launches == 1,"The shared approval did not allow the task to launch once");
+}
+
 void replyTargetsReachTheTurn() {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
@@ -847,6 +877,7 @@ int main() {
         boundedContextAndOlderTasks();
         longResultsAreReadInChunks();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
+        notesFailureReleasesUnusedApproval();
         replyTargetsReachTheTurn();
         conversationPagesCombineTaskAndMessageHistory();
         std::cout << "Conversation Store acceptance passed\n";

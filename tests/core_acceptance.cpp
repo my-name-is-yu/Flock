@@ -2030,6 +2030,50 @@ void modelBudgetCountsFailedAttempts() {
     check(f.model.calls == 4 && f.task(id)["remaining"] == 3,"approval did not resume the saved retry event");
 }
 
+void taskInferenceSurvivesWriterContention(bool modelFails) {
+    Fixture f;
+    const auto taskId = f.store->submit({"alpha","Check the fixture","e","p",{{"modelCallLimit",1}}});
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open((f.directory/"state.db").c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    f.model.usage = {{"input_tokens",7}};
+    f.model.script = [&](const ModelInput&) {
+        check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not acquire the fixture write lock");
+        if (modelFails) throw ModelError("Temporary fixture failure",true,f.model.usage);
+        return work();
+    };
+    f.reach(taskId,"deciding");
+    bool contended = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "database is locked","Unexpected Task checkpoint error");
+        contended = true;
+    }
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK && contended,
+          "The model checkpoint did not contend with the fixture writer");
+
+    if (modelFails) {
+        f.runtime->tick();
+        const auto task = f.task(taskId);
+        check(f.model.calls == 1 && f.t3.launches == 0 && f.logs(taskId,"model_failure") == 1 &&
+              task.at("state") == "deciding" && task.at("feedback") == "Temporary fixture failure",
+              "The Task lost the model failure or skipped its retry backoff");
+    } else {
+        f.reach(taskId,"running");
+        check(f.model.calls == 1 && f.t3.launches == 1 && f.logs(taskId,"decision") == 1,
+              "The Task repeated inference or lost the decision after the writer released its lock");
+    }
+    sqlite3_stmt* statement = nullptr;
+    check(sqlite3_prepare_v2(writer.get(),"SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE task_id=?",
+                             -1,&statement,nullptr) == SQLITE_OK,"Could not read the fixture model usage");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
+    check(sqlite3_bind_int64(row.get(),1,taskId) == SQLITE_OK && sqlite3_step(row.get()) == SQLITE_ROW &&
+          sqlite3_column_int(row.get(),0) == 7 && sqlite3_step(row.get()) == SQLITE_DONE,
+          "The Task did not save the original model attempt's usage");
+}
+
 void modelBudgetAllowsT3ObservationAndRecovery() {
     Fixture f;
     f.model.script = [](const ModelInput& input) { return input.event["kind"] == "intake" ? work() : reply(); };
@@ -3276,6 +3320,8 @@ int main() {
             {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
             {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
             {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
+            {"Task model decision survives SQLite writer contention",[] { taskInferenceSurvivesWriterContention(false); }},
+            {"Task model failure survives SQLite writer contention",[] { taskInferenceSurvivesWriterContention(true); }},
             {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
