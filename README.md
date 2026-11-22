@@ -88,7 +88,7 @@ Session. A Bot can read its own Sessions. To share another Session, grant
 in C++, or the compact JSON pair `["environment-id","thread-id"]` as the resource
 ID in settings. T3 must permit each read. Set `services` and `mcpServers` to arrays of
 connection names for the conversation tools. Manage grants and protected input
-from **Manage access and credentials** in Bot settings.
+from **Access and credentials** in Bot settings.
 
 Adapters that perform resource operations should use the contracts in
 `include/flock/access.hpp`. At the execution boundary, pass the authenticated
