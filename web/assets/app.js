@@ -960,6 +960,10 @@ function eventCard(event, context, place) {
     if (trigger) text.append(icon('clock', 'glyph kind-icon'), node('span', 'sr-only', 'Automated request: '));
     text.append(document.createTextNode(data.text ?? ''));
     bubble.append(text);
+    if (event.kind === 'conversation_message' && data.imageAttachmentCount > 0) {
+      const count = data.imageAttachmentCount;
+      bubble.append(node('p', 'message-attachments', count === 1 ? '1 image attached' : `${count} images attached`));
+    }
     if (event.kind === 'user_answer') {
       const question = data.question;
       if (question && !place.afterQuestion) {

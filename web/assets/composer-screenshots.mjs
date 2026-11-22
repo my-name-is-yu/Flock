@@ -2,6 +2,9 @@ const maxFiles = 4;
 const maxFileBytes = 64 * 1024;
 const maxAttachmentBytes = 98_000;
 const maxMessageBytes = 128 * 1024;
+// Match the attachment inspector's limits in src/attachments.cpp.
+const maxImageEdge = 8192;
+const maxImagePixels = 4_194_304;
 const encoder = new TextEncoder();
 const jsonBytes = (value) => encoder.encode(JSON.stringify(value));
 const signatures = {
@@ -45,21 +48,18 @@ export async function encodeScreenshot(file, attachments) {
 export async function stageScreenshots(draft, files, isCurrent) {
   for (const file of files) {
     if (!isCurrent()) return;
-    let preview;
     try {
       const attachment = await encodeScreenshot(file, draft.images.map((image) => image.attachment));
       if (!isCurrent()) return;
-      preview = URL.createObjectURL(file);
-      const image = new Image();
-      image.src = preview;
-      await image.decode();
-      if (!isCurrent()) {
-        URL.revokeObjectURL(preview);
-        return;
-      }
+      const image = await createImageBitmap(file);
+      const { width, height } = image;
+      image.close();
+      if (!isCurrent()) return;
+      if (width > maxImageEdge || height > maxImageEdge || width * height > maxImagePixels)
+        throw new ScreenshotError(`Crop or resize ${attachment.name} to at most 8,192 pixels per side and 4,194,304 pixels total.`);
+      const preview = URL.createObjectURL(file);
       draft.images = [...draft.images, { attachment, preview }];
     } catch (error) {
-      if (preview) URL.revokeObjectURL(preview);
       if (isCurrent()) draft.error ||= error instanceof ScreenshotError ? error.message : 'Could not open this PNG or JPEG screenshot.';
     }
   }

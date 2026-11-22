@@ -740,6 +740,8 @@ SELECT page.id,page.task_id,page.time,page.kind,
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',
             coalesce(json_extract(page.data,'$.status'),'received'),
+            'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
+              WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,coalesce(json_extract(data,'$.step'),0) AS step
