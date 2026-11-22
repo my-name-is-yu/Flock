@@ -13,6 +13,11 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
+void Store::setWebPeople(std::vector<Person> people) {
+    std::lock_guard lock(p_->mutex);
+    p_->webPeople = std::move(people);
+}
+
 void Store::Impl::initializeConversationSchema() {
     Transaction transaction(db);
     if (sqlite3_exec(db,R"SQL(
@@ -33,6 +38,7 @@ CREATE TABLE IF NOT EXISTS messages(
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
   person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
+  principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3)),
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
@@ -51,6 +57,8 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw std::runtime_error(sqlite3_errmsg(db));
+    if (!query("SELECT 1 FROM pragma_table_info('messages') WHERE name='principal_source'").next())
+        exec("ALTER TABLE messages ADD COLUMN principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3))");
     transaction.commit();
 }
 
@@ -101,11 +109,19 @@ std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, st
 
 Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
                     const Json& attachments) {
-    return receive(actor,routing.botId,clientId,text,replyTo,nullptr,[&] { return routing; },attachments);
+    return receive(actor,routing.botId,clientId,text,replyTo,conversation::PrincipalSource::trusted,
+                   nullptr,[&] { return routing; },attachments);
+}
+
+Json Store::receiveWeb(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo,
+                       const Json& attachments) {
+    return receive(actor,routing.botId,clientId,text,replyTo,conversation::PrincipalSource::web,
+                   nullptr,[&] { return routing; },attachments);
 }
 
 Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
-                    const VerifiedChannelMessage* channel, const std::function<Intake()>& route, const Json& attachments) {
+                    conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
+                    const std::function<Intake()>& route, const Json& attachments) {
     if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0)
@@ -129,10 +145,11 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
                      {unixTime(),routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?
 )SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
-        actor.id,actor.adminRoot ? 1 : 0,routing.botId});
+        actor.id,source == conversation::PrincipalSource::trusted && actor.adminRoot ? 1 : 0,
+        static_cast<int>(source),routing.botId});
             p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }

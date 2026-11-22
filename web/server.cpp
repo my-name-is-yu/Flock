@@ -597,7 +597,12 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo,attachments));
+                if (message) {
+                    const auto receipt = callbacks_.authenticate
+                        ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
+                        : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
+                    return json(res,201,receipt);
+                }
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);

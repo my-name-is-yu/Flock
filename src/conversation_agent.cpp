@@ -15,6 +15,7 @@ using conversation_storage::verifiedEnvironment;
 
 namespace {
 using conversation::Message;
+using conversation::PrincipalSource;
 
 const std::vector<std::string> channelTools{"channel_edit_message","channel_react","channel_send_attachment",
     "publish_artifact","read_channel_attachment"};
@@ -83,11 +84,14 @@ AND NOT EXISTS (
 
 Message Store::Impl::loadTurnMessage(Id id) const {
     auto row = query(R"SQL(
-SELECT m.reply_to,m.bot_id,m.text,c.scope_key,m.routing,m.person_id,m.person_root FROM messages m
+SELECT m.reply_to,m.bot_id,m.text,c.scope_key,m.routing,m.person_id,m.person_root,m.principal_source FROM messages m
 LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
 )SQL",{id});
     if (!row.next()) throw Conflict("Conversation message is missing");
-    Message message{id,row.number(0),row.string(1),row.string(2),row.string(3),row.json(4),{row.string(5),row.number(6) != 0}};
+    Message message{id,row.number(0),row.string(1),row.string(2),row.string(3),row.json(4),
+                    {row.string(5),row.number(6) != 0},static_cast<PrincipalSource>(row.number(7))};
+    if (message.principalSource == PrincipalSource::legacy && !message.channelScope.empty())
+        message.principalSource = PrincipalSource::channel;
     if (!message.replyTo || message.replyTo >= id) return message;
     auto anchor = query(R"SQL(
 WITH RECURSIVE targets(id) AS (
@@ -458,11 +462,11 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError(error,{{"taskId",task.at("id")},{"current",taskState(task,message)}});
         const TaskTarget target{bot,task.at("id"),waitId,identifier(args,"revisionId",true,0),
                                 identifier(args,"generation",true,0)};
-        operate(message.actor,target,"answer",{{"text",answer}},message.id,InboxKind::user_question);
+        operate(turnActor(message),target,"answer",{{"text",answer}},message.id,InboxKind::user_question);
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!Access(*this).permitsPerson(message.actor,bot,Role::decide)) throw DecisionDenied{};
+        if (!Access(*this).permitsPerson(turnActor(message),bot,Role::decide)) throw DecisionDenied{};
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
@@ -478,7 +482,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
-        operate(message.actor,TaskTarget::from(task,0),"cancel",Json::object());
+        operate(turnActor(message),TaskTarget::from(task,0),"cancel",Json::object());
         const auto state = load(task.at("id")).at("state");
         return {{"ok",true},{"effect",state == "cancelled" ? "cancelled" : "cancelling"},{"taskId",task.at("id")}};
     }
@@ -665,6 +669,29 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
+Person Store::Impl::turnActor(const Message& message) {
+    const auto& admitted = message.admittedActor;
+    switch (message.principalSource) {
+        case PrincipalSource::trusted: return admitted;
+        case PrincipalSource::channel: return {admitted.id,false};
+        case PrincipalSource::legacy:
+            // A legacy shared Web receipt cannot be distinguished from a trusted intake by ID alone.
+            return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
+        case PrincipalSource::web: {
+            bool present = false;
+            bool root = true;
+            for (const auto& current : webPeople) {
+                if (current.id != admitted.id) continue;
+                present = true;
+                // Credentials for one person can disagree. Only authority common to them is safe to reuse.
+                root = root && current.adminRoot;
+            }
+            return present ? Person{admitted.id,root} : Person{};
+        }
+    }
+    return {};
+}
+
 bool Store::Impl::authorizeTurn(const Message& message) {
     if (!turnPending(message.id)) return false;
     if (message.routing.contains("gitEvent")) {
@@ -673,12 +700,12 @@ bool Store::Impl::authorizeTurn(const Message& message) {
         exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
         return false;
     }
-    if (message.channelScope.empty()) {
-        if (Access(*this).permitsPerson(message.actor,message.bot,Role::decide)) return true;
-        finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
-    } else {
-        if (channelMessageAuthorized(message.id,message.bot)) return true;
+    if (message.principalSource == PrincipalSource::channel) {
+        if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
+    } else {
+        if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
+        finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
     }
     return false;
 }
@@ -780,6 +807,14 @@ LIMIT 1
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
+                {
+                    std::lock_guard lock(mutex);
+                    Transaction transaction(db);
+                    const bool allowed = authorizeTurn(message);
+                    if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
+                    transaction.commit();
+                    if (!allowed) return true;
+                }
                 calls = callModel(message.bot,model,input,attempt).calls;
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count",false);
@@ -875,17 +910,21 @@ LIMIT 1
         }
 
         Json result;
-        if (isGitTool(decision.tool)) {
-            {
-                std::lock_guard lock(mutex);
-                Transaction transaction(db);
-                if (!authorizeTurn(message)) { transaction.commit(); return true; }
-                transaction.commit();
-            }
+        const bool git = isGitTool(decision.tool);
+        const bool readSession = decision.tool == "flock_session_search" || decision.tool == "flock_session_events";
+        const bool checkEnvironment = decision.tool == "check_environment_readiness" && message.channelScope.empty();
+        if (git || readSession || checkEnvironment) {
+            std::lock_guard lock(mutex);
+            Transaction transaction(db);
+            const bool allowed = authorizeTurn(message);
+            transaction.commit();
+            if (!allowed) return true;
+        }
+        if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
-        } else if (decision.tool == "flock_session_search" || decision.tool == "flock_session_events") {
+        } else if (readSession) {
             result = sessionReadTool(message.bot,message.channelScope,decision,t3);
-        } else if (decision.tool == "check_environment_readiness" && message.channelScope.empty()) {
+        } else if (checkEnvironment) {
             try {
                 result = readiness(message.bot,message.routing,decision.args,t3);
                 result["ok"] = true;

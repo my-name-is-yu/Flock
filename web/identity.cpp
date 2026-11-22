@@ -22,7 +22,7 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
     const auto entries=Json::parse(data,nullptr,false);
     if (!entries.is_array()) throw Conflict("Invalid Web identities");
     std::map<std::string,Person,std::less<>> people;
-    std::vector<std::string> roots;
+    std::vector<Person> identities;
     for (auto& item:entries) {
         try {
             const auto credential=item.at("authorization").get<std::string>();
@@ -31,10 +31,10 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
                 (!credential.starts_with("Basic ") && !credential.starts_with("Bearer ")) ||
                 credential.find_first_of("\r\n")!=credential.npos || !people.emplace(credential,principal).second)
                 throw Conflict("Invalid Web identity");
-            if (principal.adminRoot) roots.push_back(std::move(principal.id));
+            identities.push_back(std::move(principal));
         } catch (const Json::exception&) { throw Conflict("Invalid Web identity"); }
     }
-    store.setRootPeople(std::move(roots));
+    store.setWebPeople(std::move(identities));
     callbacks.authenticate = [people=std::move(people)](std::string_view authorization) -> Person {
         auto found=people.find(authorization);
         return found==people.end() ? Person{} : found->second;

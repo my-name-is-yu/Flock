@@ -201,6 +201,7 @@ class LocalMachine;
 enum class ChannelKind;
 struct ChannelResource;
 struct VerifiedChannelMessage;
+namespace conversation { enum class PrincipalSource; }
 class Store {
 public:
     using MemorySeed = std::function<std::string(std::string_view)>;
@@ -232,6 +233,9 @@ public:
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());
+    // Refers to a person in the current Web identity directory when the Runtime executes the turn.
+    Json receiveWeb(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
+                    Id replyToMessageId = 0, const Json& attachments = Json::array());
     std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
                                 std::string_view text, Id replyToMessageId = 0, const Json& attachments = Json::array()) const;
     // Conversation turns paused on the model call limit, newest first.
@@ -278,7 +282,8 @@ public:
     Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
-    void setRootPeople(std::vector<std::string> ids);
+    // Install the current Web identity directory on the Store that processes conversation turns.
+    void setWebPeople(std::vector<Person> people);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
@@ -291,7 +296,7 @@ public:
 
 private:
     Json receive(const Person&, std::string_view botId, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&,
+                 Id replyToMessageId, conversation::PrincipalSource, const VerifiedChannelMessage*, const std::function<Intake()>&,
                  const Json& attachments = Json::array());
     struct Impl;
     std::unique_ptr<Impl> p_;
