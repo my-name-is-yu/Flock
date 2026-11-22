@@ -19,7 +19,8 @@ const elements = Object.fromEntries([
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-name-first', 'peer-name-second',
+  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -575,8 +576,10 @@ function renderHeader() {
     elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
     const pair = [dm.id, dm.peerId].sort().map(participant);
     if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot)));
-      elements['peer-heading'].textContent = pair.map(({ name }) => name).join(' & ');
+      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot, 'avatar-profile')));
+      elements['peer-name-first'].textContent = pair[0].name;
+      elements['peer-name-second'].textContent = pair[1].name;
+      elements['peer-heading'].title = pair.map(({ name }) => name).join(' & ');
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
