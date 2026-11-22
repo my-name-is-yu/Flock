@@ -78,7 +78,6 @@ const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
-let pendingSource = null;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
@@ -224,16 +223,15 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
-    if (view.source || pendingSource) backToLatest();
+    if (view.source || view.pendingSource) backToLatest();
     else renderBots();
     return;
   }
-  pendingSource = null;
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, source: null, loadingOlder: false, loadingSessions: false,
+    sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const pending = botId && pendingMessage(botId);
   if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
@@ -864,7 +862,7 @@ function sourceAction(source, label = 'Open source') {
   });
 }
 function leaveConversationSource(context) {
-  pendingSource = null;
+  context.pendingSource = null;
   if (!context.source) return false;
   context.source = null;
   readingPositions.delete(timelineKey(context.id));
@@ -907,14 +905,14 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
   if (preferLoaded && context.events.has(id)) {
     if (leaveConversationSource(context)) renderTimeline();
   } else {
-    const request = {};
-    pendingSource = request;
+    // Find and the inbox share one pending jump per conversation.
+    const request = context.pendingSource = { id };
     let page;
     try {
       page = await api(botQuery('conversation', context.id, id + 1), undefined, signal);
     } catch {}
-    if (pendingSource !== request || context !== view) return;
-    pendingSource = null;
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
     if (signal?.aborted) return;
     if (!page?.events.some((event) => event.id === id)) {
       setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
@@ -2055,11 +2053,11 @@ elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
-  pendingSource = null;
   if (view?.source) {
     backToLatest();
     return;
   }
+  if (view) view.pendingSource = null;
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
