@@ -24,6 +24,13 @@ void check(bool passed, const std::string& failure) {
     if (!passed) throw std::runtime_error(failure);
 }
 
+void checkReply(const Json& data) {
+    const bool hasRoute = data.contains("route");
+    const auto outcome = data.value(hasRoute ? "route" : "status", "");
+    if (outcome != (hasRoute ? "reply" : "ok"))
+        throw std::runtime_error("Turn ended with " + outcome + ": " + data.value("text", ""));
+}
+
 struct Directory {
     std::filesystem::path path;
     Directory() {
@@ -152,9 +159,7 @@ struct Scene {
         for (const auto& row : store.conversation("release",0,200)) {
             const auto& data = row.at("data");
             if (row.at("kind") != "conversation_reply" || data.at("replyToMessageId") != receipt.at("messageId")) continue;
-            const auto route = data.at("route").get<std::string>();
-            if (route != "reply")
-                throw std::runtime_error("Turn ended with " + route + ": " + data.at("text").get<std::string>());
+            checkReply(data);
             return {data,std::move(before),snapshot(),
                     {t3.notes.begin() + static_cast<std::ptrdiff_t>(steerCount),t3.notes.end()},
                     t3.interrupted.size() - interruptCount};
@@ -317,6 +322,17 @@ bool explainsCanary(const std::string& reply) {
 
 enum class NoteTiming { Immediate, SafeBoundary };
 
+bool selectsOtherDatabase(const std::string& text) {
+    // Capture each exclusion with its own production mention so a later directive is scored separately.
+    static const std::regex otherDatabase(
+        R"(((?:\b(?:not|never|no|avoid|skip|without|instead\s+of|rather\s+than)|n['’]t)\s+)"
+        R"((?:(?:use|using|switch\s+to|target|connect\s+to|benchmark\s+against|run\s+against)\s+)?(?:the\s+)?`?)?)"
+        R"(\b(?:production|prod)\b|\b(?:development|dev)\s+(?:database|db)\b)");
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),otherDatabase); it != std::sregex_iterator(); ++it)
+        if (!(*it)[1].matched) return true;
+    return false;
+}
+
 void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing) {
     const bool immediate = timing == NoteTiming::Immediate;
     checkActions(turn,{{immediate ? "message_session" : "send_to_task",id}});
@@ -333,10 +349,9 @@ void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing
     static const std::regex rejectsStaging(
         R"((?:(?:\b(?:not|never)|n['’]t)\s+(?:use|switch to|target|connect to|benchmark against|run against))"
         R"(|\b(?:no|avoid|skip|without|instead of|rather than))\s+(?:the\s+)?staging\b)");
-    static const std::regex otherDatabase(R"(\b(?:production|prod|development|dev)\s+(?:database|db)\b)");
     const auto text = lower(instruction);
     check(std::regex_search(text,staging) && !std::regex_search(text,rejectsStaging) &&
-          !std::regex_search(text,otherDatabase),
+          !selectsOtherDatabase(text),
           "the new instruction did not direct the benchmark to use the staging database");
 
     const auto& effect = turn.reply.at("actions").front().at("effect");
@@ -476,6 +491,10 @@ struct Script : Model {
 
 void selfTest() {
     int passed = 0;
+    for (const auto& reply : {Json{{"route","reply"}},Json{{"status","ok"}}}) {
+        checkReply(reply);
+        ++passed;
+    }
     const auto run = [&](std::string_view name, const Scenario& scenario, std::vector<Decision> steps,
                          std::string_view expectedFailure = {}) {
         Script script(std::move(steps));
@@ -521,7 +540,8 @@ void selfTest() {
         return action("change_task",benchmark,{{"doneWhen",text},{"instruction",instruction}});
     };
     const auto steer = [&](std::string_view text) { return action("message_session",benchmark,{{"text",text}}); };
-    const auto queue = action("send_to_task",benchmark,{{"instruction","Use the staging database at the next safe point"}});
+    const auto queue = [&](std::string_view text) { return action("send_to_task",benchmark,{{"instruction",text}}); };
+    const auto stagingAtSafePoint = queue("Use the staging database at the next safe point");
 
     auto cloud = start("Run the existing test suite");
     cloud.args["environment"] = "cloud Mac";
@@ -563,15 +583,29 @@ void selfTest() {
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then never expand it to everyone.")},"did not explain");
     test("a note for running work reaches",{steer("Use the staging database"),done});
     test("a note for running work reaches",{steer("Use the staging database; do not stop the current run"),done});
-    test("a note for running work reaches",{queue,done},"unexpected action");
+    test("a note for running work reaches",{stagingAtSafePoint,done},"unexpected action");
     test("a note for running work reaches",
          {steer("Do not use the staging database"),done},"did not direct");
     test("a note for running work reaches",
          {steer("Use the staging database for now. Do not use staging for the benchmark."),done},"did not direct");
-    test("a note for running work waits",{queue,done});
+    test("a note for running work waits",{stagingAtSafePoint,done});
     test("a note for running work waits",{steer("Use the staging database"),done},"unexpected action");
-    test("a note for running work waits",
-         {action("send_to_task",benchmark,{{"instruction","Avoid staging database"}}),done},"did not direct");
+    test("a note for running work waits",{queue("Avoid staging database"),done},"did not direct");
+    for (auto text : {"Use the staging database, not the production database",
+                      "Use the staging database instead of production",
+                      "Use the staging database rather than prod",
+                      "Avoid production and use the staging database"}) {
+        test("a note for running work reaches",{steer(text),done});
+        test("a note for running work waits",{queue(text),done});
+    }
+    for (auto text : {"Use the production database",
+                      "Use staging and production database",
+                      "Use the staging database and production database",
+                      "Use the staging database, then switch to production",
+                      "Use the staging database, not the production database. Then run against prod."}) {
+        test("a note for running work reaches",{steer(text),done},"did not direct");
+        test("a note for running work waits",{queue(text),done},"did not direct");
+    }
 
     constexpr auto stagingBenchmark = "Benchmark startup using the staging database";
     const auto queuedNote = [&](std::string text) {
