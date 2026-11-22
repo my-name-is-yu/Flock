@@ -10,7 +10,8 @@
   border: 0; border-radius: var(--radius-md); background: none; color: var(--text-2);
   font-size: .875rem; font-weight: 500; text-align: left;
 }
-.board-inbox-nav button:hover { background: var(--hover); color: var(--text); }
+.board-inbox-nav a { padding: .4rem .55rem .4rem 3.9rem; color: var(--text-2); border-radius: var(--radius-md); font-size: .875rem; font-weight: 500; text-decoration: none; }
+.board-inbox-nav button:hover, .board-inbox-nav a:hover { background: var(--hover); color: var(--text); }
 /* Center icons in the avatar column so labels line up with Bot names. */
 .board-inbox-nav svg { flex: none; width: 2.6rem; height: 1.2rem; }
 .board-inbox button:not(.icon-button), .board-inbox select {

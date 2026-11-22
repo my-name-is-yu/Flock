@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS coordination_activations(
 )SQL");
 }
 
+Participation Store::Impl::authorizeParticipation(const Person& person, Id channel) {
+    auto entry = lookup(db, channel);
+    if (!entry) throw Conflict("Unknown Session participation");
+    if (const auto* consult = std::get_if<ConsultPermit>(&*entry))
+        authorize(Access(*this), person, consult->channel.origin, nullptr);
+    else {
+        const auto& activation = std::get<CoordinationActivation>(*entry);
+        authorize(Access(*this), person, activation.channel.origin, &activation.binding.request);
+    }
+    return std::move(*entry);
+}
+
 Participation ParticipationStore::open(const Person& person, const InvitationRef& ref,
                                        ParticipationAuthority& authority) {
     validateInvitation(ref);
@@ -165,7 +177,9 @@ Participation ParticipationStore::open(const Person& person, const InvitationRef
     }
     if (request && db.query(R"SQL(
 SELECT 1 FROM coordination_activations a JOIN return_channels c ON c.id=a.channel_id
+LEFT JOIN root_gate_channels g ON g.channel_id=c.id
 WHERE c.environment_id=? AND c.thread_id=?
+ AND (g.sealed IS NOT 1 OR g.frozen IS NOT 1 OR g.release_acknowledged IS NOT 1)
 )SQL", {target.environmentId, target.threadId}).next())
         throw Conflict("A coordination activation already exists for this Session");
 

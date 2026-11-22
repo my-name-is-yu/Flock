@@ -38,7 +38,7 @@ using IntakeResolver = std::function<Intake(std::string_view botId, std::string_
 Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake);
 
 struct BotNotes { std::string soul, memory; };
-struct PeerBot { std::string name; Intake intake; };
+struct PeerBot { std::string name; Intake intake; std::string role = {}; };
 
 struct Decision {
     std::string tool;
@@ -186,6 +186,8 @@ class GitHost;
 struct GitWebhook;
 class Access;
 class ParticipationStore;
+class RootDelivery;
+class SessionHandoff;
 struct Person;
 struct ConfiguredSchedule;
 struct ScheduleImportError;
@@ -297,9 +299,20 @@ private:
     friend class Runtime;
     friend class Access;
     friend class ParticipationStore;
+    friend class RootDelivery;
+    friend class SessionHandoff;
 };
 
 struct BotTools;
+struct SpecialistCheck {
+    Id channel, generation;
+    std::string delegationId, peerBotId, purpose, doneWhen, commitSha;
+};
+struct SpecialistDelegation {
+    std::string delegationId;
+    Id senderTaskId, recipientTaskId;
+    bool operator==(const SpecialistDelegation&) const = default;
+};
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
@@ -309,6 +322,10 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
+    std::function<std::optional<Id>(const Person&, Id channel)> observeSpecialistGrant = {};
+    std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
+    // True only for an adapter which guarantees that this launch requires the pinned commit.
+    std::function<bool(const Command&, std::string_view commitSha)> verifySpecialistWorkspace = {};
 };
 class Runtime {
 public:
@@ -317,6 +334,7 @@ public:
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
+    SpecialistDelegation startSpecialist(const Person&, const SpecialistCheck&);
     void runConversations();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.

@@ -1,6 +1,7 @@
 #pragma once
 #include "flock/access.hpp"
 #include "flock/bot_profile.hpp"
+#include "flock/session_handoff.hpp"
 
 #include <optional>
 #include <string>
@@ -21,6 +22,11 @@ struct WebCallbacks {
     std::function<Seconds()> clock = unixTime;
     std::function<bool(std::string_view authorization)> authenticateSessionBridge = {};
     std::string githubWebhookSecret = {};
+    T3PersonBinding bindT3Person = {};
+    std::shared_ptr<SessionHandoff> sessionHandoffs = {};
+    Model* sessionHandoffModel = nullptr;
+    Runtime::SoulLoader sessionHandoffSoul = {};
+    std::function<std::optional<Person>(std::string_view)> configuredPerson = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

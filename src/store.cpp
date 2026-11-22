@@ -97,10 +97,9 @@ Store::Impl::Impl(std::filesystem::path file, MemorySeed seed)
     try {
         if (rc != SQLITE_OK) sqlError(db);
         sqlite3_busy_timeout(db, 4000);
+        if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;",
+                         nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         const char* schema = R"SQL(
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-PRAGMA synchronous=FULL;
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
   project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL);
@@ -158,13 +157,18 @@ SELECT task.id,task.environment_id,task.project_id,task.state,
          ORDER BY (COALESCE(sender.state,task.state)='queued'
                    OR COALESCE(json_extract(task.data,'$.environmentReleased'),0)),
            COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+           CASE WHEN json_extract(task.data,'$.delegatedWorkflowId') IS NOT NULL OR
+                     json_extract(task.data,'$.nestedDelegationId') IS NOT NULL OR
+                     (task.state='cancelling' AND json_extract(task.data,'$.specialistRole')='requester' AND EXISTS (
+                       SELECT 1 FROM peer_exchanges open WHERE open.sender_task=task.id AND open.phase<>'closed')) THEN 2
+                WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
                 WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
        ) AS position
 FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN candidates sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
-  AND sender.project_id=task.project_id AND peer.phase<>'closed'
+LEFT JOIN peer_exchanges peer ON peer.recipient_task=COALESCE(json_extract(task.data,'$.workflowParentTaskId'),task.id)
+LEFT JOIN candidates sender ON sender.id=COALESCE(json_extract(task.data,'$.specialistQueueOwner'),peer.sender_task)
+  AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
+  AND (json_extract(task.data,'$.specialistQueueOwner') IS NOT NULL OR peer.phase<>'closed')
 WHERE COALESCE(peer.kind,'')<>'consult';
 CREATE VIEW IF NOT EXISTS project_slots AS
 WITH queue AS (
@@ -179,18 +183,36 @@ SELECT task.id, task.environment_id, task.project_id, task.state,
        ROW_NUMBER() OVER (
          PARTITION BY task.environment_id,task.project_id
          ORDER BY COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+           CASE WHEN json_extract(task.data,'$.delegatedWorkflowId') IS NOT NULL OR
+                     json_extract(task.data,'$.nestedDelegationId') IS NOT NULL OR
+                     (task.state='cancelling' AND json_extract(task.data,'$.specialistRole')='requester' AND EXISTS (
+                       SELECT 1 FROM peer_exchanges open WHERE open.sender_task=task.id AND open.phase<>'closed')) THEN 2
+                WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
                 WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
        ) AS position
 FROM tasks task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
+LEFT JOIN peer_exchanges peer ON peer.recipient_task=COALESCE(json_extract(task.data,'$.workflowParentTaskId'),task.id)
+LEFT JOIN tasks sender ON sender.id=COALESCE(json_extract(task.data,'$.specialistQueueOwner'),peer.sender_task)
+  AND sender.environment_id=task.environment_id
   AND sender.project_id=task.project_id AND sender.state NOT IN ('completed','cancelled')
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
-        if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        {
+            Transaction upgrade(db);
+            if (query("SELECT 1 FROM sqlite_schema WHERE name='project_execution_queue'"
+                      " AND instr(sql,'specialistQueueOwner')=0").next()) {
+                exec("DROP VIEW IF EXISTS project_task_order");
+                exec("DROP VIEW IF EXISTS project_slots");
+                exec("DROP VIEW project_execution_queue");
+            }
+            if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+            upgrade.commit();
+        }
         initializeAccessSchema();
         initializeParticipationSchema();
+        initializeRootDeliverySchema();
+        initializeSpecialistSchema();
+        initializeSessionHandoffSchema();
         initializeConversationSchema();
         initializeChannelSchema();
         initializeLocalMachineSchema();
@@ -313,6 +335,8 @@ void Store::Impl::requestCancellation(Json& task) {
         for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
+        if (task.contains("workflowParentTaskId"))
+            exec("UPDATE workflow_stages SET status='stopped' WHERE task_id=?",{id});
         journal(id,"cancelled",Json::object());
     } else task["state"] = "cancelling";
     save(task);
@@ -494,7 +518,23 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation,
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
-    if (!Access(*this).permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+    if (!Access(*this).permitsPerson(actor,bot,Role::decide)) {
+        if (operation!="answer") throw DecisionDenied{};
+        auto origin = query(R"SQL(
+SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
+ JOIN specialist_delegations d ON d.id=w.delegation_id JOIN return_channels c ON c.id=d.channel_id
+ JOIN tasks t ON t.id=s.task_id
+WHERE t.id=? AND t.bot_id=? AND d.recipient_task=json_extract(t.data,'$.workflowParentTaskId') AND c.person_id=?
+UNION ALL
+SELECT d.channel_id FROM specialist_delegations d JOIN tasks t ON t.id=d.sender_task
+ JOIN return_channels c ON c.id=d.channel_id
+WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
+)SQL",{id,bot,actor.id,id,bot,actor.id});
+        if (!origin.next()) throw DecisionDenied{};
+        const auto participation = authorizeParticipation(actor,origin.number(0));
+        const auto* grant = std::get_if<CoordinationActivation>(&participation);
+        if (!grant || !grant->acknowledgment || !grant->binding.request.allowDelegation) throw DecisionDenied{};
+    }
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};
     const auto data = redactor(bot).payload(input);

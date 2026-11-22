@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Session handoffs</title>
+  <link rel="stylesheet" href="/access.css">
+  <link rel="stylesheet" href="/session-handoff.css">
+  <script type="module" src="/session-handoff.js"></script>
+</head>
+<body><main>
+  <a href="/">Conversation</a>
+  <h1>Session handoffs</h1>
+  <p id="status" role="status"></p>
+  <section aria-labelledby="new-heading">
+    <h2 id="new-heading">Accept an invitation</h2>
+    <form id="accept" autocomplete="off">
+      <label>Invitation from T3 Code
+        <textarea name="invitation" rows="3" required spellcheck="false" maxlength="16384"></textarea>
+      </label>
+      <button>Accept invitation</button>
+    </form>
+  </section>
+  <section id="handoff" aria-labelledby="handoff-heading" hidden>
+    <h2 id="handoff-heading">Handoff</h2>
+    <p id="state"></p>
+    <dl id="origin"></dl>
+    <h3>Take-back status</h3>
+    <dl id="barriers"></dl>
+    <details id="residual" hidden><summary id="residual-count"></summary><ul id="residual-commands"></ul></details>
+    <details id="residual-work" hidden><summary id="residual-work-count"></summary><ul id="residual-children"></ul></details>
+    <h3>Root reply</h3>
+    <dl id="reply"></dl>
+    <section id="decision" aria-labelledby="decision-heading" hidden>
+      <h3 id="decision-heading">Latest coordination decision</h3>
+      <p id="decision-text"></p>
+    </section>
+    <form id="answer" autocomplete="off" hidden>
+      <label><span id="question"></span><textarea name="text" rows="3" maxlength="8192" required></textarea></label>
+      <button>Send answer</button>
+    </form>
+    <section id="delegated" aria-labelledby="work-heading" hidden>
+      <h3 id="work-heading">Delegated checks</h3>
+      <ul id="work-list"></ul>
+    </section>
+    <div class="handoff-actions">
+      <button id="reconcile" type="button">Refresh from T3</button>
+      <button id="consult" type="button" hidden>Send consultation reply</button>
+      <button id="freeze" type="button" hidden>Freeze Flock work</button>
+    </div>
+  </section>
+</main></body>
+</html>

@@ -1,9 +1,12 @@
 #include "flock/board_inbox.hpp"
+#include "flock/root_delivery.hpp"
 
 #include <algorithm>
+#include <barrier>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -190,6 +193,9 @@ struct Fixture {
     std::string read = "off";
     std::map<std::string,BotNotes> notes{{"alpha",{"Initial SOUL","ALPHA_ONLY"}},{"beta",{"Second SOUL","BETA_ONLY"}}};
     std::map<std::string,std::vector<PeerBot>,std::less<>> peers;
+    std::function<std::optional<Id>(const Person&,Id)> specialistGrant;
+    std::function<std::optional<std::string>(const Person&,Id)> specialistInput;
+    std::function<bool(const Command&,std::string_view)> specialistWorkspace;
 
     Fixture() {
         char temp[] = "/tmp/flock-acceptance-XXXXXX";
@@ -218,6 +224,9 @@ struct Fixture {
             const auto found = peers.find(source);
             return found == peers.end() ? std::vector<PeerBot>{} : found->second;
         };
+        options.observeSpecialistGrant = specialistGrant;
+        options.observeSpecialistInput = specialistInput;
+        options.verifySpecialistWorkspace = specialistWorkspace;
         runtime = std::make_unique<Runtime>(*store,model,t3,[&](std::string_view id) {
             return notes.at(std::string(id)).soul;
         },std::move(options));
@@ -1907,6 +1916,303 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
+enum class SpecialistMode { Single, Workflow, StaleWorkflow, FrozenWorkflow, FrozenWorkflowAdmission, Nested, CancelledNested };
+
+void specialistAdmission(SpecialistMode mode) {
+    Fixture f;
+    f.allowBeta();
+    f.peers.at("alpha").front().role = "reviewer";
+    const Person person{"participant"};
+    const InvitationRef invitation{{"e","p","root-thread","human-run"},"request","source","alpha"};
+    const CoordinationRequest scope{0,"Check the pinned project",true};
+    struct Authority final : ParticipationAuthority {
+        VerifiedInvitation verified;
+        explicit Authority(VerifiedInvitation input) : verified(std::move(input)) {}
+        std::optional<VerifiedInvitation> invitation(const InvitationRef& ref) override {
+            if (verified.ref==ref) return verified;
+            return {};
+        }
+        std::optional<CoordinationGrant> grant(const CoordinationBinding& binding) override {
+            return CoordinationGrant{binding,1};
+        }
+    } authority({invitation,person.id,{},scope});
+    struct Gate final : RootGate {
+        RootGrant grant;
+        explicit Gate(RootGrant root) : grant(std::move(root)) {}
+        std::optional<RootGateCapabilities> capabilities(std::string_view environment) override {
+            return RootGateCapabilities{std::string(environment),"test",1,true,true,true,true,true};
+        }
+        std::optional<RootGrant> readGrant(const RootGrantRef& ref, std::string_view) override {
+            if (grant.ref==ref) return grant;
+            return {};
+        }
+        std::optional<RootSealStatus> sealStatus(const RootGrantRef& ref, std::string_view) override {
+            if (grant.ref==ref) return RootSealStatus{grant,{}, {},false};
+            return {};
+        }
+        RootGateReply readReceipt(const RootCommandRef&,std::string_view) override { return {}; }
+        RootGateReply send(const RootCommand&,std::string_view) override {
+            throw std::runtime_error("A specialist tried to send to the root Run");
+        }
+    };
+    auto access = f.store->access();
+    access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
+    access.personScope(localOwner,person.id,Scope::sessionRead("e","root-thread"),GrantChange::grant);
+    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
+    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
+    const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested;
+    if (nested) {
+        f.notes["gamma"] = {"Third SOUL","GAMMA_ONLY"};
+        f.peers["beta"] = {{"Root",{"alpha","","e","p"},"reviewer"},
+                           {"Nested",{"gamma","","e","p"},"reviewer"}};
+        f.peers["gamma"] = {{"Too deep",{"delta","","e","p"},"reviewer"}};
+        access.resourceGrant(localOwner,"gamma",{"environment","e","launch"},GrantChange::grant);
+        access.resourceGrant(localOwner,"delta",{"environment","e","launch"},GrantChange::grant);
+        for (const auto* bot : {"beta","gamma"})
+            access.resourceGrant(localOwner,bot,Scope::workDelegate("e","root-thread"),GrantChange::grant);
+    }
+    ParticipationStore participation(*f.store);
+    const auto opening = std::get<CoordinationActivation>(participation.open(person,invitation,authority));
+    const auto channel = opening.channel.id;
+    participation.observeGrant(person,channel,authority);
+    Gate gate({{invitation.target,opening.binding.activationId,1},invitation.sourceMessageId,"alpha",scope,false});
+    RootDelivery(*f.store,gate).bind(person,channel,std::string(43,'z'));
+    f.specialistGrant = [&](const Person& actor, Id id) -> std::optional<Id> {
+        const auto grant = RootDelivery(*f.store,gate).observeGrant(actor,id);
+        if (grant.verified && !grant.frozen && !grant.sealed) return grant.generation;
+        return {};
+    };
+    bool freezeBeforeReservation = false;
+    unsigned workspaceChecks = 0;
+    f.specialistWorkspace = [&](const Command& command, std::string_view sha) {
+        if (freezeBeforeReservation || (++workspaceChecks==2 && mode==SpecialistMode::FrozenWorkflow))
+            RootDelivery(*f.store,gate).freeze(person,channel);
+        const auto& session = command.config.at("session");
+        return session.at("workspaceStrategy").at("expectedCommit")==sha &&
+            session.at("workspaceStrategy").at("baseRef")==sha;
+    };
+    const std::string pin(40,'a');
+    std::string currentPin = pin;
+    if (mode!=SpecialistMode::Single) f.specialistInput = [&](const Person&, Id) {
+        if (mode==SpecialistMode::FrozenWorkflowAdmission) RootDelivery(*f.store,gate).freeze(person,channel);
+        return currentPin;
+    };
+    f.restart();
+    const auto generation = *f.specialistGrant(person,channel);
+    SpecialistCheck request{channel,generation,"coord/check-1","beta","Review the pinned project",Evidence,pin};
+    const auto first = f.runtime->startSpecialist(person,request);
+    check(first.senderTaskId!=first.recipientTaskId && f.task(first.senderTaskId)["activeRun"].is_null() &&
+          f.task(first.recipientTaskId)["inputArtifactVersion"]==pin,"delegation did not bind two distinct tasks to the pin");
+    f.restart();
+    check(f.runtime->startSpecialist(person,request)==first && f.store->tasks("beta").size()==1,
+          "specialist retry duplicated its task after restart");
+    const auto denied = [&](const SpecialistCheck& candidate) {
+        try { f.runtime->startSpecialist(person,candidate); }
+        catch (const Conflict&) { return; }
+        throw std::runtime_error("Unexpected specialist admission");
+    };
+    auto changed = request;
+    changed.commitSha = std::string(40,'b');
+    denied(changed);
+    if (nested) {
+        f.model.script = [](const ModelInput& input) -> Decision {
+            if (input.task.at("botId")=="beta") {
+                check(hasTool(input,"delegate_nested_specialist") && input.task.at("peers").size()==1 &&
+                      input.task.at("peers").at(0).at("botId")=="gamma","nested action offered an ancestor or unauthorized peer");
+                return {"delegate_nested_specialist",{{"botId","gamma"}},"Ask the narrower specialist"};
+            }
+            check(input.task.at("botId")=="gamma" && !hasTool(input,"delegate_nested_specialist"),
+                  "a nested specialist inherited the ability to delegate again");
+            if (input.event.at("kind")=="bot_request") return botReply("question","Which check first?");
+            if (input.event.at("kind")=="bot_answer") {
+                check(input.event.at("text")=="Check the fixture","nested specialist received the wrong answer");
+                return work("delegate",false);
+            }
+            return botReply("result","Nested specialist checked the immutable input");
+        };
+        f.reach(first.recipientTaskId,"specialist_waiting");
+        const auto nestedId = f.task(first.recipientTaskId).at("nestedDelegationId");
+        const auto beta = f.store->tasks("beta");
+        const auto gamma = f.store->tasks("gamma");
+        check(beta.size()==2 && gamma.size()==1 && gamma.front().at("specialistDelegationId")==nestedId,
+              "nested delegation did not create one new sender and recipient");
+        const Id childSender = beta.front().at("id"), child = gamma.front().at("id");
+        const auto question = f.wait(childSender,"user_question");
+        f.restart();
+        f.store->operate(person,TaskTarget::from(f.task(childSender),question),"answer",{{"text","Check the fixture"}});
+        f.reach(child,"running");
+        check(f.t3.launches==1 && f.t3.seen.front().ownerBotId=="gamma" && f.task(child).at("inputArtifactVersion")==pin &&
+              f.task(first.recipientTaskId).at("activeRun").is_null(),"nested work used its ancestor's Session");
+        if (mode==SpecialistMode::CancelledNested) {
+            f.store->operate(person,TaskTarget::from(f.task(first.senderTaskId),0),"cancel");
+            for (int step=0;step<8 && !f.t3.interrupts;++step) f.runtime->tick();
+            check(f.t3.interrupts==1 && f.t3.interruptedRuns.front().runId=="run-1",
+                  "request cancellation did not reach only its nested specialist Run");
+            f.t3.finish("run-1","interrupted");
+            f.reach(first.senderTaskId,"cancelled");
+            return;
+        }
+        f.t3.finish("run-1");
+        f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
+        f.reach(child,"completed");
+        f.restart();
+        f.reach(first.senderTaskId,"completed");
+        const auto history = f.store->history(first.senderTaskId,0,200);
+        const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
+        check(result!=history.end() && result->at("data").at("sourceExecutorBotId")=="gamma" &&
+              result->at("data").at("sourceDelegationId")==nestedId && result->at("data").at("executorBotId")=="beta" &&
+              result->at("data").at("references").at(0).at("itemId")=="final-answer" &&
+              f.logs(first.senderTaskId,"specialist_result")==1,"nested result lost original evidence, executor or ancestry");
+        for (int i=0;i<8;++i) {
+            request.delegationId = "coord/budget-"+std::to_string(i);
+            f.runtime->startSpecialist(person,request);
+        }
+        std::barrier startTogether(2);
+        const auto reserveLast = [&](std::string action) {
+            auto candidate = request;
+            candidate.delegationId = std::move(action);
+            startTogether.arrive_and_wait();
+            try { f.runtime->startSpecialist(person,candidate); return true; }
+            catch (const Conflict&) { return false; }
+        };
+        auto firstReservation = std::async(std::launch::async,[&] { return reserveLast("coord/concurrent-a"); });
+        const bool secondReservation = reserveLast("coord/concurrent-b");
+        check(firstReservation.get()!=secondReservation,"competing delegations did not reserve the final shared unit exactly once");
+        request.delegationId = "coord/budget-exhausted";
+        denied(request);
+        return;
+    }
+    if (mode!=SpecialistMode::Single) {
+        f.model.script = [](const ModelInput& input) -> Decision {
+            if (input.event.at("kind")=="bot_request") {
+                check(hasTool(input,"start_peer_workflow"),"received work did not expose its workflow action");
+                return {"start_peer_workflow",Json::object(),"Verify the same pin independently"};
+            }
+            if (input.event.at("kind")=="question" && input.event.contains("userAnswer")) return reply();
+            return ask();
+        };
+        if (mode==SpecialistMode::FrozenWorkflowAdmission) {
+            f.wait(first.recipientTaskId,"model_failure");
+            check(f.store->workflows("beta",0,10).empty() && f.store->tasks("beta").size()==1 && f.t3.launches==0,
+                  "freeze between grant observation and workflow creation admitted stage tasks");
+            return;
+        }
+        const auto unrelated = f.submit("Unrelated work");
+        f.reach(first.recipientTaskId,"workflow_waiting");
+        const auto workflow = f.task(first.recipientTaskId).at("delegatedWorkflowId");
+        const auto stages = f.store->workflows("beta",0,10).at(0).at("stages");
+        const Id stage1 = stages.at(0).at("taskId"), stage2 = stages.at(1).at("taskId");
+        check(stage1!=stage2 && stage1!=first.recipientTaskId && stage2!=first.recipientTaskId,
+              "workflow did not persist two independent stage tasks");
+        f.restart();
+        if (mode==SpecialistMode::FrozenWorkflow) {
+            f.reach(stage2,"completed");
+            check(f.task(stage1).at("state")=="running" && f.t3.launches==1 && f.t3.interrupts==0 &&
+                  f.logs(stage2,"specialist_launch_blocked")==1 && f.task(first.recipientTaskId).at("state")=="workflow_waiting",
+                  "freeze did not stop only the reserved stage before launch");
+            f.t3.finish("run-1");
+            f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
+            f.reach(first.senderTaskId,"completed");
+            check(f.task(first.senderTaskId).at("peerOutcome")=="failed" && f.t3.launches==1 && f.t3.interrupts==0 &&
+                  f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
+                  "late evidence after freeze created a new stage or falsely passed");
+            return;
+        }
+        f.reach(stage2,"running");
+        check(f.task(stage1).at("state")=="running" && f.task(unrelated).at("state")=="queued" && f.t3.launches==2 &&
+              f.t3.seen.at(0).target.runId.empty() && f.t3.seen.at(1).target.runId.empty() &&
+              f.t3.seen.at(0).actionId!=f.t3.seen.at(1).actionId,"workflow did not transfer the project slot to its siblings");
+        for (const auto& command : f.t3.seen)
+            check(command.config.at("session").at("workspaceStrategy").at("expectedCommit")==pin,
+                  "a stage launch used a different immutable input");
+        const auto run1 = f.task(stage1).at("activeRun").at("runId").get<std::string>();
+        const auto run2 = f.task(stage2).at("activeRun").at("runId").get<std::string>();
+        f.t3.question(run1);
+        const auto wait = f.wait(stage1,"user_question");
+        f.t3.finish(run2);
+        const auto report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
+        f.t3.runs.at(run2).report = report;
+        f.reach(stage2,"completed");
+        check(f.task(first.recipientTaskId).at("state")=="workflow_waiting" &&
+              f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
+              "a question blocked its independent check or emitted early aggregate success");
+        f.restart();
+        const auto question = TaskTarget::from(f.task(stage1),wait);
+        try {
+            f.store->operate({"other-person"},question,"answer",{{"text","main"}});
+            throw std::runtime_error("An unrelated person answered the scoped stage question");
+        } catch (const DecisionDenied&) {}
+        f.store->operate(person,question,"answer",{{"text","main"}});
+        f.reach(stage1,"running");
+        if (mode==SpecialistMode::StaleWorkflow) currentPin = std::string(40,'b');
+        f.t3.finish(run1);
+        f.t3.runs.at(run1).report = report;
+        f.reach(stage1,"completed");
+        f.restart();
+        f.reach(first.senderTaskId,"completed");
+        const auto history = f.store->history(first.senderTaskId,0,200);
+        const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
+        const bool stale = mode==SpecialistMode::StaleWorkflow;
+        check(result!=history.end() && result->at("data").at("workflowId")==workflow &&
+              result->at("data").at("workflowStatus")== (stale ? "stale" : "completed") &&
+              result->at("data").at("artifactVersion")==pin && result->at("data").at("references").size()==2 &&
+              result->at("data").at("verdict")== (stale ? "" : "pass") && f.t3.launches==2 && f.t3.replies==1,
+              "aggregate result lost its exact evidence, freshness or restart identity");
+        check(f.store->workflows("beta",0,10).size()==1 && f.logs(first.senderTaskId,"specialist_result")==1,
+              "restart duplicated the workflow or aggregate reply");
+        f.wait(unrelated,"user_question");
+        return;
+    }
+    bool needsClarification = true;
+    f.model.script = [&](const ModelInput& input) {
+        check(input.task.at("botId")=="beta" && !hasTool(input,"send_bot_message") && !hasTool(input,"follow_up"),
+              "specialist supplied unrelated or additional authority to its model");
+        if (input.event.at("kind")=="bot_request") {
+            if (std::exchange(needsClarification,false)) return botReply("question","Which checks are needed?");
+            return work("delegate",false);
+        }
+        if (input.event.at("kind")=="bot_answer") {
+            check(input.event.at("text")=="Check the unit test fixture","specialist lost its own answer");
+            return work("delegate",false);
+        }
+        check(input.event.at("kind")=="result","unexpected specialist event");
+        return botReply("result","Verified the immutable input");
+    };
+    const auto wait = f.wait(first.senderTaskId,"user_question");
+    check(f.t3.launches==0 && f.task(first.recipientTaskId).at("state")=="peer_waiting",
+          "specialist bypassed its open question");
+    f.restart();
+    f.store->operate(person,TaskTarget::from(f.task(first.senderTaskId),wait),"answer",{{"text","Check the unit test fixture"}});
+    f.reach(first.recipientTaskId,"running");
+    const auto& launched = f.t3.seen.front();
+    check(f.t3.launches==1 && launched.target.runId.empty() && launched.ownerBotId=="beta" &&
+          launched.config.at("session").at("runtimeMode")=="approval-required" &&
+          launched.config.at("session").at("interactionMode")=="plan" &&
+          launched.instruction.find(pin)!=std::string::npos,"specialist launched outside its own pinned worktree");
+    f.t3.finish("run-1");
+    f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},{"findings","checked"}}.dump();
+    f.reach(first.recipientTaskId,"completed");
+    f.restart();
+    f.reach(first.senderTaskId,"completed");
+    const auto history = f.store->history(first.senderTaskId,0,200);
+    const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
+    check(result!=history.end() && result->at("data").at("executorBotId")=="beta" &&
+          result->at("data").at("artifactVersion")==pin && result->at("data").at("verdict")=="pass" &&
+          result->at("data").at("references").at(0).at("itemId")=="final-answer",
+          "specialist result lost its author, pinned version, verdict or native evidence");
+
+    request.delegationId = "coord/check-2";
+    const auto second = f.runtime->startSpecialist(person,request);
+    f.reach(second.recipientTaskId,"sending");
+    freezeBeforeReservation = true;
+    f.reach(second.senderTaskId,"completed");
+    check(f.t3.launches==1 && f.logs(second.recipientTaskId,"specialist_launch_blocked")==1 &&
+          f.task(second.senderTaskId).at("peerOutcome")=="failed",
+          "freeze between remote observation and launch reservation started new work");
+    request.delegationId = "coord/check-after-freeze";
+    denied(request);
+}
+
 void inferenceInvalidatedByCancel() {
     Fixture f;
     const auto id = f.submit();
@@ -2007,6 +2313,13 @@ int main() {
             {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
+            {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"scoped specialist workflow transfers its slot and aggregates evidence",[] { specialistAdmission(SpecialistMode::Workflow); }},
+            {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},
+            {"specialist workflow freezes only work which did not start",[] { specialistAdmission(SpecialistMode::FrozenWorkflow); }},
+            {"specialist workflow rejects a frozen stage creation",[] { specialistAdmission(SpecialistMode::FrozenWorkflowAdmission); }},
+            {"nested specialist preserves scope, provenance and shared allowance",[] { specialistAdmission(SpecialistMode::Nested); }},
+            {"nested specialist cancellation reaches only its assigned Run",[] { specialistAdmission(SpecialistMode::CancelledNested); }},
             {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {
         try { run(); std::cout << "PASS " << name << '\n'; }
         catch (const std::exception& e) { std::cerr << "FAIL " << name << ": " << e.what() << '\n'; return 1; }

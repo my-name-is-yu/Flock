@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/access.hpp"
+#include "flock/participation.hpp"
 #include "flock/secrets.hpp"
 #include "workspace_internal.hpp"
 #include "flock/board_inbox.hpp"
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
+#include <variant>
 
 namespace flockv0 {
 namespace conversation { struct Message; }
@@ -36,6 +38,10 @@ Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, 
 
 enum class RequestJournal { record, skip };
 
+struct ConversationWorkflowOrigin { Id messageId; };
+struct ReceivedPeerWork { std::string delegationId, requestId, startKey; };
+using WorkflowOrigin = std::variant<ConversationWorkflowOrigin, ReceivedPeerWork>;
+
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
@@ -56,6 +62,7 @@ private:
 };
 
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
+SecretRef participationCredential(Id channel);
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -90,6 +97,9 @@ struct Store::Impl {
                         std::string_view operation) const;
     void initializeAccessSchema();
     void initializeParticipationSchema();
+    void initializeRootDeliverySchema();
+    void initializeSessionHandoffSchema();
+    Participation authorizeParticipation(const Person&, Id channel);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
@@ -146,9 +156,13 @@ struct Store::Impl {
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
+    // The caller persists its effect and the workflow in the same Store transaction.
+    Id startWorkflow(const WorkflowOrigin&, const Json& args, std::string_view bot, const Json& routing,
+                     std::string_view inputArtifactVersion = {});
     Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
     Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
     void advanceWorkflows(Seconds now);
+    void materializeWorkflowStages(Id scopedWorkflow = 0);
     void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
@@ -209,6 +223,7 @@ struct Store::Impl {
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
     std::optional<PeerExchange> peerExchange(Id) const;
+    void initializeSpecialistSchema();
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);

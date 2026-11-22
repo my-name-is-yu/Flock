@@ -5,6 +5,7 @@
 #include "git_github.hpp"
 
 #ifdef FLOCK_WITH_T3
+#include "flock/root_delivery.hpp"
 #include "flock/t3_mcp.hpp"
 #endif
 #ifdef FLOCK_WITH_WEB
@@ -191,6 +192,26 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     options.botTools = loadBotTools(home);
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
     options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
+#ifdef FLOCK_WITH_T3
+    auto handoffGate = !fixed ? makeT3RootGate(home / "credentials" / "t3") : nullptr;
+    if (handoffGate) {
+        options.observeSpecialistGrant = [&](const Person& person, Id channel) -> std::optional<Id> {
+            const auto grant = RootDelivery(store,*handoffGate).observeGrant(person,channel);
+            if (!grant.verified || grant.sealed || grant.frozen) return {};
+            return grant.generation;
+        };
+        options.observeSpecialistInput = [&](const Person& person, Id channel) {
+            return RootDelivery(store,*handoffGate).inputCommit(person,channel);
+        };
+        options.verifySpecialistWorkspace = [&](const Command& command, std::string_view sha) {
+            const auto caps = handoffGate->capabilities(command.environmentId);
+            const auto session = command.config.value("session",Json::object());
+            const auto strategy = session.value("workspaceStrategy",Json::object());
+            return caps && caps->strictPinnedWorktree && strategy.value("type","") == "worktree" &&
+                   strategy.value("baseRef","") == sha && strategy.value("expectedCommit","") == sha;
+        };
+    }
+#endif
     Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
@@ -213,6 +234,43 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE"); identities && (web || bridges))
         configureWebIdentities(store,identities,callbacks);
     if (bridges) configureChannelBridges(store,bridges,callbacks);
+#ifdef FLOCK_WITH_T3
+    std::jthread handoffWorker;
+    if (web && handoffGate && callbacks.bindT3Person) {
+        callbacks.sessionHandoffs = std::make_shared<SessionHandoff>(store,*handoffGate,callbacks.bindT3Person,
+                                                                    &runtime,options.peers);
+        callbacks.sessionHandoffModel = model.get();
+        callbacks.sessionHandoffSoul = [&](std::string_view botId) { return bots.soul(botId); };
+        handoffWorker = std::jthread([handoffs=callbacks.sessionHandoffs, person=callbacks.configuredPerson,
+                                     intake=callbacks.intake, soul=callbacks.sessionHandoffSoul,
+                                     &model](std::stop_token stop) {
+            Id after = 0;
+            while (!stop.stop_requested()) {
+                try {
+                    const auto pending = handoffs->pending(after);
+                    if (pending.empty()) after = 0;
+                    for (const auto& [channel, personId] : pending) {
+                        if (stop.stop_requested()) return;
+                        after = channel;
+                        const auto actor = person ? person(personId) : std::nullopt;
+                        if (!actor) continue;
+                        try {
+                            const auto view = handoffs->view(*actor,channel);
+                            if (view.opening) handoffs->resume(*actor,channel);
+                            else if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
+                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                        } catch (const std::exception&) {
+                            // The next pass rechecks the persisted grant and receipt.
+                        }
+                    }
+                } catch (const std::exception&) {
+                    // A temporary store failure leaves the work available for recovery.
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+        });
+    }
+#endif
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;

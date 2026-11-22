@@ -20,6 +20,32 @@ header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
 identity for initial grants. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
 
+## Session handoffs
+
+Use a T3 build with the exact-Run handoff contract. Open **Flock** in a running
+T3 Session, choose a Bot and permission, and select the messages to share.
+Copy the invitation and paste it into **Session handoffs** in Flock. The
+invitation contains a credential scoped to the selected Run and permission.
+Treat it as private. Flock retains the channel for reload and stores the
+credential in its local vault.
+
+Add a `t3People` object to the inviting person's Web identity. Its keys are
+T3 environment IDs and its values are the authenticated person references
+shown in the T3 invitation. Grant the person Session read and decision access
+for the Bot. Grant the Bot `consult:reply-once` or `session:coordinate` for the
+exact environment and Session. A coordinator also needs `work:delegate` to
+choose specialists. Set the specialist's `role` in its Bot configuration,
+include its ID in the requester's `allowedBots`, and grant it permission to
+launch in the same T3 project. Both participants need their own applicable
+scope for a further delegation.
+
+Use **Take back** in T3 to seal new root input and **Refresh from T3** in Flock
+to see the seal and local freeze. The details show admitted commands and launch
+IDs for work that may still settle. **Freeze Flock work** is available separately
+when a person needs to stop local work admission first.
+
+## Access administration
+
 An administrator can GET `/api/access?bot=ID` and POST to `/api/access/person`,
 `resource`, `decision`, `secret` and `bot-change` under the same prefix. These
 routes require the usual same-origin JSON mutation headers. Grant mutations use
