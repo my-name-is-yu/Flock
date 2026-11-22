@@ -258,7 +258,7 @@ public:
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,
-                      ConversationEvents events = ConversationEvents::all) const;
+                      ConversationEvents events = ConversationEvents::all, std::string_view viewer = {}) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50,
                           Id from = 0) const;

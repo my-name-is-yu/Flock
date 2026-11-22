@@ -281,7 +281,7 @@ public:
                             ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
                         const auto changes = store_.conversationChangesSince(changesAfter,id);
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
-                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr));
+                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
                         view["bot"]["id"] = id;
                         view["composerPerson"] = callbacks_.authenticate ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
@@ -291,7 +291,7 @@ public:
                         view["sessionCursor"] = sessionThrough;
                         setViewer(res,callbacks_,actor);
                         json(res,200,withConversationAccess(actor,id,std::move(view)));
-                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
+                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before,actor.id)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
@@ -497,7 +497,7 @@ private:
         if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
         const auto bot = findBot(view.bot);
         if (bot.is_null()) return nullptr;
-        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot)));
+        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
