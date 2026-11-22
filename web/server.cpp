@@ -396,8 +396,7 @@ private:
 
     bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
         if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
-        const auto partners = store_.peerPartners(bot);
-        return std::ranges::find(partners,peer) != partners.end();
+        return store_.hasPeerExchange(bot,peer);
     }
 
     Json snapshot(const ChangeFeed::BotList&) const { return botList(); }
@@ -416,18 +415,21 @@ private:
 
     Json botList() const {
         auto list = web::botList(store_,bots());
+        if (list.empty()) return list;
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::set<std::string>> connections;
+        auto pairs = store_.peerExchangePairs();
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
-                if (id == peer || !known.contains(peer)) continue;
-                connections[id].insert(peer);
-                connections[peer].insert(id);
+                if (known.contains(peer)) pairs.emplace_back(id,peer);
             }
-            for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].insert(peer);
+        }
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& [sender,recipient] : pairs) {
+            if (sender == recipient) continue;
+            if (known.contains(sender)) connections[sender].insert(recipient);
+            if (known.contains(recipient)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();

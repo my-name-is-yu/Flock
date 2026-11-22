@@ -773,26 +773,37 @@ Json Store::peerConversation(std::string_view bot, std::string_view peer, Id bef
     auto rows = p_->query(R"SQL(
 SELECT j.id,j.task_id,j.time,j.kind,j.data
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message' AND json_extract(j.data,'$.exchangeId')=p.id
-WHERE ((sender.bot_id=? AND recipient.bot_id=?) OR (sender.bot_id=? AND recipient.bot_id=?))
-  AND (?=0 OR j.id<?)
-ORDER BY j.id DESC LIMIT ?
-)SQL",{bot,peer,peer,bot,before,before,std::clamp(limit,1u,200u)});
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
+  -- Unary + removes TEXT affinity so SQLite can use the exchange ID in the JSON expression index.
+  AND json_extract(j.data,'$.exchangeId') = +p.id
+WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
+  AND (?3=0 OR j.id<?3)
+ORDER BY j.id DESC LIMIT ?4
+)SQL",{bot,peer,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
     std::reverse(result.begin(),result.end());
     return result;
 }
 
-std::vector<std::string> Store::peerPartners(std::string_view bot) const {
+std::vector<std::pair<std::string,std::string>> Store::peerExchangePairs() const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
-SELECT DISTINCT CASE WHEN sender.bot_id=? THEN recipient.bot_id ELSE sender.bot_id END
+SELECT DISTINCT sender.bot_id,recipient.bot_id
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
-WHERE sender.bot_id=? OR recipient.bot_id=?
-)SQL",{bot,bot,bot});
-    std::vector<std::string> result;
-    while (rows.next()) result.push_back(rows.string(0));
+)SQL");
+    std::vector<std::pair<std::string,std::string>> result;
+    while (rows.next()) result.emplace_back(rows.string(0),rows.string(1));
     return result;
+}
+
+bool Store::hasPeerExchange(std::string_view bot, std::string_view peer) const {
+    std::lock_guard lock(p_->mutex);
+    return p_->query(R"SQL(
+SELECT 1
+FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+WHERE (sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1)
+LIMIT 1
+)SQL",{bot,peer}).next();
 }
 } // namespace flockv0
