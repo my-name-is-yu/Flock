@@ -798,7 +798,6 @@ const icons = {
   copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
-  forward: '<path d="m14.5 7 5 5-5 5"/><path d="M19 12h-9a5.5 5.5 0 0 0-5.5 5.5V19"/>',
   resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
@@ -1337,24 +1336,19 @@ function peerMessage(event, from, anchored) {
   row.id = `event-${event.id}`;
   row.tabIndex = -1;
   row.toggleAttribute('data-anchored', anchored);
+  const metadata = node('div', 'msg-meta');
+  metadata.append(node('span', 'msg-name', from.name), eventTime(event));
+  const line = node('div', 'msg-line');
+  const bubble = node('div', 'bubble');
   if (forwardedMessage) {
-    const content = node('div', 'peer-forward-content');
-    const label = node('div', 'peer-forward-meta');
-    label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
-    const card = node('div', 'bubble peer-forwarded-message');
-    card.append(node('p', 'event-text', forwardedMessage.text));
-    content.append(label, card);
-    row.append(content);
+    const quote = node('blockquote', 'peer-forwarded-message');
+    const label = node('p', 'msg-quote', forwardedMessage.fromViewer === true ? 'You' : 'Original sender');
+    quote.append(label, node('p', 'event-text', forwardedMessage.text));
+    bubble.append(quote);
   }
-  if (text || !forwardedMessage) {
-    const metadata = node('div', 'msg-meta');
-    metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
-    const line = node('div', 'msg-line');
-    const bubble = node('div', 'bubble');
-    bubble.append(node('p', 'event-text', text));
-    line.append(avatar(from, 'msg-avatar'), bubble);
-    row.append(metadata, line);
-  }
+  if (text || !forwardedMessage) bubble.append(node('p', 'event-text', text));
+  line.append(avatar(from, 'msg-avatar'), bubble);
+  row.append(metadata, line);
   return row;
 }
 

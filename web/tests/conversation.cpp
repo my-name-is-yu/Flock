@@ -503,7 +503,7 @@ void conversationEntry(const std::filesystem::path& path) {
           "exact or stale answer changed another wait or created a Task");
 }
 
-void botMediatedConversation(const std::filesystem::path& path, std::string_view note) {
+void botMediatedConversation(const std::filesystem::path& path, std::string_view note, bool authenticated = false) {
     constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
     constexpr auto greeting = "こんにちは。";
     constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
@@ -553,9 +553,20 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
     web.peers = peers;
+    if (authenticated) {
+        const Person author{"fixture-message-author",true};
+        web.authenticate = [author](std::string_view credential) {
+            if (credential == "Bearer author") return author;
+            if (credential == "Bearer reader") return Person{"fixture-shared-reader"};
+            return Person{};
+        };
+        for (const auto* bot : {"ernest","reviewer"})
+            store.access().personGrant(author,bot,"fixture-shared-reader",Role::view,GrantChange::grant);
+    }
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
+    if (authenticated) browser.client.set_default_headers({{"Authorization","Bearer author"}});
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
 
     const auto hello = browser.post("/api/messages",{{"botId","ernest"},{"clientMessageId","hello"},{"text",greeting}},201);
@@ -588,14 +599,28 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
           "the exchange was not the same two-message thread from both Bots");
     const auto& forwarded = messages.front().at("data");
     const auto& answered = messages.back().at("data");
+    auto expectedQuote = original;
+    if (authenticated) expectedQuote["fromViewer"] = true;
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
-          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
+          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == expectedQuote &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
           !answered.contains("forwardedMessage") && t3.launches == 0,
           "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");
+    if (authenticated) {
+        const auto anchored = std::string(dm) + "&anchor=" + std::to_string(messages.front().at("id").get<Id>());
+        check(browser.get(anchored).at("messages") == messages,"the author lost attribution in anchored history");
+        browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+        auto shared = messages;
+        shared.front()["data"]["forwardedMessage"] = original;
+        check(browser.get(anchored).at("messages") == shared &&
+              browser.get("/api/peer-conversation?bot=reviewer&peer=ernest").at("messages") == shared,
+              "a shared viewer saw authorship that belonged to another person");
+        check(messages.dump().find("fixture-message-author") == std::string::npos &&
+              shared.dump().find("fixture-shared-reader") == std::string::npos,"the DM exposed a person ID");
+    }
 }
 #ifdef FLOCK_TEST_CHATGPT
 void approvedProfiles(const std::filesystem::path& directory) {
@@ -964,7 +989,7 @@ int main(int argc,char** argv) {
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
-        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
+        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。",true);
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");

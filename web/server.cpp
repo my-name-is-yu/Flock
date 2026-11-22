@@ -42,6 +42,11 @@ void setViewer(Response& res, const WebCallbacks& callbacks, const Person& perso
     res.set_header("X-Flock-Viewer",viewer.dump(-1,' ',true,Json::error_handler_t::replace));
 }
 
+std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& person) {
+    // Local access shares one principal, so it cannot identify a human author.
+    return callbacks.authenticate && person.id != localOwner.id ? std::string_view{person.id} : std::string_view{};
+}
+
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
 
 Id queryId(const Request& req, const char* key, bool optional) {
@@ -269,7 +274,7 @@ public:
                         return json(res,200,store_.access().redactSecrets(id,web::taskDetail(task,store_.latestTaskResult(taskId))));
                     }
                     const auto before = queryId(req,"before",true);
-                    if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,actor,id,before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {
                         const auto items = req.path == "/api/compactions" ? store_.compactions(id,before) : store_.workflows(id,before);
                         return json(res,200,store_.access().redactSecrets(id,items));
@@ -542,12 +547,12 @@ private:
         return list;
     }
 
-    void readPeerConversation(const Request& req, Response& res, const Json& known,
+    void readPeerConversation(const Request& req, Response& res, const Json& known, const Person& actor,
                               std::string_view bot, Id before) {
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
-        if (!store_.access().permitsPerson(web::person(callbacks_,req),peer,Role::view))
+        if (!store_.access().permitsPerson(actor,peer,Role::view))
             return error(res,403,"access_denied");
         const bool configured = botById(known,peer) != nullptr;
         if (!canReadPeer(bot,peer,configured))
@@ -558,7 +563,8 @@ private:
             anchor = store_.peerMessageAnchor(bot,peer,queryId(req,"anchor",false));
             if (!anchor) return error(res,404,"peer_message_not_found");
         }
-        const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before,anchor));
+        const auto history = store_.access().redactSecrets(bot,
+            web::peerConversation(store_,bot,peer,before,anchor,verifiedViewer(callbacks_,actor)));
         json(res,200,store_.access().redactSecrets(peer,history));
     }
 

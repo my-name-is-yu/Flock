@@ -821,10 +821,20 @@ ORDER BY page.id DESC LIMIT ?)SQL",
     return result;
 }
 
-Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from) const {
+Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from,
+                             std::string_view viewer) const {
     std::lock_guard lock(p_->mutex);
+    // The sending task keeps its original source message even as its revisions change.
+    // Match the saved quote as well, so missing or unverified provenance falls back to a generic label.
     const auto sql = std::string(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data
+SELECT j.id,j.task_id,j.time,j.kind,j.data,
+  CASE WHEN ?5<>'' AND json_type(j.data,'$.forwardedMessage')='object' THEN EXISTS(
+    SELECT 1 FROM messages m JOIN journal original ON original.id=m.id
+    WHERE m.id=json_extract(sender.data,'$.sourceMessageId') AND m.bot_id=sender.bot_id
+      AND original.kind='conversation_message' AND m.person_id=?5
+      AND m.text=json_extract(j.data,'$.forwardedMessage.text')
+      AND original.time=json_extract(j.data,'$.forwardedMessage.time')
+  ) ELSE 0 END
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
   -- Unary + removes TEXT affinity so SQLite can use the exchange ID in the JSON expression index.
@@ -832,9 +842,13 @@ JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
 WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
 )SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4"
                : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
-    auto rows = p_->query(sql.c_str(),{bot,peer,from ? from : before,std::clamp(limit,1u,200u)});
+    auto rows = p_->query(sql.c_str(),{bot,peer,from ? from : before,std::clamp(limit,1u,200u),viewer});
     Json result = Json::array();
-    while (rows.next()) result.push_back(journalRow(rows));
+    while (rows.next()) {
+        auto event = journalRow(rows);
+        if (rows.number(5)) event["forwardedFromViewer"] = true;
+        result.push_back(std::move(event));
+    }
     if (!from) std::reverse(result.begin(),result.end());
     return result;
 }

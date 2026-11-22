@@ -180,8 +180,11 @@ Json eventView(const Json& event) {
         if (const auto forwarded = data.find("forwardedMessage"); forwarded != data.end() && forwarded->is_object()) {
             const auto text = field(*forwarded,"text");
             const auto time = forwarded->find("time");
-            if (!text.empty() && time != forwarded->end() && time->is_number_integer())
+            if (!text.empty() && time != forwarded->end() && time->is_number_integer()) {
                 details["forwardedMessage"] = {{"text",text},{"time",*time}};
+                if (event.value("forwardedFromViewer",false))
+                    details["forwardedMessage"]["fromViewer"] = true;
+            }
         }
     } else if (kind == "report") {
         copyFields(details,data,{"report","status","resultRunId","truncated","itemId","revisionId"});
@@ -362,9 +365,10 @@ Json conversation(Store& store, std::string_view bot, Id before, std::string_vie
     return result;
 }
 
-Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor) {
+Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor,
+                      std::string_view viewer) {
     const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
-    const auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1);
+    const auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1,0,viewer);
     const bool more = events.size() > olderSize;
     Json result = {{"messages",Json::array()},{"hasOlder",more}};
     auto& page = result["messages"];
@@ -372,7 +376,7 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
         page.push_back(eventView(*event));
     if (anchor) {
         result["anchorId"] = anchor;
-        for (const auto& event : store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor))
+        for (const auto& event : store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor,viewer))
             page.push_back(eventView(event));
     }
     return result;
