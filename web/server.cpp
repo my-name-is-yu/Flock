@@ -37,6 +37,11 @@ void error(Response& res, int status, std::string_view code) {
     json(res,status,{{"error",code}});
 }
 
+void setViewer(Response& res, const WebCallbacks& callbacks, const Person& person) {
+    const Json viewer = callbacks.authenticate ? Json(person.id) : Json(nullptr);
+    res.set_header("X-Flock-Viewer",viewer.dump(-1,' ',true,Json::error_handler_t::replace));
+}
+
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
 
 Id queryId(const Request& req, const char* key, bool optional) {
@@ -233,7 +238,9 @@ public:
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
-            json(res,200,botList(web::person(callbacks_,req)));
+            const auto actor = web::person(callbacks_,req);
+            setViewer(res,callbacks_,actor);
+            json(res,200,botList(actor));
         });
         server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
@@ -282,6 +289,7 @@ public:
                         if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
                             view["changedMessageIds"] = changed->second;
                         view["sessionCursor"] = sessionThrough;
+                        setViewer(res,callbacks_,actor);
                         json(res,200,view);
                     } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));

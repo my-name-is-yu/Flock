@@ -435,6 +435,8 @@ void exercise(const std::filesystem::path& path) {
     const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
+    check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"],
+          "a Bot question did not update the incoming event ID");
     const Id waitId = waits[0]["wait"]["id"];
     std::map<Id,std::string> earlierRequests;
     for (int i = 0; i < 45; ++i) {
@@ -547,6 +549,47 @@ void exercise(const std::filesystem::path& path) {
 
     conversationPages(reopened,cli,release,next,triage,earlierRequests);
     sessionPages(reopened,cli,*runtime,triage);
+}
+
+void sidebarReplies(const std::filesystem::path& path) {
+    struct ReplyModel : Model {
+        ModelTurn decide(const ModelInput&) override {
+            return {{{"reply",{{"text","Same reply"}},"Reply to the message"}}};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,{});
+    const auto cb = callbacks();
+    const auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    const auto release = [&] {
+        const auto bots = browser.get("/api/bots");
+        const auto row = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "release"; });
+        check(row != bots.end(),"Release was not listed");
+        return *row;
+    };
+    const auto send = [&](unsigned sequence) {
+        store.receive(Person{"owner",true},cb.intake("release","Same request"),
+                      "sidebar-" + std::to_string(sequence),"Same request");
+    };
+    send(0);
+    check(release().at("latestIncomingEventId") == 0,"an outgoing message appeared as an incoming reply");
+    tick(runtime,3);
+    const auto first = release();
+    const auto incoming = first.at("latestIncomingEventId").get<Id>();
+    const auto events = browser.get("/api/conversation?bot=release").at("events");
+    check(incoming > 0 && events.back().at("kind") == "conversation_reply" && events.back().at("id") == incoming,
+          "the sidebar did not identify the visible conversation reply");
+    send(1);
+    check(release().at("latestIncomingEventId") == incoming,"an outgoing message advanced the incoming reply");
+    tick(runtime,3);
+    const auto second = release();
+    check(second.at("preview") == first.at("preview") && second.at("latestIncomingEventId").get<Id>() > incoming,
+          "two replies with the same text did not have distinct incoming IDs");
+    for (unsigned sequence = 2; sequence < 16; ++sequence) send(sequence);
+    check(release().at("latestIncomingEventId") == second.at("latestIncomingEventId"),
+          "outgoing messages hid the latest incoming reply past the preview window");
 }
 
 void readChanges(Browser& stream, const std::string& path, const std::function<bool(const Json&)>& next) {
@@ -848,6 +891,11 @@ void accessEndpoints(const std::filesystem::path& path) {
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
+    const auto list = browser.client.Get("/api/bots");
+    const auto view = browser.client.Get("/api/view?bot=release");
+    check(list && view && list->get_header_value("X-Flock-Viewer") == "\"alice\"" &&
+          view->get_header_value("X-Flock-Viewer") == "\"alice\"",
+          "list and conversation did not expose the same authenticated viewer scope");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/workflows?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
@@ -864,6 +912,7 @@ int main() {
     try {
         TestDirectory directory;
         exercise(directory.path / "state.db");
+        sidebarReplies(directory.path / "sidebar.db");
         eventStream(directory.path / "events.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");

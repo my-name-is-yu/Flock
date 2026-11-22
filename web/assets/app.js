@@ -137,6 +137,7 @@ function changed(key, ...values) {
   signatures.set(key, signature);
   return true;
 }
+const responseViewers = new WeakMap();
 async function api(path, body) {
   const init = { credentials: 'same-origin' };
   if (body) Object.assign(init, {
@@ -146,6 +147,8 @@ async function api(path, body) {
   const response = await fetch(`/api/${path}`, init);
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
+  const viewer = response.headers.get('X-Flock-Viewer');
+  if (viewer !== null) responseViewers.set(data, viewer);
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
@@ -247,6 +250,8 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 const sidebarEntries = new Map();
+let readState = new Map();
+let sidebarViewer = null;
 
 let botDraft = null;
 function sidebarBots() {
@@ -342,11 +347,15 @@ function createSidebarEntry(botId) {
   const face = node('span');
   const avatarHost = node('span', 'avatar');
   const pinPresence = node('span');
-  face.append(avatarHost, pinPresence);
+  const pinUnread = node('span', 'unread-dot pin-unread');
+  pinUnread.setAttribute('aria-hidden', 'true');
+  face.append(avatarHost, pinPresence, pinUnread);
 
   const name = node('span', 'bot-name');
   const nameText = node('span', 'bot-name-text');
   const presenceDot = node('span', 'presence-dot');
+  const rowUnread = node('span', 'unread-dot row-unread');
+  rowUnread.setAttribute('aria-hidden', 'true');
   name.append(nameText, presenceDot);
   const preview = node('span', 'bot-preview');
   const dots = node('span', 'working-dots');
@@ -359,7 +368,7 @@ function createSidebarEntry(botId) {
 
   const pinName = node('span', 'pin-name');
   const status = node('span', 'sr-only');
-  select.append(face, text, pinName, status);
+  select.append(rowUnread, face, text, pinName, status);
   const tooltip = node('span', 'pin-tooltip');
   tooltip.setAttribute('aria-hidden', 'true');
   const tooltipName = node('span');
@@ -409,8 +418,13 @@ function createSidebarEntry(botId) {
       dots.hidden = !busyPresence.has(bot.presence);
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
-      status.hidden = !hasPresence;
-      if (hasPresence && previousBot?.presence !== bot.presence) status.textContent = stateLabels[bot.presence];
+      const unread = hasUnread(bot);
+      row.classList.toggle('unread', !!unread);
+      pinUnread.hidden = !pinned || !unread;
+      rowUnread.hidden = pinned || !unread;
+      const label = [unread && 'New reply', hasPresence && stateLabels[bot.presence]].filter(Boolean).join(', ');
+      status.hidden = !label;
+      if (status.textContent !== label) status.textContent = label;
 
       toggle.setAttribute('aria-expanded', expanded);
       if (expanded) {
@@ -477,12 +491,12 @@ function placeSidebarRows(container, rows) {
 }
 
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
+  const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const source = sidebarBots();
   const pinned = pinnedBotsInShortcutOrder(source);
-  const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinned = source.filter((bot) => !pins.has(bot.id));
   const activeIds = new Set(source.map((bot) => bot.id));
   for (const [id, entry] of sidebarEntries) {
     if (!activeIds.has(id)) {
@@ -498,14 +512,39 @@ function renderBots() {
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
-  const rows = unpinnedByPresence.map(rowFor);
+  const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
   else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
   placeSidebarRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
-  unpinnedByPresence.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
+}
+
+function hasUnread(bot) {
+  const state = readState.get(bot.id);
+  return state && state.incoming > state.readThrough;
+}
+
+let readCheckFrame;
+function scheduleReadCheck() {
+  readCheckFrame ??= requestAnimationFrame(() => {
+    readCheckFrame = undefined;
+    if (!view?.data || view.dm || sidebarViewer === null || responseViewers.get(view.data) !== sidebarViewer ||
+        document.hidden || document.querySelector('dialog[open]')) return;
+    const state = readState.get(view.id);
+    if (!state || state.incoming <= state.readThrough) return;
+    const scroller = elements.conversation;
+    if (!scroller.clientHeight) return;
+    const message = byId(`event-${state.incoming}`);
+    if (!message || !elements.timeline.contains(message)) return;
+    const viewport = scroller.getBoundingClientRect();
+    const bounds = message.getBoundingClientRect();
+    if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom || bounds.bottom > viewport.bottom + 1) return;
+    state.readThrough = state.incoming;
+    renderBots();
+  });
 }
 
 const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
@@ -1693,6 +1732,7 @@ function render(scroll) {
   renderComposer();
   renderTimeline(scroll, previousScroll);
   renderDetail();
+  scheduleReadCheck();
 }
 
 function mergeSessionTasks(context, tasks) {
@@ -1775,7 +1815,18 @@ async function refreshView(context, scroll) {
 const refreshBots = coalescedRefresh(async () => {
   try {
     const latest = await api('bots');
-    bots = latest;
+    const viewer = responseViewers.get(latest) ?? null;
+    const previous = viewer === sidebarViewer ? readState : null;
+    sidebarViewer = viewer;
+    readState = new Map();
+    // The first successful list sets a baseline for existing conversations in this tab.
+    bots = latest.map(({ latestIncomingEventId: incoming, ...bot }) => {
+      if (viewer !== null) {
+        const readThrough = previous?.get(bot.id)?.readThrough ?? incoming;
+        readState.set(bot.id, { incoming, readThrough });
+      }
+      return bot;
+    });
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
@@ -2035,6 +2086,9 @@ function resumeUpdates() {
   syncAll();
 }
 
+elements.conversation.addEventListener('scroll', scheduleReadCheck, { passive: true });
+new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
+document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
 document.addEventListener('visibilitychange', resumeUpdates);
