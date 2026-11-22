@@ -49,7 +49,7 @@ void boundary(Browser& browser) {
           landing->get_header_value("Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos,
           "missing frame protection");
     pageAssets(browser,landing->body);
-    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/flock.svg",
+    for (const auto* path : {"/event-history.mjs","/live-updates.js","/avatars.js","/bot-editor.js","/composer-drafts.mjs","/flock.svg",
                             "/vendor/open-bot-avatar/index.js","/vendor/open-bot-avatar/dom/index.js"}) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
@@ -69,6 +69,7 @@ void boundary(Browser& browser) {
     check(preflight && preflight->status == 403 && !preflight->has_header("Access-Control-Allow-Origin"),"cross-origin preflight was permitted");
     Browser::checked(browser.client.Get("/api/conversation?bot=release&before=-1"),400);
     Browser::checked(browser.client.Get("/api/view?bot=missing"),404);
+    check(browser.get("/api/view?bot=release").at("composerPerson").is_null(),"local composer was given an authenticated identity");
     for (const std::string path : {"/api/compactions","/api/workflows"}) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
@@ -434,6 +435,8 @@ void exercise(const std::filesystem::path& path) {
     const auto releaseRow = std::find_if(list.begin(),list.end(),[](const Json& bot) { return bot.at("id") == "release"; });
     check(releaseRow != list.end() && releaseRow->at("preview") == "利用者向けの変更だけを載せますか？",
           "Bot list does not show Release's latest question");
+    check(releaseRow->at("latestIncomingEventId") == waits[0]["wait"]["messageId"],
+          "a Bot question did not update the incoming event ID");
     const Id waitId = waits[0]["wait"]["id"];
     std::map<Id,std::string> earlierRequests;
     for (int i = 0; i < 45; ++i) {
@@ -548,6 +551,47 @@ void exercise(const std::filesystem::path& path) {
     sessionPages(reopened,cli,*runtime,triage);
 }
 
+void sidebarReplies(const std::filesystem::path& path) {
+    struct ReplyModel : Model {
+        ModelTurn decide(const ModelInput&) override {
+            return {{{"reply",{{"text","Same reply"}},"Reply to the message"}}};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,{});
+    const auto cb = callbacks();
+    const auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    const auto release = [&] {
+        const auto bots = browser.get("/api/bots");
+        const auto row = std::ranges::find_if(bots,[](const Json& bot) { return bot.at("id") == "release"; });
+        check(row != bots.end(),"Release was not listed");
+        return *row;
+    };
+    const auto send = [&](unsigned sequence) {
+        store.receive(Person{"owner",true},cb.intake("release","Same request"),
+                      "sidebar-" + std::to_string(sequence),"Same request");
+    };
+    send(0);
+    check(release().at("latestIncomingEventId") == 0,"an outgoing message appeared as an incoming reply");
+    tick(runtime,3);
+    const auto first = release();
+    const auto incoming = first.at("latestIncomingEventId").get<Id>();
+    const auto events = browser.get("/api/conversation?bot=release").at("events");
+    check(incoming > 0 && events.back().at("kind") == "conversation_reply" && events.back().at("id") == incoming,
+          "the sidebar did not identify the visible conversation reply");
+    send(1);
+    check(release().at("latestIncomingEventId") == incoming,"an outgoing message advanced the incoming reply");
+    tick(runtime,3);
+    const auto second = release();
+    check(second.at("preview") == first.at("preview") && second.at("latestIncomingEventId").get<Id>() > incoming,
+          "two replies with the same text did not have distinct incoming IDs");
+    for (unsigned sequence = 2; sequence < 16; ++sequence) send(sequence);
+    check(release().at("latestIncomingEventId") == second.at("latestIncomingEventId"),
+          "outgoing messages hid the latest incoming reply past the preview window");
+}
+
 void readChanges(Browser& stream, const std::string& path, const std::function<bool(const Json&)>& next) {
     using namespace std::chrono_literals;
     stream.client.set_read_timeout(2);
@@ -582,6 +626,7 @@ void eventStream(const std::filesystem::path& path) {
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     Browser stream(*server);
+    check(browser.get("/api/view?bot=release").at("canDecide") == true,"local owner lost conversation access");
     Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
     Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
 
@@ -607,6 +652,61 @@ void eventStream(const std::filesystem::path& path) {
         ++changes;
         return true;
     });
+}
+
+void conversationPermissions(const std::filesystem::path& path) {
+    Store store(path);
+    const Person owner{"fixture",true};
+    auto access = store.access();
+    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
+    access.personGrant(owner,"release","decider",Role::decide,GrantChange::grant);
+    access.resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
+    auto web = callbacks();
+    web.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer reader") return Person{"reader"};
+        if (credential == "Bearer decider") return Person{"decider"};
+        return Person{};
+    };
+
+    const auto taskId = store.submit(web.intake("release","Draft release notes"));
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    tick(runtime,3);
+    auto& observation = t3.observations["thread-release"];
+    observation.kind = Observation::Kind::Question;
+    observation.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
+    tick(runtime,2);
+
+    const auto server = startWeb(store,0,web);
+    Browser reader(*server), decider(*server), stream(*server);
+    reader.client.set_default_headers({{"Authorization","Bearer reader"}});
+    stream.client.set_default_headers({{"Authorization","Bearer reader"}});
+    decider.client.set_default_headers({{"Authorization","Bearer decider"}});
+    const auto viewPath = "/api/view?bot=release";
+    const auto readable = reader.get(viewPath);
+    const auto writable = decider.get(viewPath);
+    check(readable.at("canDecide") == false && writable.at("canDecide") == true,"conversation permission did not follow the caller");
+    check(!readable.at("events").empty() && readable.at("events") == writable.at("events") &&
+          readable.at("waits") == writable.at("waits"),"reader lost conversation or wait history");
+
+    const auto& wait = readable.at("waits").at(0);
+    const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
+        {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
+        {"targetGeneration",wait.at("generation")}};
+    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
+    reader.post("/api/messages",message,403);
+    reader.post("/api/operations",answer,403);
+    unsigned updates = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        check(change.at("bot") == "release","permission change did not invalidate the open conversation");
+        check(reader.get(viewPath).at("canDecide") == (updates == 1),"refreshed conversation has stale permission");
+        if (++updates == 3) return false;
+        access.personGrant(owner,"release","reader",updates == 1 ? Role::decide : Role::view,GrantChange::grant);
+        return true;
+    });
+    decider.post("/api/operations",answer);
+    decider.post("/api/messages",message,201);
 }
 
 void retryEventProjection(const std::filesystem::path& path) {
@@ -826,6 +926,7 @@ void accessEndpoints(const std::filesystem::path& path) {
     Browser browser(*server);
     Browser::checked(browser.client.Get("/api/access?bot=release"),401);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    check(browser.get("/api/view?bot=release").at("composerPerson")=="owner","composer identity did not match owner");
     Browser::checked(browser.client.Get("/api/access?bot=release&bot=triage"),400);
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
@@ -843,8 +944,14 @@ void accessEndpoints(const std::filesystem::path& path) {
     browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
                                           {"resourceId","github.com/org/private"},{"operation","read"}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");
+    const auto list = browser.client.Get("/api/bots");
+    const auto view = browser.client.Get("/api/view?bot=release");
+    check(list && view && list->get_header_value("X-Flock-Viewer") == "\"alice\"" &&
+          view->get_header_value("X-Flock-Viewer") == "\"alice\"",
+          "list and conversation did not expose the same authenticated viewer scope");
     Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/workflows?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
@@ -861,7 +968,9 @@ int main() {
     try {
         TestDirectory directory;
         exercise(directory.path / "state.db");
+        sidebarReplies(directory.path / "sidebar.db");
         eventStream(directory.path / "events.db");
+        conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
