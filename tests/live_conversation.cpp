@@ -41,19 +41,19 @@ struct Mixed : Model {
     Json trace = Json::array();
     explicit Mixed(Model& model) : live(model) {}
     Decision decide(const ModelInput& input) override {
-        if (input.event.value("kind","") == "conversation_turn") {
+        const auto kind = input.event.value("kind","");
+        if (kind == "conversation_turn") {
             trace = input.event.at("turn");
             auto decision = live.decide(input);
             trace.push_back({{"tool",decision.tool},{"args",decision.args}});
             return decision;
         }
-        const auto request = input.task.value("request","");
         if (const auto question = questions.find(input.task.at("id").get<Id>());
-            input.event.at("kind") == "intake" && question != questions.end() && !input.event.contains("userAnswer"))
+            kind == "intake" && question != questions.end() && !input.event.contains("userAnswer"))
             return {"ask_user",question->second,"The fixture needs a decision"};
-        if (input.event.value("kind","") == "result")
+        if (kind == "result")
             return {"complete",{{"report",input.event.value("report","")}},"The fixture report is the result"};
-        Json args = {{"instruction",request}};
+        Json args = {{"instruction",input.task.value("request","")}};
         if (input.task.value("doneWhen","").empty()) args["doneWhen"] = "Report the result with evidence";
         return {"delegate",args,"Run the fixture work"};
     }
@@ -202,18 +202,17 @@ std::string lower(std::string text) {
     return text;
 }
 
-bool matches(const std::string& text, const std::regex& pattern) {
-    return std::regex_search(text,pattern);
-}
-
 bool includes(std::string_view text, std::string_view part) {
     return text.find(part) != std::string_view::npos;
 }
 
-bool contradictsInstruction(const std::string& text) {
+bool rejectsStartupColumn(const std::string& text) {
     static const std::regex denial(
-        R"(\b(?:not|no|never|avoid|omit|exclude|skip|without|optional|unnecessary|instead of|rather than)\b|n['’]t\b)");
-    return matches(text,denial);
+        R"((?:(?:\b(?:not|never)|n['’]t)\s+(?:include|report|provide|require|add|use))"
+        R"(|\b(?:no|avoid|omit|exclude|skip|without(?:\s+(?:including|reporting|adding))?|instead of|rather than))"
+        R"()\s+(?:(?:a|the|report|column|field|named|called)\s+)*`?\bstartup_p95_ms\b)"
+        R"(|\bstartup_p95_ms\b`?(?:\s+(?:column|field))?\s+(?:is\s+(?:optional|unnecessary|not required)|(?:must|should)\s+not\s+be\s+(?:included|reported)))");
+    return std::regex_search(text,denial);
 }
 
 std::vector<Json> turnEvents(const Scene& s, const Turn& turn, Id task, std::string_view kind) {
@@ -254,7 +253,8 @@ bool requiresStartupColumn(const std::string& criteria) {
     static const std::regex requirement(
         R"(\b(?:include[sd]?|contain[s]?|require[sd]?|add|must|report|provide|with)\b)");
     const auto text = lower(criteria);
-    return matches(text,column) && matches(text,field) && matches(text,requirement) && !contradictsInstruction(text);
+    return std::regex_search(text,column) && std::regex_search(text,field) &&
+        std::regex_search(text,requirement) && !rejectsStartupColumn(text);
 }
 
 void checkCriteria(const Scene& s, const Turn& turn, Id id) {
@@ -262,12 +262,12 @@ void checkCriteria(const Scene& s, const Turn& turn, Id id) {
     const auto& before = turn.before.at(id);
     const auto& after = turn.after.at(id);
     const auto& criteria = after.at("doneWhen").get_ref<const std::string&>();
-    auto revisions = before.at("revisions");
+    const auto& revisions = before.at("revisions");
     const auto& savedRevisions = after.at("revisions");
     check(savedRevisions.size() == revisions.size() + 1,"expected one new saved revision");
     const auto& revision = savedRevisions.back();
-    revisions.push_back(revision);
-    check(savedRevisions == revisions && revision.at("id") == after.at("currentRevision") &&
+    check(std::equal(revisions.begin(),revisions.end(),savedRevisions.begin()) &&
+          revision.at("id") == after.at("currentRevision") &&
           revision.at("sourceMessageId") == turn.message() && revision.at("doneWhen") == criteria &&
           revision.at("intent") == before.at("intent") && after.at("intent") == before.at("intent") &&
           before.at("doneWhen") != criteria && requiresStartupColumn(criteria),
@@ -278,32 +278,40 @@ void checkCriteria(const Scene& s, const Turn& turn, Id id) {
           accepted.size() == 1 && accepted.front().at("messageId") == turn.message() &&
           after.at("pendingInstructions").back() == accepted.front() && accepted.front().at("conflicting") == true &&
           accepted.front().at("replaceKey") == "criteria" && accepted.front().at("revisionId") == revision.at("id") &&
-          !contradictsInstruction(lower(accepted.front().at("text").get<std::string>())),
+          !rejectsStartupColumn(lower(accepted.front().at("text").get<std::string>())),
           "the turn did not queue a consistent criteria replan for its new revision");
 }
 
 bool explainsCanary(const std::string& reply) {
     const auto text = lower(reply);
-    static const std::regex flag(R"(\brollout_[a-z0-9_]+\b)");
     static const std::regex canary(R"(\brollout_canary\b)");
+    static const std::regex directsAlternative(
+        R"((?:(?:(?:^|[.!?;\n])\s*(?:please\s+)?|\b(?:but|then|and)\s+|\b(?:i|we|you)\s+(?:would|should)\s+))"
+        R"((?:use|enable|choose|select|go with)|\b(?:i|we)\s+(?:would\s+)?(?:prefer|recommend(?:\s+(?:using|choosing|selecting))?)))"
+        R"(\s+(?:the\s+)?`?\brollout_(?!canary\b)[a-z0-9_]+\b)");
+    static const std::regex alternativeChoice(
+        R"(\brollout_(?!canary\b)[a-z0-9_]+\b`?\s+(?:is\s+(?:recommended|preferred|selected)\b)"
+        R"(|is\s+the\s+(?:recommended|preferred|selected|best)\s+(?:flag|option|choice)\b|should\s+be\s+used\b))");
     static const std::regex percentage(R"(\b[0-9]+(?:\.[0-9]+)?\s*(?:%|percent\b))");
-    static const std::regex allowedPercentage(R"(^(?:5|100)\s*(?:%|percent)$)");
+    static const std::regex allowedPercentage(R"((?:5|100)\s*(?:%|percent))");
     static const std::regex duration(R"(\b(?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?)\b)");
-    static const std::regex allowedDuration(R"(^(?:24\s+hours?|(?:1|one|a)\s+day)$)");
+    static const std::regex allowedDuration(R"(24\s+hours?|(?:1|one|a)\s+day)");
     static const std::regex wrongValue(
-        R"(\b(?:not|never|instead of|rather than|avoid)\b[^.!?\n]{0,40}\b(?:5\s*(?:%|percent)|rollout_canary|(?:one|a)\s+day|24\s+hours|everyone|all users)|\b(?:never|not)\s+(?:expand|roll out|enable))");
+        R"(\b(?:not|never|instead of|rather than|avoid)\b(?!\s+(?:use\s+)?`?rollout_(?!canary\b)))"
+        R"([^,;.!?\n]{0,40}\b(?:5\s*(?:%|percent)|rollout_canary|(?:one|a)\s+day|24\s+hours|everyone|all users))"
+        R"(|\b(?:never|not)\s+(?:expand|roll out|enable))");
     static const std::regex rollout(
         R"(\b5\s*(?:%|percent)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
         R"([\s\S]{0,160}?\b(?:24\s+hours?|(?:1|one|a)\s+day)\b)"
         R"([\s\S]{0,160}?\b(?:then|after(?:ward|wards| that)?|before|followed by)\b)"
         R"([\s\S]{0,160}?\b(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|100\s*(?:%|percent)|full rollout))");
-    if (!matches(text,canary) || !matches(text,rollout) || matches(text,wrongValue)) return false;
-    for (auto it = std::sregex_iterator(text.begin(),text.end(),flag); it != std::sregex_iterator(); ++it)
-        if (it->str() != "rollout_canary") return false;
+    if (!std::regex_search(text,canary) || !std::regex_search(text,rollout) ||
+        std::regex_search(text,wrongValue) || std::regex_search(text,directsAlternative) ||
+        std::regex_search(text,alternativeChoice)) return false;
     for (auto it = std::sregex_iterator(text.begin(),text.end(),percentage); it != std::sregex_iterator(); ++it)
-        if (!matches(it->str(),allowedPercentage)) return false;
+        if (!std::regex_match(it->str(),allowedPercentage)) return false;
     for (auto it = std::sregex_iterator(text.begin(),text.end(),duration); it != std::sregex_iterator(); ++it)
-        if (!matches(it->str(),allowedDuration)) return false;
+        if (!std::regex_match(it->str(),allowedDuration)) return false;
     return true;
 }
 
@@ -322,9 +330,13 @@ void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing
     const auto& instruction = note.at("text").get_ref<const std::string&>();
     static const std::regex staging(
         R"(\b(?:use|switch to|target|connect to|benchmark against|run against)\s+(?:the\s+)?staging\s+(?:database|db)\b)");
+    static const std::regex rejectsStaging(
+        R"((?:(?:\b(?:not|never)|n['’]t)\s+(?:use|switch to|target|connect to|benchmark against|run against))"
+        R"(|\b(?:no|avoid|skip|without|instead of|rather than))\s+(?:the\s+)?staging\b)");
     static const std::regex otherDatabase(R"(\b(?:production|prod|development|dev)\s+(?:database|db)\b)");
     const auto text = lower(instruction);
-    check(matches(text,staging) && !contradictsInstruction(text) && !matches(text,otherDatabase),
+    check(std::regex_search(text,staging) && !std::regex_search(text,rejectsStaging) &&
+          !std::regex_search(text,otherDatabase),
           "the new instruction did not direct the benchmark to use the staging database");
 
     const auto& effect = turn.reply.at("actions").front().at("effect");
@@ -400,13 +412,15 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         static const std::regex notes(R"(\brelease[- ]notes?\b)");
         static const std::regex licenses(R"(\blicen[cs](?:e[sd]?|ing)\b)");
         static const std::regex audit(R"(\b(?:audit|review|check|inspect|verify|assess)\b)");
+        static const std::regex denial(
+            R"(\b(?:not|no|never|avoid|omit|exclude|skip|without|optional|unnecessary|instead of|rather than)\b|n['’]t\b)");
         const auto role = [&](const Json& task) {
             const auto request = lower(task.at("request").get<std::string>());
-            const bool hasNotes = matches(request,notes);
-            const bool hasLicenses = matches(request,licenses);
-            if (contradictsInstruction(request) || hasNotes == hasLicenses) return "";
+            const bool hasNotes = std::regex_search(request,notes);
+            const bool hasLicenses = std::regex_search(request,licenses);
+            if (hasNotes == hasLicenses || std::regex_search(request,denial)) return "";
             if (hasNotes) return "release notes";
-            return matches(request,audit) ? "license audit" : "";
+            return std::regex_search(request,audit) ? "license audit" : "";
         };
         const std::set<std::string> roles{role(first->second),role(second->second)};
         check(roles == std::set<std::string>{"release notes","license audit"},
@@ -503,10 +517,10 @@ void selfTest() {
     const auto clarify = say("モバイル版とデスクトップ版のどちらをキャンセルしますか？");
     auto choices = say("対象を選んでください。");
     choices.args["suggestions"] = {"モバイル版","デスクトップ版"};
-    const auto criteria = [&](std::string text) {
-        return action("change_task",benchmark,{{"doneWhen",std::move(text)},{"instruction","Update the report criteria"}});
+    const auto criteria = [&](std::string_view text, std::string_view instruction = "Update the report criteria") {
+        return action("change_task",benchmark,{{"doneWhen",text},{"instruction",instruction}});
     };
-    const auto steer = action("message_session",benchmark,{{"text","Use the staging database"}});
+    const auto steer = [&](std::string_view text) { return action("message_session",benchmark,{{"text",text}}); };
     const auto queue = action("send_to_task",benchmark,{{"instruction","Use the staging database at the next safe point"}});
 
     auto cloud = start("Run the existing test suite");
@@ -521,21 +535,43 @@ void selfTest() {
     test("an ambiguous stop",{choices,stopMobile,done});
     test("an ambiguous stop",{say("キャンセルしました。")},"did not ask which task");
     test("new criteria",{criteria("Include a report column named startup_p95_ms"),done});
-    test("new criteria",{criteria("Do not include the startup_p95_ms column"),done},"did not preserve the benchmark and require");
+    constexpr auto columnConstraint = "Include a report column named startup_p95_ms without changing the benchmark";
+    test("new criteria",{criteria(columnConstraint,columnConstraint),done});
+    for (auto text : {"Do not include the startup_p95_ms column",
+                      "Include a report column named startup_p95_ms. Omit startup_p95_ms from the final report.",
+                      "Add a report column, but exclude startup_p95_ms."})
+        test("new criteria",{criteria(text),done},"did not preserve the benchmark and require");
+    test("new criteria",{criteria(columnConstraint,"Omit startup_p95_ms"),done},"did not queue a consistent criteria replan");
     test("two requests",{notes,audit,done});
     test("two requests",{start("Write the release notes and audit the third-party licenses"),audit,done},"one-to-one");
     test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, then expand it to everyone.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. "
+                            "Unlike rollout_global, this limits initial exposure.")});
+    test("explaining",{say("Use rollout_canary, not rollout_global, for 5% of users for a day, then expand to everyone.")});
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. Do not use rollout_global.")});
+    test("explaining",{say("The first option is to use rollout_global. "
+                            "For the second option, rollout_canary starts with 5% of users for a day, then expands to everyone.")});
+    test("explaining",{say("Start with 5% of users for a day, then expand to everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_global for 5% of users for a day, then expand to everyone. "
+                            "The other flag was rollout_canary.")},"did not explain");
+    test("explaining",{say("rollout_canary starts with 5% of users for a day, then expands to everyone. "
+                            "I recommend using rollout_immediate.")},"did not explain");
+    test("explaining",{say("rollout_canary starts with 5% of users for a day, then expands to everyone. "
+                            "rollout_immediate is the recommended option.")},"did not explain");
     test("explaining",{say("Use rollout_canary for 50% of users for a week, then everyone.")},"did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then everyone. Start with 50%.")},"did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then never expand it to everyone.")},"did not explain");
-    test("a note for running work reaches",{steer,done});
+    test("a note for running work reaches",{steer("Use the staging database"),done});
+    test("a note for running work reaches",{steer("Use the staging database; do not stop the current run"),done});
     test("a note for running work reaches",{queue,done},"unexpected action");
     test("a note for running work reaches",
-         {action("message_session",benchmark,{{"text","Do not use the staging database"}}),done},"did not direct");
+         {steer("Do not use the staging database"),done},"did not direct");
+    test("a note for running work reaches",
+         {steer("Use the staging database for now. Do not use staging for the benchmark."),done},"did not direct");
     test("a note for running work waits",{queue,done});
-    test("a note for running work waits",{steer,done},"unexpected action");
+    test("a note for running work waits",{steer("Use the staging database"),done},"unexpected action");
     test("a note for running work waits",
-         {action("send_to_task",benchmark,{{"instruction","Avoid the staging database"}}),done},"did not direct");
+         {action("send_to_task",benchmark,{{"instruction","Avoid staging database"}}),done},"did not direct");
 
     constexpr auto stagingBenchmark = "Benchmark startup using the staging database";
     const auto queuedNote = [&](std::string text) {
