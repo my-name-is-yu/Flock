@@ -43,7 +43,7 @@ struct Adapter : T3 {
     Delivery send(const Command&) override { throw std::runtime_error("Unexpected Session launch"); }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
-    void interrupt(const std::string&,const Json&,const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 struct Script : Model {

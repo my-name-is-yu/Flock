@@ -37,6 +37,8 @@ if(BUILD_TESTING)
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
     add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    add_test(NAME flock_web_board_inbox_live_retry COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}" live)
     add_test(NAME flock_web_composer_screenshot_dimensions COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-screenshot-dimensions.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     set_tests_properties(flock_web_composer_screenshot_dimensions PROPERTIES TIMEOUT 30)
@@ -47,7 +49,8 @@ if(BUILD_TESTING)
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/question-choices.mjs" "${FLOCK_CHROME_EXECUTABLE}")
     add_test(NAME flock_web_conversation_find_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/conversation-find.mjs" "${FLOCK_CHROME_EXECUTABLE}")
-    set_tests_properties(flock_web_board_inbox_dom flock_web_question_choices_dom flock_web_conversation_find_dom PROPERTIES TIMEOUT 30)
+    set_tests_properties(flock_web_board_inbox_dom flock_web_board_inbox_live_retry
+      flock_web_question_choices_dom flock_web_conversation_find_dom PROPERTIES TIMEOUT 30)
   endif()
   add_executable(flock_web_tests tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")

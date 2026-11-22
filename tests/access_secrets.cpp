@@ -37,7 +37,7 @@ struct Adapter : T3 {
     Delivery send(const Command&) override {throw Conflict("Unexpected send");}
     Delivery reconcile(const Command&) override {return {};}
     Observation observe(const std::string&,const Json&,const RunRef&) override {return {};}
-    void interrupt(const std::string&,const Json&,const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 const Person owner{"local-owner",true}, admin{"alice"}, viewer{"bob"};
 const Scope readRepo{"repository","github.com/org/private","read"}, writeRepo{"repository","github.com/org/private","write"};
