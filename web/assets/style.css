@@ -91,7 +91,10 @@ svg { display: block; }
   inset: var(--keyboard-viewport-top) 0 auto;
   height: var(--keyboard-viewport-height);
 }
-.main { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; background: var(--canvas); }
+.main {
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0;
+  container: conversation-layout / size; background: var(--canvas);
+}
 
 .avatar { display: grid; place-items: center; overflow: visible; width: 2.25rem; height: 2.25rem; flex: none; background: none; }
 .avatar > svg, .avatar > canvas { width: 100%; height: 100%; }
@@ -102,7 +105,8 @@ svg { display: block; }
   box-shadow: inset 0 -2px 0 rgb(0 0 0 / .14);
 }
 .avatar-icon-glyph > svg { width: 54%; height: 54%; }
-.mug-outline > :is(svg, canvas) { filter: drop-shadow(0 0 .55px light-dark(rgb(28 20 40 / .36), transparent)); }
+/* Pale avatars need an edge against light surfaces. Animated avatars wrap their canvas in a div. */
+.mug-outline > :is(svg, canvas, div) { filter: drop-shadow(0 0 .55px light-dark(rgb(28 20 40 / .36), transparent)); }
 .icon-button { background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm); width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center; font-size: 1.25rem; flex: none; }
 .icon-button:hover { background: var(--hover); color: var(--text); }
 .icon-button svg { width: 1.18rem; height: 1.18rem; }

@@ -155,10 +155,11 @@ async function exercise() {
 
   const forwardedTime = eventTime(forwarded);
   const source = forwarded.querySelector('.peer-forwarded-message');
-  const sourceTime = source.querySelector('time');
   tap(source.querySelector('.event-text'));
-  check(shown()[0] === forwardedTime && source.contains(sourceTime) && sourceTime.dateTime !== forwardedTime.dateTime,
-    'Tapping a forwarded-only message did not reveal its own timestamp while preserving the source timestamp');
+  // The quote names only its original sender; the message's own time is the one revealed.
+  check(shown()[0] === forwardedTime && !source.querySelector('time') &&
+    source.querySelector('.msg-quote')?.textContent === 'Original sender',
+    'Tapping a forwarded-only message did not reveal its own timestamp beside the attributed quote');
   tap(triage.querySelector('.event-text'));
   check(shown().length === 1 && shown()[0].parentElement === triage && eventTime(forwarded) === forwardedTime,
     'The peer message timestamp did not move back when another one was opened');

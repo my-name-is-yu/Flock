@@ -74,16 +74,26 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <h1 id="profile-heading" class="profile-heading" aria-labelledby="profile-name" hidden>
-            <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status">
-              <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
-              <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
-            </button>
-          </h1>
+          <div id="profile-identity" class="profile-identity header-identity" hidden>
+            <h1 id="profile-heading" class="profile-heading" aria-labelledby="profile-name">
+              <button id="profile" class="profile header-identity-content" type="button" aria-haspopup="dialog" aria-label="Open Bot settings">
+                <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+                <span id="profile-name" class="profile-name header-name" dir="auto"></span>
+              </button>
+            </h1>
+            <p id="profile-status" class="profile-status" hidden></p>
+          </div>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
-          <div id="peer-identity" class="peer-identity" hidden>
-            <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
-            <h1 id="peer-heading" class="peer-title" tabindex="-1"></h1>
+          <div id="peer-identity" class="header-identity" hidden>
+            <h1 id="peer-heading" class="peer-title header-identity-content" aria-describedby="peer-description" tabindex="-1">
+              <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
+              <span class="peer-names header-name">
+                <bdi id="peer-name-first"></bdi>
+                <span>&amp;</span>
+                <bdi id="peer-name-second"></bdi>
+              </span>
+            </h1>
+            <span id="peer-description" hidden>Read-only Bot DM</span>
           </div>
           <button id="peer-back" class="header-text-button peer-back" type="button" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6.5-5.5 5.5 5.5 5.5M9 12h11"/></svg>
@@ -117,6 +127,7 @@
       </div>
       <div class="conversation-frame">
         <section id="conversation" class="conversation" aria-label="Conversation history" tabindex="0">
+          <p id="conversation-source-error" class="conversation-source-error" role="alert"></p>
           <div class="conversation-inner">
             <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
             <p id="peer-status" class="peer-status" role="status" hidden></p>

@@ -16,12 +16,13 @@ const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
-  'profile-name', 'profile-status', 'profile-heading', 'profile-placeholder', 'conversation', 'older',
-  'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'profile-name', 'profile-status', 'profile-identity', 'profile-placeholder', 'conversation', 'older',
+  'timeline', 'conversation-source-error', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-name-first', 'peer-name-second',
+  'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -76,6 +77,7 @@ const errors = {
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
   peer_not_found: 'This Bot DM is unavailable.',
+  peer_message_not_found: 'This message is unavailable.',
 };
 
 function saved(key, fallback) {
@@ -175,8 +177,12 @@ async function api(path, body, signal) {
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
-const peerQuery = ({ id: bot, peerId: peer }, before) =>
-  `peer-conversation?${new URLSearchParams(before ? { bot, peer, before } : { bot, peer })}`;
+function peerQuery({ id: bot, peerId: peer }, before, anchor) {
+  const params = new URLSearchParams({ bot, peer });
+  if (before) params.set('before', before);
+  else if (anchor) params.set('anchor', anchor);
+  return `peer-conversation?${params}`;
+}
 const timelineContext = () => view?.dm ?? view;
 const timelineKey = (botId, peerId = null) => JSON.stringify([botId, peerId]);
 const showingComposer = (bot) => view?.id === bot && !view?.dm;
@@ -205,31 +211,34 @@ function openNavigation(open, focus = true) {
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
   if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
-function conversationUrl(botId, peerId) {
+function conversationUrl(botId, peerId, anchor) {
   const url = new URL(location.href);
   if (botId) url.searchParams.set('bot', botId);
   else url.searchParams.delete('bot');
   if (peerId) url.searchParams.set('peer', peerId);
   else url.searchParams.delete('peer');
+  if (peerId && anchor) url.searchParams.set('anchor', anchor);
+  else url.searchParams.delete('anchor');
   return url;
 }
-function selectBot(botId, peerId = null, updateHistory = true) {
+function selectBot(botId, peerId = null, { updateHistory = true, anchor = 0, fromPeerLink = false } = {}) {
   menu = null;
   openNavigation(false);
-  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
+  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId && (view?.dm?.anchor ?? 0) === anchor) {
     if (view.source || view.pendingSource) backToLatest();
     else renderBots();
     return;
   }
-  rememberReadingPosition();
+  resetConversationJump(view);
+  rememberReadingPosition(fromPeerLink && !view?.dm && view?.id === botId);
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, source: null, pendingSource: null, loadingOlder: false, loadingSessions: false,
-    dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
-  const url = conversationUrl(botId, peerId);
+    dm: peerId ? { id: botId, peerId, anchor, fromPeerLink, events: new Map(), olderBefore: 0 } : null } : null;
+  const url = conversationUrl(botId, peerId, anchor);
   if (url.href !== location.href) {
-    if (updateHistory) history.pushState(null, '', url);
+    if (updateHistory) history.pushState(fromPeerLink ? { peerAnchor: anchor } : null, '', url);
     else history.replaceState(null, '', url);
   }
   save('flock-selected-bot', botId);
@@ -251,18 +260,26 @@ function selectLocation() {
   const params = new URLSearchParams(location.search);
   const requested = params.get('bot');
   const bot = bots.find((entry) => entry.id === requested);
-  const peer = params.get('peer') || null;
+  const peer = params.get('peer');
+  const peerId = bot && peer && peer !== bot.id ? peer : null;
+  const requestedAnchor = params.get('anchor');
+  const id = /^\d+$/.test(requestedAnchor ?? '') ? Number(requestedAnchor) : 0;
+  const anchor = peerId && Number.isSafeInteger(id) ? id : 0;
   const preferred = saved('flock-selected-bot', null);
-  selectBot(bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null,
-    bot && peer !== bot.id ? peer : null, false);
+  const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
+  if (!peerId && view?.dm && view.id === selectedBot) {
+    leavePeerConversation(false);
+    return;
+  }
+  selectBot(selectedBot, peerId, { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
 }
-function peerLink(botId, peerId, label, className) {
+function peerLink(botId, peerId, label, className, anchor = 0) {
   const link = node('a', className, label);
-  link.href = conversationUrl(botId, peerId);
+  link.href = conversationUrl(botId, peerId, anchor);
   link.addEventListener('click', (event) => {
     if (event.button || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
     event.preventDefault();
-    selectBot(botId, peerId);
+    selectBot(botId, peerId, { anchor, fromPeerLink: !!anchor });
     elements['peer-heading'].focus({ preventScroll: true });
   });
   return link;
@@ -572,7 +589,8 @@ function renderHeader() {
   const dm = view?.dm;
   conversationFind.setContext(view?.data && !dm ? view : null);
   const profile = elements.profile;
-  elements['profile-heading'].hidden = !bot || !!dm;
+  const identity = elements['profile-identity'];
+  identity.hidden = !bot || !!dm;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
@@ -582,8 +600,10 @@ function renderHeader() {
     elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
     const pair = [dm.id, dm.peerId].sort().map(participant);
     if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot)));
-      elements['peer-heading'].textContent = pair.map(({ name }) => name).join(' & ');
+      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot, 'avatar-profile')));
+      elements['peer-name-first'].textContent = pair[0].name;
+      elements['peer-name-second'].textContent = pair[1].name;
+      elements['peer-heading'].title = pair.map(({ name }) => name).join(' & ');
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -615,13 +635,18 @@ function renderHeader() {
   profileMotion = motion;
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
+  const showStatus = offline || presence !== 'idle';
+  const settingsLabel = `${bot.name} settings`;
+  const name = elements['profile-name'];
   profile.dataset.presence = presence;
-  profile.dataset.state = offline ? 'offline' : presence;
-  profile.title = `${bot.name} settings`;
-  profile.setAttribute('aria-label', profile.title);
-  elements['profile-name'].textContent = bot.name;
-  elements['profile-status'].textContent = status;
-  elements['profile-status'].hidden = !offline && presence === 'idle';
+  identity.dataset.state = offline ? 'offline' : presence;
+  profile.setAttribute('aria-label', settingsLabel);
+  name.textContent = bot.name;
+  name.title = settingsLabel;
+  elements['profile-status'].textContent = showStatus ? status : '';
+  elements['profile-status'].hidden = !showStatus;
+  if (showStatus) profile.setAttribute('aria-describedby', 'profile-status');
+  else profile.removeAttribute('aria-describedby');
 }
 
 function activityRow(tag, className, title, status, statusClass) {
@@ -773,7 +798,6 @@ const icons = {
   copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
-  forward: '<path d="m14.5 7 5 5-5 5"/><path d="M19 12h-9a5.5 5.5 0 0 0-5.5 5.5V19"/>',
   resultWarning: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.8v4.8m0 3.45h.01"/>',
   check: '<circle cx="12" cy="12" r="8.5"/><path d="m8.5 12.3 2.4 2.4 4.6-4.9"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
@@ -945,35 +969,16 @@ noHover.addEventListener('change', () => {
   if (!noHover.matches) closeMessageTime();
 });
 
-function sourceAction(source, label = 'Open source') {
-  const control = button(label, 'text-button', async () => {
-    const match = byId(`event-${source.messageId}`);
-    const target = match?.closest('article') ?? match;
-    if (target) {
-      closeDetail();
-      target.focus();
-      target.scrollIntoView({ block: 'center' });
-      return;
-    }
-    const context = view;
-    const selection = { kind: 'source' };
-    openDetail(selection);
-    try {
-      const page = await api(botQuery('conversation', context.id, source.messageId + 1));
-      if (detail !== selection) return;
-      selection.event = page.events.find((event) => event.id === source.messageId);
-      selection.failed = !selection.event;
-    } catch {
-      if (detail !== selection) return;
-      selection.failed = true;
-    }
-    renderDetail();
-  });
-  control.dataset.timelineAction = `source:${source.messageId}`;
-  return control;
+function conversationMessageRow(id) {
+  // A collapsed Session report can be an anchor inside the completion row.
+  return byId(`event-${id}`)?.closest('article');
+}
+function resetConversationJump(context) {
+  if (context) context.pendingSource = null;
+  elements['conversation-source-error'].textContent = '';
 }
 function leaveConversationSource(context) {
-  context.pendingSource = null;
+  resetConversationJump(context);
   if (!context.source) return false;
   context.source = null;
   readingPositions.delete(timelineKey(context.id));
@@ -999,24 +1004,30 @@ function updateFindOverlap() {
   return overlap;
 }
 function focusConversationMessage(target) {
+  const row = target?.closest('article') ?? target;
+  if (!row) return;
   // Scroll within the conversation and keep the message clear of the floating controls.
   const scroller = elements.conversation;
   const overlap = updateFindOverlap();
   const viewport = scroller.getBoundingClientRect();
   const returnSpace = parseFloat(getComputedStyle(scroller).scrollPaddingBlockEnd) || 0;
-  const message = (target.querySelector('.bubble') ?? target).getBoundingClientRect();
+  const message = (row.querySelector('.bubble') ?? row).getBoundingClientRect();
   const top = viewport.top + overlap + 8;
   const bottom = viewport.bottom - returnSpace;
   const center = top + Math.max(0, (bottom - top - message.height) / 2);
-  target.focus({ preventScroll: true });
+  row.focus({ preventScroll: true });
   scroller.scrollTop += message.top - center;
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
-  if (preferLoaded && context.events.has(id)) {
+  resetConversationJump(context);
+  const error = elements['conversation-source-error'];
+  let target = preferLoaded ? conversationMessageRow(id) : null;
+  if (!target && preferLoaded && context.events.has(id)) {
     if (leaveConversationSource(context)) renderTimeline();
-  } else {
-    // Find and the inbox share one pending jump per conversation.
+    target = conversationMessageRow(id);
+  } else if (!target) {
+    // Only the newest jump in this conversation can apply its page.
     const request = context.pendingSource = { id };
     let page;
     try {
@@ -1025,20 +1036,27 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     if (context !== view || context.pendingSource !== request) return;
     context.pendingSource = null;
     if (signal?.aborted) return;
-    if (!page?.events.some((event) => event.id === id)) {
-      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+    if (!page) {
+      error.textContent = 'Could not load that message.';
+      return;
+    }
+    const event = page.events.find((item) => item.id === id);
+    if (!event || event.kind === 'wait_closed' || event.kind === 'bot_message') {
+      error.textContent = 'That message is no longer in this conversation.';
       return;
     }
     if (!context.source) rememberReadingPosition(true);
     context.source = { id, bot: bot ?? context.data.bot, events: page.events };
     renderTimeline();
+    target = conversationMessageRow(id);
   }
-  const target = byId(`event-${id}`)?.closest('article');
-  if (target) {
-    elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
-    target.classList.add('conversation-source-target');
-    focusConversationMessage(target);
+  if (!target) {
+    error.textContent = 'That message is no longer in this conversation.';
+    return;
   }
+  elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  target.classList.add('conversation-source-target');
+  focusConversationMessage(target);
   updateJumpToLatest();
 }
 function cardSourceAction(bot, id, close) {
@@ -1185,8 +1203,13 @@ function eventCard(event, context, place, report) {
         row.insertBefore(quote, meta.nextSibling);
       }
     }
-    if (event.kind === 'conversation_message' && data.replyToMessageId)
-      extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (event.kind === 'conversation_message' && data.replyToMessageId) {
+      const original = button('Open original message', 'text-button open-original-message', () => {
+        void showConversationMessage(view, data.replyToMessageId, { preferLoaded: true });
+      });
+      original.dataset.timelineAction = 'open-original';
+      extras.push(original);
+    }
     if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     else if (event.id === context.latestWebMessageId && data.status === 'received')
       extras.push(node('p', 'msg-note', 'Received'));
@@ -1268,12 +1291,28 @@ function dayLabel(seconds) {
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
 }
 
-function peerExchangeLink(peer, messageCount, activeBot, firstMessageId) {
+function peerExchangeLink(peer, activeBot, eventIds) {
+  const [firstMessageId] = eventIds;
+  const messageCount = eventIds.length;
   const count = messageCount === 1 ? '1 message' : `${messageCount} messages`;
-  const link = peerLink(activeBot, peer.id, null, 'peer-exchange-link');
+  const link = peerLink(activeBot, peer.id, null, 'peer-exchange-link', firstMessageId);
   link.append(avatar(peer, 'peer-exchange-avatar'), node('span', null, `${count} with ${peer.name}`));
   link.dataset.peerFocus = firstMessageId;
+  link.dataset.peerEvents = eventIds.join(' ');
   return link;
+}
+
+function peerExchangeForEvent(eventId) {
+  return eventId ? elements.timeline.querySelector(`[data-peer-events~="${eventId}"]`) : null;
+}
+
+function leavePeerConversation(updateHistory = true) {
+  const { id, dm } = view;
+  const anchor = dm.fromPeerLink && readingPositions.has(timelineKey(id)) ? dm.anchor : 0;
+  selectBot(id, null, { updateHistory });
+  const picker = elements['peer-picker'];
+  const target = peerExchangeForEvent(anchor) ?? (picker.hidden ? elements.profile : picker);
+  target.focus({ preventScroll: true });
 }
 
 function peerThread(events, dm, keep) {
@@ -1297,7 +1336,8 @@ function peerThread(events, dm, keep) {
     const place = peerMessagePlacement(events[index - 1], event, events[index + 1]);
     if (place.timeBreak) rows.push(keep(`gap-${event.id}`, event.time, () => chatTimeBreak(event)));
     const from = participant(event.data.fromBotId);
-    const row = keep(`event-${event.id}`, [event, from.name, from.avatar], () => peerMessage(event, from, dm));
+    const anchored = event.id === dm.anchorId;
+    const row = keep(`event-${event.id}`, [event, from.name, from.avatar, anchored], () => peerMessage(event, from, dm, anchored));
     row.classList.toggle('group-start', place.groupStart);
     row.classList.toggle('group-continues', !place.groupEnd);
     row.querySelector('.msg-meta').classList.toggle('sr-only', !place.groupStart);
@@ -1306,19 +1346,19 @@ function peerThread(events, dm, keep) {
   });
   return rows;
 }
-function peerMessage(event, from, dm) {
+function peerMessage(event, from, dm, anchored) {
   const { text, forwardedMessage } = event.data;
   const row = node('article', 'msg event-message peer-dm-message');
   row.id = `event-${event.id}`;
   row.tabIndex = 0;
+  row.toggleAttribute('data-anchored', anchored);
   const metadata = node('div', 'msg-meta');
   metadata.append(node('span', 'msg-name', from.name));
   const line = node('div', 'msg-line');
   const bubble = node('div', 'bubble');
   if (forwardedMessage) {
     const quote = node('blockquote', 'peer-forwarded-message');
-    const label = node('div', 'peer-forward-meta');
-    label.append(icon('forward'), node('span', null, 'Forwarded message'), eventTime(forwardedMessage));
+    const label = node('p', 'msg-quote', forwardedMessage.fromViewer === true ? 'You' : 'Original sender');
     quote.append(label, node('p', 'event-text', forwardedMessage.text));
     bubble.append(quote);
   }
@@ -1346,7 +1386,7 @@ function timelineAtEnd(scroller, viewportHeight = scroller.clientHeight) {
 function rememberReadingPosition(keepAtBottom = false) {
   if (view?.source) return;
   const context = timelineContext();
-  if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
+  if (context?.newestEvent == null || context.anchor || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
   if (atBottom && !keepAtBottom) return;
   const viewportTop = elements.conversation.getBoundingClientRect().top;
@@ -1369,8 +1409,8 @@ function restoreReadingPosition(position) {
     scroller.scrollTop = scroller.scrollHeight;
     return;
   }
-  const anchor = position.anchorId ? byId(position.anchorId)?.closest('article') :
-    [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((row) => row.dataset.peerFocus === position.peerFocus);
+  const row = position.anchorId ? byId(position.anchorId) : peerExchangeForEvent(position.peerFocus);
+  const anchor = row?.closest('article') ?? row;
   scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
     scroller.getBoundingClientRect().top - position.offset : position.top;
 }
@@ -1389,8 +1429,8 @@ function updateJumpToLatest() {
   frame.toggleAttribute('data-history-above', top > 1);
   frame.toggleAttribute('data-history-below', height - top - scroller.clientHeight > 1);
   const control = elements['jump-to-latest'];
-  // Keep the return control visible throughout a historical page.
-  const hidden = !view?.source && atBottom;
+  // An explicitly opened history page is separate from the latest messages.
+  const hidden = !view?.source && !view?.dm?.historical && atBottom;
   if (control.hidden === hidden) return;
   if (hidden && document.activeElement === control) scroller.focus({ preventScroll: true });
   control.hidden = hidden;
@@ -1411,10 +1451,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   peerStatus.hidden = !olderFailed;
   peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
-  const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
+  const key = context?.newestEvent != null && !context.anchor && timelineKey(context.id, context.peerId);
   const position = !source && key && readingPositions.get(key);
   const moveScroll = () => {
-    if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
+    if (scroll === 'anchor') focusConversationMessage(byId(`event-${context.anchorId}`));
+    else if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
       restoreReadingPosition(position);
       // The restored offset already includes the returning composer's height.
@@ -1422,14 +1463,14 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
       timelineWidth = scroller.clientWidth;
       scroller.classList.toggle('follow-newest', timelineAtEnd(scroller, timelineHeight));
       readingPositions.delete(key);
-    } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+    } else if (scroll === 'bottom' || (!context?.anchor && previousScroll.atBottom)) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
     updateJumpToLatest();
   };
   if (view?.dm) {
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
-    if (!changed('timeline', dm.id, dm.peerId, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
+    if (!changed('timeline', dm.id, dm.peerId, dm.anchor, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
     updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
@@ -1474,9 +1515,9 @@ function conversationRows(data, events, keep, source) {
     const [first] = peerMessages;
     const { fromBotId, toBotId } = first.data;
     const peer = participant(fromBotId === view.id ? toBotId : fromBotId);
-    const count = peerMessages.length;
-    rows.push(keep(`peer-${first.id}`, [peer.id, peer.name, peer.avatar, count],
-      () => peerExchangeLink(peer, count, view.id, first.id)));
+    const eventIds = peerMessages.map(({ id }) => id);
+    rows.push(keep(`peer-${first.id}`, [peer.id, peer.name, peer.avatar, eventIds],
+      () => peerExchangeLink(peer, view.id, eventIds)));
     peerMessages = [];
   };
   let day = '';
@@ -2053,24 +2094,6 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'source') {
-    if (changed('detail', detail)) {
-      elements['detail-title'].textContent = 'Original message';
-      const source = detail.event;
-      const text = source?.kind === 'waiting' ? waitText(source.data) :
-        source?.data.report ?? source?.data.text ??
-        (detail.failed ? 'The original message is no longer available in this conversation.' : 'Loading…');
-      const body = node('p', 'prose', text);
-      elements['detail-body'].replaceChildren(body);
-      const link = linkToRun(source?.data.run);
-      if (link) {
-        const actions = node('div', 'event-actions');
-        actions.append(link);
-        elements['detail-body'].append(actions);
-      }
-    }
-    return;
-  }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
     if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
@@ -2135,24 +2158,33 @@ function mergeLatest(context, latest) {
     setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
 }
-async function conversationPage(timeline, before) {
+async function conversationPage(timeline, before, anchor) {
   if (!timeline.peerId) return api(botQuery('conversation', timeline.id, before));
-  const { messages, hasOlder } = await api(peerQuery(timeline, before));
-  return { events: messages, olderBefore: hasOlder ? messages[0].id : 0 };
+  const { messages, hasOlder, anchorId } = await api(peerQuery(timeline, before, anchor));
+  return { events: messages, olderBefore: hasOlder ? messages[0].id : 0, anchorId };
 }
 async function refreshPeerConversation(context, scroll) {
   if (context !== view) return;
   const dm = context.dm;
   const isCurrent = () => context === view;
   const readPage = before => conversationPage(dm, before);
+  const openingAnchor = dm.anchor && dm.newestEvent == null;
   try {
-    const latest = await readPage();
+    let latest = await conversationPage(dm, undefined, dm.historical ? dm.anchor : 0);
     if (!isCurrent()) return;
-    const eventHistory = eventHistoryForRefresh(dm);
+    const historical = dm.historical || (openingAnchor && !latest.events.some((event) => event.id === dm.anchor));
+    if (openingAnchor && historical) latest = await conversationPage(dm, undefined, dm.anchor);
+    if (!isCurrent()) return;
+    const eventHistory = dm.anchor ? dm : eventHistoryForRefresh(dm);
     await refreshEventHistory(eventHistory, latest, readPage, isCurrent);
     if (!isCurrent()) return;
     if (eventHistory !== dm) Object.assign(dm, eventHistory);
     dm.error = null;
+    dm.historical = historical;
+    if (openingAnchor) {
+      dm.anchorId = historical ? latest.anchorId : dm.anchor;
+      scroll = 'anchor';
+    }
   } catch (error) {
     if (!isCurrent()) return;
     if (dm.newestEvent == null) dm.error = errors[error.message] ?? 'Could not load this conversation.';
@@ -2372,11 +2404,7 @@ elements['close-navigation'].addEventListener('click', () => openNavigation(fals
 narrow.addEventListener('change', () => openNavigation(false, false));
 elements.profile.addEventListener('click', () => openDetail({ kind: 'settings' }));
 elements['peer-picker'].addEventListener('click', () => openDetail({ kind: 'peers' }));
-elements['peer-back'].addEventListener('click', () => {
-  selectBot(view.id);
-  const picker = elements['peer-picker'];
-  (picker.hidden ? elements.profile : picker).focus({ preventScroll: true });
-});
+elements['peer-back'].addEventListener('click', () => leavePeerConversation());
 elements['close-detail'].addEventListener('click', closeDetail);
 elements.detail.addEventListener('close', () => { if (!elements.detail.open) detail = null; });
 elements.detail.addEventListener('close', () => {
@@ -2394,8 +2422,15 @@ elements['jump-to-latest'].addEventListener('click', () => {
     backToLatest();
     return;
   }
-  if (view) view.pendingSource = null;
+  resetConversationJump(view);
   const scroller = elements.conversation;
+  const dm = view?.dm;
+  if (dm?.historical) {
+    readingPositions.delete(timelineKey(dm.id, dm.peerId));
+    selectBot(dm.id, dm.peerId);
+    scroller.focus({ preventScroll: true });
+    return;
+  }
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
 });
