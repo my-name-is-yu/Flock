@@ -109,7 +109,9 @@
   padding-inline: .15rem 0;
   font-size: var(--text-md); line-height: 1.5;
 }
-.composer textarea::placeholder { color: var(--text-3); }
+.composer textarea::placeholder { color: var(--text-3); white-space: nowrap; }
+/* A placeholder can't take an ellipsis, so a long Bot name fades out before the send button. */
+.composer textarea:placeholder-shown { mask-image: linear-gradient(to right, #000 calc(100% - 2rem), transparent); }
 .composer textarea:focus-visible { outline: none; }
 .composer textarea:read-only { color: var(--text-2); }
 
