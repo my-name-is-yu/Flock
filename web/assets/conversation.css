@@ -381,6 +381,10 @@
 .event-actions { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-top: .55rem; }
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
+@container conversation-layout (max-width: 700px) {
+  .event-message.bot, .peer-exchange-link { --avatar-col: 0px; }
+  .event-message.bot .msg-line > :is(.msg-avatar, .msg-avatar-space) { display: none; }
+}
 @media (max-width: 700px) {
   .conversation-header { --profile-avatar-size: 2.625rem; }
   .main:has(:is(#profile-identity, #peer-identity):not([hidden])) { --chat-avatar-size: 2.625rem; }

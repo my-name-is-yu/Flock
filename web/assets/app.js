@@ -1220,13 +1220,9 @@ function eventCard(event, context, place, report) {
       ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
       : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const showMeta = side === 'bot' && place.groupStart;
-  const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
   const author = side === 'external' ? 'Other sender' : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
-  const name = node('span', showMeta ? 'msg-name' : 'msg-name sr-only', author);
   const time = eventTime(event, scheduled);
-  meta.append(name);
-  row.append(meta);
+  row.append(node('span', 'msg-name sr-only', author));
 
   const line = node('div', 'msg-line');
   if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
@@ -1403,7 +1399,7 @@ function workingLine(data) {
   }
   const text = node('span', 'working-label', label);
   text.title = label;
-  line.append(avatar(data.bot, 'msg-avatar'), dots, text);
+  line.append(dots, text);
   row.append(line);
   return row;
 }
