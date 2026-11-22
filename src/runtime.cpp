@@ -1486,8 +1486,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         } else {
             if (!task["activeRun"].is_null() && (state == "running" || state == "waiting") &&
                 ingest(task,observe(task))) return;
-            const bool reconcile = state == "waiting" && task.contains("workflowId") &&
-                                   field(task["wait"],"reason") == "unknown_delivery";
+            const bool reconcile = state == "waiting" && task.contains("workflowId") && !field(task,"actionId").empty();
             if (state != "sending" && !reconcile) return;
             Json action;
             {
