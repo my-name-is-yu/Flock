@@ -383,6 +383,8 @@ void responseContract() {
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
           turnTool("change_task")["required"] == Json::array({"reason","taskId","generation","revisionId","instruction"}) &&
           turnTool("change_task")["properties"]["revisionId"]["minimum"] == 0 &&
+          turnTool("find_tasks")["required"] == Json::array({"reason"}) &&
+          turnTool("find_tasks")["properties"]["taskId"]["type"] == "integer" &&
           turnTool("send_to_task")["properties"]["generation"]["minimum"] == 0 &&
           turnTool("reply")["properties"]["suggestions"]["maxItems"] == 4,
           "conversation provider request must offer the conversation tools");

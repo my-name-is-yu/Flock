@@ -126,7 +126,8 @@ struct FixedModel : Model {
         check(anchor.is_object() && anchor.at("kind") == "task_question","Unexpected message in HTTP fixture: " + text);
         if (!steps.empty()) return reply(steps.back().at("result").value("ok",false) ? "回答を伝えました。" : "その質問は終了しています。");
         if (!anchor.at("current").get<bool>()) return reply("その質問は終了しています。");
-        return {"answer_task_question",{{"taskId",anchor.at("taskId")},{"waitId",anchor.at("waitId")},{"text",text},
+        const auto answer = text == "利用者向けのみ" ? "すべて" : text;
+        return {"answer_task_question",{{"taskId",anchor.at("taskId")},{"waitId",anchor.at("waitId")},{"text",answer},
             {"revisionId",anchor.at("revisionId")},{"generation",anchor.at("generation")}},"Answer the question"};
     }
 };
@@ -509,7 +510,8 @@ void conversationEntry(const std::filesystem::path& path) {
     tick(runtime,2);
     const auto afterAnswer = browser.get("/api/view?bot=triage");
     const auto delayedReply = conversationReply(afterAnswer,delayedReceipt.at("messageId"));
-    check(delayedReply.at("text") == "その質問は終了しています。","Bot did not respond to the late answer");
+    check(delayedReply.at("status") == "done" && delayedReply.at("actions").empty(),
+          "The late choice was left pending or applied an action");
     check(t3.replies.size() == 1 && t3.replies[0].environmentId == "linked env" &&
           t3.replies[0].target.threadId == "thread-triage" && t3.replies[0].target.runId == firstWait["run"]["runId"].get<std::string>() &&
           t3.replies[0].questionId == "scope-question" && t3.replies[0].answers == Json{{"scope",reply["text"]}},
@@ -517,7 +519,18 @@ void conversationEntry(const std::filesystem::path& path) {
     const auto& waits = afterAnswer.at("waits");
     check(waits.size() == 1 && waits[0]["id"] == secondWaitTask && waits[0]["wait"]["messageId"] == otherQuestion &&
           waits[0]["wait"]["reason"] == "user_question" && store.tasks().size() == 3,
-          "exact or stale answer changed another wait or created a Task");
+          "The freeform or stale answer changed another wait or created a task");
+
+    const auto choice = browser.post("/api/messages",{{"botId","triage"},{"clientMessageId","answer-second"},
+        {"text","利用者向けのみ"},{"replyToMessageId",otherQuestion}},201);
+    tick(runtime,2);
+    const auto afterChoice = browser.get("/api/view?bot=triage");
+    const auto choiceReply = conversationReply(afterChoice,choice.at("messageId"));
+    check(choiceReply.at("actions") == Json::array({{{"tool","answer_task_question"},{"effect","answered"},
+          {"taskId",secondWaitTask}}}) && afterChoice.at("waits").empty() && t3.replies.size() == 2 &&
+          t3.replies.back().target.threadId == "thread-next-scope" &&
+          t3.replies.back().answers == Json{{"scope","利用者向けのみ"}},
+          "The exact choice was replaced or reached a different Session");
 }
 
 void botMediatedConversation(const std::filesystem::path& path, std::string_view note, bool authenticated = false) {

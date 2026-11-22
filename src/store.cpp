@@ -412,6 +412,10 @@ std::string taskIntent(const Json& task) {
     return intent.empty() ? field(task,"request") : intent;
 }
 
+std::string effectiveDoneWhen(const Json& task) {
+    return task.value("requestedDoneWhen",field(task,"doneWhen"));
+}
+
 Store::Store(std::filesystem::path db, MemorySeed seed)
     : p_(std::make_unique<Impl>(std::move(db),std::move(seed))) {}
 Store::~Store() = default;

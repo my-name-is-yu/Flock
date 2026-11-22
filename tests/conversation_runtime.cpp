@@ -487,6 +487,11 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     check(f.task(color).at("state") == "waiting" && f.event(color,"user_answer").is_null(),
           "an old question or its explanation answered the replacement question");
     const auto replacement = f.task(color).at("wait");
+    f.script("青",{stop(color)});
+    const auto stale = f.receive("old-choice","青",explanation.at("messageId"));
+    check(f.response(stale).at("actions").empty() && f.task(color).at("wait") == replacement &&
+          f.event(color,"user_answer").is_null() && f.event(color,"cancel_requested").is_null(),
+          "an exact choice for a stale question changed the replacement task");
     f.model.beforeTurn = [&](const ModelInput& input) {
         if (input.event.at("turn").empty()) f.store->operate(localOwner,TaskTarget::from(f.task(color),replacement.at("id")),"cancel");
     };
@@ -495,20 +500,162 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           "an in-flight reply recorded an answer after cancellation");
 }
 
-void offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion() {
+void exactOfferedAnswersPreserveTheStoredChoice() {
+    for (const bool conflictingAnswer : {true,false}) {
+        Fixture f;
+        const auto id = f.store->submit(f.routing("Decide whether the task should continue"));
+        f.model.questions.emplace(id,Json{{"question","Should I keep going?"},
+                                          {"choices",{"Cancel this task","Keep going"}}});
+        f.reach(id,"waiting");
+        const auto wait = f.task(id).at("wait");
+        constexpr auto choice = "Cancel this task";
+        const Step substitute = [id](const ModelInput& input) {
+            auto call = answer(id)(input);
+            call.args["text"] = "Keep going";
+            return call;
+        };
+        f.script(choice,{conflictingAnswer ? substitute : stop(id),start({{"request","Unrelated work"}})});
+        const auto receipt = f.receive("cancel-choice",choice,wait.at("messageId"));
+        const auto response = f.response(receipt);
+        const auto recorded = f.event(id,"user_answer");
+        check(response.at("actions") == Json::array({{{"tool","answer_task_question"},{"effect","answered"},{"taskId",id}}}) &&
+              recorded.at("text") == choice && recorded.at("messageId") == receipt.at("messageId") &&
+              recorded.at("waitId") == wait.at("id") && f.task(id).at("wait").is_null() &&
+              f.event(id,"cancel_requested").is_null() && f.store->tasks("alpha").size() == 1,
+              "a model decision overrode or misrouted the offered choice");
+
+        f.restart();
+        check(f.receive("cancel-choice",choice,wait.at("messageId")) == receipt && f.response(receipt) == response &&
+              f.store->decisionHistory(localOwner,"alpha").size() == 1,
+              "retrying an exact choice recorded a second decision");
+        f.reach(id,"running");
+        check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(choice) != std::string::npos,
+              "the next Session did not receive the recorded choice");
+    }
+}
+
+void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
     Fixture f;
-    const auto id = f.store->submit(f.routing("Decide whether the task should continue"));
-    f.model.questions.emplace(id,Json{{"question","Should I keep going?"},
-                                      {"choices",{"Cancel this task","Keep going"}}});
+    const auto id = f.store->submit(f.routing("Publish the draft only with approval"));
+    f.model.questions.emplace(id,Json{{"question","Publish the draft?"},{"choices",{"Yes","No"}}});
     f.reach(id,"waiting");
-    const auto wait = f.task(id)["wait"];
-    f.script("Cancel this task",{answer(id)});
-    f.receive("cancel-choice","Cancel this task",wait.at("messageId").get<Id>());
-    check(f.model.turnInputs.back().event["replyTo"]["choices"] == Json::array({"Cancel this task","Keep going"}) &&
-          f.lastTurn()[0]["result"]["ok"] == true &&
-          f.event(id,"user_answer")["text"] == "Cancel this task" &&
-          f.event(id,"cancel_requested").is_null(),
-          "an offered cancellation-sounding answer was treated as a task cancel");
+    const auto wait = f.task(id).at("wait");
+    f.script("Can I see a preview first?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Show a preview?"},{"suggestions",{"Yes","No"}}},"Offer a preview"};
+    }});
+    const auto preview = f.response(f.receive("request-preview","Can I see a preview first?",wait.at("messageId")));
+    f.script("Yes",{say("Here is a preview.")});
+    const auto reply = f.response(f.receive("accept-preview","Yes",preview.at("messageId")));
+    check(reply.at("text") == "Here is a preview." && f.task(id).at("wait") == wait &&
+          f.event(id,"user_answer").is_null(),"a newer suggestion answered an older question");
+}
+
+void attachedChoiceRemainsAuthoritative() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing("Check the error"));
+    constexpr auto choice = "Cancel this task";
+    f.model.questions.emplace(id,Json{{"question","What should I do if the error is present?"},
+                                      {"choices",{choice,"Keep going"}}});
+    f.reach(id,"waiting");
+    const auto wait = f.task(id).at("wait");
+    const auto other = f.store->submit(f.routing("Check the logs"));
+    f.store->access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
+    f.store->access().resourceGrant(localOwner,"alpha",{"attachment","alpha","inspect"},GrantChange::grant);
+    f.script(choice,{
+        [](const ModelInput&) {
+            return Decision{"workspace_write_file",{{"path","note.txt"},{"text","Unrelated note"}},"Scripted write"};
+        },
+        stop(other),
+        start({{"request","Unrelated work"}}),
+        [](const ModelInput& input) {
+            return Decision{"inspect_attachment",{{"messageId",input.event.at("messageId")},
+                {"attachmentId",input.event.at("attachments").at(0).at("attachmentId")}},"Inspect the attached screenshot"};
+        },
+        [id](const ModelInput& input) {
+            auto call = answer(id)(input);
+            call.args["text"] = "Keep going";
+            return call;
+        },
+        say("I recorded your answer.")
+    });
+    const auto receipt = f.store->receive(localOwner,f.routing(),"attached-choice",choice,wait.at("messageId"),
+        Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},{"dataBase64",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}}));
+    f.runtime->runConversations();
+    const auto steps = f.lastTurn();
+    check(steps.at(0).at("result").at("ok") == false && steps.at(1).at("result").at("ok") == false &&
+          steps.at(2).at("result").at("ok") == false && !std::filesystem::exists(f.dir/"workspaces"/"alpha"/"note.txt") &&
+          f.task(other).at("state") == "queued" && f.store->tasks("alpha").size() == 2,
+          "an attached choice allowed an unrelated write or task action");
+    check(steps.at(3).at("result").at("data").at("width") == 1,
+          "the conversation could not inspect the attachment");
+    const auto recorded = f.event(id,"user_answer");
+    check(recorded.at("text") == choice && recorded.at("messageId") == receipt.at("messageId") &&
+          recorded.at("waitId") == wait.at("id") && f.response(receipt).at("text") == "I recorded your answer.",
+          "the conversation changed the selected choice or lost its reply");
+}
+
+void resumedChoicesRecoverSavedEffectsWithoutDispatching() {
+    for (const bool started : {false,true}) {
+        Fixture f;
+        const auto questionTask = f.store->submit(f.routing("Decide what happens next"));
+        f.model.questions.emplace(questionTask,Json{{"question","What next?"},{"choices",{"Interrupt","Continue"}}});
+        f.reach(questionTask,"waiting");
+        const auto other = f.store->submit(f.routing("Independent work","alpha","desktop","other-project"));
+        f.reach(other,"running");
+        const auto receipt = f.enqueue("resume-saved-choice","Interrupt",f.task(questionTask).at("wait").at("messageId"));
+        const Id id = receipt.at("messageId");
+
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+        const auto insertTurn = "INSERT INTO conversation_turns(message_id,status) VALUES(" +
+            std::to_string(id) + ",'running')";
+        check(opened == SQLITE_OK && sqlite3_exec(db.get(),insertTurn.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+              "could not save the old conversation turn");
+        sqlite3_stmt* statement = nullptr;
+        check(sqlite3_prepare_v2(db.get(),"INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(?,1,?,?)",
+                                 -1,&statement,nullptr) == SQLITE_OK,"could not prepare the saved tool call");
+        const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
+        const auto decision = Json::array({{{"tool","interrupt_session"},{"reason","Previously selected operation"},
+                                           {"args",{{"taskId",other},{"generation",f.task(other).at("generation")}}}}}).dump();
+        const auto effect = Json{{"taskId",other}}.dump();
+        check(sqlite3_bind_int64(row.get(),1,id) == SQLITE_OK &&
+              sqlite3_bind_text(row.get(),2,decision.c_str(),-1,SQLITE_TRANSIENT) == SQLITE_OK &&
+              (started ? sqlite3_bind_text(row.get(),3,effect.c_str(),-1,SQLITE_TRANSIENT)
+                       : sqlite3_bind_null(row.get(),3)) == SQLITE_OK &&
+              sqlite3_step(row.get()) == SQLITE_DONE,"could not save the legacy decision and effect");
+
+        f.script("Interrupt",{interrupt(other),answer(questionTask),say("Answer recorded.")});
+        f.restart();
+        f.runtime->runConversations();
+        const auto previous = f.lastTurn().at(0).at("result");
+        check(previous.at("ok") == false && f.t3.interrupted.empty(),"resuming a choice dispatched a saved interruption");
+        if (started)
+            check(previous.at("delivery") == "unknown","the started Session operation lost its recovery result");
+        else
+            check(previous.at("error") == "Tool unavailable for this turn","the saved call bypassed offered-tool checking");
+        check(f.event(questionTask,"user_answer").at("text") == "Interrupt" && f.task(other).at("state") == "running",
+              "resuming a saved call lost the anchored answer or changed another Task");
+    }
+}
+
+void directChoiceRechecksWebAuthority() {
+    Fixture f;
+    const auto task = f.store->submit(f.routing("Choose a name"));
+    f.model.questions.emplace(task,Json{{"question","Which name?"},{"choices",{"Maple","Juniper"}}});
+    f.reach(task,"waiting");
+    const auto wait = f.task(task).at("wait");
+    const auto receipt = f.store->receiveWeb({"web-root",true},f.routing(),"queued-web-choice","Maple",wait.at("messageId"));
+    int lookups = 0;
+    f.store->setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+        if (person == "web-root" && ++lookups == 1) return true;
+        return std::nullopt;
+    });
+    f.runtime->runConversations();
+    check(lookups == 2 && f.response(receipt).at("route") == "access" && f.model.turnInputs.empty() &&
+          f.event(task,"user_answer").is_null() && f.task(task).at("wait") == wait,
+          "a queued choice used its admitted Web root after that authority was revoked");
 }
 
 void directAnswersRemainInConversationHistory() {
@@ -1678,6 +1825,65 @@ void startCriteriaAreUsedForFirstDelegation() {
           "the criteria given when the task started were not used");
 }
 
+void conversationCanReadAndChangeTheFullCurrentContract() {
+    Fixture f;
+    f.script("Start a release audit",{start({{"doneWhen","Report on staging"}})});
+    f.receive("create-audit","Start a release audit");
+    const Id id = f.store->tasks("alpha").front().at("id");
+    const std::string intent = std::string(999,'i') + "監査の対象";
+    const std::string criteria = std::string(1599,'c') + "公開しない";
+    f.script("Use the updated contract",{change(id,{{"intent",intent},{"doneWhen",criteria}})});
+    const auto update = f.receive("updated-contract","Use the updated contract");
+    const auto queued = f.task(id);
+    const auto expectedPreview = [&](const Json& task) {
+        return task.at("intent") == std::string(999,'i') && task.at("intentTruncated") == true &&
+               task.at("doneWhen") == std::string(1599,'c') && task.at("doneWhenTruncated") == true &&
+               task.at("doneWhenSource") == "requested" && task.at("criteriaSourceMessageId") == update.at("messageId") &&
+               task.at("revisionId") == 0 && task.at("generation") == queued.at("generation");
+    };
+    const std::string addition = "\nInclude the audit date";
+    Json context, search, detail;
+    f.script("Also include the audit date",{
+        [&](const ModelInput& input) {
+            context = listed(input,id);
+            return Decision{"find_tasks",{{"query","release audit"}},"Find the audit"};
+        },
+        [&](const ModelInput& input) {
+            search = input.event.at("turn").back().at("result").at("tasks").at(0);
+            return Decision{"find_tasks",{{"taskId",search.at("taskId")}},"Read its full contract"};
+        },
+        [&](const ModelInput& input) {
+            detail = input.event.at("turn").back().at("result").at("tasks").at(0);
+            return Decision{"change_task",{{"taskId",detail.at("taskId")},{"generation",detail.at("generation")},
+                {"revisionId",detail.at("revisionId")},{"instruction","Add the audit date to the criteria"},
+                {"doneWhen",detail.at("doneWhen").get<std::string>() + addition}},"Add the criterion"};
+        },
+    });
+    const auto changeReceipt = f.receive("extend-contract","Also include the audit date");
+    check(queued.at("state") == "queued" && expectedPreview(context) && expectedPreview(search),
+          "the conversation lists hid the effective prelaunch criteria or clipped them without a marker");
+    check(detail.at("taskId") == id && detail.at("revisionId") == 0 && detail.at("generation") == queued.at("generation") &&
+          detail.at("intent") == intent && detail.at("doneWhen") == criteria &&
+          !detail.value("intentTruncated",false) && !detail.value("doneWhenTruncated",false) &&
+          f.response(changeReceipt).at("actions").size() == 1,
+          "the targeted lookup did not provide a complete contract usable by change_task");
+    f.reach(id,"running");
+    const auto launched = f.task(id);
+    check(launched.at("doneWhen") == criteria + addition && launched.at("intent") == intent &&
+          launched.at("revisions").at(0).at("sourceMessageId") == changeReceipt.at("messageId"),
+          "the launch lost part of the criteria when the user extended them");
+
+    f.script("Read the current audit contract",{
+        [id](const ModelInput&) { return Decision{"find_tasks",{{"taskId",id}},"Read the audit's current revision"}; },
+    });
+    f.receive("read-launched-contract","Read the current audit contract");
+    const auto current = f.lastTurn().at(0).at("result").at("tasks").at(0);
+    check(current.at("revisionId") == launched.at("currentRevision") && current.at("revisionId") != 0 &&
+          current.at("generation") == launched.at("generation") && current.at("doneWhen") == criteria + addition &&
+          current.at("intent") == intent && current.value("doneWhenSource","") != "requested",
+          "the targeted lookup lost the identity or contract of the established revision");
+}
+
 void notesReachTheRunningSession() {
     Fixture f;
     const auto id = f.store->submit(f.routing());
@@ -1976,7 +2182,11 @@ int main() {
         questionAnswerReachesTheBotBeforeContinuingWork();
         answersStayOnTheirQuestion();
         answersNeedTheirOwnReplyTargetAndAStableTask();
-        offeredAnswerThatSoundsLikeCancellationStaysOnItsQuestion();
+        exactOfferedAnswersPreserveTheStoredChoice();
+        latestSuggestionsTakePrecedenceOverAnInheritedQuestion();
+        attachedChoiceRemainsAuthoritative();
+        resumedChoicesRecoverSavedEffectsWithoutDispatching();
+        directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
@@ -2010,6 +2220,7 @@ int main() {
         revisionOfProvablyUnsentAction();
         queuedCriteriaAreUsedForFirstDelegation();
         startCriteriaAreUsedForFirstDelegation();
+        conversationCanReadAndChangeTheFullCurrentContract();
         environmentsResolveByNameOrId();
         notesReachTheRunningSession();
         notesRejectStoppingTasks();

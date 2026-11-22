@@ -1169,7 +1169,7 @@ ORDER BY j.id
         }
         const bool moved = task.value("newSessionRequired",false);
         if (contract || moved || task["lastRun"].is_null() || task["lastRun"].at("revisionId") != revision(task)) {
-            const auto criteria = contract ? contract->doneWhen : task.value("requestedDoneWhen",field(task,"doneWhen"));
+            const auto criteria = contract ? contract->doneWhen : effectiveDoneWhen(task);
             instruction += "\n\nTask intent:\n" + (contract ? contract->intent : taskIntent(task)) +
                 "\n\nCompletion criteria:\n" + criteria;
             overhead += std::max<std::size_t>(criteria.size(),8000) - criteria.size();
