@@ -171,13 +171,36 @@ a.session-row:hover .activity-open, a.session-row:focus-visible .activity-open {
 .theme-switch button[aria-pressed="true"] { background: var(--canvas); color: var(--text); box-shadow: 0 1px 2px var(--shadow-color); }
 .theme-switch svg { width: .95rem; height: .95rem; }
 
+.nav-backdrop { display: none; }
+
 @media (max-width: 700px) {
-  .sidebar { display: none; border-inline-end: 0; transition: none; }
+  .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 7;
+    background: light-dark(rgb(10 10 14 / .32), rgb(0 0 0 / .56));
+    opacity: 0; pointer-events: none;
+    transition: opacity .24s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  .workspace.nav-open .nav-backdrop { opacity: 1; pointer-events: auto; }
+  .sidebar {
+    display: flex; position: fixed; inset: 0 auto 0 0; z-index: 8;
+    width: min(20rem, 86vw);
+    border-inline-end: 1px solid color-mix(in srgb, var(--hairline) 75%, transparent);
+    box-shadow: var(--shadow-lg);
+    transform: translateX(-104%); visibility: hidden; pointer-events: none;
+    transition: transform .22s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s linear .22s;
+  }
   .sidebar-resizer { display: none; }
-  .workspace.nav-open .sidebar { display: flex; }
+  .workspace.nav-open .sidebar {
+    transform: translateX(0); visibility: visible; pointer-events: auto;
+    transition: transform .28s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s linear 0s;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar { transition: none; }
+  .sidebar, .nav-backdrop { transition: opacity .12s ease; }
+  @media (max-width: 700px) {
+    .sidebar { transform: none; opacity: 0; }
+    .workspace.nav-open .sidebar { opacity: 1; }
+  }
   .menu-popover { animation: none; }
   .connection[data-state="loading"], .working-dots i, .pin-presence, .activity-status.live .activity-mark { animation: none; }
   .skeleton-line, .skeleton-avatar { animation: none; opacity: .7; }

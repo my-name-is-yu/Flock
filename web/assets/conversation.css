@@ -32,9 +32,11 @@
 }
 .header-inner:has(> :is(#profile-identity, #peer-identity):not([hidden])) .header-menu {
   pointer-events: auto;
+  border-radius: 12px;
   background: light-dark(rgb(255 255 255 / .82), rgb(26 26 28 / .74));
   backdrop-filter: blur(14px);
   border: 1px solid light-dark(rgb(0 0 0 / .08), rgb(255 255 255 / .08));
+  box-shadow: 0 2px 10px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .24));
 }
 .profile-toolbar {
   position: absolute; inset-block-start: .7rem; inset-inline-end: clamp(.75rem, 2vw, 1.25rem);

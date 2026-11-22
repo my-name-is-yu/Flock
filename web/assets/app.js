@@ -207,10 +207,13 @@ function setTheme(mode) {
   document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
   renderTheme(mode);
 }
+const mainElement = byId('main');
+const navBackdrop = byId('nav-backdrop');
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
   const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
+  if (mainElement) mainElement.inert = expanded;
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
   if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
@@ -2627,6 +2630,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
+navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
