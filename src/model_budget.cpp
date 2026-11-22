@@ -1,8 +1,42 @@
 #include "conversation_storage.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace flockv0 {
+namespace {
+bool redactsProse(std::string_view tool, std::string_view key) {
+    if (tool == "reply") return key == "text";
+    if (tool == "apply_memory_edit") return key == "content";
+    if (tool == "propose_memory_edit") return key == "content" || key == "rationale";
+    return false;
+}
+
+bool sharedMemoryTool(std::string_view tool) {
+    return tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
+           tool == "apply_memory_edit" || tool == "revert_memory_edit";
+}
+
+bool argumentsMayHaveBeenRedacted(const Decision& call) {
+    if (!call.args.is_object()) return SecretRedactor::mayContainLegacyRedaction(call.args);
+    for (const auto& [key,value] : call.args.items()) {
+        if (SecretRedactor::mayContainLegacyRedaction(key) ||
+            (!(value.is_string() && redactsProse(call.tool,key)) && SecretRedactor::mayContainLegacyRedaction(value)))
+            return true;
+    }
+    return false;
+}
+}
+
+bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
+    if (!args.is_object()) return scrub.containsProtected(args);
+    for (const auto& [key,value] : args.items()) {
+        const bool protocolKey = redactsProse(tool,key) || (tool == "reply" && key == "suggestions");
+        if ((!protocolKey && scrub.containsProtected(key)) || scrub.containsProtected(value)) return true;
+    }
+    return false;
+}
+
 Id modelCallLimit(const Json& config) {
     const auto limit = config.find("modelCallLimit");
     if (limit == config.end()) return 20;
@@ -93,11 +127,48 @@ Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view 
     return attempt;
 }
 
-ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
+                                              bool gitNotification) const {
+    if (gitNotification || isGitTool(tool) || (sharedMemoryTool(tool) && args.contains("docId")))
+        return sharedRedactor();
+    return redactor(bot);
+}
+
+ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered,
+                                      bool gitNotification, bool legacy) {
+    std::string rejection;
+    if (std::ranges::find(offered,call.tool) == offered.end()) {
+        rejection = "Tool unavailable for this turn";
+        if (redactor(bot).containsProtected(call.tool)) call.tool.clear();
+    } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
+               !Access(*this).permits(bot,{"shared_memory",field(call.args,"docId"),
+                   (call.tool == "read_memory" || call.tool == "memory_history") ? "read" : "write"},true)) {
+        rejection = "Memory access denied";
+    } else {
+        const auto scrub = modelCallRedactor(bot,call.tool,call.args,gitNotification);
+        if (call.args.is_object()) {
+            for (auto& [key,value] : call.args.items())
+                if (value.is_string() && redactsProse(call.tool,key))
+                    value = scrub.text(value.get_ref<const std::string&>());
+        }
+        if (modelArgumentsContainProtected(scrub,call.tool,call.args))
+            rejection = "Tool arguments contain protected material. Use a secret reference where supported.";
+        else if (legacy && argumentsMayHaveBeenRedacted(call))
+            rejection = "Saved tool arguments may have been redacted. Submit a fresh call.";
+        if (rejection.empty()) call.reason = scrub.text(call.reason);
+    }
+    if (!rejection.empty()) {
+        call.args = Json::object();
+        call.reason.clear();
+    }
+    return {std::move(call),std::move(rejection)};
+}
+
+CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
     Json revision;
     const bool conversation = input.event.contains("turn") && input.event.value("kind","") == "conversation_turn";
     const auto scrub = redactor(bot,conversation ? &revision : nullptr);
-    ModelTurn turn;
+    CheckedModelTurn checked;
     try {
         auto safe = input;
         safe.task = scrub.record(input.task);
@@ -108,41 +179,27 @@ ModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const Model
         safe.notes = {scrub.text(input.notes.soul),scrub.text(input.notes.memory)};
         safe.feedback = scrub.text(input.feedback);
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"),revision);
-        turn = model.decide(safe);
-        for (auto& decision : turn.calls) {
-            for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
-            decision.reason = scrub.text(decision.reason);
-
-            if (decision.args.contains("docId")) {
-                const auto shared = sharedRedactor();
-                const auto document = decision.args.at("docId");
-                decision.args = shared.record(std::move(decision.args),SecretRedactor::Fields::external);
-                if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
-                decision.reason = shared.text(decision.reason);
-            }
-            if (isGitTool(decision.tool) || input.event.contains("gitEvent")) {
-                const auto shared = sharedRedactor();
-                decision.args = shared.payload(decision.args);
-                decision.reason = shared.text(decision.reason);
-            }
-            if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
-                decision.tool = scrub.text(decision.tool);
-        }
-        turn.usage = scrub.payload(turn.usage);
+        auto turn = model.decide(safe);
+        checked.calls.reserve(turn.calls.size());
+        for (auto& call : turn.calls)
+            checked.calls.push_back(checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent")));
+        checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         auto usage = scrub.payload(error.usage);
-        if (!usage.empty()) {
+        if (attemptId && !usage.empty()) {
             std::lock_guard lock(mutex);
             exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
         throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }
-    if (!turn.usage.empty()) {
+    if (attemptId && !checked.usage.empty()) {
         std::lock_guard lock(mutex);
-        exec("UPDATE model_attempts SET usage=? WHERE id=?",{turn.usage,attemptId});
+        exec("UPDATE model_attempts SET usage=? WHERE id=?",{checked.usage,attemptId});
     }
-    return turn;
+    return checked;
 }
 }
