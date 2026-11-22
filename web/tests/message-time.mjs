@@ -101,12 +101,15 @@ async function exercise() {
   check(rows.every(row => row.querySelectorAll('time').length === 1 && !row.querySelector('time').closest('[aria-hidden="true"]')),
     'The timestamp was duplicated or removed from accessibility');
   tap(report);
+  rows[2].querySelector('[data-timeline-action=copy]').focus();
   window.completeReport();
   for (let attempt = 0; attempt < 20 && !document.getElementById('event-4'); attempt++)
     await new Promise(resolve => setTimeout(resolve, 10));
   const merged = document.getElementById('event-4');
   check(merged && document.getElementById('event-3')?.closest('article') === merged,
     'Collapsing the report and completion dropped the original event anchor');
+  check(document.getElementById('event-1') === rows[0] && document.activeElement.closest('article') === merged,
+    'The live collapse replaced an unchanged row or dropped focus from the combined row');
   check(shown().length === 1 && shown()[0].parentElement === merged && merged.querySelectorAll('time').length === 1,
     'The revealed timestamp did not follow the collapsed row');
   check(merged.querySelectorAll('[aria-label="Reply to this result"]').length === 1 && !shown()[0].title.includes('#17'),

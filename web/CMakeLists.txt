@@ -59,6 +59,11 @@ if(BUILD_TESTING)
       COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
+    if(FLOCK_CHROME_EXECUTABLE)
+      add_test(NAME flock_web_timeline_rows_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/timeline-rows.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+      set_tests_properties(flock_web_timeline_rows_dom PROPERTIES TIMEOUT 30)
+    endif()
     if(TARGET flock_app_support)
       target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
       target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
