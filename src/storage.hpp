@@ -75,7 +75,7 @@ struct Store::Impl {
                                        const Json& attachments) const;
     void saveChannelMessage(Id, std::string_view bot, const VerifiedChannelMessage&, bool replay);
     bool channelMessageAuthorized(Id, std::string_view bot) const;
-    Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr) const;
+    Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr, std::string_view viewer = {}) const;
     std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
     void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);

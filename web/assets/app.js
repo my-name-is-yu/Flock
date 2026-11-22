@@ -743,6 +743,7 @@ function beginReply(target, text = '') {
   elements.message.focus();
 }
 const icons = {
+  person: '<circle cx="12" cy="8" r="3.25"/><path d="M5.25 19c.6-3.5 3.1-5.4 6.75-5.4s6.15 1.9 6.75 5.4"/>',
   copy: '<path d="M9 9.5A1.5 1.5 0 0 1 10.5 8h7A1.5 1.5 0 0 1 19 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 9 18.5z"/><path d="M15 8V5.5A1.5 1.5 0 0 0 13.5 4h-7A1.5 1.5 0 0 0 5 5.5v9A1.5 1.5 0 0 0 6.5 16H9"/>',
   copied: '<path d="m5.5 12.5 4 4 9-9"/>',
   reply: '<path d="M9.5 7 4.5 12l5 5"/><path d="M5 12h9a5.5 5.5 0 0 1 5.5 5.5V19"/>',
@@ -815,7 +816,8 @@ function suggestionActions(event) {
 }
 function messageSide(event) {
   if (event.kind === 'cancelled') return 'system';
-  if (event.kind === 'conversation_message' && event.data.channel?.channelKind) return 'external';
+  if (event.kind === 'conversation_message' && event.data.channel?.channelKind)
+    return event.data.channel.fromViewer === true ? 'user' : 'external';
   return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
 }
 function channelLabel(kind) {
@@ -892,18 +894,17 @@ function eventCard(event, context, place) {
       ? `Covers ${fullTime.format(trigger.coveredFrom * 1000)} to ${fullTime.format(trigger.coveredTo * 1000)}`
       : `Scheduled for ${fullTime.format(trigger.targetTime * 1000)}`;
   } else if (trigger?.source) scheduled = `Webhook from ${trigger.source}`;
-  const showName = side === 'external' || (side === 'bot' && place.groupStart);
+  const showName = side === 'bot' && place.groupStart;
   const showMeta = showName || place.taskStart;
   const meta = node('div', showMeta ? 'msg-meta' : 'msg-meta sr-only');
-  const author = side === 'external' ? channelLabel(data.channel.channelKind) : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
+  const author = side === 'external' ? 'Other sender' : side === 'bot' ? bot?.name ?? 'Bot' : 'You';
   const name = node('span', showName ? 'msg-name' : 'msg-name sr-only', author);
   meta.append(name, eventTime(event, scheduled));
   row.append(meta);
 
   const line = node('div', 'msg-line');
-  if (side !== 'user') {
-    line.append(side === 'bot' && place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
-  }
+  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  else if (side === 'external') line.append(icon('person', 'msg-avatar external-sender'));
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
@@ -973,6 +974,7 @@ function eventCard(event, context, place) {
     }
     if (event.kind === 'conversation_message' && data.replyToMessageId)
       extras.push(sourceAction({ messageId: data.replyToMessageId }, 'Open original message'));
+    if (data.channel?.channelKind) extras.push(node('p', 'msg-note channel-source', channelLabel(data.channel.channelKind)));
     if (data.status === 'received') extras.push(node('p', 'msg-note', 'Received'));
     if (data.deliveredToT3) extras.push(node('p', 'msg-note', 'Sent to T3'));
     const blocker = ['request', 'conversation_message'].includes(event.kind) ? context.queued.get(event.taskId)?.blockedBy : null;

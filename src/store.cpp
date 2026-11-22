@@ -730,7 +730,7 @@ ORDER BY j.id DESC LIMIT 1
     return row.next() ? journalRow(row) : Json(nullptr);
 }
 
-Json Store::conversation(std::string_view bot, Id before, unsigned limit) const {
+Json Store::conversation(std::string_view bot, Id before, unsigned limit, std::string_view viewer) const {
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
 SELECT page.id,page.task_id,page.time,page.kind,
@@ -773,7 +773,7 @@ WHERE (?=0 OR page.id<?) ORDER BY page.id DESC LIMIT ?)SQL",
     while (rows.next()) {
         auto event = journalRow(rows);
         if (event["kind"] == "conversation_message")
-            event["data"].update(p_->channelContext(rows.number(0),bot));
+            event["data"].update(p_->channelContext(rows.number(0),bot,nullptr,viewer));
         result.push_back(std::move(event));
     }
     std::reverse(result.begin(),result.end());
