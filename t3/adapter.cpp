@@ -525,8 +525,6 @@ Delivery reconcileWork(Client& client, const Command& command) {
     const auto& hint = command.candidate.threadId;
     if (!hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
     const auto expected = actionPrompt(command);
-    // Older clients persisted the same command but sent an additional wrapper.
-    const auto legacy = "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
     std::map<std::pair<std::string, std::string>, RunRef> matches;
     bool incomplete = false;
     for (const auto& threadId : threads) {
@@ -538,13 +536,12 @@ Delivery reconcileWork(Client& client, const Command& command) {
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
             if (str(item, "type") != "user_message" || !local(item, threadId)) return true;
             const auto text = itemText(item);
-            const bool possible = text.more ? (expected.starts_with(text.text) || legacy.starts_with(text.text))
-                                            : (expected == text.text || legacy == text.text);
+            const bool possible = text.more ? expected.starts_with(text.text) : expected == text.text;
             if (possible && str(item, "createdBy") == "agent" && str(item, "creationSource") == "mcp" &&
                 str(item, "senderThreadId").empty()) {
-                const auto full = readCompleteItemText(client, scan, item, threadId, "messages", std::max(expected.size(), legacy.size()));
+                const auto full = readCompleteItemText(client, scan, item, threadId, "messages", expected.size());
                 const auto runId = str(item, "runId");
-                const bool exact = full && (*full == expected || *full == legacy);
+                const bool exact = full && *full == expected;
                 if (!full || (runId.empty() && exact)) incomplete = true;
                 if (exact && !runId.empty() && (launch || runId != command.target.runId))
                     matches[{threadId, runId}] = {threadId, runId, str(thread, "link")};

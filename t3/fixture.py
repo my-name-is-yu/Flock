@@ -226,7 +226,7 @@ class Fixture(BaseHTTPRequestHandler):
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         if scenario.endswith("-result"):
             recent.insert(0, {"runId": "later", "ordinal": 2, "status": "completed"})
-        rows = [self.item(thread_id, 0, "root", "user_message", state.get("legacyPrompt") or state["launched"], source="mcp"),
+        rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
         if scenario == "delegated-result":
             rows.extend([self.item(thread_id, 2, "root", "subagent", "done") | {"subagentId": "child-task"},

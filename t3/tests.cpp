@@ -91,10 +91,6 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "recovered exact launch after restart");
         const auto run = delivery.run;
-        fixture({{"legacyPrompt", "[Flock action " + launch.actionId + "]\n\n" +
-                                  launch.instruction + "\n\n[/Flock action]"}});
-        check(adapter->reconcile(launch).kind == Delivery::Kind::Accepted, "older wrapped launches remain recoverable");
-        fixture({{"legacyPrompt", false}});
         other = launch;
         other.instruction += "x";
         check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "marker requires identical instruction");
@@ -106,8 +102,8 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", false}});
         const auto launches = effects("t3_thread_launch");
         check(launches.size() == 1, "launch reconciliation creates no additional T3 threads");
-        check(launches.at(0).at("message").get<std::string>().find(launch.instruction) != std::string::npos,
-              "T3 receives the complete original instruction with its whitespace");
+        check(launches.at(0).at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
+              "T3 receives the original launch instruction followed by one canonical marker");
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
