@@ -138,6 +138,7 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    Json sessionTask(Id) const;
     void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
     void initializeWorkflowSchema();

@@ -21,10 +21,14 @@ const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long'
 const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
+const sessionEndLabels = {
+  completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
+  interrupted: 'Interrupted', rolled_back: 'Rolled back', ended: 'Ended',
+};
 const stateLabels = {
+  ...sessionEndLabels,
   queued: 'Queued', deciding: 'Evaluating', sending: 'Sending', running: 'Working', waiting: 'Waiting for input',
-  cancelling: 'Cancelling', stopping: 'Confirming stop', completed: 'Complete', cancelled: 'Cancelled', ended: 'Ended',
-  failed: 'Failed', interrupted: 'Interrupted', rolled_back: 'Rolled back',
+  cancelling: 'Cancelling', stopping: 'Confirming stop',
   idle: 'Idle', thinking: 'Thinking', working: 'Working', peer_waiting: 'Waiting for another Bot',
 };
 const waitLabels = {
@@ -711,7 +715,9 @@ function renderActivity() {
   const ended = [];
   for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
+      if (activeKeys.has(key(task.id, session))) continue;
+      const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+      ended.push(sessionRow(task, session, status, false));
     }
   }
   const rows = [];
@@ -1657,7 +1663,8 @@ function render(scroll) {
 
 function mergeSessionTasks(context, tasks) {
   for (const task of tasks) {
-    if (task.runCount >= (context.loadedSessions.get(task.id)?.runCount ?? 0))
+    // A history page can arrive after a live update for the same task.
+    if (task.generation >= (context.loadedSessions.get(task.id)?.generation ?? 0))
       context.loadedSessions.set(task.id, task);
   }
 }

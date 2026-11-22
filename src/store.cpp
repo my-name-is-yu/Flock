@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 #include <system_error>
+#include <tuple>
 
 namespace flockv0 {
 namespace {
@@ -202,7 +203,9 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         initializeAutomationSchema();
         initializeGitSchema();
         initializeBoardInboxSchema();
-        exec("CREATE INDEX IF NOT EXISTS journal_run_starts ON journal(id,task_id) WHERE kind='run_started'");
+        exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
+             " WHERE kind IN ('run_started','report')");
+        exec("DROP INDEX IF EXISTS journal_run_starts");
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -616,6 +619,28 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     return task;
 }
 
+Json Store::Impl::sessionTask(Id id) const {
+    auto task = taskDetails(id,false);
+    // A settled report identifies the assigned Run even when its result came from a later Run.
+    auto reports = query(R"SQL(
+SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
+       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
+FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+)SQL",{id});
+    using RunKey = std::tuple<std::string,std::string,std::string>;
+    std::map<RunKey,std::string> statuses;
+    while (reports.next()) {
+        auto status = reports.string(3);
+        if (!status.empty())
+            statuses.insert_or_assign(RunKey{reports.string(0),reports.string(1),reports.string(2)},std::move(status));
+    }
+    for (auto& run : task.at("runs")) {
+        const auto status = statuses.find({field(run,"environmentId"),field(run,"threadId"),field(run,"runId")});
+        if (status != statuses.end()) run["status"] = status->second;
+    }
+    return task;
+}
+
 void Store::Impl::addTaskDetails(Json& result) const {
     const Id id = result.at("id");
     restoreWaitAnchor(*this,result);
@@ -684,22 +709,22 @@ Json Store::sessionTasks(std::string_view bot, Id before, unsigned limit) const 
                           " AND EXISTS (SELECT 1 FROM runs WHERE task_id=tasks.id)"
                           " ORDER BY id DESC LIMIT ?", {bot,before,before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
-    while (rows.next()) result.push_back(p_->taskDetails(rows.number(0),false));
+    while (rows.next()) result.push_back(p_->sessionTask(rows.number(0)));
     return result;
 }
 
 std::pair<Id,Json> Store::sessionChangesSince(std::string_view bot, std::optional<Id> after) const {
     std::lock_guard lock(p_->mutex);
-    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind='run_started'");
+    auto newest = p_->query("SELECT coalesce(max(id),0) FROM journal WHERE kind IN ('run_started','report')");
     newest.next();
     const auto through = newest.number(0);
     auto tasks = Json::array();
     if (after && *after < through) {
         auto rows = p_->query(R"SQL(
 SELECT DISTINCT j.task_id FROM journal j CROSS JOIN tasks t ON t.id=j.task_id
-WHERE j.kind='run_started' AND j.id>? AND j.id<=? AND t.bot_id=?
+WHERE j.kind IN ('run_started','report') AND j.id>? AND j.id<=? AND t.bot_id=?
 )SQL",{*after,through,bot});
-        while (rows.next()) tasks.push_back(p_->taskDetails(rows.number(0),false));
+        while (rows.next()) tasks.push_back(p_->sessionTask(rows.number(0)));
     }
     return {through,std::move(tasks)};
 }
