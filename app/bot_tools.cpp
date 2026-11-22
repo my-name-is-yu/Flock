@@ -275,7 +275,6 @@ bool validMcpContentBlock(const Json& block, std::string_view version) {
                optionalMember(*resource,"mimeType",&Json::is_string) &&
                (version == protocol || optionalMember(*resource,"_meta",&Json::is_object));
     }
-    // Forward unfamiliar block types as opaque data.
     return !name.empty();
 }
 
