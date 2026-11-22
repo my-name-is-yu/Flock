@@ -4,6 +4,7 @@ import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
 import { createTimelineRows, placeRows } from '/timeline-rows.js';
+import { replyArrivalId } from '/reply-arrival.mjs';
 import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 
@@ -18,6 +19,13 @@ const elements = Object.fromEntries([
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
 const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function animateLiveReply(id) {
+  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
+    { opacity: .76, transform: 'translateY(4px)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+}
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -79,6 +87,7 @@ const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
+let visibilityGeneration = 0;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
@@ -213,7 +222,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
+    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
     void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
@@ -1183,7 +1193,7 @@ function updateJumpToLatest() {
   control.hidden = hidden;
 }
 
-function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
   const older = elements.older;
   const data = view?.data;
   const context = timelineContext();
@@ -1218,11 +1228,18 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     moveScroll();
     return;
   }
-  if (!changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
-  scroller.setAttribute('aria-label', 'Conversation history');
-  updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
-  moveScroll();
+  if (changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) {
+    scroller.setAttribute('aria-label', 'Conversation history');
+    updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
+    moveScroll();
+  }
+  const canAnimate = liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  if (canAnimate) {
+    const id = replyArrivalId(events, liveAfterId);
+    if (id != null) animateLiveReply(id);
+  }
 }
 
 function conversationRows(data, events, keep) {
@@ -1793,13 +1810,13 @@ function renderDetail() {
   const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
   if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
 }
-function render(scroll) {
+function render(scroll, liveAfterId) {
   renderBots();
   renderHeader();
   renderActivity();
   const previousScroll = timelineScrollPosition();
   renderComposer();
-  renderTimeline(scroll, previousScroll);
+  renderTimeline(scroll, previousScroll, liveAfterId);
   renderDetail();
   scheduleReadCheck();
 }
@@ -1854,9 +1871,11 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll) {
-  if (context !== view) return;
-  const isCurrent = () => context === view;
+async function refreshView(context, scroll, liveGeneration) {
+  const isCurrent = () => context === view &&
+    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+  if (!isCurrent()) return;
+  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
     const eventHistory = eventHistoryForRefresh(context);
@@ -1883,7 +1902,7 @@ async function refreshView(context, scroll) {
     }
     return;
   }
-  render(scroll);
+  render(scroll, liveAfterId);
   if (context.openSettingsOnLoad) {
     context.openSettingsOnLoad = null;
     openSettingsFromMenu(context.id);
@@ -2129,10 +2148,10 @@ document.addEventListener('keydown', (event) => {
 
 let syncRetry;
 function retrySync() {
-  if (!document.hidden) syncRetry ??= setTimeout(syncAll, 2500);
+  if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
 
-function syncAll() {
+function catchUp() {
   clearTimeout(syncRetry);
   syncRetry = null;
   if (document.hidden) return;
@@ -2141,9 +2160,10 @@ function syncAll() {
   void view?.dm?.refresh();
 }
 
-const liveUpdates = createLiveUpdates(syncAll, (change) => {
+const liveUpdates = createLiveUpdates(catchUp, (change) => {
+  if (document.hidden) return;
   if (change.list === true) void refreshBots();
-  if (view && change.bot === view.id) void view.refresh();
+  if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
   const dm = view?.dm;
   if (dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId) void dm.refresh();
 });
@@ -2161,7 +2181,7 @@ function subscribeToView() {
 
 function resumeUpdates() {
   subscribeToView();
-  syncAll();
+  catchUp();
 }
 
 elements.conversation.addEventListener('scroll', scheduleReadCheck, { passive: true });
@@ -2169,8 +2189,14 @@ new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
 document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
-document.addEventListener('visibilitychange', resumeUpdates);
-window.addEventListener('pagehide', () => liveUpdates.use(null));
+document.addEventListener('visibilitychange', () => {
+  visibilityGeneration++;
+  resumeUpdates();
+});
+window.addEventListener('pagehide', () => {
+  visibilityGeneration++;
+  liveUpdates.use(null);
+});
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 
