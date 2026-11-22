@@ -3,6 +3,7 @@ import { refreshEventHistory } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { mountConversationFind } from '/conversation-find.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
@@ -148,8 +149,8 @@ function changed(key, ...values) {
   signatures.set(key, signature);
   return true;
 }
-async function api(path, body) {
-  const init = { credentials: 'same-origin' };
+async function api(path, body, signal) {
+  const init = { credentials: 'same-origin', signal };
   if (body) Object.assign(init, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Flock-Action': '1' },
     body: JSON.stringify(body),
@@ -547,6 +548,7 @@ const botPeers = (id) => participant(id).peers ?? [];
 function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
+  conversationFind.setContext(view?.data && !dm ? view : null);
   const heading = elements['peer-heading'];
   const profile = elements.profile;
   profile.hidden = !bot || !!dm;
@@ -1851,6 +1853,31 @@ async function submit(event) {
     if (showingComposer(context.id)) renderComposer();
   }
 }
+
+const conversationFind = mountConversationFind({
+  toggle: byId('find-conversation'),
+  panel: byId('conversation-find'),
+  readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
+  describeAuthor: (context, event) => messageSide(event) === 'user' ? 'You' : context.data.bot.name,
+  async openMatch(context, id) {
+    if (context !== view || view.dm) return;
+    const target = byId(`event-${id}`);
+    if (target) {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: 'center' });
+      return;
+    }
+    const selection = { kind: 'source' };
+    openDetail(selection);
+    try {
+      const { events } = await api(botQuery('conversation', context.id, id + 1));
+      selection.event = events.find(event => event.id === id);
+    } catch {}
+    if (detail !== selection || context !== view) return;
+    selection.failed = !selection.event;
+    renderDetail();
+  },
+});
 
 const savedTheme = saved('flock-theme', 'system');
 renderTheme(['light', 'dark'].includes(savedTheme) ? savedTheme : 'system');

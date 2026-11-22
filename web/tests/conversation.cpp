@@ -723,6 +723,13 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     auto access = store.access();
     access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
     const auto request = access.requestSecret("release",{"fixture-token"});
+    const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
+        return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
+            .at("messageId").get<Id>();
+    };
+    const auto oldMessage = send("staging-triage","old","Original handoff for staging");
+    const auto otherBotMessage = send("release","other","Unrelated handoff");
+    for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
@@ -737,7 +744,20 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
     check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
           "Bot view must preserve its ID and redact display text");
-    browser.get("/api/conversation?bot=staging-triage");
+    const std::string history = "/api/conversation?bot=staging-triage";
+    const auto latest = browser.get(history);
+    const auto older = browser.get(history + "&before=" + latest.at("olderBefore").dump());
+    const auto exact = browser.get(history + "&before=" + std::to_string(oldMessage + 1));
+    check(latest.at("events").front().at("id") > oldMessage && older.at("events").front().at("id") == oldMessage,
+          "An older match must be reachable through the same Bot conversation projection");
+    check(exact.at("events").size() == 1 && exact.at("events").back().at("id") == oldMessage &&
+          exact.at("events").back().at("data").at("text") == "Original handoff for [redacted]",
+          "The older conversation projection must redact its text and omit other Bots' messages");
+    const auto foreign = browser.get(history + "&before=" + std::to_string(otherBotMessage + 1));
+    check(foreign.at("events").back().at("id") != otherBotMessage,
+          "An exact source lookup must stay in the selected Bot");
+    Browser::checked(browser.client.Get("/api/conversation?bot=release&before=" +
+        std::to_string(otherBotMessage + 1)),403);
     Browser::checked(browser.client.Get("/api/view?bot=release"),403);
 }
 
