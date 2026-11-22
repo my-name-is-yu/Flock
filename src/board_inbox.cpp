@@ -52,7 +52,7 @@ bool validDecision(InboxKind kind, std::string_view decision) {
     case unknown_delivery: return decision == "reconcile";
     case grant_request: case bot_change: return decision == "approve" || decision == "deny";
     case protected_input: return decision == "supply";
-    case pr_reconciliation: return decision == "acknowledge";
+    case pr_reconciliation: return decision == "link_pr" || decision == "reject_pr";
     case pr_review: return decision == "approve" || decision == "request_changes";
     }
     return false;
@@ -88,7 +88,10 @@ CREATE TABLE IF NOT EXISTS pr_review_items(
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
     target_revision INTEGER NOT NULL, target_generation INTEGER NOT NULL,
     url TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','changes_requested')));
+    git_key TEXT, operation_id TEXT REFERENCES git_pr_operations(operation_id), candidates TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','changes_requested','linked','rejected','superseded')),
+    UNIQUE(task_id,git_key));
+CREATE UNIQUE INDEX IF NOT EXISTS pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS pr_reviews_by_task ON pr_review_items(task_id,id);
 CREATE TABLE IF NOT EXISTS inbox_decisions(
     id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, item_kind TEXT NOT NULL, item_id INTEGER NOT NULL,
@@ -127,8 +130,7 @@ SELECT t.id,t.state,t.generation,t.data,w.id,w.data,
        (SELECT json_group_array(json_object('id',p.id,'url',p.url,'title',p.title,'status',p.status))
         FROM (
           SELECT i.id,i.url,i.title,i.status FROM pr_review_items i
-          LEFT JOIN git_inbox_items g ON g.inbox_id=i.id
-          WHERE i.task_id=t.id AND (g.dedupe IS NULL OR g.dedupe NOT LIKE 'reconcile/%')
+          WHERE i.task_id=t.id AND i.operation_id IS NULL
           UNION ALL
           SELECT w.pr_number,w.url,'Pull request #'||w.pr_number,'linked' FROM git_pr_watches w
           WHERE w.task_id=t.id AND NOT EXISTS (
@@ -247,18 +249,18 @@ WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
             addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
                       (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3));
         auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,g.dedupe
-FROM pr_review_items p JOIN tasks t ON t.id=p.task_id LEFT JOIN git_inbox_items g ON g.inbox_id=p.id
-WHERE t.bot_id=? AND p.status='pending' AND coalesce(g.resolved,0)=0 AND p.target_generation=t.generation
+SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates
+FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
+WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
 AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
 AND NOT coalesce(json_extract(t.data,'$.replanning'),0) ORDER BY p.id DESC
 )SQL",{id});
         while (reviews.next()) {
             const auto task = reviews.json(7);
-            const auto kind = reviews.string(8).starts_with("reconcile/") ? pr_reconciliation : pr_review;
+            const auto kind = reviews.string(8).empty() ? pr_review : pr_reconciliation;
             add({id,kind,reviews.number(0),0,reviews.number(1),reviews.number(2),reviews.number(3)},
                 {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
-                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)}});
+                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(9)}});
         }
     }
     snapshot.commit();
@@ -347,16 +349,16 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
-        auto review = p_->query("SELECT p.target_revision,p.target_generation,p.status,g.dedupe,coalesce(g.resolved,0)"
-                                " FROM pr_review_items p LEFT JOIN git_inbox_items g ON g.inbox_id=p.id WHERE p.id=? AND p.task_id=?",
+        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id"
+                                " FROM pr_review_items WHERE id=? AND task_id=?",
                                 {item.itemId,item.taskId});
         if (!review.next()) throw RequestChanged{};
-        if (review.string(2) != "pending" || review.number(4)) throw DecisionUnavailable{};
-        if (review.string(3).starts_with("reconcile/") != (kind == pr_reconciliation)) throw RequestChanged{};
+        if (review.string(2) != "pending") throw DecisionUnavailable{};
+        if (review.string(3).empty() != (kind == pr_review)) throw RequestChanged{};
         if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration ||
             task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration ||
             task.value("replanning",false)) throw RequestChanged{};
-        if (kind == pr_reconciliation) p_->exec("UPDATE git_inbox_items SET resolved=1 WHERE inbox_id=?",{item.itemId});
+        if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
         else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
                       {decision == "approve" ? "approved" : "changes_requested",item.itemId});
         p_->recordInboxDecision(actor,item,decision);
@@ -389,16 +391,18 @@ Id Store::requestPrReview(Id taskId, Id revision, Id generation, std::string_vie
     return id;
 }
 
-Id Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt) {
+Id Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                               std::string_view gitKey, std::string_view operationId, const Json& candidates) {
     if (!(url.starts_with("https://") || url.starts_with("http://")) ||
         url.find_first_of(" \t\r\n") != url.npos || url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
         prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
-    const auto scrub = redactor(field(task,"botId"));
-    scrub.requirePublic(url);
-    exec("INSERT INTO pr_review_items(task_id,target_revision,target_generation,url,title,prompt) VALUES(?,?,?,?,?,?)",
-         {task.at("id"),task.value("currentRevision",Id{0}),task.at("generation"),url,
-          scrub.text(std::string(title)),scrub.text(std::string(prompt))});
+    const auto scrub = gitKey.empty() && operationId.empty() ? redactor(field(task,"botId")) : gitRedactor();
+    scrub.requirePublic({url,candidates});
+    exec("INSERT INTO pr_review_items(task_id,target_revision,target_generation,url,title,prompt,git_key,operation_id,candidates)"
+         " VALUES(?,?,?,?,?,?,?,?,?)",
+         {task.at("id"),task.value("currentRevision",Id{0}),task.at("generation"),url,scrub.text(title),scrub.text(prompt),
+          gitKey.empty() ? Json(nullptr) : Json(gitKey),operationId.empty() ? Json(nullptr) : Json(operationId),candidates});
     return last();
 }
 }

@@ -55,6 +55,9 @@ public:
     Create create = Create::success;
     State state = State::open;
     bool upstreamPermitted = true;
+    bool rejectComment = false;
+    GitLog log{"linker: missing symbol in build\nextra output the adapter failed to trim",false};
+    Json result{{"headSha",sha},{"status","ok"}};
     int createCalls = 0, lookupCalls = 0, logCalls = 0, hostCalls = 0, comments = 0, edits = 0;
     std::vector<Entry> prs;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
@@ -84,12 +87,13 @@ public:
         ++logCalls;
         check(job == 81,"wrong CI job");
         check(maxBytes == 32,"log byte limit was not passed to the adapter");
-        return {"linker: missing symbol in build\nextra output the adapter failed to trim",false};
+        return log;
     }
     Json call(const GitContext&, const GitRepository&, const Decision& decision) override {
         ++hostCalls;
         const auto& args = decision.args;
         if (decision.tool == "git_comment") {
+            if (rejectComment) throw GitRejected("Comment rejected");
             if (args.contains("commentId")) {
                 check(args.at("commentId") == 101 && comments == 1 &&
                       args.at("target") == commentTarget && args.at("number") == commentNumber,"wrong comment edited");
@@ -101,7 +105,7 @@ public:
             }
             return {{"id",101},{"body",args.at("body")}};
         }
-        return {{"headSha",sha},{"status","ok"}};
+        return result;
     }
 private:
     Json commentTarget, commentNumber;

@@ -100,6 +100,8 @@ void run() {
           "unsigned webhook was accepted");
     check(post(client,"workflow_job","job-run-1",payload,202).at("status") == "received","signed webhook was not enqueued");
     check(post(client,"workflow_job","job-run-1",payload,202).at("status") == "duplicate","retry was not deduplicated");
+    check(post(client,"workflow_job","job-run-redelivery",payload,202).at("status") == "duplicate",
+          "An existing signed payload was handled twice");
     const Json unrelatedCheck{{"action","completed"},{"repository",repository},
         {"check_run",{{"head_sha",sha},{"conclusion","failure"},
                       {"pull_requests",Json::array({{{"number",1},{"base",{{"repo",{{"id",42}}}}}}})}}}};
@@ -111,6 +113,18 @@ void run() {
     check(model.received == 1 && host->logCalls == 1 &&
           store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,
           "authenticated webhook did not wake the persisted task and produce a CI report");
+    const std::string newSha(40,'b');
+    auto nextJob = payload;
+    nextJob["workflow_job"]["head_sha"] = newSha;
+    check(post(client,"workflow_job","job-new-head",nextJob,202).at("status") == "received","New CI job was not saved");
+    runtime.runConversations();
+    check(model.received == 1,"A CI job with no verified watch was delivered");
+    const Json sync{{"action","synchronize"},{"repository",repository},
+        {"before",sha},{"after",newSha},{"pull_request",{{"number",1},{"head",{{"sha",newSha}}},{"title","Change"}}}};
+    check(post(client,"pull_request","pr-new-head",sync,202).at("status") == "received","PR synchronization was not saved");
+    runtime.runConversations();
+    check(model.received == 3 && host->logCalls == 2,"Out-of-order PR synchronization did not route the new CI job");
+
     const Json review{{"action","submitted"},{"repository",repository},
         {"pull_request",{{"number",1},{"head",{{"sha",sha}}},{"title","Change"}}},
         {"review",{{"state","approved"},{"body","Review complete"}}}};

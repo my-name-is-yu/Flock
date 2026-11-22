@@ -147,7 +147,10 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     bool fixed = false, web = true;
     [[maybe_unused]] unsigned port = 0;
     RuntimeOptions options;
-    if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) options.gitHost = makeGitHubHost(token);
+    if (const auto* token = std::getenv("FLOCK_GITHUB_TOKEN"); token && *token) {
+        options.gitHost = makeGitHubHost(token);
+        store.protectGitCredential(token);
+    }
     while (!args.empty()) {
         const auto option = args.pop("run option");
         if (option == "--fixed") fixed = true;

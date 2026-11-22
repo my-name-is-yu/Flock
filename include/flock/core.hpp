@@ -146,6 +146,7 @@ public:
     Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
                        std::string_view title, std::string_view prompt);
     bool receiveGitWebhook(const GitWebhook&);
+    void protectGitCredential(std::string value);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,

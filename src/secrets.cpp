@@ -93,11 +93,11 @@ SecretRedactor::SecretRedactor(std::vector<std::string> values) : values_(std::m
     std::sort(values_.begin(),values_.end(),[](const auto& a,const auto& b){return a.size()>b.size();});
 }
 
-std::string SecretRedactor::text(const std::string& source) const {
-    if (values_.empty()) return source;
+std::string SecretRedactor::text(std::string_view source, bool truncated) const {
+    if (values_.empty()) return std::string(source);
     std::string out;
     for (size_t i=0; i<source.size();) {
-        const auto found = std::find_if(values_.begin(),values_.end(),[&](const auto& v){return source.compare(i,v.size(),v)==0;});
+        const auto found = std::find_if(values_.begin(),values_.end(),[&](const auto& v){return source.compare(i,v.size(),v)==0 || (truncated && v.starts_with(source.substr(i)));});
         if (found == values_.end()) out += source[i++];
         else { out += "[redacted]"; i += found->size(); }
     }
@@ -105,10 +105,10 @@ std::string SecretRedactor::text(const std::string& source) const {
     return out;
 }
 
-Json SecretRedactor::payload(const Json& input) const {
-    if (values_.empty()) return input;
+Json SecretRedactor::payload(const Json& input, std::size_t textLimit) const {
+    if (values_.empty() && textLimit == std::string_view::npos) return input;
     auto scrub = [&](auto&& self, const Json& item) -> Json {
-        if (item.is_string()) return text(item.get_ref<const std::string&>());
+        if (item.is_string()) return bounded(text(item.get_ref<const std::string&>()),textLimit);
         if (item.is_array()) {
             auto result = Json::array();
             for (auto& entry : item) result.push_back(self(self,entry));
@@ -154,6 +154,20 @@ SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
       AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
 )SQL",{bot,bot});
     std::vector<std::string> values;
+    while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
+    return SecretRedactor(std::move(values));
+}
+
+void Store::protectGitCredential(std::string value) {
+    if (value.empty()) return;
+    std::lock_guard lock(p_->mutex);
+    p_->gitCredentials.push_back(std::move(value));
+}
+
+SecretRedactor Store::Impl::gitRedactor() const {
+    std::lock_guard lock(mutex);
+    auto values = gitCredentials;
+    auto rows = query("SELECT file FROM protected_inputs WHERE status='fulfilled'");
     while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
     return SecretRedactor(std::move(values));
 }

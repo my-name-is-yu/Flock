@@ -50,6 +50,13 @@ bool Scope::valid() const {
                identifier(ref[0].get_ref<const std::string&>()) && identifier(ref[1].get_ref<const std::string&>()) &&
                resource==ref.dump();
     }
+    if (kind=="repository") {
+        const auto slash = resource.find('/');
+        if (slash == resource.npos) return false;
+        try { return GitRepository::parse(std::string_view(resource).substr(0,slash),
+                                          std::string_view(resource).substr(slash+1)).resource() == resource; }
+        catch (const Conflict&) { return false; }
+    }
     if (kind=="secret") return SecretRef{resource}.valid();
     if (kind=="bot_admin") return validBotId(resource);
     return identifier(resource);

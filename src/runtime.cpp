@@ -1228,7 +1228,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             try {
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
                                     "event/" + event.at("id").dump(),snapshot.at("generation").get<Id>());
-            } catch (const std::exception& error) { result = {{"ok",false},{"error",error.what()}}; }
+            } catch (const std::exception& error) { result = {{"ok",false},{"error",db.gitRedactor().text(error.what())}}; }
             change(snapshot,[&](Json& current) {
                 auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{event.at("id"),current.at("id")});
                 if (!row.next()) return false;

@@ -24,6 +24,7 @@ bool terminal(const Json&);
 std::string actionId();
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
@@ -46,8 +47,8 @@ private:
 class SecretRedactor {
 public:
     explicit SecretRedactor(std::vector<std::string> values);
-    std::string text(const std::string&) const;
-    Json payload(const Json&) const;
+    std::string text(std::string_view, bool truncated = false) const;
+    Json payload(const Json&, std::size_t textLimit = std::string_view::npos) const;
     enum class Fields { protocol, external };
     Json record(Json, Fields = Fields::protocol) const;
     void requirePublic(const Json&) const;
@@ -65,11 +66,18 @@ struct Store::Impl {
     void migrateGit();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
                  std::string_view invocation, std::optional<Id> generation = {});
-    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&);
+    Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
+    bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
+    void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
+    std::vector<std::string> gitCredentials;
+    SecretRedactor gitRedactor() const;
     void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
                       std::string_view title, std::string_view prompt);
-    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt);
+    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                      std::string_view gitKey = {}, std::string_view operationId = {},
+                      const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);

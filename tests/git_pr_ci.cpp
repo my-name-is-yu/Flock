@@ -1,6 +1,7 @@
 #include "fake_git.hpp"
 #include "model.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <sqlite3.h>
@@ -14,6 +15,8 @@ public:
     Json results = Json::object();
     unsigned notifications = 0;
     bool openAfterSession = false;
+    bool checkOriginatingSession = false;
+    std::function<void()> onNotification;
 
     Decision decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
@@ -42,7 +45,10 @@ private:
             const auto& gitEvent = event.at("gitEvent");
             if (steps.empty()) {
                 ++notifications;
-                check(gitEvent.at("run").at("threadId") == "thread-project","Webhook lost its originating Session");
+                if (onNotification) onNotification();
+                check(input.task.empty() && input.history.empty(),"Notification received unrelated task context");
+                if (checkOriginatingSession)
+                    check(gitEvent.at("run").at("threadId") == "thread-project","Webhook lost its originating Session");
                 check(std::ranges::find(input.tools,"git_open_pr") == input.tools.end(),"Webhook supplied mutation tools");
                 if (gitEvent.at("jobId") == 81)
                     return {"git_read_ci_logs",{{"host",gitEvent.at("host")},{"repo",gitEvent.at("repo")},
@@ -92,6 +98,7 @@ void runner() {
     Sessions sessions;
     Script script;
     script.openAfterSession = true;
+    script.checkOriginatingSession = true;
     Id task, other;
     {
         Store store(path);
@@ -141,6 +148,17 @@ void runner() {
               store.decisionHistory(localOwner,"owner").at(0).at("decision") == "request_changes",
               "Git inbox decision did not update and record");
         check(script.notifications == 3 && historyCount(store,task,"git_webhook") == 3,"webhooks were delivered more than once");
+
+        const auto sibling = store.submit(intake());
+        auto args = openArgs("sibling-change");
+        args["taskId"] = sibling;
+        check(invoke(store,runtime,script,"watch-sibling","git_open_pr",args).at("prNumber") == 2,
+              "Could not create a second watch at the same commit");
+        check(store.receiveGitWebhook({hostName,"shared-commit",repoName,"ci","completed",{},sha,"Shared SHA",81}),
+              "CI event with a shared SHA was not saved");
+        runtime.runConversations();
+        check(script.notifications == 3 && historyCount(store,sibling,"git_webhook") == 0,
+              "A SHA-only CI event woke a task without an unambiguous watch");
     }
 }
 
@@ -154,6 +172,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
     Script script;
     Id task;
     std::string operationId;
+    InboxTarget initial{};
     {
         Store store(path);
         task = store.submit(intake());
@@ -172,6 +191,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         const auto lost = invoke(store,runtime,script,"lost","git_open_pr",args);
         check(lost.at("status") == "ambiguous" && persistence(path,operationId).at("status") == "ambiguous",
               "lost response was not recorded unresolved");
+        initial = target(store.inbox(localOwner,"owner").at(0));
     }
     host->inspect = {};
     const auto repo = GitRepository::parse(hostName,repoName);
@@ -179,6 +199,12 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
                         "Change",FakeHost::State::open});
     host->prs.push_back({{{repo,repo,"old","change"},5,"https://github.com/org/flock/pull/5",operationId,sha,false},
                         "Change",FakeHost::State::closed});
+    for (const auto collisionState : {FakeHost::State::open,FakeHost::State::closed,FakeHost::State::merged}) {
+        const auto number = static_cast<Id>(host->prs.size() + 10);
+        host->prs.push_back({{{repo,repo,"main","change"},number,
+                             "https://github.com/org/flock/pull/" + std::to_string(number),"",sha,false},
+                             "Change",collisionState});
+    }
     if (wrongCorrelation) host->prs.front().pr.operationId = "someone-elses-operation";
     if (multipleMatches) {
         auto extra = host->prs.front();
@@ -197,9 +223,30 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
             check(recovered.at("status") == "ambiguous" && !recovered.contains("prNumber"),"unverified PR was adopted");
             const auto items = store.inbox(localOwner,"owner");
             check(items.size() == 1 && items.at(0).at("itemKind") == "pr_reconciliation","reconciliation item missing or duplicated");
-            store.decideInbox(localOwner,target(items.at(0)),"acknowledge");
-            check(store.inbox(localOwner,"owner").empty() && persistence(path,operationId).at("status") == "ambiguous",
-                  "acknowledging reconciliation asserted an unverified identity");
+            const auto decision = target(items.at(0));
+            const auto candidates = items.at(0).at("candidates");
+            if (multipleMatches) {
+                check(candidates.size() == 2,"Only exact correlations should be candidates");
+                try {
+                    store.decideInbox(localOwner,initial,"reject_pr");
+                    throw std::runtime_error("An outdated reconciliation decision was accepted");
+                } catch (const DecisionUnavailable&) {}
+                try {
+                    store.decideInbox(localOwner,decision,"link_pr",{{"prNumber",4}});
+                    throw std::runtime_error("An unverified candidate was accepted");
+                } catch (const Conflict&) {}
+                store.decideInbox(localOwner,decision,"link_pr",{{"prNumber",1}});
+                check(persistence(path,operationId).at("prNumber") == 1,"Selecting a verified PR did not link it");
+                check(store.board(localOwner,"owner").at(0).at("prRefs").at(0).at("url") ==
+                      "https://github.com/org/flock/pull/1","Selected PR was not watched");
+            } else {
+                check(candidates.empty(),"Title collision was offered for manual linking");
+                store.decideInbox(localOwner,decision,"reject_pr");
+                check(store.inbox(localOwner,"owner").empty() && persistence(path,operationId).at("status") == "rejected",
+                      "Rejecting reconciliation did not close the decision");
+                check(invoke(store,runtime,script,"retry-rejected","git_open_pr",args).at("status") == "rejected" &&
+                      host->createCalls == 1,"Rejected unknown operation was resent");
+            }
         } else {
             check(recovered.at("status") == "created" && recovered.at("prNumber") == 1 &&
                   recovered.at("url") == "https://github.com/org/flock/pull/1" &&
@@ -235,13 +282,14 @@ void accessAndActions() {
         {"git_manage_issue",{{"action","update"},{"issueNumber",2},{"state","closed"},{"labels",Json::array()}}},
     };
     grant(store,"owner","repository",repoGrant,"read");
+    grant(store,"owner","repository",repoGrant,"write");
     auto readOnly = openArgs();
     readOnly["taskId"] = task;
     check(invoke(store,runtime,script,"read-is-not-pr","git_open_pr",readOnly).at("ok") == false &&
-          host->createCalls == 0,"repository read allowed PR creation");
+          host->createCalls == 0,"repository read or write allowed PR creation");
     const auto deniedIssueComment = invoke(store,runtime,script,"read-is-not-issues","git_comment",
         {{"host",hostName},{"repo",repoName},{"taskId",task},{"target","issue"},{"number",2},{"body","Comment"}});
-    check(deniedIssueComment.at("ok") == false && host->hostCalls == 0,"read access allowed an issue comment");
+    check(deniedIssueComment.at("ok") == false && host->hostCalls == 0,"repository read or write allowed an issue comment");
     for (const auto* operation : {"pr","review","issues"}) grant(store,"owner","repository",repoGrant,operation);
     auto argsFor = [task](Json args, std::string repo) {
         args.update({{"host",hostName},{"repo",std::move(repo)},{"taskId",task}});
@@ -280,6 +328,144 @@ void accessAndActions() {
     check(retry.at("data").at("id") == 101 && host->comments == 1 && host->edits == 2,"comment edit retry duplicated a comment");
     check(historyCount(store,task,"git_mutation") == 18 && historyCount(store,other,"git_mutation") == 0,
           "Git mutations were not recorded on the owning task");
+
+    const auto review = invoke(store,runtime,script,"review-existing-pr","git_request_review",
+                               argsFor({{"prNumber",20},{"reviewers",{"alice"}}},repoName));
+    check(review.at("ok") == true && review.at("watchAttached") == true,"Review request did not watch the existing PR");
+    check(store.receiveGitWebhook({hostName,"existing-pr-review",repoName,"review","submitted",{20},sha,"Approved",0}),
+          "Could not enqueue a review for the existing PR");
+    runtime.runConversations();
+    check(script.notifications == 1 && historyCount(store,task,"git_webhook") == 1 &&
+          historyCount(store,other,"git_webhook") == 0,"Review result did not go to the requesting task");
+}
+
+void newAttempts() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    grant(store,"owner","repository",repoGrant,"pr");
+    const auto originalTask = store.submit(intake());
+    auto args = openArgs();
+    args["taskId"] = originalTask;
+    host->create = FakeHost::Create::rejected;
+    const auto failed = invoke(store,runtime,script,"definite-rejection","git_open_pr",args);
+    check(failed.at("status") == "failed","Definite rejection was treated as unknown");
+    host->create = FakeHost::Create::success;
+    const auto created = invoke(store,runtime,script,"fresh-attempt","git_open_pr",args);
+    check(created.at("prNumber") == 1 && created.at("operationId") != failed.at("operationId") && host->createCalls == 2,
+          "A fresh request could not recover from a definitive rejection");
+
+    auto comment = Json{{"taskId",originalTask},{"host",hostName},{"repo",repoName},
+                        {"target","pr"},{"number",1},{"body","Update requested"}};
+    host->rejectComment = true;
+    check(invoke(store,runtime,script,"comment-rejected","git_comment",comment).at("status") == "failed",
+          "Definite comment rejection was not recorded");
+    host->rejectComment = false;
+    check(invoke(store,runtime,script,"comment-retried","git_comment",comment).at("ok") == true && host->comments == 1,
+          "A fresh comment request could not retry a definitive rejection");
+
+    host->prs.front().state = FakeHost::State::merged;
+    args["taskId"] = store.submit(intake());
+    const auto next = invoke(store,runtime,script,"replacement-pr","git_open_pr",args);
+    check(next.at("prNumber") == 2 && host->createCalls == 3,"Branch pair was locked after the previous task's PR merged");
+}
+
+void redaction() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    Store store(path);
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    const std::string credential = "fixture-pr-credential-value";
+    const std::string secret = "fixture-protected-other-bot-value";
+    store.protectGitCredential(credential);
+    auto access = store.access();
+    const auto input = access.requestSecret("other",{"example"});
+    access.submitSecret(localOwner,"other",input,secret);
+    grant(store,"owner","repository",repoGrant,"read");
+    grant(store,"owner","repository",repoGrant,"pr");
+    const auto task = store.submit(intake());
+    host->result["description"] = credential + " " + secret;
+    host->result[credential] = secret;
+    const auto repo = Json{{"host",hostName},{"repo",repoName}};
+    const auto details = invoke(store,runtime,script,"details","git_repo_info",repo).dump();
+    check(details.find(secret) == details.npos && details.find(credential) == details.npos &&
+          details.find("[redacted]") != details.npos,"Repository output exposed secrets");
+    host->log = {"build error " + credential.substr(0,12),true};
+    auto args = repo;
+    args.update({{"jobId",81},{"maxBytes",32}});
+    const auto log = invoke(store,runtime,script,"redacted-log","git_read_ci_logs",args).at("data");
+    check(log.at("text") == "build error [redacted]" && log.at("truncated") == true,
+          "Log byte limit exposed a partial credential");
+
+    auto open = openArgs();
+    open["taskId"] = task;
+    check(invoke(store,runtime,script,"open-pr","git_open_pr",open).at("ok") == true,"Could not create watch");
+    check(store.receiveGitWebhook({hostName,"secret-event",repoName,"review","submitted",{1},sha,credential + " " + secret,0}),
+          "Webhook with redactable content was rejected");
+    runtime.runConversations();
+    for (const auto& content : {store.history(task).dump(),store.inbox(localOwner,"owner").dump()})
+        check(content.find(secret) == content.npos && content.find(credential) == content.npos,
+              "Webhook output exposed secrets");
+    for (const auto& file : {path.string(),path.string()+"-wal"}) {
+        std::ifstream database(file,std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(database)),{});
+        check(bytes.find(secret) == bytes.npos && bytes.find(credential) == bytes.npos,"Raw webhook content was persisted");
+    }
+}
+
+void notificationBudgetAndRevocation() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    grant(store,"owner","repository",repoGrant,"read");
+    grant(store,"owner","repository",repoGrant,"pr");
+    auto limited = intake();
+    limited.config["modelCallLimit"] = 1;
+    const auto task = store.submit(limited);
+    auto args = openArgs();
+    args["taskId"] = task;
+    check(invoke(store,runtime,script,"create-watch","git_open_pr",args).at("ok") == true,"Could not create watch");
+    check(store.receiveGitWebhook({hostName,"budget-event",repoName,"ci","completed",{1},sha,"A job failed",81}),
+          "Could not enqueue job");
+    runtime.runConversations();
+    const auto inbox = store.inbox(localOwner,"owner");
+    const auto approval = std::find_if(inbox.begin(),inbox.end(),[](const Json& row) {
+        return row.at("itemKind") == "conversation_model_budget";
+    });
+    check(approval != inbox.end(),"The notification did not pause for model budget");
+    store.decideInbox(localOwner,target(*approval),"approve");
+    runtime.runConversations();
+    const auto history = store.history(task);
+    const auto event = std::find_if(history.begin(),history.end(),[](const Json& row) {
+        return row.at("kind") == "git_webhook";
+    });
+    check(event != history.end() && event->at("data").at("jobId") == 81 &&
+          event->at("data").at("headSha") == sha && event->at("data").at("prNumber") == 1,
+          "Budget approval erased the Git delivery from task history");
+    check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos,"Approved model call did not resume");
+
+    script.onNotification = [&] {
+        store.access().resourceGrant(localOwner,"owner",{"repository",repoGrant,"read"},GrantChange::revoke);
+    };
+    const auto replies = historyCount(store,task,"conversation_reply");
+    check(store.receiveGitWebhook({hostName,"revoked-turn",repoName,"comment","created",{1},sha,"An update",0}),
+          "Could not enqueue new event");
+    runtime.runConversations();
+    check(script.notifications == 2 && historyCount(store,task,"conversation_reply") == replies,
+          "A queued notification posted a reply after grant revocation");
+    check(store.receiveGitWebhook({hostName,"revoked-event",repoName,"comment","created",{1},sha,"Another update",0}),
+          "Could not enqueue event after revocation");
+    runtime.runConversations();
+    check(historyCount(store,task,"git_webhook") == 2,"Revoked grant received another task event");
 }
 
 void schemas() {
@@ -315,6 +501,9 @@ int main() {
         recovery(FakeHost::State::open,false,true);
         recovery(FakeHost::State::open,false,false,true);
         accessAndActions();
+        newAttempts();
+        redaction();
+        notificationBudgetAndRevocation();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

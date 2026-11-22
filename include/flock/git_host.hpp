@@ -59,6 +59,7 @@ struct GitWebhook {
     std::vector<Id> prNumbers;
     std::string headSha, summary;
     Id jobId = 0;
+    std::string payloadDigest = {};
 };
 
 const std::vector<std::string>& gitTools();

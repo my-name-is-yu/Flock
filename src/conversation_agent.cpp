@@ -168,6 +168,21 @@ Json sourceRef(const Json& result) {
 }
 
 Json Store::Impl::turnInput(const Message& message, int step) const {
+    Json turn = Json::array();
+    auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
+                       " AND result IS NOT NULL ORDER BY step",{message.id,step});
+    while (steps.next()) {
+        const auto decision = steps.json(0);
+        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
+    }
+    auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
+                      {"replyTo",nullptr},{"turn",std::move(turn)}};
+    if (message.routing.contains("gitEvent")) {
+        auto gitEvent = message.routing.at("gitEvent");
+        event["gitEvent"] = gitRedactor().record(std::move(gitEvent));
+        return {{"task",Json::object()},{"event",std::move(event)},{"history",Json::array()}};
+    }
+
     Json tasks = Json::array();
     std::set<Id> listed;
     const auto latestResult = [&](Id taskId) -> Json {
@@ -302,16 +317,7 @@ ORDER BY j.id DESC LIMIT ?
         }
     }
 
-    Json turn = Json::array();
-    auto steps = query("SELECT decision,result FROM conversation_steps WHERE message_id=? AND step<?"
-                       " AND result IS NOT NULL ORDER BY step",{message.id,step});
-    while (steps.next()) {
-        const auto decision = steps.json(0);
-        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
-    }
-    auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}};
-    if (message.routing.contains("gitEvent")) event["gitEvent"] = message.routing.at("gitEvent");
+    event["replyTo"] = std::move(replyTo);
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
             {"event",std::move(event)},
             {"history",std::move(history)}};
@@ -604,16 +610,28 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
     if (!message) return true;
     const bool ja = japanese(message->text);
     const auto webhook = message->routing.value("gitEvent",Json(nullptr));
+    const auto revoked = [&] {
+        if (!webhook.is_object() || canReceiveGitWebhook(message->bot,webhook)) return false;
+        exec("UPDATE journal SET data=json_set(data,'$.status','access_revoked') WHERE id=?",{id});
+        exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{id});
+        return true;
+    };
     auto tools = webhook.is_object() ? std::vector<std::string>{"reply"} : turnTools;
     if (gitHost) {
         if (webhook.is_object()) {
-            tools.insert(tools.end(),{"git_pr_status","git_commit_status","git_read_ci_logs"});
+            tools.push_back("git_pr_status");
+            if (!field(webhook,"headSha").empty()) tools.push_back("git_commit_status");
+            if (webhook.at("jobId") != 0) tools.push_back("git_read_ci_logs");
         } else tools.insert(tools.end(),gitTools().begin(),gitTools().end());
     }
     const auto finish = [&](std::string text, std::string_view route) {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (!turnMessage(id)) return;
+        if (revoked()) {
+            transaction.commit();
+            return;
+        }
         finishTurn(*message,std::move(text),nullptr,route);
         transaction.commit();
     };
@@ -653,6 +671,10 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (!turnMessage(id)) return true;
+                if (revoked()) {
+                    transaction.commit();
+                    return true;
+                }
                 const auto context = turnInput(*message,step);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = tools,.feedback = {},.config = message->routing.at("config")};
@@ -680,9 +702,14 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             }
             std::lock_guard lock(mutex);
             Transaction transaction(db);
-            exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",
-                 {Json{{"tool",decision->tool},{"args",decision->args},{"reason",decision->reason},
-                       {"usage",decision->usage}},id,step});
+            if (revoked()) {
+                transaction.commit();
+                return true;
+            }
+            auto saved = Json{{"tool",decision->tool},{"args",decision->args},{"reason",decision->reason},
+                              {"usage",decision->usage}};
+            if (webhook.is_object() || isGitTool(decision->tool)) saved = gitRedactor().record(std::move(saved));
+            exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",{saved,id,step});
             transaction.commit();
         }
 
@@ -746,14 +773,15 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                     const auto owner = webhook.at("taskId").get<Id>();
                     if ((call.args.contains("taskId") && call.args.at("taskId") != owner) ||
                         field(call.args,"host") != field(webhook,"host") || field(call.args,"repo") != field(webhook,"repo") ||
-                        (call.tool == "git_pr_status" && call.args.value("prNumber",Id{0}) != webhook.at("prNumber")) ||
-                        (call.tool == "git_read_ci_logs" && call.args.value("jobId",Id{0}) != webhook.at("jobId")))
+                        (call.tool == "git_pr_status" && call.args.at("prNumber") != webhook.at("prNumber")) ||
+                        (call.tool == "git_commit_status" && field(call.args,"sha") != field(webhook,"headSha")) ||
+                        (call.tool == "git_read_ci_logs" && call.args.at("jobId") != webhook.at("jobId")))
                         throw Conflict("Git notification tools must use the watched target");
                     call.args["taskId"] = owner;
                 }
                 result = gitTool(*gitHost,message->bot,0,message->routing,call,
                                  "turn/" + std::to_string(id) + "/" + std::to_string(step));
-            } catch (const std::exception& error) { result = {{"ok",false},{"error",error.what()}}; }
+            } catch (const std::exception& error) { result = {{"ok",false},{"error",gitRedactor().text(error.what())}}; }
         } else if (decision->tool == "check_environment_readiness") {
             try {
                 result = readiness(message->bot,message->routing,decision->args,t3);
@@ -764,11 +792,16 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         Transaction transaction(db);
         const auto current = turnMessage(id);
         if (!current) return true;
+        if (revoked()) {
+            transaction.commit();
+            return true;
+        }
         if (decision->tool == "reply") {
             try {
                 const auto& args = decision->args;
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
                 auto reply = text(args,"text",8000,true);
+                if (webhook.is_object()) reply = gitRedactor().text(reply);
                 Json suggestions = Json::array();
                 if (const auto list = args.find("suggestions"); list != args.end() && !list->is_null()) {
                     if (!list->is_array() || list->size() > 4) throw ToolError("suggestions must be up to 4 strings");
@@ -782,6 +815,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                 }
                 exec("UPDATE conversation_steps SET result=? WHERE message_id=? AND step=?",
                      {Json{{"ok",true}},id,step});
+                if (webhook.is_object()) suggestions = gitRedactor().payload(suggestions);
                 finishTurn(*current,std::move(reply),suggestions,"reply");
                 transaction.commit();
                 return true;
@@ -828,7 +862,7 @@ void Store::Impl::approveMessageModelCall(Id message, Id waitMessageId) {
     const auto attempt = reserveExtraModelCall(messageModelBudget(message),"conversation_turn",message,0,0);
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});
-    exec("UPDATE journal SET data='{}' WHERE id=?",{message});
+    exec("UPDATE journal SET data=json_remove(data,'$.status') WHERE id=?",{message});
     exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
 }
 }

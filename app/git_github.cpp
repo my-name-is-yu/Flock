@@ -54,6 +54,43 @@ struct Buffer {
     bool truncated = false;
 };
 
+struct HttpResponse {
+    Buffer body;
+    long status;
+    std::string redirect;
+};
+
+using CurlUrl = std::unique_ptr<CURLU,decltype(&curl_url_cleanup)>;
+using CurlText = std::unique_ptr<char,decltype(&curl_free)>;
+
+CurlText urlPart(const CurlUrl& url, CURLUPart part) {
+    char* raw = nullptr;
+    curl_url_get(url.get(),part,&raw,0);
+    return CurlText(raw,curl_free);
+}
+
+bool validLogUrl(const std::string& location) {
+    const CurlUrl url(curl_url(),curl_url_cleanup);
+    if (!url || curl_url_set(url.get(),CURLUPART_URL,location.c_str(),CURLU_DISALLOW_USER) != CURLUE_OK)
+        return false;
+    const auto scheme = urlPart(url,CURLUPART_SCHEME);
+    const auto host = urlPart(url,CURLUPART_HOST);
+    if (!scheme || std::string_view(scheme.get()) != "https" || !host || urlPart(url,CURLUPART_PORT)) return false;
+    const std::string_view name(host.get());
+    constexpr std::string_view blob = ".blob.core.windows.net";
+    constexpr std::string_view storage = "productionresultssa";
+    if (name.ends_with(".actions.githubusercontent.com")) return true;
+    if (!name.starts_with(storage) || !name.ends_with(blob)) return false;
+    const auto number = name.substr(storage.size(),name.size() - storage.size() - blob.size());
+    return !number.empty() && number.find_first_not_of("0123456789") == number.npos;
+}
+
+void requireSuccess(long status) {
+    if (status == 400 || status == 401 || status == 403 || status == 404 || status == 422 || status == 429)
+        throw GitRejected("GitHub rejected the request (HTTP " + std::to_string(status) + ")");
+    if (status < 200 || status >= 300) throw Conflict("GitHub returned HTTP " + std::to_string(status));
+}
+
 std::size_t receive(char* data, std::size_t size, std::size_t count, void* context) noexcept {
     auto& buffer = *static_cast<Buffer*>(context);
     const auto length = size * count;
@@ -64,12 +101,12 @@ std::size_t receive(char* data, std::size_t size, std::size_t count, void* conte
     return bytes;
 }
 
-Json pick(const Json& object, std::initializer_list<const char*> keys, std::size_t textLimit = 2000) {
+Json pick(const Json& object, std::initializer_list<const char*> keys) {
     auto result = Json::object();
     for (const auto* key : keys) {
         const auto value = object.find(key);
         if (value == object.end()) continue;
-        result[key] = value->is_string() ? Json(bounded(value->get_ref<const std::string&>(),textLimit)) : *value;
+        result[key] = *value;
     }
     return result;
 }
@@ -152,10 +189,16 @@ public:
     }
 
     GitLog readCiLogs(const GitContext&, const GitRepository& repo, Id job, std::size_t maxBytes) override {
-        auto buffer = request("GET",path(repo) + "/actions/jobs/" + std::to_string(job) + "/logs",
-                              Json(nullptr),maxBytes,true);
-        auto text = Json::parse(Json(buffer.text).dump(-1,' ',false,Json::error_handler_t::replace)).get<std::string>();
-        return {std::move(text),buffer.truncated};
+        const auto endpoint = std::string(api) + path(repo) + "/actions/jobs/" + std::to_string(job) + "/logs";
+        const auto response = request("GET",endpoint,nullptr,8192,true);
+        if (response.status != 302) {
+            requireSuccess(response.status);
+            throw Conflict("GitHub did not return a job log download URL");
+        }
+        if (!validLogUrl(response.redirect)) throw Conflict("GitHub returned an unexpected job log destination");
+        auto download = request("GET",response.redirect,nullptr,maxBytes,false);
+        requireSuccess(download.status);
+        return {std::move(download.body.text),download.body.truncated};
     }
 
     Json call(const GitContext&, const GitRepository& repo, const Decision& decision) override {
@@ -202,28 +245,23 @@ public:
     }
 
 private:
-    Buffer request(const char* method, const std::string& endpoint, const Json& data,
-                   std::size_t maxBytes, bool follow) const {
+    HttpResponse request(const char* method, const std::string& url, const Json& data,
+                         std::size_t maxBytes, bool authenticated) const {
         const std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
         if (!curl) throw Conflict("Could not open a GitHub connection");
         Buffer response{{},maxBytes};
-        const auto url = std::string(api) + endpoint;
         auto options = curl.get();
         curl_easy_setopt(options,CURLOPT_URL,url.c_str());
         curl_easy_setopt(options,CURLOPT_CUSTOMREQUEST,method);
         curl_easy_setopt(options,CURLOPT_USERAGENT,"Flock");
-        curl_easy_setopt(options,CURLOPT_HTTPAUTH,CURLAUTH_BEARER);
-        curl_easy_setopt(options,CURLOPT_XOAUTH2_BEARER,token_.c_str());
+        if (authenticated) {
+            curl_easy_setopt(options,CURLOPT_HTTPAUTH,CURLAUTH_BEARER);
+            curl_easy_setopt(options,CURLOPT_XOAUTH2_BEARER,token_.c_str());
+        }
+        curl_easy_setopt(options,CURLOPT_PROTOCOLS_STR,"https");
         curl_easy_setopt(options,CURLOPT_NOSIGNAL,1L);
         curl_easy_setopt(options,CURLOPT_CONNECTTIMEOUT,5L);
         curl_easy_setopt(options,CURLOPT_TIMEOUT,20L);
-        curl_easy_setopt(options,CURLOPT_FOLLOWLOCATION,follow ? 1L : 0L);
-        curl_easy_setopt(options,CURLOPT_MAXREDIRS,3L);
-#if LIBCURL_VERSION_NUM >= 0x075500
-        curl_easy_setopt(options,CURLOPT_REDIR_PROTOCOLS_STR,"https");
-#else
-        curl_easy_setopt(options,CURLOPT_REDIR_PROTOCOLS,CURLPROTO_HTTPS);
-#endif
         curl_easy_setopt(options,CURLOPT_WRITEFUNCTION,receive);
         curl_easy_setopt(options,CURLOPT_WRITEDATA,&response);
         curl_slist* headers = nullptr;
@@ -237,7 +275,7 @@ private:
             headers = next;
         }
         const std::unique_ptr<curl_slist,decltype(&curl_slist_free_all)> ownedHeaders(headers,curl_slist_free_all);
-        curl_easy_setopt(options,CURLOPT_HTTPHEADER,headers);
+        if (authenticated) curl_easy_setopt(options,CURLOPT_HTTPHEADER,headers);
         const auto body = data.is_null() ? std::string{} : data.dump();
         if (!data.is_null()) {
             curl_easy_setopt(options,CURLOPT_POSTFIELDS,body.c_str());
@@ -245,17 +283,22 @@ private:
         }
         const auto sent = curl_easy_perform(options);
         long status = 0;
-        curl_easy_getinfo(options,CURLINFO_RESPONSE_CODE,&status);
-        if (sent != CURLE_OK && !(sent == CURLE_WRITE_ERROR && response.truncated && follow))
+        if (curl_easy_getinfo(options,CURLINFO_RESPONSE_CODE,&status) != CURLE_OK)
+            throw Conflict("Could not read the GitHub response status");
+        if (sent != CURLE_OK && !(sent == CURLE_WRITE_ERROR && response.truncated && !authenticated))
             throw Conflict("GitHub request or response was interrupted");
-        if (status == 400 || status == 401 || status == 403 || status == 404 || status == 422 || status == 429)
-            throw GitRejected("GitHub rejected the request (HTTP " + std::to_string(status) + ")");
-        if (status < 200 || status >= 300) throw Conflict("GitHub returned HTTP " + std::to_string(status));
-        return response;
+        char* redirect = nullptr;
+        if (status == 302 && curl_easy_getinfo(options,CURLINFO_REDIRECT_URL,&redirect) != CURLE_OK)
+            throw Conflict("Could not read the GitHub redirect");
+        return {std::move(response),status,redirect ? redirect : ""};
     }
 
     Json json(const char* method, const std::string& endpoint, const Json& data = nullptr) const {
-        return Json::parse(request(method,endpoint,data,responseLimit,false).text);
+        const auto response = request(method,std::string(api) + endpoint,data,responseLimit,true);
+        requireSuccess(response.status);
+        auto parsed = Json::parse(response.body.text,nullptr,false);
+        if (parsed.is_discarded()) throw Conflict("GitHub returned malformed JSON");
+        return parsed;
     }
 
     Json comment(const std::string& root, const Json& args) const {
@@ -281,12 +324,17 @@ private:
         const auto action = str(args,"action");
         const auto issues = root + "/issues";
         const auto target = args.contains("issueNumber") ? issues + "/" + id(args,"issueNumber") : issues;
-        const auto page = "&per_page=30&page=" + std::to_string(args.value("page",Id{1}));
+        const auto pageNumber = args.value("page",Id{1});
+        const auto page = "&per_page=30&page=" + std::to_string(pageNumber);
+        const auto continuation = [pageNumber](const Json& response) -> Json {
+            return response.size() == 30 ? Json(pageNumber + 1) : Json(nullptr);
+        };
         if (action == "list") {
-            auto result = Json::array();
-            for (const auto& value : json("GET",issues + "?state=" + args.value("state","open") + page))
-                if (!value.contains("pull_request")) result.push_back(compactIssue(value));
-            return result;
+            const auto response = json("GET",issues + "?state=" + args.value("state","open") + page);
+            auto items = Json::array();
+            for (const auto& value : response)
+                if (!value.contains("pull_request")) items.push_back(compactIssue(value));
+            return {{"items",items},{"nextPage",continuation(response)}};
         }
         if (action == "read") {
             const auto value = json("GET",target);
@@ -294,14 +342,14 @@ private:
             return compactIssue(value);
         }
         if (action == "create")
-            return compactIssue(json("POST",target,pick(args,{"title","body","labels","assignees"},12000)));
+            return compactIssue(json("POST",target,pick(args,{"title","body","labels","assignees"})));
         validateIssueKind(target,false);
         if (action == "update")
-            return compactIssue(json("PATCH",target,pick(args,{"title","body","state","labels","assignees"},12000)));
-        auto result = Json::array();
-        for (const auto& value : json("GET",target + "/comments?sort=created" + page))
-            result.push_back(compactComment(value));
-        return result;
+            return compactIssue(json("PATCH",target,pick(args,{"title","body","state","labels","assignees"})));
+        const auto response = json("GET",target + "/comments?sort=created" + page);
+        auto items = Json::array();
+        for (const auto& value : response) items.push_back(compactComment(value));
+        return {{"items",items},{"nextPage",continuation(response)}};
     }
 
     const std::string token_;

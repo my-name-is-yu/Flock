@@ -8,7 +8,7 @@ FetchContent_Declare(date
 FetchContent_MakeAvailable(date)
 
 configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
-find_package(CURL REQUIRED)
+find_package(CURL 7.85 REQUIRED)
 add_library(flock_app_support bots.cpp model.cpp git_github.cpp)
 target_link_libraries(flock_app_support PUBLIC flock_core date::date-tz PRIVATE CURL::libcurl)
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")

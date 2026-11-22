@@ -16,7 +16,7 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
                        src/model_budget.cpp src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/board_inbox.cpp
-                       src/git_host.cpp src/git_tools.cpp src/git_webhooks.cpp)
+                       src/git_host.cpp src/git_pr.cpp src/git_tools.cpp src/git_webhooks.cpp)
 target_include_directories(flock_core PUBLIC include)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)

@@ -189,7 +189,7 @@ void exercise(const std::filesystem::path& path) {
     const auto report = store.task(question);
     const auto review = store.requestPrReview(question,report.at("currentRevision"),report.at("generation"),
                                               prUrl,"Review the published report","Check the report and source");
-    const auto grant = access.request("review",{"repository","report","read"});
+    const auto grant = access.request("review",{"repository","github.com/org/report","read"});
     const auto secret = access.requestSecret("review",{"report-credential"});
     access.resourceGrant(owner,"review",{"bot_admin","review","rename_bot"},GrantChange::grant);
     const auto botRequest = access.requestBotChange("review","rename_bot","review","Reviewer");
@@ -251,7 +251,7 @@ void exercise(const std::filesystem::path& path) {
     check(row(store.board(alice),"taskId",question).at("prRefs").at(0).at("status") == "approved",
           "PR approval failed to update the linked review");
     store.decideInbox(owner,pending(store,grant_request),"approve");
-    check(access.permits("review",{"repository","report","read"},true),"inbox grant bypassed canonical approval");
+    check(access.permits("review",{"repository","github.com/org/report","read"},true),"inbox grant bypassed canonical approval");
     store.decideInbox(owner,pending(store,protected_input),"supply",{{"value","test-vault-value"}});
     check(store.decisionHistory(owner).dump().find("test-vault-value") == std::string::npos,"secret was journaled");
     store.decideInbox(owner,pending(store,bot_change),"approve",Json::object(),apply);
@@ -343,7 +343,7 @@ void exercise(const std::filesystem::path& path) {
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,turn,"approve"); },"turn approved twice");
     check(store.pausedConversations("review").empty() && access.grants("review").size() >= 2,
           "conversation model approval did not release the pause");
-    access.request("review",{"repository","after-restart","read"});
+    access.request("review",{"repository","github.com/org/after-restart","read"});
 }
 
 void chatDecision(const std::filesystem::path& path) {
@@ -393,7 +393,7 @@ int main() {
         const auto approval = row(history,"itemKind","extra_run");
         check(history.size() == 9 && approval.at("decidedAt").get<Id>() > 0 &&
               (approval.at("decidedBy") == "alice" || approval.at("decidedBy") == "bob") &&
-              row(restarted.inbox(alice),"itemKind","grant_request").at("prompt") == "read repository after-restart",
+              row(restarted.inbox(alice),"itemKind","grant_request").at("prompt") == "read repository github.com/org/after-restart",
               "restart lost pending requests or recorded decisions");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

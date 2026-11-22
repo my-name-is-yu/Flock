@@ -760,7 +760,7 @@ void botProfileEndpoints(const std::filesystem::path& path) {
 }
 void accessEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    const auto id = store.access().request("release",{"repository","private","read"});
+    const auto id = store.access().request("release",{"repository","github.com/org/private","read"});
     auto cb = callbacks();
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
@@ -792,7 +792,7 @@ void accessEndpoints(const std::filesystem::path& path) {
     auto state = browser.get("/api/access?bot=release");
     check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
     browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
-                                          {"resourceId","private"},{"operation","read"}});
+                                          {"resourceId","github.com/org/private"},{"operation","read"}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     browser.get("/api/conversation?bot=release");
     check(browser.get("/api/bots").size()==1,"view-only person listed unrelated Bots");

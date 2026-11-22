@@ -178,9 +178,9 @@ void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
     exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
          {task["state"], task["generation"], task, task["environmentId"], task["id"]});
-    exec("UPDATE pr_review_items SET target_generation=?,target_revision=? WHERE status='pending' AND task_id=?"
-         " AND id IN (SELECT inbox_id FROM git_inbox_items WHERE task_id=?)",
-         {task["generation"],task.value("currentRevision",Id{0}),task["id"],task["id"]});
+    exec("UPDATE pr_review_items SET target_generation=? WHERE status='pending' AND task_id=?"
+         " AND target_revision=? AND (git_key IS NOT NULL OR operation_id IS NOT NULL)",
+         {task["generation"],task["id"],task.value("currentRevision",Id{0})});
 }
 Json Store::Impl::queueBlocker(Id id) const {
     auto row = query("SELECT head.id,owner.bot_id,json_extract(owner.data,'$.request'),head.state"

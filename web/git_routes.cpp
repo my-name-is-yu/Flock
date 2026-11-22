@@ -3,6 +3,7 @@
 
 #include <openssl/crypto.h>
 #include <openssl/hmac.h>
+#include <openssl/sha.h>
 
 #include <charconv>
 #include <limits>
@@ -16,6 +17,17 @@ void reply(httplib::Response& response, int status, const Json& result) {
     response.set_content(result.dump(),"application/json");
 }
 
+std::string hexDigest(const unsigned char* digest, unsigned length) {
+    constexpr char hex[] = "0123456789abcdef";
+    std::string output;
+    output.reserve(length * 2);
+    for (unsigned i = 0; i < length; ++i) {
+        output += hex[digest[i] >> 4];
+        output += hex[digest[i] & 15];
+    }
+    return output;
+}
+
 bool verified(const httplib::Request& request, const std::string& secret) {
     if (request.get_header_value_count("X-Hub-Signature-256") != 1) return false;
     const auto signature = request.get_header_value("X-Hub-Signature-256");
@@ -24,12 +36,7 @@ bool verified(const httplib::Request& request, const std::string& secret) {
     if (secret.size() > std::numeric_limits<int>::max() ||
         !HMAC(EVP_sha256(),secret.data(),static_cast<int>(secret.size()),
               reinterpret_cast<const unsigned char*>(request.body.data()),request.body.size(),digest,&length)) return false;
-    constexpr char hex[] = "0123456789abcdef";
-    std::string expected = "sha256=";
-    for (unsigned i = 0; i < length; ++i) {
-        expected += hex[digest[i] >> 4];
-        expected += hex[digest[i] & 15];
-    }
+    const auto expected = "sha256=" + hexDigest(digest,length);
     return signature.size() == expected.size() && CRYPTO_memcmp(signature.data(),expected.data(),expected.size()) == 0;
 }
 
@@ -113,7 +120,6 @@ std::optional<GitWebhook> githubEvent(const httplib::Request& request) {
     } else return {};
     if (event.prNumbers.empty() && event.headSha.empty()) return {};
     event.repo = payload.at("repository").at("full_name").get<std::string>();
-    event.summary = bounded(event.summary,4000);
     return event;
 }
 }
@@ -127,8 +133,11 @@ void gitRoutes(httplib::Server& server, Store& store, const WebCallbacks& callba
         if (req.get_header_value_count("X-GitHub-Delivery") != 1 || req.get_header_value_count("X-GitHub-Event") != 1)
             return reply(res,400,{{"error","invalid_webhook_headers"}});
         try {
-            const auto event = githubEvent(req);
+            auto event = githubEvent(req);
             if (!event) return reply(res,202,{{"status","ignored"}});
+            unsigned char digest[SHA256_DIGEST_LENGTH];
+            SHA256(reinterpret_cast<const unsigned char*>(req.body.data()),req.body.size(),digest);
+            event->payloadDigest = hexDigest(digest,SHA256_DIGEST_LENGTH);
             reply(res,202,{{"status",store.receiveGitWebhook(*event) ? "received" : "duplicate"}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_git_webhook"}}); }
         catch (const std::invalid_argument&) { reply(res,400,{{"error","invalid_git_webhook"}}); }

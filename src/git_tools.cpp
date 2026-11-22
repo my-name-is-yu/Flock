@@ -25,7 +25,8 @@ const std::map<std::string_view,Tool>& specs() {
         {"git_open_pr",{"Open or recover the task's PR using repository:pr and repository:read on a separate head repository.",
             {{"baseRef","string","Exact base branch."},{"headRepo","string","Head owner/repo. Omit for the base repository.",false},
              {"headRef","string","Exact head branch."},{"title","string","Pull request title."},
-             {"body","string","Pull request description.",false},{"draft","boolean","Open as a draft.",false}}}},
+             {"body","string","Pull request description.",false},{"draft","boolean","Open as a draft.",false},
+             {"newIntent","boolean","Set only when explicitly asked to create a replacement after the previous PR closed.",false}}}},
         {"git_update_pr",{"Update title, body, base branch or open/closed state using repository:pr.",
             {{"prNumber","integer","Exact PR number."},{"title","string","New title.",false},
              {"body","string","New description.",false},{"baseRef","string","New base branch.",false},
@@ -54,7 +55,7 @@ const std::map<std::string_view,Tool>& specs() {
              {"state","string","State filter for list or new state for update.",false,{"open","closed","all"}},
              {"labels","array","Labels. For update, replaces the current list.",false},
              {"assignees","array","Usernames. For update, replaces the current list.",false},
-             {"page","integer","Page of up to 30 items for list or list_comments.",false}}}},
+             {"page","integer","Start at 1 and use nextPage to continue, even when items is empty.",false}}}},
     };
     return tools;
 }
@@ -93,6 +94,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
         if (param.required) required.push_back(param.name);
     }
     if (name == "git_read_ci_logs") properties["maxBytes"]["maximum"] = 16384;
+    if (name == "git_manage_issue") properties["page"]["maximum"] = 10000;
     return {{"type","function"},{"name",name},{"description",spec.description},{"strict",false},
         {"parameters",{{"type","object"},{"properties",properties},{"required",required},{"additionalProperties",false}}}};
 }
