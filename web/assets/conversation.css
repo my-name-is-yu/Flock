@@ -1,4 +1,4 @@
-.main { --conversation-top: 1rem; }
+.main { --conversation-top: 1rem; --jump-to-latest-space: 4rem; }
 
 .conversation-header { position: relative; z-index: 3; height: var(--header-height); box-shadow: inset 0 -1px var(--hairline); }
 .header-inner {
@@ -54,7 +54,6 @@
 .conversation {
   --bot-accent: var(--accent-fill);
   --user-bubble: #58418a;
-  --jump-to-latest-space: 4rem;
   grid-area: 2 / 1;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
   /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
