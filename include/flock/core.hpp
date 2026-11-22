@@ -24,6 +24,7 @@ std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
+struct SpecialistAllowanceExhausted : Conflict { using Conflict::Conflict; };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -335,6 +336,8 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     SpecialistDelegation startSpecialist(const Person&, const SpecialistCheck&);
+    Id specialistBudgetRemaining(Id channel) const;
+    void freezeSpecialistWork(const Person&, Id channel, Id generation);
     void runConversations();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.

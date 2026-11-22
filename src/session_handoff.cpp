@@ -26,6 +26,37 @@ bool unresolved(State state) {
            state == State::Unknown;
 }
 
+enum class ModelAttemptState { Reserved, Exhausted, Stale };
+
+template <typename Database>
+ModelAttemptState reserveModelAttempt(Database& db, const Person& person, Id channel, Id generation,
+                                      const Json& config, std::string_view purpose, Id& attempt) {
+    Transaction transaction(db.db);
+    db.authorizeParticipation(person,channel);
+    auto control = db.query("SELECT generation,state FROM session_controls WHERE channel_id=?",{channel});
+    if (!control.next() || control.number(0) != generation || control.string(1) != "active") {
+        transaction.commit();
+        return ModelAttemptState::Stale;
+    }
+    const auto budget = db.ensureModelBudget("session-handoff/" + std::to_string(channel),config);
+    attempt = db.reserveModelCall(budget,purpose,0,0,0);
+    if (!attempt) {
+        db.exec(R"SQL(
+UPDATE session_controls SET state='budget_exhausted',generation=generation+1
+WHERE channel_id=? AND generation=? AND state='active'
+)SQL",{channel,generation});
+        if (sqlite3_changes(db.db)) {
+            db.exec("UPDATE thread_deliveries SET state=? WHERE channel_id=? AND state=?",
+                    {static_cast<int>(State::Rejected),channel,static_cast<int>(State::Prepared)});
+            db.exec("UPDATE session_decisions SET settled=1 WHERE channel_id=? AND NOT settled",{channel});
+        }
+        transaction.commit();
+        return ModelAttemptState::Exhausted;
+    }
+    transaction.commit();
+    return ModelAttemptState::Reserved;
+}
+
 }
 
 void Store::Impl::initializeSessionHandoffSchema() {
@@ -43,30 +74,54 @@ CREATE TABLE IF NOT EXISTS session_decisions(
 
 void SessionHandoff::recover() {
     auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    db.exec("UPDATE thread_deliveries SET state=? WHERE state=?",
-            {static_cast<int>(State::Unknown),static_cast<int>(State::Dispatching)});
+    struct Sweep { std::string person; Id channel, generation; };
+    std::vector<Sweep> sweeps;
+    {
+        std::lock_guard lock(db.mutex);
+        db.exec("UPDATE thread_deliveries SET state=? WHERE state=?",
+                {static_cast<int>(State::Unknown),static_cast<int>(State::Dispatching)});
+        if (runtime_) {
+            auto rows = db.query(R"SQL(
+SELECT DISTINCT r.person_id,d.channel_id,c.generation-1 FROM session_controls c
+JOIN return_channels r ON r.id=c.channel_id
+JOIN specialist_delegations d ON d.channel_id=c.channel_id
+WHERE c.state IN ('paused','stopped','budget_exhausted') AND d.generation<c.generation
+)SQL");
+            while (rows.next()) sweeps.push_back({rows.string(0),rows.number(1),rows.number(2)});
+        }
+    }
+    for (const auto& sweep : sweeps)
+        if (const auto person=people_(sweep.person))
+            runtime_->freezeSpecialistWork(*person,sweep.channel,sweep.generation);
 }
 
 SessionHandoffView SessionHandoff::freezeAs(const Person& person, Id channel, std::string_view state) {
     auto& db = *store_.p_;
+    Id generation = 0;
+    bool changed = false, coordination = false;
     {
         std::lock_guard lock(db.mutex);
         Transaction tx(db.db);
         const auto participation = db.authorizeParticipation(person,channel,false);
+        coordination = std::holds_alternative<CoordinationActivation>(participation);
         if (state == "paused" && !std::holds_alternative<CoordinationActivation>(participation))
             throw Conflict("Only coordination can be paused");
+        auto control = db.query("SELECT generation FROM session_controls WHERE channel_id=?",{channel});
+        if (control.next()) generation = control.number(0);
         db.exec(R"SQL(
 UPDATE session_controls SET generation=generation+1,state=?
 WHERE channel_id=? AND (state='active' OR (?='stopped' AND state='paused'))
 )SQL",{state,channel,state});
-        if (sqlite3_changes(db.db)) {
+        changed = sqlite3_changes(db.db) != 0;
+        if (changed) {
             db.exec("UPDATE thread_deliveries SET state=? WHERE channel_id=? AND state=?",
                     {static_cast<int>(State::Rejected),channel,static_cast<int>(State::Prepared)});
             db.exec("UPDATE session_decisions SET settled=1 WHERE channel_id=? AND NOT settled",{channel});
         }
         tx.commit();
     }
+    if (changed && coordination && runtime_ && (state=="paused" || state=="stopped" || state=="budget_exhausted"))
+        runtime_->freezeSpecialistWork(person,channel,generation);
     return view(person,channel);
 }
 
@@ -79,6 +134,11 @@ SessionHandoffView SessionHandoff::freeze(const Person& person, Id channel) {
 }
 
 SessionHandoffView SessionHandoff::resume(const Person& person, Id channel) {
+    if (runtime_) {
+        const auto current = view(person,channel);
+        if (current.state=="paused" && current.generation>0)
+            runtime_->freezeSpecialistWork(person,channel,current.generation-1);
+    }
     RootDelivery(store_,session_).reconcile(person,channel);
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
@@ -133,7 +193,10 @@ SELECT CASE WHEN ?4='' THEN d.sender_task ELSE s.task_id END
 FROM specialist_delegations d JOIN session_controls c ON c.channel_id=d.channel_id
 LEFT JOIN workflows w ON w.delegation_id=d.id
 LEFT JOIN workflow_stages s ON s.workflow_id=w.id AND s.stage_id=?4
-WHERE d.channel_id=?1 AND d.generation=?2 AND d.id=?3 AND d.generation=c.generation AND c.state='active'
+WHERE d.channel_id=?1 AND d.generation=?2 AND d.id=?3 AND c.state='active'
+AND (d.generation=c.generation OR (d.generation<c.generation AND EXISTS (
+ SELECT 1 FROM tasks admitted WHERE admitted.id=CASE WHEN ?4='' THEN d.recipient_task ELSE s.task_id END
+ AND json_extract(admitted.data,'$.activeRun') IS NOT NULL)))
 )SQL",{channel,generation,delegation,stage});
     if (!binding.next() || !binding.number(0)) throw Conflict("This work question is unavailable");
     const auto task = db.load(binding.number(0));
@@ -150,7 +213,10 @@ SessionHandoffView SessionHandoff::view(const Person& person, Id channel) const 
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db,Transaction::Mode::read);
     const auto participation = db.authorizeParticipation(person,channel,false);
-    const auto& origin = channelOf(participation).origin;
+    const auto& returnChannel = channelOf(participation);
+    const auto& origin = returnChannel.origin;
+    const auto scrub = db.sharedRedactor();
+    const auto clean = [&](std::string_view text) { return redactPairingCodes(scrub.text(text)); };
     auto row = db.query("SELECT state,generation,event_cursor FROM session_controls WHERE channel_id=?",{channel});
     if (!row.next()) throw Conflict("Unknown Session handoff");
     SessionHandoffView result;
@@ -163,13 +229,14 @@ SessionHandoffView SessionHandoff::view(const Person& person, Id channel) const 
     if (const auto* coord = std::get_if<CoordinationActivation>(&participation)) {
         result.coordination = true;
         result.permission = coord->binding.request;
+        result.permission->goal = clean(result.permission->goal);
     }
     if (auto decision = db.query(R"SQL(
 SELECT event_id,position,kind,text,settled FROM session_decisions
 WHERE channel_id=? AND kind<>'wait_for_root' ORDER BY rowid DESC LIMIT 1
 )SQL",{channel}); decision.next()) {
         result.latestDecision = {{"eventId",decision.string(0)},{"position",decision.number(1)},
-                                 {"kind",decision.string(2)},{"text",decision.string(3)},
+                                 {"kind",decision.string(2)},{"text",clean(decision.string(3))},
                                  {"settled",decision.number(4) != 0}};
     }
     if (!result.frozen) {
@@ -177,43 +244,50 @@ WHERE channel_id=? AND kind<>'wait_for_root' ORDER BY rowid DESC LIMIT 1
 SELECT event_id,text FROM session_decisions WHERE channel_id=? AND generation=? AND kind='handoff_question'
 AND answer_text IS NULL ORDER BY rowid LIMIT 1
 )SQL",{channel,result.generation});
-        if (question.next()) result.pendingQuestion = {{"eventId",question.string(0)},{"text",question.string(1)}};
+        if (question.next()) result.pendingQuestion = {{"eventId",question.string(0)},{"text",clean(question.string(1))}};
     }
     auto delegations = db.query(R"SQL(
-SELECT d.id,r.bot_id,r.state,d.purpose,d.done_when,d.commit_sha,w.id,j.data,p.phase,d.sender_task,d.parent_id,d.generation
+SELECT d.id,r.bot_id,r.state,d.purpose,d.done_when,d.commit_sha,w.id,j.data,p.phase,d.sender_task,d.parent_id,d.generation,d.recipient_task
 FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task
 JOIN peer_exchanges p ON p.id=d.id LEFT JOIN workflows w ON w.delegation_id=d.id
 LEFT JOIN journal j ON j.task_id=d.sender_task AND j.kind='specialist_result'
 WHERE d.channel_id=? ORDER BY d.rowid LIMIT 16
 )SQL", {channel});
     while (delegations.next()) {
-        const auto scrub = db.sharedRedactor();
         Json work{{"delegationId",delegations.string(0)},{"executor",delegations.string(1)},
-                  {"state",delegations.string(2)},{"generation",delegations.number(11)},{"purpose",delegations.string(3)},
-                  {"doneWhen",delegations.string(4)},{"commit",delegations.string(5)},
+                  {"state",delegations.string(2)},{"generation",delegations.number(11)},{"purpose",clean(delegations.string(3))},
+                  {"doneWhen",clean(delegations.string(4))},{"commit",delegations.string(5)},
                   {"phase",delegations.string(8)},{"stages",Json::array()},
                   {"question",workQuestion(db.load(delegations.number(9)),scrub)}};
+        const auto answerable = [&](Id task) {
+            return !result.frozen && (delegations.number(11)==result.generation ||
+                (delegations.number(11)<result.generation && task>0 &&
+                 db.query("SELECT 1 FROM tasks WHERE id=? AND json_extract(data,'$.activeRun') IS NOT NULL",{task}).next()));
+        };
+        work["canAnswer"] = answerable(delegations.number(12));
         if (const auto parent = delegations.string(10); !parent.empty()) work["parentDelegationId"] = parent;
         if (const auto workflow = delegations.number(6)) {
             const auto details = db.workflowStatus(workflow,delegations.string(1),unixTime());
             for (const auto& stage : details.at("stages")) {
                 const auto task = stage.at("taskId").get<Id>();
-                work["stages"].push_back({{"stageId",stage.at("stageId")},{"name",stage.at("name")},
+                work["stages"].push_back({{"stageId",stage.at("stageId")},
+                    {"name",clean(stage.at("name").get<std::string>())},
                     {"status",stage.at("status")},{"needsAttention",stage.at("needsAttention")},
                     {"commit",stage.at("inputArtifactVersion")},
-                    {"question",task ? workQuestion(db.load(task),scrub) : Json(nullptr)}});
+                    {"question",task ? workQuestion(db.load(task),scrub) : Json(nullptr)},
+                    {"canAnswer",answerable(task)}});
             }
         }
         if (!delegations.string(7).empty()) {
             const auto settled = delegations.json(7);
-            work["result"] = {{"status",settled.value("workflowStatus",field(settled,"status"))},
-                              {"verdict",field(settled,"verdict")},{"report",field(settled,"report")}};
+            work["result"] = {{"status",clean(settled.value("workflowStatus",field(settled,"status")))},
+                              {"verdict",clean(field(settled,"verdict"))},{"report",clean(field(settled,"report"))}};
             auto evidence = Json::array();
             for (const auto& source : settled.value("references",Json::array())) {
                 evidence.push_back({{"threadId",field(source,"threadId")},{"runId",field(source,"runId")},
                                     {"itemId",field(source,"itemId")},{"stageId",field(source,"stageId")},
-                                    {"verdict",field(source,"verdict")},{"commit",field(source,"artifactVersion")},
-                                    {"findings",field(source,"findings")}});
+                                    {"verdict",clean(field(source,"verdict"))},{"commit",field(source,"artifactVersion")},
+                                    {"findings",clean(field(source,"findings"))}});
             }
             work["result"]["evidence"] = std::move(evidence);
         }
@@ -283,7 +357,19 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
             {{"kind","session_consultation"},{"request",permit.channel.request}},
             Json::array(),std::move(notes),{"reply"},{},Json::array(),routing.config
         };
-        const auto turn = model.decide(input);
+        Id attempt = 0;
+        ModelAttemptState attemptState;
+        {
+            std::lock_guard lock(db.mutex);
+            attemptState = reserveModelAttempt(db,person,channel,current.generation,routing.config,
+                                               "session_consultation",attempt);
+        }
+        if (attemptState != ModelAttemptState::Reserved) {
+            if (attemptState == ModelAttemptState::Exhausted && runtime_)
+                runtime_->freezeSpecialistWork(person,channel,current.generation);
+            return;
+        }
+        const auto turn = db.callModel(origin.botId,model,input,attempt);
         if (turn.calls.size() != 1 || turn.calls.front().tool != "reply")
             throw Conflict("The Bot did not produce one consultation reply");
         const auto text = bounded(scrub.text(field(turn.calls.front().args,"text")),8192);
@@ -342,7 +428,18 @@ AND s.kind IN ('root_guidance','delegate_specialist') ORDER BY s.rowid LIMIT 1
         }
         if (job.kind == "delegate_specialist") {
             if (!runtime_) return true;
-            runtime_->startSpecialist(person,{channel,current.generation,job.command,job.specialist,job.text,job.doneWhen,job.commit});
+            try {
+                runtime_->startSpecialist(person,{channel,current.generation,job.command,job.specialist,job.text,job.doneWhen,job.commit});
+            } catch (const SpecialistAllowanceExhausted&) {
+                {
+                    std::lock_guard lock(db.mutex);
+                    Transaction tx(db.db);
+                    db.exec("UPDATE session_decisions SET settled=1 WHERE command_id=?",{job.command});
+                    tx.commit();
+                }
+                freezeAs(person,channel,"budget_exhausted");
+                return true;
+            }
         } else {
             const auto result = delivery.deliver(person,channel,job.command);
             if (result.state == State::Prepared || unresolved(result.state)) return true;
@@ -437,7 +534,8 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
                         {"commit",clean(commit)},{"status",clean(status)}});
     }
     const auto peerScope = Scope::workDelegate(target.environmentId,target.threadId);
-    if (runtime_ && peers_ && current.permission->allowDelegation && !awaitingSpecialist &&
+    if (runtime_ && runtime_->specialistBudgetRemaining(channel)>=2 && peers_ &&
+        current.permission->allowDelegation && !awaitingSpecialist &&
         store_.access().permits(bot,peerScope,true)) {
         for (const auto& peer : peers_(bot)) {
             const auto& settings = peer.intake;
@@ -481,7 +579,19 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
          {"specialistResult",std::move(evidence)}},
         Json::array(),std::move(note),tools,{},Json::array(),routing.config
     };
-    const auto turn = model.decide(input);
+    Id attempt = 0;
+    ModelAttemptState attemptState;
+    {
+        std::lock_guard lock(db.mutex);
+        attemptState = reserveModelAttempt(db,person,channel,current.generation,routing.config,
+                                           "session_coordination",attempt);
+    }
+    if (attemptState != ModelAttemptState::Reserved) {
+        if (attemptState == ModelAttemptState::Exhausted && runtime_)
+            runtime_->freezeSpecialistWork(person,channel,current.generation);
+        return view(person,channel);
+    }
+    const auto turn = db.callModel(bot,model,input,attempt);
     if (turn.calls.size() != 1) throw Conflict("The coordinator did not choose one action");
     const auto& decision = turn.calls.front();
     const auto& kind = decision.tool;
@@ -495,6 +605,10 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
         doneWhen = bounded(clean(field(decision.args,"doneWhen")),8192);
         if (doneWhen.empty() || !std::ranges::any_of(peers,[&](const Json& item) { return item.at("botId") == specialist; }))
             throw Conflict("Invalid specialist selection");
+    }
+    if (kind == "complete_handoff" && !evidenceSha.empty()) {
+        const auto latestPin = session_.inputCommit(target);
+        if (!latestPin || *latestPin != evidenceSha) return view(person,channel);
     }
     const bool effect = kind == "root_guidance" || kind == "delegate_specialist";
     {

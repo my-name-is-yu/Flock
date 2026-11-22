@@ -27,6 +27,7 @@ class ThreadSession {
 public:
     virtual ~ThreadSession() = default;
     virtual std::optional<ThreadPage> read(const ThreadTarget&, std::optional<Id> after) = 0;
+    virtual std::optional<ThreadPage> dispatchHistory(const ThreadTarget&, Id) { return {}; }
     virtual ThreadSend send(const ThreadTarget&, std::string_view authGeneration,
                             std::string_view requestId, std::string_view text) = 0;
     virtual std::optional<std::string> inputCommit(const ThreadTarget&) = 0;

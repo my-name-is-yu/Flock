@@ -396,8 +396,6 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
-        // The MCP tool uses its own short-lived pairing credential. Browser identity
-        // and CSRF headers do not authorize a call to this endpoint.
         if (req.path == "/mcp/flock") {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
             else if (req.method != "POST") {

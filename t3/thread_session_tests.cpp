@@ -1,6 +1,7 @@
 #include "internal.hpp"
 #include "flock/root_delivery.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 using namespace flockv0;
@@ -36,6 +37,23 @@ int main(int argc, char** argv) {
               later->events.back().creationSource == "mcp" && later->events.back().createdBy == "agent",
               "forward page includes finalized progress and correlated MCP delivery");
 
+        fixture({{"stockHistory","late-human"}});
+        const auto firstPage = session->read(target,0);
+        const auto fullHistory = session->dispatchHistory(target,0);
+        check(firstPage && firstPage->cursor == 20 && fullHistory && fullHistory->cursor == 26 &&
+              std::ranges::any_of(fullHistory->events,[](const auto& event) {
+                  return event.position == 26 && event.kind == "user_message" && event.createdBy == "user";
+              }),"dispatch history did not paginate beyond the finalized observation page");
+        fixture({{"stockHistory","streaming-late-human"}});
+        const auto streamingPage = session->read(target,0);
+        const auto streamingHistory = session->dispatchHistory(target,0);
+        check(streamingPage && streamingPage->cursor == 0 && streamingPage->events.empty() && streamingHistory &&
+              streamingHistory->events.size() == 2 && streamingHistory->events.back().createdBy == "user",
+              "dispatch history stopped at an unfinished assistant message");
+        fixture({{"stockIncomplete",true}});
+        check(!session->dispatchHistory(target,0),"an incomplete bounded history scan was treated as complete");
+        fixture({{"stockHistory","default"},{"stockIncomplete",false}});
+
         const auto generation = page->authGeneration;
         const auto send = [&](const ThreadTarget& destination, std::string_view auth = "") {
             return session->send(destination,auth.empty() ? generation : auth,"command-1","[Flock result] Complete.");
@@ -68,9 +86,31 @@ int main(int argc, char** argv) {
         command.config["session"] = {{"runtimeMode","approval-required"},
             {"workspaceStrategy",{{"type","worktree"},{"baseRef",pin},{"startFromOrigin",false},{"expectedCommit",pin}}}};
         check(!adapter->preflight(command), "valid pinned specialist preflight");
+        for (const auto mode : {"unstaged","staged"}) {
+            fixture({{"stockTrackedEdit",mode}});
+            command.actionId = std::string("dirty-") + mode;
+            const auto rejected = adapter->send(command);
+            check(rejected.kind == Delivery::Kind::NotAccepted && rejected.definitelyUnsent,
+                  "tracked " + std::string(mode) + " edit blocks the first specialist prompt");
+            fixture({{"stockTrackedEdit","clean"}});
+        }
+        command.actionId = "pinned-worker";
+        t3detail::Client provision(t3detail::loadCredential(directory,target.environmentId));
+        const auto provisioned = provision.call("t3_thread_launch",{{"projectId",command.projectId},
+            {"title","Flock task"},{"clientRequestId",command.actionId},{"runtimeMode","approval-required"},
+            {"workspaceStrategy",{{"type","worktree"},{"baseRef",pin},{"startFromOrigin",false}}}});
+        check(provisioned.at("threadId")==command.actionId && provisioned.at("runId").is_null(),
+              "fixture did not leave a provision-only launch for same-key recovery");
         const auto started = adapter->send(command);
         check(started.kind == Delivery::Kind::Accepted && started.run.threadId == command.actionId &&
               started.run.runId == "next-run", "idle stock workspace starts only after its input pin matches");
+        for (const auto mode : {"unstaged","staged"}) {
+            fixture({{"stockTrackedEdit",mode}});
+            const auto dirty = adapter->observe(target.environmentId,command.config,started.run);
+            check(dirty.kind == Observation::Kind::Finished && dirty.status == "failed" && !dirty.report.empty(),
+                  "tracked " + std::string(mode) + " edit did not produce terminal failed evidence");
+            fixture({{"stockTrackedEdit","clean"}});
+        }
         const auto report = adapter->observe(target.environmentId,command.config,started.run);
         check(report.kind == Observation::Kind::Finished && report.status == "completed" && report.report == "Pinned report",
               "provider report from the pinned workspace is accepted");
@@ -83,8 +123,12 @@ int main(int argc, char** argv) {
         check(wrong.kind == Delivery::Kind::NotAccepted && wrong.definitelyUnsent,
               "different actual worktree input blocks the first prompt");
         const auto effects = Json::parse(http(origin+"/fixture/effects","GET").body);
-        check(effects.at("t3_thread_send").size() == 3 && effects.at("t3_thread_launch").size() == 2 &&
-              !effects.contains("t3_thread_interrupt"), "invalid destinations and mismatched pins cause no prompt");
+        const auto stock = Json::parse(http(origin+"/fixture/stock","GET").body);
+        check(effects.at("t3_thread_send").size() == 3 && effects.at("t3_thread_launch").size() == 5 &&
+              !effects.contains("t3_thread_interrupt") && stock.at("stockLaunches").size()==4 &&
+              stock.at("stockLaunches").at("project:pinned-worker").at("replays")==1 &&
+              stock.at("stockPromptSends").at("pinned-worker:pinned-worker:start").at("replays")==0,
+              "same-key provision recovery created another thread, resent the first prompt, or sent to invalid work");
         std::cout << "Stock Thread delivery, history provenance, and pinned specialist verified\n";
         return 0;
     } catch (const std::exception& error) {

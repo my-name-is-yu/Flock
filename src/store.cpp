@@ -526,13 +526,17 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
 SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
  JOIN specialist_delegations d ON d.id=w.delegation_id JOIN return_channels c ON c.id=d.channel_id
  JOIN tasks t ON t.id=s.task_id
- JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.generation=d.generation AND sc.state='active'
+ JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.state='active'
 WHERE t.id=? AND t.bot_id=? AND d.recipient_task=json_extract(t.data,'$.workflowParentTaskId') AND c.person_id=?
+ AND (sc.generation=d.generation OR (sc.generation>d.generation AND json_extract(t.data,'$.activeRun') IS NOT NULL))
 UNION ALL
 SELECT d.channel_id FROM specialist_delegations d JOIN tasks t ON t.id=d.sender_task
  JOIN return_channels c ON c.id=d.channel_id
- JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.generation=d.generation AND sc.state='active'
+ JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.state='active'
 WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
+ AND (sc.generation=d.generation OR (sc.generation>d.generation AND EXISTS (
+  SELECT 1 FROM tasks admitted WHERE admitted.id=d.recipient_task
+  AND json_extract(admitted.data,'$.activeRun') IS NOT NULL)))
 )SQL",{id,bot,actor.id,id,bot,actor.id});
         if (!origin.next()) throw DecisionDenied{};
         const auto participation = authorizeParticipation(actor,origin.number(0));

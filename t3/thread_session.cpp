@@ -39,7 +39,8 @@ public:
 };
 
 std::optional<std::string> gitOutput(const std::filesystem::path& directory,
-                                     std::initializer_list<std::string> arguments) {
+                                     std::initializer_list<std::string> arguments,
+                                     bool allowMultipleLines = false) {
     int pipes[2];
 #if defined(__linux__)
     if (pipe2(pipes, O_CLOEXEC) != 0) return {};
@@ -62,7 +63,7 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory,
 #if defined(__linux__)
     if (posix_spawn_file_actions_addclosefrom_np(&spawn.actions, 3) != 0) return {};
 #endif
-    std::vector<std::string> words{"/usr/bin/git", "-C", directory.string(), "rev-parse"};
+    std::vector<std::string> words{"/usr/bin/git", "-C", directory.string()};
     words.insert(words.end(), arguments);
     std::vector<char*> argv;
     for (auto& word : words) argv.push_back(word.data());
@@ -70,7 +71,9 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory,
     std::string path = "PATH=/usr/bin:/bin";
     std::string noSystem = "GIT_CONFIG_NOSYSTEM=1", noGlobal = "GIT_CONFIG_GLOBAL=/dev/null";
     std::string noLazyFetch = "GIT_NO_LAZY_FETCH=1", noReplace = "GIT_NO_REPLACE_OBJECTS=1";
-    char* env[]{path.data(), noSystem.data(), noGlobal.data(), noLazyFetch.data(), noReplace.data(), nullptr};
+    std::string noOptionalLocks = "GIT_OPTIONAL_LOCKS=0";
+    char* env[]{path.data(), noSystem.data(), noGlobal.data(), noLazyFetch.data(), noReplace.data(),
+                noOptionalLocks.data(), nullptr};
     pid_t child = 0;
 #if defined(__APPLE__)
     posix_spawnattr_t attributes;
@@ -109,10 +112,11 @@ std::optional<std::string> gitOutput(const std::filesystem::path& directory,
     pid_t waited;
     do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
     if (!completed || waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
-        output.empty() || output.back() != '\n')
+        (!allowMultipleLines && output.empty()) || (!output.empty() && output.back() != '\n'))
         return {};
-    output.pop_back();
-    if (output.find_first_of("\r\n") != std::string::npos) return {};
+    if (!output.empty()) output.pop_back();
+    if (output.find('\r') != std::string::npos || output.find('\0') != std::string::npos ||
+        (!allowMultipleLines && output.find('\n') != std::string::npos)) return {};
     return output;
 }
 
@@ -182,6 +186,54 @@ public:
         }
     }
 
+    std::optional<ThreadPage> dispatchHistory(const ThreadTarget& target, Id after) override {
+        constexpr unsigned pageSize = 20;
+        constexpr unsigned maxPages = 32;
+        constexpr unsigned maxItems = pageSize * maxPages;
+        if (after < -1 || after > maxHistoryPosition) return {};
+        ThreadPage history{target,after,"","",{}};
+        unsigned scanned = 0;
+        try {
+            for (unsigned pageIndex = 0; pageIndex < maxPages; ++pageIndex) {
+                auto credential = loadCredential(directory_,target.environmentId);
+                if (!credential.operate || (!history.authGeneration.empty() &&
+                    credential.generation != history.authGeneration)) return {};
+                if (history.authGeneration.empty()) history.authGeneration = credential.generation;
+                Client client(std::move(credential));
+                verifyEnvironment(client,target);
+                const auto start = history.cursor;
+                const auto reply = readThread(client,target.threadId,"messages",pageSize,2730,
+                                              {{"afterPosition",start}});
+                const auto& thread = member(reply,"thread");
+                if (!validDestination(thread,target)) return {};
+                const auto& running = member(thread,"activeRunId");
+                if (!running.is_null() && (!running.is_string() || str(thread,"activeRunId").empty()))
+                    invalidResponse();
+                history.activeRunId = str(thread,"activeRunId");
+                const auto& rows = array(reply,"items");
+                if (scanned + rows.size() > maxItems) return {};
+                scanned += static_cast<unsigned>(rows.size());
+                for (const auto& item : rows) {
+                    const auto current = position(member(item,"position"));
+                    if (current <= history.cursor) invalidResponse();
+                    history.cursor = current;
+                    const auto kind = str(item,"type");
+                    if (!localItem(item,target.threadId) ||
+                        (kind != "user_message" && kind != "assistant_message")) continue;
+                    const auto id = str(item,"itemId");
+                    if (id.empty() || id.size() > 1024) invalidResponse();
+                    history.events.push_back({id,str(item,"messageId"),str(item,"runId"),kind,str(item,"status"),
+                        str(item,"createdBy"),str(item,"text"),current,str(item,"creationSource")});
+                }
+                if (!moreHistory(reply,history.cursor,start)) return history;
+                if (pageIndex + 1 == maxPages) return {};
+            }
+        } catch (const std::exception&) {
+            return {};
+        }
+        return {};
+    }
+
     ThreadSend send(const ThreadTarget& target, std::string_view generation,
                     std::string_view requestId, std::string_view text) override {
         bool dispatched = false;
@@ -218,7 +270,8 @@ public:
             const auto page = readThread(client,target.threadId,"messages",1,1);
             const auto& thread = member(page,"thread");
             if (!validDestination(thread,target)) return {};
-            return workspaceHead(client,target.projectId,thread,false);
+            const auto head = workspaceHead(client,target.projectId,thread,false);
+            return head ? std::optional(head->commit) : std::nullopt;
         } catch (const Failure&) {
             return {};
         }
@@ -244,8 +297,8 @@ bool loopbackGitHost(std::string_view origin) {
         });
 }
 
-std::optional<std::string> workspaceHead(Client& client, std::string_view projectId, const Json& thread,
-                                         bool requireSeparateWorktree) {
+std::optional<WorkspaceHead> workspaceHead(Client& client, std::string_view projectId, const Json& thread,
+                                            bool requireSeparateWorktree) {
     const auto project = client.call("t3_project_read",{{"projectId",projectId}});
     if (str(project,"id") != projectId) return {};
     const auto root = localDirectory(str(project,"workspaceRoot"));
@@ -254,17 +307,24 @@ std::optional<std::string> workspaceHead(Client& client, std::string_view projec
     if (!path.is_null() && !path.is_string()) return {};
     const auto workspace = path.is_null() ? root : localDirectory(path.get_ref<const std::string&>());
     if (!workspace || (requireSeparateWorktree && workspace == root)) return {};
-    const auto top = gitOutput(*workspace,{"--show-toplevel"});
+    const auto top = gitOutput(*workspace,{"rev-parse","--show-toplevel"});
     if (!top || (workspace != root && localDirectory(*top) != workspace)) return {};
     if (workspace != root) {
-        const auto rootGit = gitOutput(*root,{"--path-format=absolute","--git-common-dir"});
-        const auto childGit = gitOutput(*workspace,{"--path-format=absolute","--git-common-dir"});
+        const auto rootGit = gitOutput(*root,{"rev-parse","--path-format=absolute","--git-common-dir"});
+        const auto childGit = gitOutput(*workspace,{"rev-parse","--path-format=absolute","--git-common-dir"});
         if (!rootGit || !childGit) return {};
         const auto checkedRoot = localDirectory(*rootGit);
         if (!checkedRoot || checkedRoot != localDirectory(*childGit)) return {};
     }
-    auto sha = gitOutput(*workspace,{"--verify","HEAD^{commit}"});
-    return sha && gitCommit(*sha) ? sha : std::nullopt;
+    bool clean = true;
+    if (requireSeparateWorktree) {
+        const auto status = gitOutput(*workspace,{"status","--porcelain=v1","--untracked-files=no",
+                                                   "--ignore-submodules=none"},true);
+        if (!status) return {};
+        clean = status->empty();
+    }
+    auto sha = gitOutput(*workspace,{"rev-parse","--verify","HEAD^{commit}"});
+    return sha && gitCommit(*sha) ? std::optional(WorkspaceHead{*sha,clean}) : std::nullopt;
 }
 
 }

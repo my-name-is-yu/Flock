@@ -157,7 +157,6 @@ struct Store::Impl {
     Json compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage = 0) const;
     Json conversationHistory(const conversation::Message&, const Json& summaries, std::size_t expandedBytes) const;
     Json contextTool(std::string_view tool, const Json&, const conversation::Message&, int step);
-    // The caller persists its effect and the workflow in the same Store transaction.
     Id startWorkflow(const WorkflowOrigin&, const Json& args, std::string_view bot, const Json& routing,
                      std::string_view inputArtifactVersion = {});
     Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);

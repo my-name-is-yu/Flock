@@ -1919,7 +1919,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested };
+enum class SpecialistMode { Single, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAfterResume, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -1931,18 +1931,22 @@ void specialistAdmission(SpecialistMode mode) {
     const std::string pin(40,'a');
     std::string currentPin = pin;
     struct Session final : ThreadSession {
+        std::optional<std::string> pin;
         std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
             return ThreadPage{origin,0,"root-credential-generation","",{}};
+        }
+        std::optional<ThreadPage> dispatchHistory(const ThreadTarget& origin, Id after) override {
+            return ThreadPage{origin,after,"root-credential-generation","",{}};
         }
         ThreadSend send(const ThreadTarget&,std::string_view,std::string_view,std::string_view) override {
             throw std::runtime_error("A specialist tried to send to the root Thread");
         }
-        std::optional<std::string> inputCommit(const ThreadTarget&) override { return {}; }
+        std::optional<std::string> inputCommit(const ThreadTarget&) override { return pin; }
     } session;
     f.specialistPerson = [&](std::string_view id) -> std::optional<Person> {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
-    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson); };
+    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,f.runtime.get()); };
     auto access = f.store->access();
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
@@ -1951,7 +1955,8 @@ void specialistAdmission(SpecialistMode mode) {
     access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
-    const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested;
+    const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
+                        mode==SpecialistMode::NestedWorkflowPause;
     if (nested) {
         f.notes["gamma"] = {"Third SOUL","GAMMA_ONLY"};
         f.peers["beta"] = {{"Root",{"alpha","","e","p"},"reviewer"},
@@ -1993,7 +1998,7 @@ void specialistAdmission(SpecialistMode mode) {
     changed.commitSha = std::string(40,'b');
     denied(changed);
     if (nested) {
-        f.model.script = [](const ModelInput& input) -> Decision {
+        f.model.script = [&](const ModelInput& input) -> Decision {
             if (input.task.at("botId")=="beta") {
                 check(hasTool(input,"delegate_nested_specialist") && input.task.at("peers").size()==1 &&
                       input.task.at("peers").at(0).at("botId")=="gamma","nested action offered an ancestor or unauthorized peer");
@@ -2001,7 +2006,13 @@ void specialistAdmission(SpecialistMode mode) {
             }
             check(input.task.at("botId")=="gamma" && !hasTool(input,"delegate_nested_specialist"),
                   "a nested specialist inherited the ability to delegate again");
-            if (input.event.at("kind")=="bot_request") return botReply("question","Which check first?");
+            if (input.event.at("kind")=="bot_request") {
+                if (mode==SpecialistMode::NestedWorkflowPause) {
+                    check(hasTool(input,"start_peer_workflow"),"nested owner did not receive its scoped workflow action");
+                    return {"start_peer_workflow",Json::object(),"Verify the nested input independently"};
+                }
+                return botReply("question","Which check first?");
+            }
             if (input.event.at("kind")=="bot_answer") {
                 check(input.event.at("text")=="Check the fixture","nested specialist received the wrong answer");
                 return work("delegate",false);
@@ -2015,6 +2026,19 @@ void specialistAdmission(SpecialistMode mode) {
         check(beta.size()==2 && gamma.size()==1 && gamma.front().at("specialistDelegationId")==nestedId,
               "nested delegation did not create one new sender and recipient");
         const Id childSender = beta.front().at("id"), child = gamma.front().at("id");
+        if (mode==SpecialistMode::NestedWorkflowPause) {
+            f.reach(child,"workflow_waiting");
+            const auto stages=f.store->workflows("gamma",0,10).at(0).at("stages");
+            const Id stage=stages.at(0).at("taskId");
+            f.reach(stage,"running");
+            const auto paused=handoffs().pause(person,channel);
+            const auto preserved=f.task(stage);
+            check(paused.state=="paused" && preserved.at("state")=="running" &&
+                  !preserved.at("activeRun").is_null() && f.task(child).at("state")=="workflow_waiting" &&
+                  f.task(first.recipientTaskId).at("state")=="specialist_waiting" && f.t3.interrupts==0,
+                  "pause cancelled a nested specialist owner before checking its admitted workflow descendant");
+            return;
+        }
         const auto question = f.wait(childSender,"user_question");
         f.restart();
         f.store->operate(person,TaskTarget::from(f.task(childSender),question),"answer",{{"text","Check the fixture"}});
@@ -2028,10 +2052,15 @@ void specialistAdmission(SpecialistMode mode) {
                   "request cancellation did not reach only its nested specialist Run");
             f.t3.finish("run-1","interrupted");
             f.reach(first.senderTaskId,"cancelled");
+            const auto history = f.store->history(first.senderTaskId,0,200);
+            check(std::ranges::count_if(history,[](const auto& item) { return item.at("kind")=="specialist_result"; })==1 &&
+                  history.back().at("kind")=="specialist_result" && history.back().at("data").at("status")=="cancelled" &&
+                  handoffs().view(person,channel).work.front().at("result").at("status")=="cancelled",
+                  "nested requester cancellation was not settled exactly once for the coordinator");
             return;
         }
         f.t3.finish("run-1");
-        f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"}}.dump();
+        f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},{"findings","Nested evidence"}}.dump();
         f.reach(child,"completed");
         f.restart();
         f.reach(first.senderTaskId,"completed");
@@ -2060,7 +2089,12 @@ void specialistAdmission(SpecialistMode mode) {
         denied(request);
         return;
     }
-    if (mode!=SpecialistMode::Single) {
+    if (mode!=SpecialistMode::Single && mode!=SpecialistMode::MissingFindings &&
+        mode!=SpecialistMode::EmptyFindings && mode!=SpecialistMode::TooManyFindings &&
+        mode!=SpecialistMode::CancelledPrelaunch && mode!=SpecialistMode::PausedPrelaunch &&
+        mode!=SpecialistMode::InterruptedPauseCleanup && mode!=SpecialistMode::InterruptedPauseStopRecovery &&
+        mode!=SpecialistMode::ResidualDirectAfterResume &&
+        mode!=SpecialistMode::EvidenceFreshness) {
         f.model.script = [](const ModelInput& input) -> Decision {
             if (input.event.at("kind")=="bot_request") {
                 check(hasTool(input,"start_peer_workflow"),"received work did not expose its workflow action");
@@ -2071,9 +2105,13 @@ void specialistAdmission(SpecialistMode mode) {
         };
         if (mode==SpecialistMode::FrozenWorkflowAdmission) {
             freezeDuringWorkflowAdmission = true;
-            f.wait(first.recipientTaskId,"model_failure");
+            f.reach(first.recipientTaskId,"cancelled");
+            f.reach(first.senderTaskId,"completed");
             check(f.store->workflows("beta",0,10).empty() && f.store->tasks("beta").size()==1 && f.t3.launches==0,
                   "freeze before workflow creation admitted stage tasks");
+            check(f.logs(first.senderTaskId,"specialist_result")==1 &&
+                  handoffs().view(person,channel).work.front().at("result").at("status")=="cancelled",
+                  "freeze before workflow creation did not settle its requester exactly once");
             return;
         }
         const auto unrelated = f.submit("Unrelated work");
@@ -2089,7 +2127,32 @@ void specialistAdmission(SpecialistMode mode) {
                 return command.instruction.find("verify-2") != std::string::npos;
             };
         }
-        if (mode==SpecialistMode::FrozenWorkflow || mode==SpecialistMode::RejectedWorkflowInput) {
+        if (mode==SpecialistMode::FrozenWorkflow) {
+            f.reach(stage2,"cancelled");
+            const auto runningStage = f.task(stage1);
+            check(runningStage.at("state")=="running" && !runningStage.at("activeRun").is_null() &&
+                  f.task(stage2).at("state")=="cancelled" && f.t3.launches==1 && f.t3.interrupts==0 &&
+                  f.task(first.recipientTaskId).at("state")=="workflow_waiting",
+                  "freeze interrupted admitted workflow work or left an unlaunched stage active");
+            const auto run1 = runningStage.at("activeRun").at("runId").get<std::string>();
+            f.t3.finish(run1);
+            f.t3.runs.at(run1).report = Json{{"artifactVersion",pin},{"verdict","pass"},
+                {"findings","The pre-freeze check completed."}}.dump();
+            f.reach(stage1,"completed");
+            f.restart();
+            f.reach(first.senderTaskId,"completed");
+            const auto history = f.store->history(first.senderTaskId,0,200);
+            const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) {
+                return item.at("kind")=="specialist_result";
+            });
+            check(result!=history.end() && result->at("data").at("status")=="failed" &&
+                  result->at("data").at("workflowStatus")=="failed" &&
+                  f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1 &&
+                  f.t3.launches==1 && f.t3.interrupts==0,
+                  "freeze did not preserve the admitted stage's evidence or settle the cancelled workflow");
+            return;
+        }
+        if (mode==SpecialistMode::RejectedWorkflowInput) {
             f.reach(stage2,"completed");
             check(f.task(stage1).at("state")=="running" && f.t3.launches==1 && f.t3.interrupts==0 &&
                   f.logs(stage2,"specialist_launch_blocked")==1 && f.task(first.recipientTaskId).at("state")=="workflow_waiting",
@@ -2128,13 +2191,45 @@ void specialistAdmission(SpecialistMode mode) {
         check(f.task(first.recipientTaskId).at("state")=="workflow_waiting" &&
               f.store->workflows("beta",0,10).at(0).at("verdicts").size()==1,
               "a question blocked its independent check or emitted early aggregate success");
-        f.restart();
-        const auto question = TaskTarget::from(f.task(stage1),wait);
-        try {
-            f.store->operate({"other-person"},question,"answer",{{"text","main"}});
-            throw std::runtime_error("An unrelated person answered the scoped stage question");
-        } catch (const DecisionDenied&) {}
-        f.store->operate(person,question,"answer",{{"text","main"}});
+        if (mode==SpecialistMode::ResidualStageAfterResume) {
+            const auto before = handoffs().view(person,channel);
+            const auto assignment = before.work.front();
+            const auto stageQuestion = [](const Json& work) {
+                for (const auto& stage : work.at("stages"))
+                    if (stage.at("stageId")=="verify-1") return stage;
+                throw std::runtime_error("The first workflow stage was not projected");
+            };
+            const Id assignmentGeneration = assignment.at("generation").get<Id>();
+            const auto delegation = assignment.at("delegationId").get<std::string>();
+            const auto beforeStage = stageQuestion(assignment);
+            check(beforeStage.at("canAnswer") && beforeStage.at("question").at("waitId")==wait,
+                  "an admitted stage question was not projected as answerable");
+            const auto paused = handoffs().pause(person,channel);
+            const auto pausedStage = stageQuestion(paused.work.front());
+            check(!pausedStage.at("canAnswer") && pausedStage.at("question").at("waitId")==wait && f.t3.interrupts==0,
+                  "pause interrupted or rebound an admitted stage question");
+            const auto resumed = handoffs().resume(person,channel);
+            const auto resumedStage = stageQuestion(resumed.work.front());
+            check(resumed.generation>assignmentGeneration && resumedStage.at("canAnswer") &&
+                  resumedStage.at("question").at("waitId")==wait,
+                  "resume did not preserve the admitted stage question's original wait");
+            const auto launches = f.t3.launches;
+            handoffs().answerWork(person,channel,assignmentGeneration,delegation,"verify-1",wait,"Use the main branch");
+            check(f.t3.launches==launches && f.task(stage1).at("activeRun").at("runId")==run1 && f.t3.interrupts==0,
+                  "answering an admitted stage question launched or interrupted a Run");
+            try {
+                handoffs().answerWork(person,channel,assignmentGeneration,delegation,"verify-1",wait,"Late answer");
+                throw std::runtime_error("A consumed stage wait accepted another answer");
+            } catch (const Conflict&) {}
+        } else {
+            f.restart();
+            const auto question = TaskTarget::from(f.task(stage1),wait);
+            try {
+                f.store->operate({"other-person"},question,"answer",{{"text","main"}});
+                throw std::runtime_error("An unrelated person answered the scoped stage question");
+            } catch (const DecisionDenied&) {}
+            f.store->operate(person,question,"answer",{{"text","main"}});
+        }
         f.reach(stage1,"running");
         if (mode==SpecialistMode::StaleWorkflow) currentPin = std::string(40,'b');
         f.t3.finish(run1);
@@ -2179,12 +2274,97 @@ void specialistAdmission(SpecialistMode mode) {
             check(input.event.at("text")=="Check the unit test fixture","specialist lost its own answer");
             return work("delegate",false);
         }
+        if (mode==SpecialistMode::ResidualDirectAfterResume && input.event.at("kind")=="question")
+            return botReply("question","Which test should I prioritize?");
         check(input.event.at("kind")=="result","unexpected specialist event");
-        return botReply("result","Verified the immutable input");
+        return mode==SpecialistMode::Single ? botReply("result","Verified the immutable input") :
+            botReply("failed","The report did not contain valid findings.");
     };
     const auto wait = f.wait(first.senderTaskId,"user_question");
     check(f.t3.launches==0 && f.task(first.recipientTaskId).at("state")=="peer_waiting",
           "specialist bypassed its open question");
+    if (mode==SpecialistMode::PausedPrelaunch) {
+        const auto paused = handoffs().pause(person,channel);
+        check(!paused.work.front().at("canAnswer"),"pause left a prelaunch work question answerable");
+        const auto resumed = handoffs().resume(person,channel);
+        check(!resumed.work.front().at("canAnswer"),"resume rebound an unadmitted question to the new generation");
+        try {
+            handoffs().answerWork(person,channel,resumed.work.front().at("generation"),
+                                  resumed.work.front().at("delegationId").get<std::string>(),"",wait,"Stale answer");
+            throw std::runtime_error("A stale prelaunch question was accepted after resume");
+        } catch (const Conflict&) {}
+        f.reach(first.senderTaskId,"completed");
+        session.pin=pin;
+        f.model.script = [](const ModelInput& input) -> Decision {
+            check(hasTool(input,"complete_handoff"),"the cancelled prelaunch assignment blocked queue progress");
+            return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
+        };
+        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
+            return Intake{std::string(bot),"","e","p"};
+        };
+        const auto soul=[](std::string_view) { return std::string{}; };
+        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+              "the unrelated coordinator queue did not progress after prelaunch cancellation");
+        return;
+    }
+    if (mode==SpecialistMode::InterruptedPauseCleanup) {
+        const auto previous = handoffs().view(person,channel);
+        const auto freeze = "UPDATE session_controls SET generation=generation+1,state='paused' WHERE channel_id="+
+            std::to_string(channel)+" AND state='active'";
+        executeSql(f.store->path(),freeze.c_str());
+        handoffs().recover();
+        const auto recovered = handoffs().view(person,channel);
+        check(recovered.state=="paused" && recovered.generation==previous.generation+1 &&
+              (recovered.work.empty() || !recovered.work.front().at("canAnswer")),
+              "recovery did not clean up a task frozen before its post-commit cleanup");
+        const auto resumed = handoffs().resume(person,channel);
+        check(resumed.state=="active" && (resumed.work.empty() || !resumed.work.front().at("canAnswer")),
+              "resume rebound an unadmitted question after recovery");
+        f.reach(first.senderTaskId,"completed");
+        f.model.script = [](const ModelInput& input) -> Decision {
+            check(hasTool(input,"complete_handoff"),"the recovered cancellation blocked queue progress");
+            return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
+        };
+        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
+            return Intake{std::string(bot),"","e","p"};
+        };
+        const auto soul=[](std::string_view) { return std::string{}; };
+        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+              "queue progress was stranded after recovered prelaunch cancellation");
+        return;
+    }
+    if (mode==SpecialistMode::InterruptedPauseStopRecovery) {
+        const auto previous=handoffs().view(person,channel);
+        const auto pause="UPDATE session_controls SET generation=generation+1,state='paused' WHERE channel_id="+
+            std::to_string(channel)+" AND state='active'";
+        executeSql(f.store->path(),pause.c_str());
+        const auto stop="UPDATE session_controls SET generation=generation+1,state='stopped' WHERE channel_id="+
+            std::to_string(channel)+" AND state='paused'";
+        executeSql(f.store->path(),stop.c_str());
+        handoffs().recover();
+        check(f.task(first.recipientTaskId).at("state")=="cancelling",
+              "stop recovery missed an unlaunched delegation from the prior pause generation");
+        f.reach(first.recipientTaskId,"cancelled");
+        f.reach(first.senderTaskId,"completed");
+        const auto recovered=handoffs().view(person,channel);
+        const auto history=f.store->history(first.senderTaskId,0,200);
+        check(recovered.state=="stopped" && recovered.generation==previous.generation+2 &&
+              recovered.work.front().at("result").at("status")=="cancelled" &&
+              std::ranges::count_if(history,[](const auto& item) { return item.at("kind")=="specialist_result"; })==1 &&
+              f.t3.launches==0,
+              "stop recovery missed an unlaunched delegation from the prior pause generation");
+        return;
+    }
+    if (mode==SpecialistMode::CancelledPrelaunch) {
+        f.store->operate(person,TaskTarget::from(f.task(first.senderTaskId),0),"cancel");
+        f.reach(first.senderTaskId,"cancelled");
+        const auto history = f.store->history(first.senderTaskId,0,200);
+        check(f.t3.launches==0 && std::ranges::count_if(history,[](const auto& item) {
+                  return item.at("kind")=="specialist_result";
+              })==1 && handoffs().view(person,channel).work.front().at("result").at("status")=="cancelled",
+              "prelaunch requester cancellation did not settle the coordinator queue");
+        return;
+    }
     f.restart();
     f.store->operate(person,TaskTarget::from(f.task(first.senderTaskId),wait),"answer",{{"text","Check the unit test fixture"}});
     f.reach(first.recipientTaskId,"sending");
@@ -2206,28 +2386,180 @@ void specialistAdmission(SpecialistMode mode) {
     check(f.t3.seen.size()==2 && f.t3.reconciles==2 && f.t3.seen.at(1).actionId==launched.actionId &&
           f.t3.seen.at(1).instruction==launched.instruction && f.t3.seen.at(1).authGeneration==launched.authGeneration,
           "restart lost the reserved launch or changed its OAuth namespace or payload");
+    if (mode==SpecialistMode::ResidualDirectAfterResume) {
+        f.t3.question("run-1");
+        const auto wait = f.wait(first.senderTaskId,"user_question");
+        const auto before = handoffs().view(person,channel);
+        const auto assignment = before.work.front();
+        const Id assignmentGeneration = assignment.at("generation").get<Id>();
+        const auto delegation = assignment.at("delegationId").get<std::string>();
+        check(assignment.at("canAnswer") && assignment.at("question").at("waitId")==wait &&
+              f.task(first.recipientTaskId).at("activeRun").at("runId")=="run-1",
+              "an admitted direct question was not projected as answerable");
+        const auto paused = handoffs().pause(person,channel);
+        check(!paused.work.front().at("canAnswer") && paused.work.front().at("question").at("waitId")==wait &&
+              f.t3.interrupts==0,"pause interrupted or rebound an admitted direct question");
+        const auto resumed = handoffs().resume(person,channel);
+        check(resumed.generation>assignmentGeneration && resumed.work.front().at("canAnswer") &&
+              resumed.work.front().at("question").at("waitId")==wait,
+              "resume did not preserve the admitted direct question's original wait");
+        const auto launches = f.t3.launches;
+        handoffs().answerWork(person,channel,assignmentGeneration,delegation,"",wait,"Prioritize the unit test");
+        check(f.t3.launches==launches && f.task(first.recipientTaskId).at("activeRun").at("runId")=="run-1" &&
+              f.t3.interrupts==0,"answering an admitted direct question launched or interrupted a Run");
+        try {
+            handoffs().answerWork(person,channel,assignmentGeneration,delegation,"",wait,"Late answer");
+            throw std::runtime_error("A consumed direct wait accepted another answer");
+        } catch (const Conflict&) {}
+        return;
+    }
     f.t3.finish("run-1");
-    f.t3.runs.at("run-1").report = Json{{"artifactVersion",pin},{"verdict","pass"},{"findings","checked"}}.dump();
+    Json report{{"artifactVersion",pin},{"verdict","pass"}};
+    if (mode==SpecialistMode::EmptyFindings) report["findings"] = Json::array();
+    else if (mode==SpecialistMode::TooManyFindings) report["findings"] = Json::array({"1","2","3","4","5","6","7","8","9"});
+    else if (mode!=SpecialistMode::MissingFindings) report["findings"] = "checked";
+    f.t3.runs.at("run-1").report = report.dump();
     f.reach(first.recipientTaskId,"completed");
     f.restart();
     f.reach(first.senderTaskId,"completed");
     const auto history = f.store->history(first.senderTaskId,0,200);
     const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
-    check(result!=history.end() && result->at("data").at("executorBotId")=="beta" &&
+    if (mode!=SpecialistMode::Single && mode!=SpecialistMode::EvidenceFreshness) {
+        const auto verdict = result==history.end() ? "" : result->at("data").value("verdict","");
+        check(result!=history.end() && result->at("data").at("status")=="failed" &&
+              verdict!="pass" && verdict!="fail","a direct successful verdict was accepted without valid findings");
+    } else check(result!=history.end() && result->at("data").at("executorBotId")=="beta" &&
           result->at("data").at("artifactVersion")==pin && result->at("data").at("verdict")=="pass" &&
           result->at("data").at("references").at(0).at("itemId")=="final-answer",
           "specialist result lost its author, pinned version, verdict or native evidence");
+
+    if (mode==SpecialistMode::EvidenceFreshness) {
+        session.pin=pin;
+        int decisions=0;
+        f.model.script=[&](const ModelInput& input)->Decision {
+            ++decisions;
+            check(hasTool(input,"complete_handoff") && input.event.at("specialistResult").at("commit")==pin &&
+                  input.event.at("specialistResult").at("status")!="stale",
+                  "fresh specialist evidence did not authorize completion review");
+            if (decisions==1) {
+                session.pin=std::string(40,'b');
+                return {"complete_handoff",{{"text","Complete using the verified report"}},"The report is complete"};
+            }
+            return {"complete_handoff",{{"text","Complete using the rechecked report"}},"The report is complete"};
+        };
+        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
+            return Intake{std::string(bot),"","e","p"};
+        };
+        const auto soul=[](std::string_view) { return std::string{}; };
+        const auto before=handoffs().view(person,channel);
+        const auto stale=handoffs().step(person,channel,f.model,routing,soul);
+        check(stale.state=="active" && stale.eventCursor==before.eventCursor && stale.latestDecision.is_null() && decisions==1 &&
+              stale.work.front().contains("result"),
+              "a completion decision consumed evidence after the root pin changed during inference");
+        session.pin=pin;
+        const auto completed=handoffs().step(person,channel,f.model,routing,soul);
+        check(completed.state=="completed" && decisions==2,
+              "the unconsumed specialist result was not reconsidered after the pin became available");
+        return;
+    }
 
     request.delegationId = "coord/check-2";
     const auto second = f.runtime->startSpecialist(person,request);
     f.reach(second.recipientTaskId,"sending");
     freezeBeforeReservation = true;
     f.reach(second.senderTaskId,"completed");
-    check(f.t3.launches==1 && f.logs(second.recipientTaskId,"specialist_launch_blocked")==1 &&
-          f.task(second.senderTaskId).at("peerOutcome")=="failed",
-          "freeze before launch reservation started new work");
+    const auto frozenSender = f.task(second.senderTaskId);
+    const auto frozenRecipient = f.task(second.recipientTaskId);
+    const auto cancelledHistory = f.store->history(second.senderTaskId,0,200);
+    const auto cancelledResult = std::find_if(cancelledHistory.begin(),cancelledHistory.end(),[](const auto& item) {
+        return item.at("kind")=="specialist_result";
+    });
+    const auto resultCount = std::ranges::count_if(cancelledHistory,[](const auto& item) {
+        return item.at("kind")=="specialist_result";
+    });
+    const auto resultStatus = cancelledResult==cancelledHistory.end() ? "missing" :
+        cancelledResult->at("data").at("status").get<std::string>();
+    const auto freezeView = handoffs().view(person,channel);
+    const auto projected = std::find_if(freezeView.work.begin(),freezeView.work.end(),[&](const Json& work) {
+        return work.at("delegationId")==request.delegationId;
+    });
+    const auto projectedStatus = projected==freezeView.work.end() ? "missing" :
+        projected->at("result").value("status","missing");
+    const auto freezeResult = "freeze did not settle unadmitted specialist work exactly once (launches="+
+        std::to_string(f.t3.launches)+", sender="+frozenSender.at("state").get<std::string>()+
+        ", outcome="+frozenSender.value("peerOutcome","missing")+
+        ", recipient="+frozenRecipient.at("state").get<std::string>()+
+        ", results="+std::to_string(resultCount)+", status="+resultStatus+
+        ", projected="+projectedStatus+")";
+    check(f.t3.launches==1 && frozenSender.at("state")=="completed" && frozenSender.at("peerOutcome")=="cancelled" &&
+          frozenRecipient.at("state")=="cancelled" && resultCount==1 && cancelledResult!=cancelledHistory.end() &&
+          resultStatus=="cancelled" && projectedStatus=="cancelled",freezeResult.c_str());
     request.delegationId = "coord/check-after-freeze";
     denied(request);
+}
+
+void exhaustedSavedSpecialistEffect() {
+    Fixture f;
+    f.allowBeta();
+    f.peers.at("alpha").front().role="reviewer";
+    const Person person{"participant",true};
+    const ThreadTarget target{"e","p","root-thread"};
+    const CoordinationRequest scope{"Check the pinned project",true};
+    const std::string pin(40,'a');
+    struct Session final : ThreadSession {
+        std::optional<std::string> pin = std::string(40,'a');
+        std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
+            return ThreadPage{origin,0,"root-credential-generation","",{}};
+        }
+        std::optional<ThreadPage> dispatchHistory(const ThreadTarget& origin, Id after) override {
+            return ThreadPage{origin,after,"root-credential-generation","",{}};
+        }
+        ThreadSend send(const ThreadTarget&,std::string_view,std::string_view,std::string_view) override {
+            throw std::runtime_error("A coordinator tried to send to the root Thread");
+        }
+        std::optional<std::string> inputCommit(const ThreadTarget&) override { return pin; }
+    } session;
+    f.specialistInput=[&](const Person&,Id) { return session.pin; };
+    f.specialistPerson=[&](std::string_view id)->std::optional<Person> {
+        return id==person.id ? std::optional(person) : std::nullopt;
+    };
+    f.restart();
+    auto access=f.store->access();
+    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
+    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
+    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
+    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson).pair(person,target,"alpha",scope);
+    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
+    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson).view(person,channel).generation;
+    int modelCalls=0;
+    f.model.script=[&](const ModelInput& input)->Decision {
+        ++modelCalls;
+        check(hasTool(input,"delegate_specialist"),"the useful delegation tool was hidden before reservation");
+        for (int i=0;i<12;++i)
+            f.runtime->startSpecialist(person,{channel,generation,"coord/fuel-"+std::to_string(i),"beta",
+                "Consume one work unit","Report the result",pin});
+        session.pin.reset();
+        return {"delegate_specialist",{{"botId","beta"},{"text","Review the pinned project"},
+            {"doneWhen","Report the result"}},"Delegate the scoped review"};
+    };
+    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    const auto soul=[](std::string_view) { return std::string{}; };
+    {
+        const auto peers=[&](std::string_view bot) { return f.peers.at(std::string(bot)); };
+        SessionHandoff handoff(*f.store,session,f.specialistPerson,f.runtime.get(),peers);
+        const auto waiting=handoff.step(person,channel,f.model,route,soul);
+        check(waiting.state=="active" && !waiting.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
+              "a transient unavailable input pin settled an outstanding specialist effect");
+        session.pin=pin;
+        const auto view=handoff.step(person,channel,f.model,route,soul);
+        check(view.state=="budget_exhausted" && view.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
+              "a permanent saved delegation refusal left coordination active or retried its model action");
+    }
+    f.restart();
+    SessionHandoff restarted(*f.store,session,f.specialistPerson,f.runtime.get());
+    const auto view=restarted.step(person,channel,f.model,route,soul);
+    check(view.state=="budget_exhausted" && modelCalls==1 && f.t3.launches==0,
+          "a saved budget refusal admitted work again after restart");
 }
 
 void inferenceInvalidatedByCancel() {
@@ -2331,6 +2663,10 @@ int main() {
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
             {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"direct specialist rejects missing findings",[] { specialistAdmission(SpecialistMode::MissingFindings); }},
+            {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},
+            {"direct specialist rejects more than eight findings",[] { specialistAdmission(SpecialistMode::TooManyFindings); }},
+            {"evidence completion rechecks the root pin after model inference",[] { specialistAdmission(SpecialistMode::EvidenceFreshness); }},
             {"scoped specialist workflow transfers its slot and aggregates evidence",[] { specialistAdmission(SpecialistMode::Workflow); }},
             {"scoped specialist workflow retains a failed check's findings",[] { specialistAdmission(SpecialistMode::FailedWorkflow); }},
             {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},
@@ -2339,6 +2675,14 @@ int main() {
             {"specialist workflow rejects a frozen stage creation",[] { specialistAdmission(SpecialistMode::FrozenWorkflowAdmission); }},
             {"nested specialist preserves scope, provenance and shared allowance",[] { specialistAdmission(SpecialistMode::Nested); }},
             {"nested specialist cancellation reaches only its assigned Run",[] { specialistAdmission(SpecialistMode::CancelledNested); }},
+            {"nested workflow pause preserves an admitted grandchild Run",[] { specialistAdmission(SpecialistMode::NestedWorkflowPause); }},
+            {"prelaunch specialist cancellation settles coordinator work",[] { specialistAdmission(SpecialistMode::CancelledPrelaunch); }},
+            {"pause settles prelaunch questions and resumes unrelated work",[] { specialistAdmission(SpecialistMode::PausedPrelaunch); }},
+            {"recovery settles work frozen before cleanup",[] { specialistAdmission(SpecialistMode::InterruptedPauseCleanup); }},
+            {"pause then stop recovery sweeps all prior delegation generations",[] { specialistAdmission(SpecialistMode::InterruptedPauseStopRecovery); }},
+            {"admitted direct question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualDirectAfterResume); }},
+            {"admitted workflow stage question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualStageAfterResume); }},
+            {"exhausted saved delegation settles across restart",exhaustedSavedSpecialistEffect},
             {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {
         try { run(); std::cout << "PASS " << name << '\n'; }
         catch (const std::exception& e) { std::cerr << "FAIL " << name << ": " << e.what() << '\n'; return 1; }

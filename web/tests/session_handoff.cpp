@@ -33,6 +33,10 @@ public:
         if (requested != target && requested != otherTarget) return {};
         return ThreadPage{requested,after.value_or(0),"fixture-auth","human-run",{}};
     }
+    std::optional<ThreadPage> dispatchHistory(const ThreadTarget& requested, Id after) override {
+        if (requested != target && requested != otherTarget) return {};
+        return ThreadPage{requested,after,"fixture-auth","human-run",{}};
+    }
     ThreadSend send(const ThreadTarget& requested, std::string_view auth, std::string_view,
                     std::string_view text) override {
         check(auth == "fixture-auth","delivery did not reuse the bound authorization");

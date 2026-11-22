@@ -390,8 +390,8 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         description = "Request human approval for one exact resource operation.";
         text("resourceKind","Resource type");
         for (const auto& entry : resourceOperations().items()) fields["resourceKind"]["enum"].push_back(entry.key());
-        text("resourceId","Exact resource identifier. For a session, use the compact JSON array [environmentId,threadId] encoded as a string.");
-        text("operation","One operation for this resource kind. Sessions support read only.");
+        text("resourceId","Exact resource identifier. For session, consult and work scopes, encode the session as the compact JSON array [environmentId,threadId] in this string.");
+        text("operation","Request one listed operation: session supports read or coordinate; consult supports reply-once; work supports delegate.");
     } else if (name == "list_secrets") {
         description = "List secret reference names.";
     } else if (name == "request_secret_input") {

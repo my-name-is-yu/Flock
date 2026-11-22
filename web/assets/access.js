@@ -7,9 +7,12 @@ function configureResourceForm(operations) {
   const kinds = Object.keys(operations);
   resource.resourceKind.replaceChildren(...kinds.map(kind => new Option(kind)));
   const selectOperations = () => {
-    $('resource-hint').textContent = resource.resourceKind.value==='session'
-      ? 'Use the environment and thread IDs, for example ["local","thread-id"].' : '';
-    resource.operation.replaceChildren(...operations[resource.resourceKind.value].map(op => new Option(op)));
+    const kind = resource.resourceKind.value;
+    const available = operations[kind];
+    $('resource-hint').textContent = ['session', 'consult', 'work'].includes(kind)
+      ? `Use the compact [environmentId,threadId] JSON array, for example ["local","thread-id"]. Operations: ${available.join(', ')}.`
+      : '';
+    resource.operation.replaceChildren(...available.map(op => new Option(op)));
   };
   resource.resourceKind.onchange = selectOperations;
   selectOperations();

@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/participation.hpp"
+#include "specialist_evidence.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,8 @@
 
 namespace flockv0 {
 namespace {
+constexpr Id specialistBudgetAllowance = 12;
+
 bool present(std::string_view value, std::size_t limit = 8000) {
     return value.size() <= limit && value.find_first_not_of(" \r\n\t") != std::string_view::npos;
 }
@@ -109,7 +112,6 @@ void Store::Impl::initializeSpecialistSchema() {
         return query("SELECT 1 FROM pragma_table_info('specialist_delegations') WHERE name='epoch'").next();
     };
     if (needsLocalControls()) {
-        // Preserve history and IDs from draft builds. A legacy channel has no local activation.
         exec("PRAGMA foreign_keys=OFF");
         {
             Transaction migration(db);
@@ -395,8 +397,89 @@ ORDER BY id)SQL");
         if (task.contains("workflowParentTaskId"))
             db.exec("UPDATE workflow_stages SET status='stopped' WHERE task_id=?",{task.at("id")});
         db.journal(task["id"],"cancelled",Json::object());
+        if (field(task,"specialistRole")=="requester") {
+            auto delegation = db.query("SELECT id,commit_sha FROM specialist_delegations WHERE sender_task=?",{task.at("id")});
+            if (delegation.next() && !db.query("SELECT 1 FROM journal WHERE task_id=? AND kind='specialist_result' LIMIT 1",
+                                                {task.at("id")}).next()) {
+                db.journal(task["id"],"specialist_result",{{"delegationId",delegation.string(0)},
+                    {"artifactVersion",delegation.string(1)},
+                    {"status","cancelled"},{"report","The specialist request was cancelled."},
+                    {"references",Json::array()}});
+            }
+        }
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
             finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
+    }
+
+    bool admittedSpecialistRun(const Json& task) const {
+        if (!task.at("activeRun").is_null()) return true;
+        const auto action = field(task,"actionId");
+        return !action.empty() && db.query("SELECT 1 FROM outbox WHERE id=? AND phase='started'",{action}).next();
+    }
+
+    bool admittedSpecialistDescendant(const Json& task, std::set<Id>& visited, std::size_t& inspected) const {
+        const auto taskId = task.at("id").get<Id>();
+        if (inspected++ >= 128 || !visited.insert(taskId).second) return true;
+        if (admittedSpecialistRun(task)) return true;
+        if (const auto delegation = field(task,"nestedDelegationId"); !delegation.empty()) {
+            auto child = db.query(R"SQL(
+SELECT child.recipient_task FROM specialist_delegations parent
+JOIN specialist_delegations child ON child.parent_id=parent.id
+WHERE parent.recipient_task=? AND child.id=?
+)SQL",{taskId,delegation});
+            if (!child.next()) return true;
+            if (admittedSpecialistDescendant(db.load(child.number(0)),visited,inspected)) return true;
+        }
+        auto stages = db.query(R"SQL(
+SELECT s.task_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
+JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.recipient_task=? AND s.task_id IS NOT NULL
+)SQL",{taskId});
+        while (stages.next())
+            if (admittedSpecialistDescendant(db.load(stages.number(0)),visited,inspected)) return true;
+        return false;
+    }
+
+    bool admittedSpecialistDescendant(const Json& task) const {
+        std::set<Id> visited;
+        std::size_t inspected = 0;
+        return admittedSpecialistDescendant(task,visited,inspected);
+    }
+
+    Id specialistBudgetRemaining(Id channel) const {
+        std::lock_guard lock(db.mutex);
+        auto row = db.query("SELECT allowance-used FROM specialist_budgets WHERE channel_id=?",{channel});
+        return row.next() ? row.number(0) : specialistBudgetAllowance;
+    }
+
+    void freezeSpecialistWork(const Person& person, Id channel, Id generation) {
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        const auto participation = db.authorizeParticipation(person,channel,false);
+        if (!std::holds_alternative<CoordinationActivation>(participation)) return;
+        auto control = db.query("SELECT generation,state FROM session_controls WHERE channel_id=?",{channel});
+        if (!control.next() || control.number(0)<=generation || control.string(1)=="active") return;
+        auto rows = db.query(R"SQL(
+SELECT recipient_task FROM specialist_delegations WHERE channel_id=? AND generation<=?
+UNION SELECT s.task_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
+JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.channel_id=? AND d.generation<=? AND s.task_id IS NOT NULL
+)SQL",{channel,generation,channel,generation});
+        std::vector<Id> tasks;
+        while (rows.next()) if (rows.number(0)>0) tasks.push_back(rows.number(0));
+        auto emptyStages = db.query(R"SQL(
+SELECT s.workflow_id,s.stage_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
+JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.channel_id=? AND d.generation<=? AND s.task_id IS NULL
+AND s.status NOT IN ('completed','failed','stopped')
+)SQL",{channel,generation});
+        while (emptyStages.next())
+            db.exec("UPDATE workflow_stages SET status='stopped' WHERE workflow_id=? AND stage_id=? AND task_id IS NULL",
+                    {emptyStages.number(0),emptyStages.string(1)});
+        for (const auto id : tasks) {
+            auto task = db.load(id);
+            if (terminal(task) || task["state"]=="cancelling" || admittedSpecialistRun(task) ||
+                admittedSpecialistDescendant(task)) continue;
+            db.requestCancellation(task);
+        }
+        transaction.commit();
     }
 
     void stopNote(const Json& snapshot, const std::string& detail) {
@@ -458,10 +541,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (field(task,"specialistRole")=="executor") {
                     const auto check = Json::parse(report,nullptr,false);
                     const auto verdict = field(check,"verdict");
+                    const auto findings = specialistFindings(check);
                     task.erase("specialistVerdict");
                     if (observed.status=="completed" && !observed.itemId.empty() && !data.at("truncated").get<bool>() &&
                         field(check,"artifactVersion")==field(task,"inputArtifactVersion") &&
-                        (verdict=="pass" || verdict=="fail")) task["specialistVerdict"] = verdict;
+                        (verdict=="pass" || verdict=="fail") && findings)
+                        task["specialistVerdict"] = verdict;
                 }
                 db.exec("INSERT OR IGNORE INTO t3_events VALUES(?,?,'result',?)",{task["environmentId"],run.threadId,run.runId});
                 if (sqlite3_changes(db.db)) {
@@ -1375,7 +1460,8 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         session["workspaceStrategy"] = specialistWorkspace(check.commitSha);
         session["runtimeMode"] = "approval-required";
         session["interactionMode"] = "default";
-        if (!reserveSpecialistBudget(check.channel)) throw Conflict("The coordination work allowance is exhausted");
+        if (!reserveSpecialistBudget(check.channel))
+            throw SpecialistAllowanceExhausted("The coordination work allowance is exhausted");
         const Id senderId = db.submit({std::string(requester),check.purpose,peer.intake.environmentId,peer.intake.projectId},
                                       0,nullptr,RequestJournal::skip);
         auto sender = db.load(senderId);
@@ -1432,8 +1518,8 @@ FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
             throw Conflict("The specialist is not authorized to check this project");
         if (db.query("SELECT 1 FROM peer_exchanges WHERE id=?",{command.delegationId}).next())
             throw Conflict("The specialist delegation identifier is already in use");
-        constexpr Id allowance = 12;
-        db.exec("INSERT OR IGNORE INTO specialist_budgets(channel_id,allowance) VALUES(?,?)",{command.channel,allowance});
+        db.exec("INSERT OR IGNORE INTO specialist_budgets(channel_id,allowance) VALUES(?,?)",
+                {command.channel,specialistBudgetAllowance});
         const auto delegation = createSpecialist(command,invitation.botId,std::move(peer));
         transaction.commit();
         return delegation;
@@ -1497,7 +1583,8 @@ FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
                 current.contains("delegatedWorkflowId") || !specialistAdmission(*origin,cmd,current))
                 throw Conflict("The specialist assignment changed before workflow admission");
             for (int i=0;i<2;++i) {
-                if (!reserveSpecialistBudget(origin->channel)) throw Conflict("The coordination work allowance is exhausted");
+                if (!reserveSpecialistBudget(origin->channel))
+                    throw SpecialistAllowanceExhausted("The coordination work allowance is exhausted");
             }
             const auto action = actionId();
             const Json stages = Json::array({
@@ -1717,7 +1804,8 @@ SELECT parent.recipient_task,parent.id,parent.commit_sha FROM specialist_delegat
     bool scopedWorkflowSettled(Id workflow) const {
         return !db.query(R"SQL(
 SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.workflow_id=?
- AND (s.task_id IS NULL OR s.status NOT IN ('completed','failed','stopped') OR t.state NOT IN ('completed','cancelled'))
+ AND ((s.task_id IS NULL AND s.status NOT IN ('failed','stopped')) OR
+      (s.task_id IS NOT NULL AND (s.status NOT IN ('completed','failed','stopped') OR t.state NOT IN ('completed','cancelled'))))
 )SQL",{workflow}).next();
     }
 
@@ -2205,6 +2293,12 @@ Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOpt
 Runtime::~Runtime() = default;
 SpecialistDelegation Runtime::startSpecialist(const Person& person, const SpecialistCheck& command) {
     return p_->startSpecialist(person,command);
+}
+Id Runtime::specialistBudgetRemaining(Id channel) const {
+    return p_->specialistBudgetRemaining(channel);
+}
+void Runtime::freezeSpecialistWork(const Person& person, Id channel, Id generation) {
+    p_->freezeSpecialistWork(person,channel,generation);
 }
 void Runtime::runConversations() {
     p_->db.deliverGitWebhooks();

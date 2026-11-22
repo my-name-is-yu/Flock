@@ -255,11 +255,9 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                             if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
                             else handoffs->consult(*actor,channel,*model,intake,soul);
                         } catch (const std::exception&) {
-                            // The next pass rechecks local permission and delivery history.
                         }
                     }
                 } catch (const std::exception&) {
-                    // A temporary store failure leaves the work available for recovery.
                 }
                 std::this_thread::sleep_for(std::chrono::seconds(2));
             }

@@ -1,26 +1,11 @@
 #include "conversation_storage.hpp"
+#include "specialist_evidence.hpp"
 
 #include <set>
 
 namespace flockv0 {
 namespace {
 constexpr std::size_t maxFindingsBytes = 2000;
-
-std::string specialistFindings(const Json& report) {
-    const auto value = report.find("findings");
-    if (value == report.end()) return {};
-    if (value->is_string()) return value->get<std::string>();
-    if (!value->is_array() || value->empty() || value->size() > 8) return {};
-    std::string result;
-    for (const auto& item : *value) {
-        if (!item.is_string()) return {};
-        const auto& text = item.get_ref<const std::string&>();
-        if (!conversation_storage::hasText(text)) return {};
-        if (!result.empty()) result += '\n';
-        result += text;
-    }
-    return result;
-}
 
 Seconds deadlineSeconds(const Json& args, Seconds inherited = 0) {
     if (!args.contains("softDeadlineSeconds")) return inherited;
@@ -116,7 +101,6 @@ void Store::Impl::initializeWorkflowSchema() {
         return query("SELECT 1 FROM pragma_table_info('workflows') WHERE name='message_id' AND \"notnull\"=1").next();
     };
     if (needsOriginMigration()) {
-        // Rebuild the parent in one write transaction, leaving child table names and IDs intact.
         exec("PRAGMA foreign_keys=OFF");
         {
             Transaction migration(db);
@@ -231,8 +215,7 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
             if (peer) {
                 const auto parsed = Json::parse(field(report,"report"),nullptr,false);
                 const auto findings = specialistFindings(parsed);
-                if (conversation_storage::hasText(findings))
-                    item["findings"] = bounded(scrub.text(findings),maxFindingsBytes);
+                if (findings) item["findings"] = bounded(scrub.text(*findings),maxFindingsBytes);
             }
         }
         auto& records = result[item.contains("verdict") ? "verdicts" : "artifacts"];
@@ -504,7 +487,7 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto version = field(result,"artifactVersion");
     bool ok = field(report,"status")=="completed" && !report.value("truncated",false);
     if (task.contains("workflowParentTaskId"))
-        ok = ok && !field(report,"itemId").empty() && conversation_storage::hasText(specialistFindings(result));
+        ok = ok && !field(report,"itemId").empty() && specialistFindings(result).has_value();
     std::string output;
     if (role=="verify") {
         const auto verdict = field(result,"verdict");

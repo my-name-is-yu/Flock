@@ -76,8 +76,6 @@ std::string redactPairingCodes(std::string value) {
 }
 
 void Store::Impl::initializeParticipationSchema() {
-    // Preserve IDs and history written by earlier draft builds. Only channels
-    // with a local control row can authorize new work.
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS return_channels(
  id INTEGER PRIMARY KEY,

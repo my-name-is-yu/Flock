@@ -90,10 +90,12 @@ WHERE d.channel_id=? AND d.command_id=?
         cursor = row.number(7);
         auth = row.string(8);
     }
-    const auto page = session_.read(target,coordination ? std::optional(cursor) : std::nullopt);
+    const auto page = coordination ? session_.dispatchHistory(target,cursor) : session_.read(target,std::nullopt);
     if (!page) return {std::string(commandId),State::Prepared,{},{}};
-    const bool humanInput = coordination && std::ranges::any_of(page->events,[](const auto& event) {
-        return event.kind == "user_message" && event.createdBy == "user";
+    if (coordination && page->cursor < cursor)
+        return {std::string(commandId),State::Prepared,{},{}};
+    const bool humanInput = coordination && std::ranges::any_of(page->events,[&](const auto& event) {
+        return event.position > cursor && event.kind == "user_message" && event.createdBy == "user";
     });
     const bool reject = humanInput || page->target != target || page->authGeneration != auth;
     {

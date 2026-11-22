@@ -612,7 +612,8 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
-        if (workspaceHead(client,command.projectId,thread,true) != pin)
+        const auto workspace = workspaceHead(client,command.projectId,thread,true);
+        if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
         const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
             {"message",std::move(prompt)},{"clientRequestId",command.actionId+":start"}});
@@ -713,9 +714,12 @@ public:
                 if (command.tool == "delegate" && recovered.kind == Outcome::Accepted) {
                     const auto pin = pinnedCommit(launchArgs(command));
                     if (!pin.empty()) {
+                        if (!loopbackGitHost(origin))
+                            return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                         const auto head = threadHead(client,recovered.run.threadId);
-                        if (!loopbackGitHost(origin) ||
-                            workspaceHead(client,command.projectId,detail(head,recovered.run.threadId),true) != pin)
+                        const auto workspace = workspaceHead(client,command.projectId,
+                                                             detail(head,recovered.run.threadId),true);
+                        if (!workspace || !workspace->clean || workspace->commit != pin)
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
                 }
@@ -764,7 +768,7 @@ public:
                     const auto& thread = detail(head,run.threadId);
                     const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
                     if (!actual) return state(Observed::Unavailable,"Could not verify the specialist's pinned workspace");
-                    if (*actual != pin) {
+                    if (!actual->clean || actual->commit != pin) {
                         observed.status = "failed";
                         observed.detail = "The specialist worktree changed from the saved commit";
                         observed.report = observed.detail;

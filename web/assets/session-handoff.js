@@ -10,6 +10,7 @@ let question;
 let rendered = '';
 let recentRendered = '';
 let pairingTimer;
+const workAnswerDrafts = new Map();
 const handoffLabels = {
   active: 'Active', paused: 'Paused in Flock',
   stopped: 'Stopped in Flock', completed: 'Completed', budget_exhausted: 'Budget exhausted',
@@ -49,7 +50,12 @@ function workState(value) {
   return String(value ?? '').replaceAll('_', ' ');
 }
 
+function workAnswerKey(view, work, stage, prompt) {
+  return JSON.stringify([view.channelId, work.delegationId, stage, prompt.waitId]);
+}
+
 function workAnswer(view, work, stage, prompt) {
+  const key = workAnswerKey(view, work, stage, prompt);
   const form = document.createElement('form');
   const label = document.createElement('label');
   label.textContent = prompt.text;
@@ -58,17 +64,22 @@ function workAnswer(view, work, stage, prompt) {
   input.required = true;
   input.maxLength = 8000;
   input.autocomplete = 'off';
+  input.value = workAnswerDrafts.get(key) ?? '';
+  input.addEventListener('input', () => workAnswerDrafts.set(key, input.value));
   label.append(input);
   const button = document.createElement('button');
   button.textContent = 'Send answer';
   form.append(label, button);
   form.onsubmit = (event) => {
     event.preventDefault();
+    workAnswerDrafts.set(key, input.value);
     void run(async () => {
-      render(await request(`/${channel}/work-answer`, {
-        generation: view.generation, delegationId: work.delegationId, stageId: stage,
+      const view = await request(`/${channel}/work-answer`, {
+        generation: work.generation, delegationId: work.delegationId, stageId: stage,
         waitId: prompt.waitId, text: input.value,
-      }));
+      });
+      workAnswerDrafts.delete(key);
+      render(view);
       status.textContent = 'Answer recorded.';
     }, 'Could not record this work answer. Refresh the handoff and try again.');
   };
@@ -79,6 +90,16 @@ function render(view) {
   const key = JSON.stringify(view);
   if (key === rendered) return;
   rendered = key;
+  const activeWorkAnswers = new Set();
+  for (const work of view.work) {
+    if (work.question) activeWorkAnswers.add(workAnswerKey(view, work, null, work.question));
+    for (const stage of work.stages) {
+      if (stage.question) activeWorkAnswers.add(workAnswerKey(view, work, stage.stageId, stage.question));
+    }
+  }
+  for (const draft of workAnswerDrafts.keys()) {
+    if (!activeWorkAnswers.has(draft)) workAnswerDrafts.delete(draft);
+  }
   const coordination = view.mode === 'coordinate';
   const stopped = view.frozen || ['completed', 'budget_exhausted'].includes(view.state);
   $('handoff').hidden = false;
@@ -131,10 +152,9 @@ function render(view) {
     const title = document.createElement('summary');
     title.textContent = `${work.executor} · ${workState(work.result?.status ?? work.state)}`;
     const content = document.createElement('ul');
-    const canAnswer = !stopped && work.generation === view.generation;
-    const showQuestion = (parent, stage, question) => {
+    const showQuestion = (parent, stage, question, canAnswer) => {
       if (!question) return;
-      if (canAnswer) parent.append(workAnswer(view, work, stage, question));
+      if (!stopped && canAnswer) parent.append(workAnswer(view, work, stage, question));
       else {
         const text = document.createElement('p');
         text.textContent = question.text;
@@ -150,11 +170,11 @@ function render(view) {
     content.replaceChildren(...notes.map(listItem));
     for (const stage of work.stages) {
       const row = listItem(`${stage.name} · ${workState(stage.status)}`);
-      showQuestion(row, stage.stageId, stage.question);
+      showQuestion(row, stage.stageId, stage.question, stage.canAnswer);
       content.append(row);
     }
     summary.append(title, content);
-    showQuestion(summary, null, work.question);
+    showQuestion(summary, null, work.question, work.canAnswer);
     item.append(summary);
     return item;
   }));
@@ -206,7 +226,7 @@ async function loadRecent() {
   renderRecent(await request(''));
 }
 
-async function refresh() {
+async function pollHandoffs() {
   if (busy || refreshing || document.hidden) return;
   refreshing = true;
   const revision = actionRevision;
@@ -219,7 +239,6 @@ async function refresh() {
       if (!busy && revision === actionRevision && !$('handoff').querySelector('form :focus')) render(view);
     }
   } catch {
-    // The explicit Refresh button reports connection errors.
   } finally { refreshing = false; }
 }
 
@@ -302,4 +321,4 @@ void (async () => {
   await loadRecent();
   if (channel) render(await request(`/${channel}`));
 })().catch(() => { status.textContent = 'Session handoffs are unavailable. Check your Flock sign-in.'; });
-setInterval(() => void refresh(), 3500);
+setInterval(() => void pollHandoffs(), 3500);
