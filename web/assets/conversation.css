@@ -46,6 +46,8 @@
   --bot-accent: var(--accent-fill);
   --user-bubble: #58418a;
   overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; min-height: 0;
+  /* Contain absolutely positioned descendants such as .sr-only text; otherwise they extend the page. */
+  position: relative;
 }
 .conversation { scroll-padding-block-start: calc(var(--conversation-top) + .5rem); }
 .msg :focus-visible { scroll-margin-block: .5rem; }
