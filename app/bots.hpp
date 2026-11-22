@@ -1,7 +1,6 @@
 #pragma once
 
-#include "flock/core.hpp"
-#include "flock/web.hpp"
+#include "flock/bot_profile.hpp"
 
 #include <bitset>
 #include <mutex>

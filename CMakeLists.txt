@@ -17,6 +17,7 @@ endif()
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
                        src/model_budget.cpp src/runtime.cpp)
 target_include_directories(flock_core PUBLIC include)
+target_sources(flock_core PRIVATE src/bot_profile.cpp)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
 else()

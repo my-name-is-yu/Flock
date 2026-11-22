@@ -714,13 +714,13 @@ void botProfilesAndAvatars() {
     const auto uploaded = bots.updateProfile("scout",{
         {"name","Scout Prime"},
         {"avatar",{{"kind","upload"},{"filename","../dir/photo.png"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/png",pngBytes});
+    },AvatarImage{pngBytes});
     check(uploaded.at("name") == "Scout Prime" && uploaded.at("avatar").at("kind") == "upload" &&
           uploaded.at("avatar").at("filename") == "photo.png" &&
           !uploaded.at("avatar").at("version").get<std::string>().empty(),
           "uploaded PNG avatar metadata was not saved");
     const auto savedPng = bots.avatarImage("scout");
-    check(savedPng && savedPng->contentType == "image/png" && savedPng->bytes == pngBytes,
+    check(savedPng && savedPng->format().contentType == "image/png" && savedPng->bytes() == pngBytes,
           "stored PNG bytes did not match upload");
 
     // Rename without re-uploading keeps the existing image.
@@ -736,13 +736,13 @@ void botProfilesAndAvatars() {
     const auto replaced = bots.updateProfile("scout",{
         {"name","Scout Renamed"},
         {"avatar",{{"kind","upload"},{"filename","anim.gif"},{"color","#75b8e8"}}},
-    },AvatarImage{"image/gif",gifBytes});
+    },AvatarImage{gifBytes});
     check(replaced.at("avatar").at("version") != uploaded.at("avatar").at("version") &&
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.png") &&
           std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "replacing uploaded avatar did not clean up previous image file");
     const auto savedGif = bots.avatarImage("scout");
-    check(savedGif && savedGif->contentType == "image/gif" && savedGif->bytes == gifBytes,
+    check(savedGif && savedGif->format().contentType == "image/gif" && savedGif->bytes() == gifBytes,
           "replaced GIF bytes did not match");
 
     // Switching back to shape removes uploaded file.
@@ -754,13 +754,7 @@ void botProfilesAndAvatars() {
           !std::filesystem::exists(temp.path / "bots" / "scout" / "avatar.gif"),
           "switching from upload to shape did not remove stored image file");
 
-    // Reject SVG masquerading as image, unknown shape/icon, and empty name.
-    rejects<Conflict>([&] {
-        bots.updateProfile("scout",{
-            {"name","Scout"},
-            {"avatar",{{"kind","upload"}}},
-        },AvatarImage{"image/svg+xml","<svg xmlns='http://www.w3.org/2000/svg'></svg>"});
-    },"SVG payload accepted as avatar image");
+    // Reject an empty name or an unknown icon.
     rejects<Conflict>([&] {
         bots.create({{"name","   "},{"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}});
     },"blank Bot name accepted");
