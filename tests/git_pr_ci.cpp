@@ -575,10 +575,11 @@ void taskMutationAttempts() {
           host->prs.at(0).state == FakeHost::State::closed,"separate decisions on one event did not all update the PR");
 }
 
-void taskMutationRestart() {
+void taskMutationRestart(bool protectTitleOnRestart) {
     Directory directory;
     const auto path = directory.path/"state.db";
     const auto effects = directory.path/"host-effects";
+    const std::string title = "fixture-title-protected-after-restart";
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
@@ -598,8 +599,8 @@ void taskMutationRestart() {
     check(child >= 0,"could not start the crash fixture");
     if (child == 0) {
         host->onPrStateUpdate = [&](std::string_view state) { writeEffect(state); _exit(73); };
-        script.onTaskResult = [](const ModelInput&) -> Decision {
-            return {"git_update_pr",{{"host",hostName},{"repo",repoName},{"prNumber",1},{"state","closed"}}, {}};
+        script.onTaskResult = [&](const ModelInput&) -> Decision {
+            return {"git_update_pr",{{"host",hostName},{"repo",repoName},{"prNumber",1},{"state","closed"},{"title",title}}, {}};
         };
         Store store(path);
         Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
@@ -613,11 +614,18 @@ void taskMutationRestart() {
     int calls = 0;
     script.onTaskResult = [&](const ModelInput& input) -> Decision {
         ++calls;
-        const auto& result = input.event.at("gitResults").back().at("result");
-        check(result.at("ok") == false && result.at("status") == "unknown","interrupted mutation did not retain unknown outcome");
+        if (protectTitleOnRestart) {
+            const auto& feedback = input.event.at("decisionFeedback").back();
+            check(feedback.at("result").at("delivery") == "unknown" && !feedback.at("args").contains("title"),
+                  "Rejecting a saved mutation lost the unknown outcome or exposed its arguments");
+        } else {
+            const auto& result = input.event.at("gitResults").back().at("result");
+            check(result.at("ok") == false && result.at("status") == "unknown","interrupted mutation did not retain unknown outcome");
+        }
         return {"complete",{{"report","PR update outcome unknown"}}, {}};
     };
     Store store(path);
+    if (protectTitleOnRestart) store.protectGitCredential(title);
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     for (int i = 0; i < 5 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
     std::ifstream log(effects);
@@ -927,7 +935,8 @@ int main() {
         accessAndActions();
         newAttempts();
         taskMutationAttempts();
-        taskMutationRestart();
+        taskMutationRestart(false);
+        taskMutationRestart(true);
         taskReadRecovery();
         boundedTaskReadAndForeignReference(false);
         boundedTaskReadAndForeignReference(true);

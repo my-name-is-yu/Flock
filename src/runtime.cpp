@@ -63,7 +63,12 @@ Json pendingBatch(const Json& task, std::size_t maxPromptBytes, SourceQuotes quo
 struct TaskDecision : Decision {
     Json usage = Json::object();
     Id attemptId = 0;
+    bool argumentsChecked = true;
 };
+
+std::string gitInvocation(const TaskDecision& decision, const Json& event) {
+    return decision.attemptId ? "attempt/" + std::to_string(decision.attemptId) : "event/" + event.at("id").dump();
+}
 
 struct SessionContextLimit : Conflict {
     SessionContextLimit() : Conflict("The Session prompt exceeds T3's size limit. "
@@ -941,11 +946,15 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
 
     static constexpr int maxToolErrors = 6;
 
-    void rejectDecision(const Json& task, const Json& event, const TaskDecision& decision, std::string_view message) {
+    void rejectDecision(const Json& task, const Json& event, const TaskDecision& decision, std::string_view message,
+                        bool replay = false) {
         change(task,[&](Json& current) {
-            const auto why = bounded(message,2048);
+            const bool unknown = replay && isGitTool(decision.tool) &&
+                db.gitEffectStarted(gitInvocation(decision,event),current.at("id"));
+            const auto why = unknown ? "The host outcome is unknown. Check the target before retrying." : bounded(message,2048);
             Json entry = {{"tool",bounded(decision.tool,128)},{"result",{{"ok",false},{"error",why}}},
                           {"eventId",event.at("id")}};
+            if (unknown) entry["result"]["delivery"] = "unknown";
             const auto args = decision.args.dump();
             if (args.size() <= 2048) entry["args"] = decision.args;
             else entry["argumentsExcerpt"] = bounded(args,2048);
@@ -1656,10 +1665,8 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (isGitTool(tool)) {
             Json result;
             try {
-                const auto invocation = decision.attemptId ? "attempt/" + std::to_string(decision.attemptId)
-                                                           : "event/" + event.at("id").dump();
                 result = db.gitTool(*options.gitHost,field(snapshot,"botId"),snapshot.at("id"),snapshot,decision,
-                                    invocation,snapshot.at("generation").get<Id>());
+                                    gitInvocation(decision,event),snapshot.at("generation").get<Id>());
             } catch (const StorageError&) { throw; }
             catch (const std::exception& error) { result = {{"ok",false},{"error",db.sharedRedactor().text(error.what())}}; }
             change(snapshot,[&](Json& current) {
@@ -1776,7 +1783,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
         return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
-                            saved->value("attemptId",Id{0})};
+                            saved->value("attemptId",Id{0}),saved->value("argumentsChecked",false)};
     }
 
     std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
@@ -1839,11 +1846,17 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
              needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
         if (turn.calls.size() != 1) throw Conflict("Return one task action");
-        const TaskDecision decision{std::move(turn.calls.front()),std::move(turn.usage),attempt};
+        auto& call = turn.calls.front();
+        const TaskDecision decision{std::move(call),std::move(turn.usage),attempt};
+        if (!call.rejection.empty()) {
+            if (task["activeRun"].is_null() || questionStillOpen(task))
+                rejectDecision(task,event,decision,call.rejection);
+            return std::nullopt;
+        }
         // Bookkeeping must not advance the generation observed by conversation turns.
         const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
             {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage},
-            {"attemptId",decision.attemptId}};
+            {"attemptId",decision.attemptId},{"argumentsChecked",true}};
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
@@ -1921,10 +1934,19 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 tools.insert(tools.end(),gitTools(false).begin(),gitTools(false).end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
-            if (!decision)
-                decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
+            const bool replay = decision.has_value();
+            if (!decision) decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
             if (!decision || shutdown.stop_requested()) return;
             if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
+            if (replay) {
+                auto call = db.checkModelCall(field(task,"botId"),*decision,tools,false,!decision->argumentsChecked);
+                if (!call.rejection.empty()) {
+                    rejectDecision(task,event,TaskDecision{std::move(call),decision->usage,decision->attemptId},call.rejection,true);
+                    return;
+                }
+                decision->args = std::move(call.args);
+                decision->reason = std::move(call.reason);
+            }
             try {
                 if (!decision->args.is_object() || decision->args.dump().size() > 20000 || !present(decision->reason,4000) ||
                     std::ranges::find(tools,decision->tool) == tools.end())

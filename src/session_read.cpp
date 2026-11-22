@@ -216,7 +216,9 @@ public:
         for (auto& step : steps) {
             const auto& tool = step.at("tool");
             if (tool != "flock_session_search" && tool != "flock_session_events") continue;
-            const auto& refs = step.at("result").at("sessions");
+            const auto& outcome = step.at("result");
+            if (!outcome.contains("sessions") && outcome.value("ok",true) == false) continue;
+            const auto& refs = outcome.at("sessions");
             for (const auto& token : refs) {
                 const auto& ref = token.get_ref<const std::string&>();
                 auto [entry, fresh] = checked.try_emplace(ref);

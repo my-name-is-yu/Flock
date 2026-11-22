@@ -8,6 +8,8 @@
 
 namespace flockv0 {
 namespace {
+constexpr std::string_view redactionPlaceholder = "[redacted]";
+
 struct File {
     int fd;
     explicit File(int value) : fd(value) {}
@@ -29,6 +31,15 @@ File openDirectory(int stateDirectory, bool create) {
     File directory(openat(stateDirectory,"secrets",O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY));
     verify(directory.fd,true);
     return directory;
+}
+
+template<class Matches>
+bool anyJsonText(const Json& value, const Matches& matches) {
+    if (value.is_string()) return matches(value.get_ref<const std::string&>());
+    if (!value.is_structured()) return false;
+    for (const auto& item : value.items())
+        if ((value.is_object() && matches(item.key())) || anyJsonText(item.value(),matches)) return true;
+    return false;
 }
 }
 
@@ -102,7 +113,7 @@ std::string SecretRedactor::text(std::string_view source, bool truncated) const 
             return tail.starts_with(value) || (truncated && value.starts_with(tail));
         });
         if (found == values_.end()) out += source[i++];
-        else { out += "[redacted]"; i += found->size(); }
+        else { out += redactionPlaceholder; i += found->size(); }
     }
     if (std::any_of(values_.begin(),values_.end(),[&](const auto& v){return out.find(v)!=out.npos;})) out.clear();
     return out;
@@ -147,6 +158,16 @@ Json SecretRedactor::record(Json data, Fields fields) const {
 
 void SecretRedactor::requirePublic(const Json& metadata) const {
     if (record(metadata,Fields::external) != metadata) throw Conflict("Secret values cannot be used as metadata");
+}
+
+bool SecretRedactor::containsProtected(const Json& value) const {
+    return !values_.empty() && anyJsonText(value,[&](std::string_view text) {
+        return std::ranges::any_of(values_,[&](const auto& secret) { return text.find(secret) != text.npos; });
+    });
+}
+
+bool SecretRedactor::mayContainLegacyRedaction(const Json& value) {
+    return anyJsonText(value,[](std::string_view text) { return text.empty() || text.find(redactionPlaceholder) != text.npos; });
 }
 
 static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, std::vector<std::string> values) {

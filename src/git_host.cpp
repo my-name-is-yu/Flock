@@ -440,6 +440,18 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     return result;
 }
 
+bool Store::Impl::gitConversationEffectStarted(Id message, int step) const {
+    return gitEffectStarted("turn/" + std::to_string(message) + "/" + std::to_string(step));
+}
+
+bool Store::Impl::gitEffectStarted(std::string_view invocation, Id taskId) const {
+    return query(R"SQL(
+SELECT 1 FROM git_pr_operations WHERE (?1=0 OR task_id=?1) AND invocation IN (?2,?2 || '/new')
+UNION ALL SELECT 1 FROM git_mutations WHERE (?1=0 OR task_id=?1) AND json_extract(invocation,'$[0]')=?2
+LIMIT 1
+)SQL",{taskId,invocation}).next();
+}
+
 Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, int step, const Decision& decision) {
     try {
         if (!host || !message.channelScope.empty()) throw Conflict("Git tools are available in Flock Web with a connected Git host");
