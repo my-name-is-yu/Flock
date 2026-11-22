@@ -89,6 +89,7 @@
   position: relative;
 }
 .conversation { scroll-padding-block-start: calc(var(--conversation-top) + .5rem); }
+.conversation.follow-newest { overflow-anchor: none; }
 .jump-to-latest {
   grid-area: 2 / 1; place-self: end center; z-index: 1; margin-block-end: .75rem;
   display: flex; align-items: center; gap: .35rem; min-height: 2.75rem; padding: .4rem .85rem;
@@ -110,6 +111,10 @@
   background: var(--raised); color: var(--text-2); font-weight: 500;
 }
 .older:hover { text-decoration: none; color: var(--text); background: var(--hover); }
+/* Keep the last opened message clear of the floating Jump to latest control. */
+.viewing-source .timeline { padding-block-end: 4rem; }
+.conversation-source-target .bubble { outline: 2px solid transparent; outline-offset: 3px; animation: source-highlight 2.4s ease-out; }
+@keyframes source-highlight { 0%, 40% { outline-color: var(--accent); } }
 
 .timeline { --avatar-size: 1.75rem; --avatar-gap: .6rem; --avatar-col: calc(var(--avatar-size) + var(--avatar-gap)); display: flex; flex-direction: column; }
 .day { text-align: center; color: var(--text-3); font-size: var(--text-xs); font-weight: 500; margin: 1.6rem 0 .3rem; }
@@ -164,15 +169,18 @@
 .msg-action svg { width: 1rem; height: 1rem; }
 
 .timeline .question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .15rem 0 0; padding-left: var(--avatar-col); }
-.timeline .question-actions .button {
+.timeline .question-actions .button:not(.question-confirm) {
   background: transparent; color: var(--text); font-weight: 500; border-radius: var(--radius-full);
   padding: .34rem .85rem; box-shadow: inset 0 0 0 1px var(--hairline);
 }
-.timeline .question-actions .button:hover:not(:disabled) { background: var(--hover); }
-.timeline .question-actions .question-confirm { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.timeline .question-actions .question-confirm:hover:not(:disabled) { background: var(--accent-soft-hover); }
-.timeline .question-actions .text-button { color: var(--text-2); font-weight: 500; }
-.timeline .question-actions .text-button:hover:not(:disabled) { color: var(--text); }
+.timeline .question-actions .button:not(.question-confirm):hover:not(:disabled) { background: var(--hover); }
+.question-actions .question-confirm {
+  padding: .34rem .85rem; border-radius: var(--radius-full); box-shadow: inset 0 0 0 1px var(--hairline);
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+.question-actions .question-confirm:hover:not(:disabled) { background: var(--accent-soft-hover); }
+.question-actions .question-reply { color: var(--text-2); font-weight: 500; }
+.question-actions .question-reply:hover:not(:disabled) { color: var(--text); }
 .question-choice-form, .question-options { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; min-width: 0; max-width: 100%; }
 .question-options { margin: 0; padding: 0; border: 0; }
 .question-option {

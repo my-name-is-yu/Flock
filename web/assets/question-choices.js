@@ -1,3 +1,17 @@
+export function hasQuestionChoices(choices) {
+  return Array.isArray(choices) && choices.length > 0 &&
+    choices.every((choice) => typeof choice === 'string' && choice.trim());
+}
+
+export function questionReplyButton(open, dialog = false) {
+  const reply = document.createElement('button');
+  reply.type = 'button';
+  reply.className = dialog ? 'dialog-button quiet' : 'text-button question-reply';
+  reply.textContent = 'Write a reply';
+  reply.addEventListener('click', open);
+  return reply;
+}
+
 export function updateQuestionChoiceForm(form, answer, busy) {
   const options = form.querySelector('fieldset');
   options.disabled = busy;

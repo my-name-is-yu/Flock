@@ -220,8 +220,22 @@ void exercise(const std::filesystem::path& path) {
           row(inbox,"itemKind","deadline").at("taskId") == deadlineTask &&
           row(inbox,"itemKind","unknown_delivery").at("taskId") == unknown &&
           inbox.size() == 11, "inbox omitted a pending decision or its prompt");
-    check(!row(store.inbox(reader),"itemKind","user_question").at("canDecide").get<bool>(),
+    const auto readerQuestion = row(store.inbox(reader),"itemKind","user_question");
+    const auto waitAnchor = report.at("wait").at("messageId");
+    check(!readerQuestion.at("canDecide").get<bool>() && readerQuestion.at("conversationEventId") == waitAnchor &&
+          readerQuestion.at("waitId") != waitAnchor &&
+          row(store.conversation("report"),"id",waitAnchor).at("kind") == "waiting",
           "view-only account got approval controls");
+    db.exec("UPDATE tasks SET data=json_remove(data,'$.wait.messageId') WHERE id="+std::to_string(question));
+    check(row(store.inbox(reader),"itemKind","user_question") == readerQuestion,
+          "a legacy wait did not resolve to its waiting event");
+    check(!row(inbox,"itemKind","model_budget").contains("conversationEventId") &&
+          !row(inbox,"itemKind","pr_review").contains("conversationEventId"),
+          "inbox invented an anchor for an item without a visible source");
+    const auto paused = row(inbox,"itemKind","conversation_model_budget");
+    check(paused.at("conversationEventId") == paused.at("waitId") &&
+          row(store.conversation("review"),"id",paused.at("conversationEventId")).at("kind") == "conversation_reply",
+          "a paused turn did not point to its conversation reply");
 
     const auto questionBefore = pending(store,user_question);
     rejected<DecisionDenied>([&] { store.decideInbox(reader,questionBefore,"answer",{{"text","Final"}}); },
@@ -354,7 +368,8 @@ void protectedInputSource(const std::filesystem::path& path) {
           access.requestSecret("report",ref,repeat) == request,"repeated protected input changed its request ID");
     const auto inbox = store.inbox(owner,"report");
     check(inbox.size() == 1 && inbox.at(0).at("itemId") == request &&
-          inbox.at(0).at("request") == "First request","protected input lost its first conversation source");
+          inbox.at(0).at("request") == "First request" && inbox.at(0).at("conversationEventId") == source,
+          "protected input lost its first conversation source");
 }
 
 void chatDecision(const std::filesystem::path& path) {
