@@ -552,7 +552,13 @@ private:
         const bool configured = botById(known,peer) != nullptr;
         if (!canReadPeer(bot,peer,configured))
             return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before));
+        Id anchor = 0;
+        if (req.has_param("anchor")) {
+            if (req.has_param("before")) return error(res,400,"invalid_cursor");
+            anchor = store_.peerMessageAnchor(bot,peer,queryId(req,"anchor",false));
+            if (!anchor) return error(res,404,"peer_message_not_found");
+        }
+        const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before,anchor));
         json(res,200,store_.access().redactSecrets(peer,history));
     }
 

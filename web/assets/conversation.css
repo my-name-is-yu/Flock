@@ -276,6 +276,7 @@
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
 .peer-dm-message .msg-time { opacity: 1; }
+.peer-dm-message[data-anchored] .bubble { outline: 1px solid var(--focus); outline-offset: 2px; }
 .peer-forward-content {
   display: grid; justify-self: end; justify-items: end; gap: .35rem; min-width: 0; max-width: min(100%, 36rem);
 }
