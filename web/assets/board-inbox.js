@@ -1,4 +1,4 @@
-import { hasQuestionChoices, questionChoiceForm, questionReplyButton, updateQuestionChoiceForm } from './question-choices.js';
+import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
 
 const labels = {
   user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
@@ -20,29 +20,32 @@ const actions = {
   protected_input: [['supply', 'Save protected value']],
   bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
   pr_reconciliation: [['reject_pr', 'Reject operation']],
-  pr_review: [['approve', 'Approve review'], ['request_changes', 'Request changes']],
+  pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
 const draftStorage = 'flock-inbox-answer-drafts';
 
-function answerKey(item) {
-  return JSON.stringify([item.botId, item.taskId]);
-}
-function choiceKey(item) {
-  return JSON.stringify([item.botId, item.taskId, 'choice']);
-}
-function decisionTarget(item) {
-  return JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
-}
-function answerFocus(input) {
-  return { key: input.dataset.answerKey, selection: [input.selectionStart, input.selectionEnd, input.selectionDirection] };
-}
+const svgIcons = {
+  pr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V10a3 3 0 0 0-3-3h-3.5m2-2-2 2 2 2"/></svg>',
+  external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5h5v5M10 14 19 5M19 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7"/></svg>',
+  history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 13.5 6.2 6a2 2 0 0 1 1.9-1.5h7.8A2 2 0 0 1 17.8 6l2.2 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18v-4.5Z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/></svg>',
+};
+
+const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
+const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text) node.textContent = text;
   if (className) node.className = className;
   return node;
+}
+function iconSpan(markup) {
+  const host = document.createElement('span');
+  host.innerHTML = markup;
+  return host.firstElementChild;
 }
 function labeled(text, control) {
   const label = element('label', text);
@@ -52,141 +55,149 @@ function labeled(text, control) {
 function time(seconds) {
   return new Date(seconds * 1000).toLocaleString();
 }
-function prLink(raw, title) {
+function relativeTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  const delta = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
+  if (delta < 60) return 'Just now';
+  if (delta < 3600) {
+    const mins = Math.floor(delta / 60);
+    return `${mins} ${mins === 1 ? 'min' : 'mins'} ago`;
+  }
+  if (delta < 86400) {
+    const hours = Math.floor(delta / 3600);
+    return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+  }
+  const days = Math.floor(delta / 86400);
+  if (days < 30) return `${days} ${days === 1 ? 'day' : 'days'} ago`;
+  return new Date(seconds * 1000).toLocaleDateString();
+}
+function parsePrInfo(raw) {
   try {
     const url = new URL(raw);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return element('span', title);
-    const link = element('a', title);
-    link.href = url.href;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    return link;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    const displayUrl = `${url.host}${url.pathname}`.replace(/\/+$/, '');
+    const match = url.pathname.match(/\/([^/]+)\/pull\/(\d+)/i) || url.pathname.match(/\/([^/]+)\/merge_requests\/(\d+)/i);
+    const repoTag = match ? `${match[1]}#${match[2]}` : url.host;
+    return { href: url.href, displayUrl, repoTag, host: url.host };
   } catch {
-    return element('span', title);
+    return null;
   }
 }
-function card(title, meta) {
+export function pullRequestLink(raw, title) {
+  const info = parsePrInfo(raw);
+  if (!info) return element('span', title);
+  const link = element('a', title);
+  link.href = info.href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+function historyCard(title, meta) {
   const article = element('article', '', 'board-inbox-card');
   article.append(element('p', meta, 'board-inbox-meta'), element('h3', title));
   return article;
 }
-function questionForms(item, submit, drafts, remember, saving, focus) {
-  const key = answerKey(item);
-  const selectionKey = choiceKey(item);
-  const target = decisionTarget(item);
-  const draft = drafts.get(key);
-  const savedChoice = drafts.get(selectionKey);
-  const choiceStale = savedChoice?.target === target && savedChoice.stale;
-  let selected = savedChoice?.target === target && !choiceStale ? savedChoice.text : undefined;
-  let draftTarget = draft?.target ?? target;
-  let stale = draft?.stale;
-  let busy = Boolean(saving);
-  const changed = draftTarget !== target;
-  const group = element('div', '', 'board-inbox-question');
-  const form = element('form', '', 'board-inbox-form');
-  const input = element('textarea');
-  input.dataset.answerKey = key;
-  input.rows = 2;
-  input.maxLength = 8000;
-  input.required = true;
-  input.value = draft?.text ?? '';
-  const send = element('button', 'Send answer');
-  send.type = 'submit';
-  let review;
-  let choices;
-  let reply;
-  const saveAnswer = () => remember(key, { target: draftTarget, text: input.value, stale });
-  const useCurrentQuestion = () => {
-    draftTarget = target;
-    stale = false;
-    saveAnswer();
-    review.remove();
-    review = undefined;
-    setBusy(busy);
-  };
-  input.addEventListener('input', () => {
-    if (draftTarget !== target && input.value !== draft?.text) useCurrentQuestion();
-    else saveAnswer();
-  });
-  if (changed || stale) {
-    review = element('div');
-    review.append(element('p', changed
-      ? 'The question changed. Review the current question before using this draft.'
-      : 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
-    if (changed) {
-      const useDraft = element('button', 'Use draft for this question');
-      useDraft.type = 'button';
-      useDraft.addEventListener('click', () => {
-        useCurrentQuestion();
-        input.focus();
-      });
-      review.append(useDraft);
-    }
-    form.append(review);
-  }
-  if (hasQuestionChoices(item.choices)) {
-    const actions = element('div', '', 'question-actions');
-    form.hidden = !draft && focus?.key !== key;
-    form.id = `inbox-answer-${item.waitId}`;
-    send.textContent = 'Send reply';
-    choices = questionChoiceForm({
-      key: target, prompt: item.prompt, choices: item.choices, answer: selected, busy: busy || choiceStale,
-      select(answer) {
-        selected = answer;
-        remember(selectionKey, { target, text: answer });
-        updateQuestionChoiceForm(choices, selected, busy);
-      },
-      submit(answer) { void sendAnswer(answer, true); },
-    });
-    reply = questionReplyButton(() => {
-      form.hidden = false;
-      reply.setAttribute('aria-expanded', 'true');
-      input.focus();
-    });
-    reply.setAttribute('aria-controls', form.id);
-    reply.setAttribute('aria-expanded', String(!form.hidden));
-    actions.append(choices, reply);
-    group.append(actions);
-    if (choiceStale) group.append(element('p', 'The question changed. Refresh to load the current question.', 'board-inbox-meta'));
-  }
-  const buttons = element('div', '', 'board-inbox-actions');
-  buttons.append(send);
-  form.append(labeled('Answer', input), buttons);
-  group.append(form);
-  function setBusy(value) {
-    busy = value;
-    for (const control of form.elements) control.disabled = busy;
-    send.disabled = busy || Boolean(review);
-    if (choices) updateQuestionChoiceForm(choices, selected, busy || choiceStale);
-    if (reply) reply.disabled = busy;
-  }
-  async function sendAnswer(text, choice = false) {
-    const active = document.activeElement;
-    const focus = !choice && form.contains(active) ? { ...answerFocus(input), origin: active } : undefined;
-    setBusy(true);
-    try { await submit(item, 'answer', { text }, focus, choice); }
-    finally { setBusy(false); }
-  }
-  form.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (event.submitter === send && !send.disabled) void sendAnswer(input.value);
-  });
-  setBusy(busy);
-  saving?.then(() => setBusy(false), () => setBusy(false));
-  return group;
+function button(text, className, click) {
+  const node = element('button', text, className);
+  node.type = 'button';
+  node.addEventListener('click', click);
+  return node;
 }
-function decisionCard(item, submit, drafts, remember, saving, focus) {
-  const article = card(item.requestTitle, `${item.botName} · ${labels[item.itemKind]}`);
-  if (item.request && item.request !== item.requestTitle) article.append(element('p', item.request));
-  article.append(element('p', item.prompt));
-  if (item.prUrl) article.append(prLink(item.prUrl, item.prTitle));
-  for (const pr of item.candidates || []) article.append(prLink(pr.url, `Pull request #${pr.prNumber}`));
+function prPreviewCard(rawUrl, title) {
+  const info = parsePrInfo(rawUrl);
+  if (!info) return element('span', title || 'Pull request', 'board-inbox-meta');
+  const box = element('div', '', 'board-inbox-pr-card');
+  const head = element('div', '', 'board-inbox-pr-head');
+  const link = pullRequestLink(info.href, title || 'Pull request');
+  link.className = 'board-inbox-pr-link';
+  const tools = element('div', '', 'board-inbox-pr-tools');
+  const openBtn = element('a', '', 'board-inbox-pr-tool');
+  openBtn.href = info.href;
+  openBtn.target = '_blank';
+  openBtn.rel = 'noopener noreferrer';
+  openBtn.setAttribute('aria-label', 'Open pull request in new tab');
+  openBtn.title = 'Open pull request';
+  openBtn.append(iconSpan(svgIcons.external));
+  const copyBtn = element('button', '', 'board-inbox-pr-tool');
+  copyBtn.type = 'button';
+  copyBtn.setAttribute('aria-label', 'Copy pull request link');
+  copyBtn.title = 'Copy link';
+  copyBtn.append(iconSpan(svgIcons.copy));
+  copyBtn.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await navigator.clipboard?.writeText(info.href);
+      copyBtn.replaceChildren(iconSpan(svgIcons.check));
+      setTimeout(() => { copyBtn.replaceChildren(iconSpan(svgIcons.copy)); }, 1200);
+    } catch {}
+  });
+  tools.append(openBtn, copyBtn);
+  head.append(link, tools);
+
+  const meta = element('div', '', 'board-inbox-pr-meta');
+  meta.append(iconSpan(svgIcons.pr), element('span', info.repoTag));
+  if (info.repoTag !== info.host) {
+    meta.append(element('span', '·', 'board-inbox-submeta-sep'), element('span', info.host));
+  }
+  box.append(head, meta);
+  return box;
+}
+function decisionCard(item, submit, source, question, saving) {
+  const article = element('article', '', 'board-inbox-card');
+  const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
+
+  const titleGroup = element('div', '', 'board-inbox-title-group');
+  titleGroup.append(element('h3', item.requestTitle));
+
+  const submeta = element('div', '', 'board-inbox-submeta');
+  const parts = [];
+  if (prInfo) {
+    const link = element('a', prInfo.displayUrl, 'board-inbox-submeta-link');
+    link.href = prInfo.href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    parts.push(link);
+  } else if (labels[item.itemKind]) {
+    parts.push(element('span', labels[item.itemKind]));
+  }
+  const rel = relativeTime(item.createdAt);
+  if (rel) parts.push(element('span', rel));
+  if (source) parts.push(source);
+  parts.forEach((part, idx) => {
+    if (idx > 0) submeta.append(element('span', '·', 'board-inbox-submeta-sep'));
+    submeta.append(part);
+  });
+  if (parts.length) titleGroup.append(submeta);
+  article.append(titleGroup);
+
+  const bodyLines = [];
+  if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
+  if (item.prompt && item.prompt !== item.requestTitle && item.prompt !== item.request) bodyLines.push(item.prompt);
+  if (bodyLines.length || prInfo) {
+    const body = element('p', bodyLines.join('\n'), 'board-inbox-body');
+    if (prInfo) {
+      const inlinePr = element('a', '', 'board-inbox-inline-pr');
+      inlinePr.href = prInfo.href;
+      inlinePr.target = '_blank';
+      inlinePr.rel = 'noopener noreferrer';
+      inlinePr.append(iconSpan(svgIcons.pr), element('span', 'View PR'));
+      body.append(inlinePr);
+    }
+    article.append(body);
+  }
+
+  if (item.prUrl) {
+    article.append(prPreviewCard(item.prUrl, item.prTitle || 'Pull request'));
+  }
+  for (const pr of item.candidates || []) article.append(prPreviewCard(pr.url, `Pull request #${pr.prNumber}`));
+
   if (!item.canDecide) {
     article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
   }
   if (item.itemKind === 'user_question') {
-    article.append(questionForms(item, submit, drafts, remember, saving, focus));
+    article.append(question());
     return article;
   }
   const form = element('form', '', 'board-inbox-form');
@@ -205,17 +216,19 @@ function decisionCard(item, submit, drafts, remember, saving, focus) {
     form.append(labeled('Protected value', inputs.value));
   }
   for (const pr of item.candidates || []) {
-    const button = element('button', `Link #${pr.prNumber}`);
-    button.type = 'submit';
-    button.value = 'link_pr';
-    button.dataset.prNumber = pr.prNumber;
-    buttons.append(button);
+    const btn = element('button', `Link #${pr.prNumber}`);
+    btn.type = 'submit';
+    btn.value = 'link_pr';
+    btn.dataset.prNumber = pr.prNumber;
+    buttons.append(btn);
   }
   for (const [decision, title] of actions[item.itemKind]) {
-    const button = element('button', title);
-    button.value = decision;
-    button.type = 'submit';
-    buttons.append(button);
+    const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
+      : (decision === 'deny' || decision === 'reject_pr' ? 'secondary' : 'primary');
+    const btn = element('button', title, style);
+    btn.value = decision;
+    btn.type = 'submit';
+    buttons.append(btn);
   }
   form.append(buttons);
   function setBusy(busy) {
@@ -237,25 +250,177 @@ function decisionCard(item, submit, drafts, remember, saving, focus) {
   return article;
 }
 
-export function mountBoardInbox(api, sourceAction) {
+export function mountBoardInbox({ api, sourceAction, onChange, onAccepted, canCompose, focusComposer, canDismiss = () => true }) {
   const byId = (id) => document.getElementById(id);
-  const dialog = byId('board-inbox');
-  const bots = byId('work-view-bot');
-  const message = byId('work-view-message');
-  const items = byId('work-view-items');
-  const history = byId('work-view-history');
+  const main = byId('main');
+  const trigger = byId('needs-you');
+  const caption = byId('profile-heading');
+  const layer = byId('decision-layer');
+  const shade = byId('decision-shade');
+  const panel = byId('decision-panel');
+  const panelBody = panel?.querySelector('.decision-panel-body');
+  const title = byId('decision-heading');
+  const position = byId('decision-position');
+  const previous = byId('decision-previous');
+  const next = byId('decision-next');
+  const more = byId('decision-more');
+  const moreList = byId('decision-more-list');
+  const message = byId('decision-message');
+  const host = byId('decision-item');
+  const transcript = byId('conversation');
+  const reducedMotion = matchMedia?.('(prefers-reduced-motion: reduce)');
   let drafts = new Map();
   try { drafts = new Map(JSON.parse(sessionStorage.getItem(draftStorage))); } catch {}
   const saving = new Map();
-  const views = {
-    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item, focus) =>
-      decisionCard(item, submit, drafts, remember, saving.get(decisionTarget(item)), focus)],
-    'inbox/history': ['Recent decisions', 'decisions', 'No recorded decisions.', (entry) => card(labels[entry.itemKind],
-      `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)],
-  };
-  let view;
-  let version = 0;
-  let availableBots;
+  let bot, viewer, origin, mode, selected, rendered;
+  let items = [];
+  let epoch = 0;
+  let historyRequest;
+  let composerSuppressed = false;
+  let morphCleanup = null;
+
+  const scoped = (botId = bot) => items.filter((item) => item.botId === botId);
+  const current = () => mode === 'pending' ? scoped().find((item) => itemKey(item) === selected) : undefined;
+  const isOpen = () => !!mode;
+  const count = (botId) => scoped(botId).length;
+  const saveKey = (item) => JSON.stringify([viewer, itemKey(item)]);
+  const draftKey = (item, choice) => JSON.stringify([viewer, item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
+
+  function clearMorph() {
+    if (morphCleanup) {
+      morphCleanup();
+      morphCleanup = null;
+    }
+  }
+
+  function animateOpenFromPill(pillRect) {
+    if (reducedMotion?.matches || !panel?.animate || !pillRect || !pillRect.width || !pillRect.height) return;
+    const cardRect = panel.getBoundingClientRect();
+    if (!cardRect.width || !cardRect.height) return;
+    const dx = (pillRect.left + pillRect.width / 2) - (cardRect.left + cardRect.width / 2);
+    const dy = pillRect.top - cardRect.top;
+    const sx = Math.max(.18, Math.min(1, pillRect.width / cardRect.width));
+    const sy = Math.max(.14, Math.min(1, pillRect.height / cardRect.height));
+    panel.getAnimations().forEach((anim) => anim.cancel());
+    panel.animate([
+      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '14px', opacity: .88 },
+      { transform: 'translate(0, 0) scale(1, 1)', borderRadius: '20px', opacity: 1 },
+    ], { duration: 220, easing: 'cubic-bezier(0.2, 0.9, 0.25, 1)' });
+    if (panelBody?.animate) {
+      panelBody.getAnimations().forEach((anim) => anim.cancel());
+      panelBody.animate([
+        { opacity: 0, filter: 'blur(7px)' },
+        { opacity: 1, filter: 'blur(0px)' },
+      ], { duration: 200, easing: 'ease-out', delay: 25, fill: 'backwards' });
+    }
+    if (shade?.animate) {
+      shade.getAnimations().forEach((anim) => anim.cancel());
+      shade.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 190, easing: 'ease-out' });
+    }
+  }
+
+  function animateCloseToPill(cardRect, pillRect) {
+    clearMorph();
+    if (reducedMotion?.matches || !main || !cardRect || !cardRect.width || !cardRect.height || !pillRect || !pillRect.width || !pillRect.height) return;
+    const overlay = element('div', '', 'decision-morph-overlay');
+    overlay.setAttribute('aria-hidden', 'true');
+    const ghostShade = element('div', '', 'decision-morph-shade');
+    const ghostCard = element('div', '', 'decision-morph-card');
+    ghostCard.style.left = `${cardRect.left}px`;
+    ghostCard.style.top = `${cardRect.top}px`;
+    ghostCard.style.width = `${cardRect.width}px`;
+    ghostCard.style.height = `${cardRect.height}px`;
+    overlay.append(ghostShade, ghostCard);
+    main.classList.add('decision-morphing');
+    main.append(overlay);
+
+    const dx = (pillRect.left + pillRect.width / 2) - (cardRect.left + cardRect.width / 2);
+    const dy = pillRect.top - cardRect.top;
+    const sx = Math.max(.18, Math.min(1, pillRect.width / cardRect.width));
+    const sy = Math.max(.14, Math.min(1, pillRect.height / cardRect.height));
+
+    const finish = () => {
+      overlay.remove();
+      main.classList.remove('decision-morphing');
+      if (morphCleanup === finish) morphCleanup = null;
+    };
+    morphCleanup = finish;
+
+    if (!ghostCard.animate || !ghostShade.animate) {
+      finish();
+      return;
+    }
+    const cardAnim = ghostCard.animate([
+      { transform: 'translate(0, 0) scale(1, 1)', borderRadius: '20px', opacity: 1 },
+      { transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`, borderRadius: '14px', opacity: .25 },
+    ], { duration: 185, easing: 'cubic-bezier(0.4, 0, 0.2, 1)', fill: 'forwards' });
+    ghostShade.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 185, easing: 'ease-out', fill: 'forwards' });
+    cardAnim.onfinish = finish;
+    cardAnim.oncancel = finish;
+  }
+
+  function closeMoreMenu() {
+    if (more?.open) more.open = false;
+  }
+
+  function syncMoreMenu() {
+    if (!more || !moreList) return;
+    const actionsList = [];
+    const item = current();
+    if (mode === 'pending' && item) {
+      const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
+      if (prInfo) {
+        const openLink = element('a', '', 'decision-more-item');
+        openLink.href = prInfo.href;
+        openLink.target = '_blank';
+        openLink.rel = 'noopener noreferrer';
+        openLink.append(iconSpan(svgIcons.external), element('span', 'Open pull request'));
+        openLink.addEventListener('click', closeMoreMenu);
+        actionsList.push(openLink);
+
+        const copyBtn = element('button', '', 'decision-more-item');
+        copyBtn.type = 'button';
+        copyBtn.append(iconSpan(svgIcons.copy), element('span', 'Copy pull request link'));
+        copyBtn.addEventListener('click', () => {
+          void navigator.clipboard?.writeText(prInfo.href);
+          closeMoreMenu();
+        });
+        actionsList.push(copyBtn);
+      }
+      const histBtn = element('button', '', 'decision-more-item');
+      histBtn.type = 'button';
+      histBtn.append(iconSpan(svgIcons.history), element('span', 'Recent decisions'));
+      histBtn.addEventListener('click', () => {
+        closeMoreMenu();
+        void openHistory(origin);
+      });
+      actionsList.push(histBtn);
+    } else if (mode === 'history' && scoped().length) {
+      const pendingBtn = element('button', '', 'decision-more-item');
+      pendingBtn.type = 'button';
+      pendingBtn.append(iconSpan(svgIcons.history), element('span', 'Pending decisions'));
+      pendingBtn.addEventListener('click', () => {
+        closeMoreMenu();
+        open(origin);
+      });
+      actionsList.push(pendingBtn);
+    }
+    more.hidden = !actionsList.length;
+    moreList.replaceChildren(...actionsList);
+  }
+
+  function storedDraft(item, choice) {
+    const key = draftKey(item, choice);
+    if (viewer === 'null' && !drafts.has(key)) {
+      const legacy = JSON.stringify([item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
+      if (drafts.has(legacy)) {
+        const draft = drafts.get(legacy);
+        drafts.delete(legacy);
+        remember(key, draft);
+      }
+    }
+    return drafts.get(key);
+  }
 
   function remember(key, draft) {
     if (draft?.text || draft?.stale) drafts.set(key, draft);
@@ -263,109 +428,384 @@ export function mountBoardInbox(api, sourceAction) {
     try { sessionStorage.setItem(draftStorage, JSON.stringify([...drafts])); } catch {}
   }
 
-  async function submit(item, decision, data, focus, choice = false) {
-    const displayed = version;
-    const key = decision === 'answer' ? (choice ? choiceKey(item) : answerKey(item)) : undefined;
-    const otherKey = key && (choice ? answerKey(item) : choiceKey(item));
-    const draft = drafts.get(key);
-    const otherDraft = drafts.get(otherKey);
-    const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
-    const attempt = decisionTarget(item);
-    message.textContent = 'Saving decision…';
+  function composer() {
+    const item = current();
+    if (composerSuppressed || item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
+    const key = draftKey(item, false);
+    const target = decisionTarget(item);
+    const saved = storedDraft(item, false);
+    return { item, key: target, text: saved?.text ?? '', busy: saving.has(saveKey(item)),
+      blocked: !!saved && (saved.target !== target || saved.stale), draftKey: key };
+  }
+
+  function reviewReply() {
+    const item = current();
+    const id = item?.conversationEventId;
+    if (item?.itemKind !== 'pr_review' || !item.canDecide || !canCompose() || !Number.isSafeInteger(id) || id <= 0) return null;
+    return { kind: 'message', messageId: id, summary: item.requestTitle };
+  }
+
+  function reviewDraft(item, targetHost) {
+    const saved = storedDraft(item, false);
+    const target = decisionTarget(item);
+    if (!saved || (saved.target === target && !saved.stale)) {
+      targetHost.replaceChildren();
+      return;
+    }
+    targetHost.replaceChildren(element('p', saved.target === target
+      ? 'The question changed. Waiting for the current question.'
+      : 'The question changed. Review it before using the previous draft.', 'board-inbox-meta'));
+    if (saved.target !== target) {
+      targetHost.append(button('Use draft for this question', 'text-button', () => {
+        if (!canCompose()) return;
+        remember(draftKey(item, false), { target, text: saved.text });
+        composerSuppressed = false;
+        reviewDraft(item, targetHost);
+        onChange();
+        focusComposer();
+      }));
+    }
+  }
+
+  function questionControls(item, busy) {
+    const group = element('div', '', 'board-inbox-question');
+    const target = decisionTarget(item);
+    const saved = storedDraft(item, true);
+    const same = saved?.target === target;
+    let selectedAnswer = same && !saved.stale ? saved.text : undefined;
+    const stale = same && saved.stale;
+    if (hasQuestionChoices(item.choices)) {
+      const form = questionChoiceForm({
+        key: target, prompt: item.prompt, choices: item.choices, answer: selectedAnswer, busy: busy || stale,
+        select(answer) {
+          selectedAnswer = answer;
+          remember(draftKey(item, true), { target, text: answer });
+          updateQuestionChoiceForm(form, selectedAnswer, saving.has(saveKey(item)));
+        },
+        submit(answer) { void submit(item, 'answer', { text: answer }, draftKey(item, true)); },
+      });
+      group.append(form);
+    }
+    const write = button('Write an answer', 'text-button question-reply', () => {
+      if (!canCompose()) return;
+      composerSuppressed = false;
+      onChange();
+      focusComposer();
+    });
+    write.disabled = busy;
+    group.append(write);
+    const needsReview = element('div', '', 'board-inbox-draft-review');
+    reviewDraft(item, needsReview);
+    group.append(needsReview);
+    return group;
+  }
+
+  function syncTrigger() {
+    const pending = bot ? count(bot) : 0;
+    trigger.hidden = !pending;
+    byId('needs-you-count').textContent = pending;
+    trigger.setAttribute('aria-expanded', String(mode === 'pending'));
+  }
+
+  function renderPending() {
+    syncTrigger();
+    if (mode !== 'pending') return;
+    const list = scoped();
+    const item = current();
+    const index = list.indexOf(item);
+    position.textContent = `${index + 1}/${list.length}`;
+    previous.disabled = index <= 0;
+    next.disabled = index < 0 || index >= list.length - 1;
+    syncMoreMenu();
+    if (!item) return;
+    const pendingWrite = saving.get(saveKey(item));
+    const questionState = item.itemKind === 'user_question' && [!!pendingWrite,
+      storedDraft(item, false)?.stale, storedDraft(item, true)?.stale];
+    const text = JSON.stringify([item, questionState]);
+    if (rendered === text) return;
+    rendered = text;
+    const focused = host.contains(document.activeElement);
+    const source = sourceAction(item, () => close({ focus: false }));
+    host.replaceChildren(decisionCard(item, submit, source, () => questionControls(item, !!pendingWrite), pendingWrite));
+    if (focused) panel.focus({ preventScroll: true });
+  }
+
+  function openLayer(nextMode, opener) {
+    clearMorph();
+    closeMoreMenu();
+    const wasClosed = !mode;
+    const pillRect = wasClosed && caption && !caption.hidden ? caption.getBoundingClientRect() : null;
+    if (!mode) origin = opener ?? trigger;
+    mode = nextMode;
+    rendered = null;
+    layer.hidden = false;
+    transcript.inert = true;
+    title.textContent = mode === 'pending' ? 'Needs you' : 'Recent decisions';
+    for (const control of [position, next, previous]) control.hidden = mode === 'history';
+    message.textContent = '';
+    panel.scrollTop = 0;
+    return pillRect;
+  }
+
+  function focusAfterOpen() {
+    if (composer() || reviewReply()) {
+      focusComposer();
+    } else {
+      panel.focus({ preventScroll: true });
+    }
+  }
+
+  function open(opener, targetItem) {
+    const list = scoped();
+    const item = targetItem ? list.find((entry) => itemKey(entry) === itemKey(targetItem)) ?? list[0] : list[0];
+    if (!item) return;
+    if (mode === 'pending' && itemKey(item) === selected) return;
+    selected = itemKey(item);
+    composerSuppressed = false;
+    const pillRect = openLayer('pending', opener);
+    renderPending();
+    onChange();
+    if (pillRect) animateOpenFromPill(pillRect);
+    focusAfterOpen();
+  }
+
+  function openItem(item, opener) {
+    open(opener, item);
+  }
+
+  async function openHistory(opener) {
+    if (!bot) return;
+    historyRequest?.abort();
+    const pillRect = openLayer('history', opener);
+    syncTrigger();
+    syncMoreMenu();
+    host.replaceChildren();
+    onChange();
+    if (pillRect) animateOpenFromPill(pillRect);
+    panel.focus({ preventScroll: true });
+    message.textContent = 'Loading…';
+    const request = historyRequest = new AbortController();
+    const sameView = () => request === historyRequest && mode === 'history';
     try {
-      const request = api('inbox/decide', { ...target, decision, data });
-      saving.set(attempt, request);
-      const response = await request;
-      saving.delete(attempt);
-      if (!response.accepted) throw new Error('decision_unconfirmed');
-      if (draft?.target === attempt && draft.text === data.text && drafts.get(key) === draft) {
-        remember(key);
-        if (otherDraft && drafts.get(otherKey) === otherDraft) remember(otherKey);
-      }
-      if (dialog.open && view === 'inbox') await load(response.status === 'approved'
-        ? 'Decision saved. The Bot change still needs to be applied in Access settings.' : 'Decision saved.');
-    } catch (error) {
-      saving.delete(attempt);
-      if (key && error.message === 'request_changed') {
-        if (drafts.get(key) === draft) remember(key, { target: attempt, text: data.text, stale: true });
-        const active = document.activeElement;
-        if (dialog.open && view === 'inbox') await load('The request changed.',
-          displayed === version && (active === focus?.origin || active === document.body) ? focus : undefined);
+      const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, request.signal);
+      if (!sameView()) return;
+      host.replaceChildren(...decisions.map((entry) => historyCard(labels[entry.itemKind],
+        `${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)));
+      message.textContent = decisions.length ? '' : 'No recorded decisions.';
+    } catch {
+      if (!sameView()) return;
+      message.textContent = 'Could not load recent decisions.';
+      host.append(button('Try again', 'text-button', () => { void openHistory(); }));
+    }
+  }
+
+  function dismiss({ animate = false } = {}) {
+    const cardRect = animate && mode && panel ? panel.getBoundingClientRect() : null;
+    const pillRect = animate && mode && caption && !caption.hidden ? caption.getBoundingClientRect() : null;
+    closeMoreMenu();
+    mode = null;
+    selected = rendered = null;
+    composerSuppressed = false;
+    historyRequest?.abort();
+    historyRequest = null;
+    layer.hidden = true;
+    transcript.inert = false;
+    host.replaceChildren();
+    message.textContent = '';
+    syncTrigger();
+    if (animate && cardRect && pillRect) animateCloseToPill(cardRect, pillRect);
+  }
+
+  function close({ focus = true, animate = true } = {}) {
+    if (!mode) return;
+    const opener = origin;
+    dismiss({ animate });
+    onChange();
+    if (!focus) return;
+    if (opener?.offsetParent) opener.focus({ preventScroll: true });
+    else if (!trigger.hidden) trigger.focus({ preventScroll: true });
+    else focusComposer();
+  }
+
+  function move(direction) {
+    const list = scoped();
+    const index = list.indexOf(current());
+    if (!list[index + direction]) return;
+    const focused = document.activeElement;
+    closeMoreMenu();
+    selected = itemKey(list[index + direction]);
+    composerSuppressed = false;
+    message.textContent = '';
+    panel.scrollTop = 0;
+    renderPending();
+    onChange();
+    if (focused?.disabled) panel.focus({ preventScroll: true });
+  }
+
+  function apply(nextItems) {
+    const old = scoped().indexOf(current());
+    items = nextItems;
+    if (mode === 'pending' && !current()) {
+      const list = scoped();
+      const nextEntry = list[Math.max(0, Math.min(old, list.length - 1))];
+      if (!nextEntry) {
+        close({ focus: panel.contains(document.activeElement) || document.activeElement?.disabled });
         return;
       }
-      if (displayed !== version) return;
-      const messages = {
-        request_changed: 'The request changed. Refresh and review it before deciding again.',
-        already_closed: 'This request was already decided or closed. Refresh to see what is still pending.',
-        access_denied: 'You do not have permission to make this decision.',
-        decision_conflict: 'Flock could not apply this decision. Check the input and refresh.',
-      };
-      message.textContent = messages[error.message] || 'The decision could not be confirmed. Refresh to check its status.';
+      selected = itemKey(nextEntry);
+      composerSuppressed = false;
+    }
+    renderPending();
+    onChange();
+  }
+
+  async function refresh() {
+    const stamp = ++epoch;
+    try {
+      const { items: latest } = await api('inbox');
+      if (stamp !== epoch || !Array.isArray(latest)) return;
+      if (JSON.stringify(items) !== JSON.stringify(latest)) apply(latest);
+    } catch (error) {
+      if (stamp !== epoch) return;
+      if (error.status === 401 || error.status === 403) apply([]);
     }
   }
 
-  async function load(update = '', focus) {
-    const active = document.activeElement;
-    if (!focus && items.contains(active) && active.dataset.answerKey) focus = answerFocus(active);
-    const displayed = ++version;
-    const [title, key, empty, render] = views[view];
-    byId('work-view-title').textContent = title;
-    history.textContent = view === 'inbox' ? 'Recent decisions' : 'Pending decisions';
-    items.replaceChildren();
-    const focusWhileLoading = document.activeElement;
-    items.setAttribute('aria-busy', 'true');
-    message.textContent = 'Loading…';
-    const query = new URLSearchParams();
-    if (bots.value) query.set('bot', bots.value);
+  function setContext(botId, viewerId) {
+    if (viewer !== viewerId) {
+      viewer = viewerId;
+      items = [];
+      epoch++;
+      clearMorph();
+      dismiss({ animate: false });
+    }
+    if (bot !== botId) {
+      bot = botId;
+      clearMorph();
+      dismiss({ animate: false });
+    }
+    syncTrigger();
+  }
+
+  const errors = {
+    request_changed: 'The request changed. Review the current request before deciding again.',
+    already_closed: 'This request was already decided or closed.',
+    access_denied: 'You do not have permission to make this decision.',
+    decision_conflict: 'Flock could not apply this decision. Check the input and try again.',
+    invalid_input: 'Check the decision and its input.',
+  };
+
+  async function submit(item, decision, data, answer) {
+    const save = saveKey(item);
+    if (!item.canDecide || saving.has(save) || !current() || decisionTarget(current()) !== decisionTarget(item)) return;
+    const owner = viewer;
+    const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
+    const fingerprint = decisionTarget(item);
+    const saved = drafts.get(answer);
+    const textKey = draftKey(item, false);
+    const choiceKey = draftKey(item, true);
+    const isCurrent = () => owner === viewer && current() && decisionTarget(current()) === fingerprint;
+    message.textContent = 'Saving decision…';
+    const operation = api('inbox/decide', { ...target, decision, data });
+    saving.set(save, operation);
+    renderPending();
+    onChange();
     try {
-      const [result, configured] = await Promise.all([api(query.size ? `${view}?${query}` : view), availableBots]);
-      if (displayed !== version) return;
-      const cards = result[key].map((item) => {
-        const card = render(item, focus);
-        if (key === 'items') {
-          const bot = configured.find(({ id }) => id === item.botId);
-          if (bot && sourceAction) card.insertBefore(
-            sourceAction(bot, item.conversationEventId, () => dialog.close()),
-            card.querySelector('.board-inbox-question, form'));
-        }
-        return card;
-      });
-      for (const entry of cards) items.append(entry);
-      message.textContent = [update, cards.length ? '' : empty].filter(Boolean).join(' ');
-      if (focus && document.activeElement === focusWhileLoading) {
-        const answer = Array.from(items.querySelectorAll('textarea')).find((input) => input.dataset.answerKey === focus.key);
-        if (answer && !answer.disabled) {
-          answer.focus();
-          answer.setSelectionRange(...focus.selection);
+      const response = await operation;
+      if (!response.accepted) throw new Error('decision_unconfirmed');
+      if (answer) {
+        if (drafts.get(answer) === saved) {
+          remember(textKey);
+          remember(choiceKey);
         }
       }
-    } catch {
-      if (displayed === version) message.textContent = 'Flock could not load this view. Try refreshing.';
+      if (owner !== viewer) return;
+      epoch++;
+      if (isCurrent()) message.textContent = '';
+      apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
+      onAccepted(item, response.status === 'approved'
+        ? 'Decision saved. Apply the Bot change in Access settings.'
+        : 'Decision saved.');
+      void refresh();
+    } catch (error) {
+      if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
+        remember(answer, { target: fingerprint, text: data.text, stale: true });
+      }
+      if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm the decision. Check before trying again.';
+      if (owner === viewer) await refresh();
     } finally {
-      if (displayed === version) items.removeAttribute('aria-busy');
+      saving.delete(save);
+      if (owner === viewer) {
+        renderPending();
+        onChange();
+      }
     }
   }
 
-  for (const button of document.querySelectorAll('[data-work-view]')) {
-    button.addEventListener('click', async () => {
-      view = button.dataset.workView;
-      bots.value = '';
-      const allBots = availableBots = api('bots').catch(() => []);
-      load();
-      dialog.showModal();
-      const configured = await allBots;
-      if (!dialog.open || allBots !== availableBots) return;
-      const selected = bots.value;
-      bots.replaceChildren(new Option('All Bots', ''), ...configured.map(({ id, name }) => new Option(name, id)));
-      bots.value = selected;
-    });
-  }
-  byId('work-view-close').addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => ++version);
-  bots.addEventListener('change', () => load());
-  byId('work-view-refresh').addEventListener('click', () => load());
-  history.addEventListener('click', () => {
-    view = view === 'inbox' ? 'inbox/history' : 'inbox';
-    load();
+  trigger.addEventListener('click', () => mode === 'pending' ? close() : open(trigger));
+  byId('decision-close').addEventListener('click', () => close());
+  byId('decision-shade').addEventListener('click', () => close());
+  previous.addEventListener('click', () => move(-1));
+  next.addEventListener('click', () => move(1));
+  document.addEventListener('click', (event) => {
+    if (more?.open && !more.contains(event.target)) closeMoreMenu();
   });
+
+  // Double-tap Option (Alt Alt) toggles the Needs you card, matching the reference shortcut.
+  let lastAltTap = 0;
+  let altInterrupted = false;
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Alt' && !event.repeat && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      altInterrupted = false;
+      return;
+    }
+    if (event.key !== 'Alt') altInterrupted = true;
+    if (event.key === 'Escape' && mode && canDismiss() && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229 &&
+        !document.querySelector('dialog[open]')) {
+      event.preventDefault();
+      if (more?.open) {
+        closeMoreMenu();
+        more.querySelector('summary')?.focus({ preventScroll: true });
+      } else {
+        close();
+      }
+    }
+  });
+  document.addEventListener('keyup', (event) => {
+    if (event.key !== 'Alt') return;
+    if (altInterrupted || event.isComposing || document.querySelector('dialog[open]')) {
+      lastAltTap = 0;
+      return;
+    }
+    const now = performance.now();
+    if (now - lastAltTap <= 360) {
+      lastAltTap = 0;
+      if (mode) close();
+      else if (bot && count(bot)) open(trigger);
+    } else {
+      lastAltTap = now;
+    }
+  });
+
+  return {
+    setContext, refresh, count, itemsFor: (botId) => scoped(botId), open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    edit(text) {
+      const draft = composer();
+      if (!draft || draft.busy || draft.text === text) return;
+      remember(draft.draftKey, { target: draft.key, text });
+      const review = host.querySelector('.board-inbox-draft-review');
+      if (review) reviewDraft(draft.item, review);
+    },
+    submitAnswer() {
+      const draft = composer();
+      if (draft && !draft.blocked && draft.text.trim()) {
+        return submit(draft.item, 'answer', { text: draft.text }, draft.draftKey);
+      }
+    },
+    suppressComposer() {
+      composerSuppressed = true;
+      onChange();
+      focusComposer();
+    },
+  };
 }

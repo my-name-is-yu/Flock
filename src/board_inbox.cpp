@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS pr_review_items(
     UNIQUE(task_id,git_key));
 CREATE UNIQUE INDEX IF NOT EXISTS pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS pr_reviews_by_task ON pr_review_items(task_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS journal_pr_review_anchor ON journal(task_id,json_extract(data,'$.itemId'))
+    WHERE kind='pr_review_requested';
 CREATE TABLE IF NOT EXISTS inbox_decisions(
     id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, item_kind TEXT NOT NULL, item_id INTEGER NOT NULL,
     wait_id INTEGER NOT NULL, task_id INTEGER REFERENCES tasks(id),
@@ -130,6 +132,19 @@ CREATE INDEX IF NOT EXISTS inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK)
         throw std::runtime_error(sqlite3_errmsg(db));
+    // Earlier builds did not add conversation anchors for pending reviews.
+    exec(R"SQL(
+INSERT INTO journal(task_id,time,kind,data)
+SELECT review.task_id,?,'pr_review_requested',
+       json_object('itemId',review.id,'title',review.title,'text',review.prompt,'prUrl',review.url)
+FROM pr_review_items review
+WHERE review.status='pending' AND review.operation_id IS NULL
+AND NOT EXISTS (
+    SELECT 1 FROM journal source WHERE source.task_id=review.task_id AND source.kind='pr_review_requested'
+    AND json_extract(source.data,'$.itemId')=+review.id
+)
+ORDER BY review.id
+)SQL",{unixTime()});
 }
 
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
@@ -156,18 +171,24 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
         const auto scrub = p_->redactor(id);
         const bool canDecide = access.permitsPerson(actor,id,Role::decide);
         const bool canAdmin = access.permitsPerson(actor,id,Role::admin);
-        const auto add = [&](const InboxTarget& target, Json view, Id anchor = 0) {
+        const auto anchorTime = [&](Id anchor) -> Id {
+            if (anchor <= 0) return 0;
+            auto row = p_->query("SELECT time FROM journal WHERE id=?",{anchor});
+            return row.next() ? row.number(0) : 0;
+        };
+        const auto add = [&](const InboxTarget& target, Json view, Id anchor = 0, Id createdAt = 0) {
             view = scrub.record(std::move(view));
             view.update(key(target));
             view["botName"] = id;
             view["canDecide"] = inboxDecisionRole(target.itemKind) == Role::admin ? canAdmin : canDecide;
             addAnchor(view,anchor);
+            if (const auto ts = createdAt > 0 ? createdAt : anchorTime(anchor); ts > 0) view["createdAt"] = ts;
             result.push_back(std::move(view));
         };
         const auto addAccess = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
-                                   std::string prompt, Id message) {
+                                   std::string prompt, Id message, Id createdAt = 0) {
             add({id,kind,requestId,0,0,0,0},{{"requestTitle",request.empty() ? std::string(label) : title(request)},
-                {"request",request},{"prompt",std::move(prompt)}},messageAnchor(*p_,id,message));
+                {"request",request},{"prompt",std::move(prompt)}},messageAnchor(*p_,id,message),createdAt);
         };
         auto waits = p_->query(R"SQL(
 SELECT t.id,t.generation,t.data,w.id,w.data
@@ -200,13 +221,13 @@ WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
                 turns.number(4) ? turns.number(2) : 0);
         }
         auto grants = p_->query(R"SQL(
-SELECT g.id,g.op,g.kind,g.resource,m.text,m.id FROM grant_requests g
+SELECT g.id,g.op,g.kind,g.resource,m.text,m.id,coalesce(g.requestedAt,0) FROM grant_requests g
 LEFT JOIN messages m ON m.id=g.source_message_id AND m.bot_id=g.bot
 WHERE g.bot=? AND g.status='pending' ORDER BY g.id DESC
 )SQL",{id});
         while (grants.next())
             addAccess(grant_request,grants.number(0),"Resource access",grants.string(4),
-                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3),grants.number(5));
+                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3),grants.number(5),grants.number(6));
         auto inputs = p_->query(R"SQL(
 SELECT p.id,p.name,m.text,m.id FROM protected_inputs p
 LEFT JOIN messages m ON m.id=p.source_message_id AND m.bot_id=p.bot
@@ -226,8 +247,10 @@ WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
                       (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
                       changes.number(5));
         auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates
+SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates,j.id
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
+LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
+AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
 AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
 AND (p.operation_id IS NOT NULL OR NOT coalesce(json_extract(t.data,'$.replanning'),0)) ORDER BY p.id DESC
@@ -237,7 +260,7 @@ AND (p.operation_id IS NOT NULL OR NOT coalesce(json_extract(t.data,'$.replannin
             const auto kind = reviews.string(8).empty() ? pr_review : pr_reconciliation;
             add({id,kind,reviews.number(0),0,reviews.number(1),reviews.number(2),reviews.number(3)},
                 {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
-                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(9)}});
+                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)},{"candidates",reviews.json(9)}},reviews.number(10));
         }
     }
     snapshot.commit();
@@ -376,10 +399,15 @@ Id Store::Impl::insertPrReview(const Json& task, std::string_view url, std::stri
         throw Conflict("A PR review needs a URL, title, and prompt");
     const auto scrub = gitKey.empty() && operationId.empty() ? redactor(field(task,"botId")) : sharedRedactor();
     scrub.requirePublic({url,candidates});
+    const auto savedTitle = scrub.text(title);
+    const auto savedPrompt = scrub.text(prompt);
     exec("INSERT INTO pr_review_items(task_id,target_revision,target_generation,url,title,prompt,git_key,operation_id,candidates)"
          " VALUES(?,?,?,?,?,?,?,?,?)",
-         {task.at("id"),task.value("currentRevision",Id{0}),task.at("generation"),url,scrub.text(title),scrub.text(prompt),
+         {task.at("id"),task.value("currentRevision",Id{0}),task.at("generation"),url,savedTitle,savedPrompt,
           gitKey.empty() ? Json(nullptr) : Json(gitKey),operationId.empty() ? Json(nullptr) : Json(operationId),candidates});
-    return last();
+    const auto reviewId = last();
+    if (operationId.empty()) journal(task.at("id"),"pr_review_requested",
+        {{"itemId",reviewId},{"title",savedTitle},{"text",savedPrompt},{"prUrl",url}});
+    return reviewId;
 }
 }
