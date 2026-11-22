@@ -1,3 +1,5 @@
+import { timelineMessages } from './event-history.mjs';
+
 const pagesPerSearch = 4;
 const matchesPerView = 5;
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
@@ -140,10 +142,15 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
       for (let page = 0; page < pagesPerSearch; page++) {
         const { events, olderBefore } = await readPage(scope, active.before, controller.signal);
         if (controller.signal.aborted) return;
-        for (const event of [...events].reverse()) {
+        // Include the adjacent newer event so a report and its completion can straddle pages.
+        const timeline = active.newerEvent ? [...events, active.newerEvent] : events;
+        const messages = timelineMessages(timeline, time => dateFormat.format(time * 1000));
+        for (const { event } of messages.reverse()) {
+          if (event.id === active.newerEvent?.id) continue;
           const snippet = snippetFor(event, pattern);
           if (snippet) matches.push({ id: event.id, time: event.time, author: describeAuthor(scope, event), snippet });
         }
+        if (events.length) active.newerEvent = events[0];
         active.before = olderBefore;
         if (!olderBefore) break;
       }

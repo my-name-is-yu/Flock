@@ -35,8 +35,15 @@ async function exercise(mountConversationFind) {
       if (!before) return Promise.resolve({ events: [item(40, 'Handoff [draft] today'),
         item(41, 'Use the [redacted] marker in exported reports.'), item(42, 'Handoff [draft]', 'bot_message')], olderBefore: 40 });
       if (before === 40) return Promise.resolve({ events: [item(11, 'Old handoff [draft] <img src=x>')], olderBefore: 11 });
-      if (before === 11) return Promise.resolve({ events: [item(10, 'Third page')], olderBefore: 10 });
-      if (before === 10) return Promise.resolve({ events: [item(9, 'Fourth page')], olderBefore: 9 });
+      const run = { environmentId: 'local', threadId: 'release', runId: 'run' };
+      if (before === 11) return Promise.resolve({ events: [{
+        ...item(10, 'Verified release report', 'completed'), taskId: 1,
+        data: { text: 'Verified release report', revisionId: 1, run },
+      }], olderBefore: 10 });
+      if (before === 10) return Promise.resolve({ events: [{
+        ...item(9, '', 'report'), taskId: 1,
+        data: { report: 'Verified release report', status: 'completed', truncated: false, revisionId: 1, run, resultRunId: 'run' },
+      }], olderBefore: 9 });
       return Promise.resolve({ events: [item(7, 'Earliest handoff [draft]')], olderBefore: 0 });
     },
     describeAuthor: () => 'You',
@@ -96,6 +103,12 @@ async function exercise(mountConversationFind) {
     'Escape did not restore the composer focus and draft');
 
   toggle.click();
+  type('Verified release report');
+  await wait();
+  check(status.textContent === '1 of 1 match so far', 'Find duplicated a report split across history pages');
+  key(input, 'Enter');
+  check(opened.at(-1)[1] === 10, 'Find did not open the deduplicated completion');
+
   type('absent from the conversation');
   await wait();
   more.click();

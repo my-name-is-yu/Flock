@@ -71,14 +71,6 @@ Json publicWait(const Json& wait) {
     return view;
 }
 
-std::string taskStatus(const Json& task, const std::string& blocker) {
-    if (terminal(task) || task.at("state") == "cancelling") return field(task,"state");
-    if (task.value("replanning",false)) return "replanning";
-    if (!blocker.empty()) return "blocked";
-    if (task.at("state") == "waiting" && !inboxWaitKind(field(task.at("wait"),"reason"))) return "blocked";
-    return field(task,"state");
-}
-
 bool validDecision(InboxKind kind, std::string_view decision) {
     switch (kind) {
     case user_question: return decision == "answer";
@@ -152,61 +144,6 @@ UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION S
         auto id = rows.string(0);
         if (access.permitsPerson(actor,id,Role::view)) result.push_back(std::move(id));
     }
-    return result;
-}
-
-Json Store::board(const Person& actor, std::string_view bot, std::string_view status) const {
-    std::lock_guard lock(p_->mutex);
-    Transaction snapshot(p_->db,Transaction::Mode::read);
-    auto result = Json::array();
-    for (const auto& id : p_->visibleBoardBots(actor,bot)) {
-        auto rows = p_->query(R"SQL(
-SELECT t.id,t.state,t.generation,t.data,w.id,w.data,
-       (SELECT json_group_array(json_object('id',p.id,'url',p.url,'title',p.title,'status',p.status))
-        FROM (
-          SELECT i.id,i.url,i.title,i.status FROM pr_review_items i
-          WHERE i.task_id=t.id AND i.operation_id IS NULL
-          UNION ALL
-          SELECT w.pr_number,w.url,'Pull request #'||w.pr_number,'linked' FROM git_pr_watches w
-          WHERE w.task_id=t.id AND NOT EXISTS (
-            SELECT 1 FROM pr_review_items i WHERE i.task_id=t.id AND i.url=w.url)
-          ORDER BY id DESC
-        ) p),
-       (SELECT j.time FROM journal j WHERE j.task_id=t.id ORDER BY j.id DESC LIMIT 1)
-FROM tasks t LEFT JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
-WHERE t.bot_id=? ORDER BY t.id DESC
-)SQL",{id});
-        const auto scrub = p_->redactor(id);
-        while (rows.next()) {
-            auto task = rows.json(3);
-            task["state"] = rows.string(1);
-            auto wait = rows.number(4) ? rows.json(5) : Json(nullptr);
-            if (wait.is_object()) wait["id"] = rows.number(4);
-            task["wait"] = std::move(wait);
-            auto blocker = field(task,"blockerReason");
-            if (blocker.empty() && task.at("state") == "queued" && !p_->queueBlocker(rows.number(0)).is_null())
-                blocker = "Waiting for the project to become available";
-            const auto state = taskStatus(task,blocker);
-            if (state == "blocked" && blocker.empty()) blocker = field(task.at("wait"),"text");
-            const bool matches = status.empty() || status == state ||
-                (status == "active" && !terminal(task)) || (status == "terminal" && terminal(task));
-            if (!matches) continue;
-            const auto due = task.value("deadline",Id{0});
-            auto links = rows.json(6);
-            auto row = scrub.record({{"requestTitle",taskTitle(task)},{"request",task.at("request")},
-                {"description",task.value("intent",task.at("request"))},{"doneWhen",task.at("doneWhen")},
-                {"blockerReason",state == "blocked" ? blocker : ""},{"wait",publicWait(task.at("wait"))},{"prRefs",std::move(links)},
-                {"status",state},{"state",task.at("state")},{"taskId",rows.number(0)},
-                {"generation",rows.number(2)},{"revisionId",task.value("currentRevision",Id{0})},
-                {"deadlineAt",due > 0 ? Json(due) : Json(nullptr)},{"updatedAt",rows.number(7)}});
-            row["botId"] = id;
-            row["botName"] = id;
-            if (row["wait"].is_object()) row["wait"]["reason"] = field(task.at("wait"),"reason");
-            result.push_back(std::move(row));
-        }
-    }
-    std::sort(result.begin(),result.end(),[](const Json& a,const Json& b) { return a.at("taskId") > b.at("taskId"); });
-    snapshot.commit();
     return result;
 }
 

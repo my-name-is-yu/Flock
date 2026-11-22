@@ -4,11 +4,6 @@ const labels = {
   unknown_delivery: 'Delivery confirmation', grant_request: 'Access request',
   protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
   pr_reconciliation: 'Pull request reconciliation',
-  budget: 'Run allowance', model_failure: 'Model failure', t3_input: 'Action in T3',
-  auth: 'T3 sign-in', settings: 'T3 settings',
-  blocked: 'Blocked', waiting: 'Waiting', queued: 'Queued', deciding: 'Evaluating',
-  sending: 'Sending', running: 'Working', replanning: 'Replanning', peer_waiting: 'Waiting for another Bot',
-  cancelling: 'Cancelling', cancelled: 'Cancelled', completed: 'Complete',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Reconciliation requested', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Operation rejected',
@@ -58,22 +53,6 @@ function prLink(raw, title) {
 function card(title, meta) {
   const article = element('article', '', 'board-inbox-card');
   article.append(element('p', meta, 'board-inbox-meta'), element('h3', title));
-  return article;
-}
-function taskCard(task) {
-  const article = card(task.requestTitle, `${task.botName} · ${labels[task.status] || task.status}`);
-  const details = element('dl');
-  const field = (label, value) => {
-    if (value) details.append(element('dt', label), element('dd', value));
-  };
-  if (task.description !== task.requestTitle) field('Request', task.description);
-  field('Done when', task.doneWhen);
-  field('Deadline', task.deadlineAt && time(task.deadlineAt));
-  field('Blocker', task.blockerReason);
-  if (task.wait && task.wait.text !== task.blockerReason)
-    field('Current wait', task.wait.text || labels[task.wait.reason] || task.wait.reason);
-  if (details.children.length) article.append(details);
-  for (const pr of task.prRefs) article.append(prLink(pr.url, pr.title));
   return article;
 }
 function decisionCard(item, submit) {
@@ -152,12 +131,10 @@ export function mountBoardInbox(api, sourceAction) {
   const byId = (id) => document.getElementById(id);
   const dialog = byId('board-inbox');
   const bots = byId('work-view-bot');
-  const status = byId('work-view-status');
   const message = byId('work-view-message');
   const items = byId('work-view-items');
   const history = byId('work-view-history');
   const views = {
-    board: ['Task board', 'tasks', 'No matching tasks.', taskCard],
     inbox: ['Decision inbox', 'items', 'No pending decisions.', (item) => decisionCard(item, submit)],
     'inbox/history': ['Recent decisions', 'decisions', 'No recorded decisions.', (entry) => card(labels[entry.itemKind],
       `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)],
@@ -190,15 +167,12 @@ export function mountBoardInbox(api, sourceAction) {
     const displayed = ++version;
     const [title, key, empty, render] = views[view];
     byId('work-view-title').textContent = title;
-    byId('work-view-status-label').hidden = view !== 'board';
-    history.hidden = view === 'board';
     history.textContent = view === 'inbox' ? 'Recent decisions' : 'Pending decisions';
     items.replaceChildren();
     items.setAttribute('aria-busy', 'true');
     message.textContent = 'Loading…';
     const query = new URLSearchParams();
     if (bots.value) query.set('bot', bots.value);
-    if (view === 'board' && status.value) query.set('status', status.value);
     try {
       const [result, configured] = await Promise.all([api(query.size ? `${view}?${query}` : view), availableBots]);
       if (displayed !== version) return;
@@ -236,7 +210,7 @@ export function mountBoardInbox(api, sourceAction) {
   }
   byId('work-view-close').addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => ++version);
-  for (const input of [bots, status]) input.addEventListener('change', () => load());
+  bots.addEventListener('change', () => load());
   byId('work-view-refresh').addEventListener('click', () => load());
   history.addEventListener('click', () => {
     view = view === 'inbox' ? 'inbox/history' : 'inbox';
