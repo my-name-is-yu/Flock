@@ -611,7 +611,7 @@ void resumeRestoresCancelledTaskDirections() {
     const auto running = f.store->submit(f.routing("Another task","alpha","desktop","other"));
     f.reach(running,"running");
     constexpr auto request = "この作業をクラウドMacで再開して";
-    f.script(request,{start({{"request","Resume the measurement"},{"sourceResultMessageId",cancellation},
+    f.script(request,{start({{"request","Resume the measurement and keep the flamegraph"},{"sourceResultMessageId",cancellation},
                              {"resume",true},{"environment","クラウドMac"}})});
     f.script("Resume the other one",{start({{"request","Resume"},{"resume",true}})});
     f.receive("resume-wrong-source","Resume the other one");
@@ -626,7 +626,8 @@ void resumeRestoresCancelledTaskDirections() {
           instruction.find("Measure the reference dataset") != std::string::npos &&
           instruction.find("Report baseline latency") != std::string::npos &&
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
-          instruction.find("Keep the raw timing file") != std::string::npos && f.t3.sent.back().tool == "delegate",
+          instruction.find("Keep the raw timing file") != std::string::npos &&
+          instruction.find("keep the flamegraph") != std::string::npos && f.t3.sent.back().tool == "delegate",
           "resume omitted the original intent, criteria, or accepted directions");
 }
 

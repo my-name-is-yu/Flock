@@ -17,10 +17,6 @@ bool present(std::string_view value, std::size_t limit = 8000) {
 }
 bool hasRun(const RunRef& r) { return !r.threadId.empty() && !r.runId.empty(); }
 
-std::string intent(const Json& task) {
-    return task.value("intent",field(task,"request"));
-}
-
 Json revision(const Json& task) { return task.value("currentRevision",Json(nullptr)); }
 
 bool hasPending(const Json& task) {
@@ -28,49 +24,140 @@ bool hasPending(const Json& task) {
     return pending != task.end() && !pending->empty();
 }
 
-std::string replacementKey(const Json& item) {
-    if (!item.value("conflicting",false)) return {};
-    const auto key = field(item,"replaceKey");
-    if (!key.empty()) return key;
-    return field(item,"environmentId").empty() ? "target" : "environment";
-}
-
 struct InstructionBatch {
     Json instructions = Json::array(), superseded = Json::array();
 };
 
-InstructionBatch pendingBatch(const Json& task) {
+bool matchesWorkRevision(const Json& task, const Json& item) {
+    return (!item.contains("intent") || item.at("intent") == taskIntent(task)) &&
+           (!item.contains("doneWhen") || item.at("doneWhen") == task.value("requestedDoneWhen",field(task,"doneWhen")));
+}
+
+std::string pendingText(const Json& task, const Json& item) {
+    const auto text = field(item,"text");
+    if (!item.contains("environmentId") || (!item.contains("intent") && !item.contains("doneWhen"))) return text;
+    const auto destination = task.value("pendingEnvironmentId",field(task,"environmentId"));
+    if (!matchesWorkRevision(task,item)) return "Use the current execution destination " + destination + ".";
+    if (item.at("environmentId") == destination) return text;
+    return "Apply the work directions in this earlier message. The current execution destination is " +
+           destination + " and supersedes any destination in the quote.\n" + text;
+}
+
+InstructionBatch pendingBatch(const Json& task, std::size_t byteLimit = instructionBatchBytes) {
     InstructionBatch batch;
     if (!hasPending(task)) return batch;
     const auto& pending = task["pendingInstructions"];
-    std::map<std::string,std::size_t> latestOverrideIndices;
-    for (std::size_t i = 0; i < pending.size(); ++i) {
-        if (auto key = replacementKey(pending[i]); !key.empty()) latestOverrideIndices[std::move(key)] = i;
+    std::set<std::string> newerKeys;
+    std::set<std::size_t> superseded;
+    bool newerDestination = false;
+    std::set<std::size_t> selectedOverrides;
+    for (std::size_t i = pending.size(); i > 0; --i) {
+        const auto& item = pending[i-1];
+        auto key = field(item,"replaceKey");
+        if (key.empty()) continue;
+        if (key == "environment") {
+            const bool laterMove = std::exchange(newerDestination,true);
+            if ((item.contains("intent") || item.contains("doneWhen")) && matchesWorkRevision(task,item))
+                key = item.contains("doneWhen") ? "criteria" : "intent";
+            else if (laterMove) {
+                superseded.insert(i-1);
+                continue;
+            }
+        }
+        if (!newerKeys.insert(key).second) {
+            superseded.insert(i-1);
+            continue;
+        }
+        const auto size = pendingText(task,item).size() + 4;
+        if (size <= byteLimit) {
+            selectedOverrides.insert(i-1);
+            byteLimit -= size;
+        }
     }
-    std::size_t reservedOverrideBytes = 0;
-    for (const auto& [key,i] : latestOverrideIndices) reservedOverrideBytes += field(pending[i],"text").size() + 4;
-    auto batchBytes = reservedOverrideBytes;
     bool acceptsIndependentInstructions = true;
     for (std::size_t i = 0; i < pending.size(); ++i) {
         const auto& item = pending[i];
-        if (const auto key = replacementKey(item); !key.empty()) {
-            if (latestOverrideIndices.at(key) == i) batch.instructions.push_back(item);
-            else batch.superseded.push_back(item);
+        if (const auto key = field(item,"replaceKey"); !key.empty()) {
+            if (selectedOverrides.contains(i)) batch.instructions.push_back(item);
+            else if (superseded.contains(i)) batch.superseded.push_back(item);
         } else if (acceptsIndependentInstructions) {
             const auto size = field(item,"text").size() + 4;
-            if (batchBytes + size <= 64000) {
+            if (size <= byteLimit) {
                 batch.instructions.push_back(item);
-                batchBytes += size;
+                byteLimit -= size;
             } else acceptsIndependentInstructions = false;
         }
     }
     return batch;
 }
 
-void includeInstructions(std::string& instruction, const Json& pending) {
-    if (pending.empty()) return;
-    instruction += "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
-    for (const auto& item : pending) instruction += "\n\n" + field(item,"text");
+constexpr std::string_view directionHeading = "\n\nUser instructions accepted for this task, oldest first. Apply later directions where they replace earlier ones:";
+constexpr std::string_view intentHeading = "\n\nTask intent:\n";
+constexpr std::string_view criteriaHeading = "\n\nCompletion criteria:\n";
+
+void includeWorkContext(std::string& instruction, const Json& task, const Json& earlier, const Json& pending,
+                        std::string_view intent, std::string_view criteria) {
+    bool hasIntent = instruction.find(intent) != instruction.npos;
+    bool hasCriteria = instruction.find(criteria) != instruction.npos;
+    if (!earlier.empty() || !pending.empty()) {
+        instruction += directionHeading;
+        for (const auto* batch : {&earlier,&pending}) {
+            for (const auto& item : *batch) {
+                const auto text = batch == &pending ? pendingText(task,item) : field(item,"text");
+                const auto key = field(item,"replaceKey");
+                if (key == "intent" || key == "criteria") {
+                    hasIntent = hasIntent || text.find(intent) != text.npos;
+                    hasCriteria = hasCriteria || text.find(criteria) != text.npos;
+                }
+                instruction += "\n\n" + text;
+            }
+        }
+    }
+    if (!hasIntent) instruction.append(intentHeading).append(intent);
+    if (!hasCriteria) instruction.append(criteriaHeading).append(criteria);
+}
+
+constexpr std::size_t maxReferenceTextBytes = 8192;
+
+Json appendResultReferences(std::string& instruction, const Json& task, const Json& pending, const Json& earlier,
+                            std::size_t availableBytes) {
+    Json references = Json::array();
+    std::set<std::pair<Id,int>> included;
+    std::vector<std::pair<std::string,const Json*>> quotes;
+    const auto collect = [&](const Json& source) {
+        const auto id = source.value("messageId",Id{0});
+        if (!id || !included.emplace(id,source.value("option",0)).second) return;
+        auto reference = source;
+        reference.erase("text");
+        references.push_back(std::move(reference));
+        auto label = "\n\nReferenced result " + std::to_string(id) + " from task " +
+            std::to_string(source.at("taskId").get<Id>()) +
+            (source.value("option",0) ? ", option " + std::to_string(source.at("option").get<int>()) : "") +
+            " (reference only):";
+        if (label.size() > availableBytes) return;
+        availableBytes -= label.size();
+        quotes.emplace_back(std::move(label),&source);
+    };
+    for (const auto& item : pending)
+        if (item.contains("source")) collect(item.at("source"));
+    if (task.at("lastRun").is_null() && task.contains("sourceResultRefs")) {
+        for (const auto& source : task.at("sourceResultRefs"))
+            if (source["taskId"] == task.value("sourceTaskId",Id{0})) collect(source);
+    }
+    for (const auto& item : earlier)
+        if (item.contains("source")) collect(item.at("source"));
+
+    auto excerptBudget = maxReferenceTextBytes;
+    for (const auto& [label,source] : quotes) {
+        instruction += label;
+        if (availableBytes <= 1 || !excerptBudget) continue;
+        const auto excerpt = bounded(field(*source,"text"),std::min(excerptBudget,availableBytes-1));
+        if (excerpt.empty()) continue;
+        instruction += "\n" + excerpt;
+        availableBytes -= excerpt.size() + 1;
+        excerptBudget -= excerpt.size();
+    }
+    return references;
 }
 }
 
@@ -774,47 +861,48 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     void queueAction(Json& task, const std::string& action, std::string_view tool, std::string instruction,
-                     const Json& args, const Json& pending = Json::array(), bool charge = false) {
+                     const Json& args, bool charge) {
         const bool work = tool == "delegate" || tool == "follow_up";
         if (charge) {
             task["remaining"] = task["remaining"].get<int>() - 1;
             task["additionalUsed"] = task["additionalUsed"].get<int>() + 1;
         }
-        Json resultReferences = Json::array();
+        Json resultReferences = Json::array(), pending = Json::array();
         if (work) {
             if (task.contains("sourceTaskId") && task["lastRun"].is_null()) {
                 const auto request = field(task,"request");
                 if (instruction.find(request) == std::string::npos) instruction += "\n\nUser request:\n" + request;
             }
-            includeInstructions(instruction,pending);
-            if (const auto restart = task.find("restartContext"); restart != task.end() && task["lastRun"].is_null()) {
-                instruction += "\n\nOriginal task being resumed:\n" + field(*restart,"intent") +
-                    "\n\nCompletion criteria:\n" + field(task,"doneWhen");
-                includeInstructions(instruction,restart->value("pendingInstructions",Json::array()));
+            const bool needsContext = tool == "delegate" &&
+                (task.contains("restartContext") || task.value("newSessionRequired",false));
+            const auto goal = needsContext ? taskIntent(task) : std::string{};
+            const auto criteria = needsContext ? field(task,"doneWhen") : std::string{};
+            const auto actionTag = "\n\n[Flock action ID: " + action + "]";
+            const auto limit = maxSessionPromptBytes - sessionPrompt(action,actionTag).size();
+            // Fit current directions first. Deferred directions stay pending until a later command accepts them.
+            auto reserved = instruction.size() + directionHeading.size() + intentHeading.size() + goal.size() +
+                            criteriaHeading.size() + criteria.size();
+            auto batch = pendingBatch(task,std::min(instructionBatchBytes,limit - std::min(limit,reserved)));
+            supersedeInstructions(task,batch.superseded);
+            pending = std::move(batch.instructions);
+            for (const auto& item : pending) reserved += pendingText(task,item).size() + 2;
+            const auto available = limit - std::min(limit,reserved);
+            auto earlier = needsContext ? db.sessionInstructions(task,goal,pending,available,instruction) : Json::array();
+            std::string references;
+            resultReferences = appendResultReferences(references,task,pending,earlier,available);
+            std::size_t historyBytes = 0;
+            for (const auto& item : earlier) historyBytes += item.at("text").get_ref<const std::string&>().size() + 2;
+            if (historyBytes + references.size() > available) {
+                // Only reclaim space used by real reference labels and excerpts.
+                earlier = db.sessionInstructions(task,goal,pending,available - references.size(),instruction);
+                includeWorkContext(instruction,task,earlier,pending,goal,criteria);
+                references.clear();
+                resultReferences = appendResultReferences(references,task,pending,earlier,limit - instruction.size());
+            } else {
+                includeWorkContext(instruction,task,earlier,pending,goal,criteria);
             }
-            std::size_t excerptBudget = 8192;
-            std::set<std::pair<Id,int>> included;
-            const auto quoteSource = [&](const Json& source) {
-                const auto id = source.value("messageId",Id{0});
-                if (!id || !included.emplace(id,source.value("option",0)).second) return;
-                auto reference = source;
-                reference.erase("text");
-                resultReferences.push_back(std::move(reference));
-                instruction += "\n\nReferenced result " + std::to_string(id) + " from task " +
-                    std::to_string(source.at("taskId").get<Id>()) +
-                    (source.value("option",0) ? ", option " + std::to_string(source.at("option").get<int>()) : "") +
-                    " (reference only):";
-                const auto excerpt = bounded(field(source,"text"),excerptBudget);
-                if (!excerpt.empty()) instruction += "\n" + excerpt;
-                excerptBudget -= excerpt.size();
-            };
-            for (const auto& item : pending)
-                if (item.contains("source")) quoteSource(item.at("source"));
-            if (task["lastRun"].is_null()) {
-                for (const auto& source : task.value("sourceResultRefs",Json::array()))
-                    if (source["taskId"] == task.value("sourceTaskId",Id{0})) quoteSource(source);
-            }
-            instruction += "\n\n[Flock action ID: " + action + "]";
+            instruction += references;
+            instruction += actionTag;
             task["deadline"] = 0;
         }
         const Json out = {{"id",action},{"tool",tool},{"environmentId",task["environmentId"]},
@@ -834,47 +922,23 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         return true;
     }
 
-    std::string priorInstructions(const Json& task) {
-        auto rows = db.query(R"SQL(
-SELECT entry.value FROM outbox, json_each(outbox.data,'$.instructions') entry
-WHERE outbox.task_id=? AND outbox.phase='accepted'
-ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
-)SQL", {task["id"]});
-        std::vector<std::string> excerpts;
-        std::size_t remaining = 4000;
-        bool sawTarget = false;
-        while (remaining && rows.next()) {
-            const auto item = rows.json(0);
-            const auto key = replacementKey(item);
-            if (key == "target" && std::exchange(sawTarget,true)) continue;
-            if (!key.empty() && key != "target") continue;
-            auto text = bounded(field(item,"text"),remaining);
-            remaining -= text.size();
-            excerpts.push_back(std::move(text));
-        }
-        if (excerpts.empty()) return {};
-        std::string context = "\n\nEarlier user directions from this Task's prior Session (excerpts):";
-        for (auto item = excerpts.rbegin(); item != excerpts.rend(); ++item) context += "\n\n" + *item;
-        return context;
-    }
-
     void continueTask(const Json& task) {
         change(task,[&](Json& current) {
-            const auto pending = pendingBatch(current);
-            if (pending.instructions.empty()) return false;
+            if (!hasPending(current)) return false;
             const bool fresh = current.value("newSessionRequired",false);
             const std::string tool = fresh ? "delegate" : "follow_up";
             const std::string reason = "Apply the accepted user instructions at a settled Run boundary";
             if (needsBudget(current,tool,reason,Json::object())) return true;
             const auto action = actionId();
-            auto instruction = "Continue this Flock task.\n\nTask intent:\n" + intent(current) +
-                "\n\nCompletion criteria:\n" + field(current,"doneWhen");
-            if (fresh) instruction += priorInstructions(current);
+            std::string instruction = "Continue this Flock task.";
+            if (!fresh && (!current.contains("restartContext") ||
+                           current.at("lastRun").value("revisionId",Json(nullptr)) != revision(current)))
+                instruction += "\n\nTask intent:\n" + taskIntent(current) +
+                    "\n\nCompletion criteria:\n" + field(current,"doneWhen");
             db.consumeEvent(current);
             db.journal(current["id"],"decision",{{"actionId",action},{"tool",tool},{"reason",reason},
                 {"eventId",current["eventId"]},{"revisionId",revision(current)}});
-            supersedeInstructions(current,pending.superseded);
-            queueAction(current,action,tool,std::move(instruction),Json::object(),pending.instructions,true);
+            queueAction(current,action,tool,std::move(instruction),Json::object(),true);
             return true;
         });
     }
@@ -966,7 +1030,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 throw Conflict("Let the assigned Run settle before requesting another Bot's work");
             if (initial) {
                 const auto source = sender.value("criteriaSourceMessageId",sender.value("sourceMessageId",Id{0}));
-                db.addRevision(sender,intent(sender),sender.value("requestedDoneWhen",field(decision.args,"doneWhen")),source);
+                db.addRevision(sender,taskIntent(sender),sender.value("requestedDoneWhen",field(decision.args,"doneWhen")),source);
                 sender.erase("requestedDoneWhen");
                 sender.erase("criteriaSourceMessageId");
             }
@@ -1245,7 +1309,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             if (charge && needsBudget(current,tool,decision.reason,decision.usage)) return true;
             if (initial && work) {
                 const auto source = current.value("criteriaSourceMessageId",current.value("sourceMessageId",Id{0}));
-                db.addRevision(current,intent(current),doneWhen,source);
+                db.addRevision(current,taskIntent(current),doneWhen,source);
                 current.erase("requestedDoneWhen");
                 current.erase("criteriaSourceMessageId");
             }
@@ -1258,20 +1322,16 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 db.wait(current,"user_question",{{"text",field(args,"question")},{"decisionReason",decision.reason},
                     {"questionId",field(current["question"],"requestId")},{"choices",args.value("choices",Json::array())}});
             } else {
-                const auto pending = work ? pendingBatch(current) : InstructionBatch{};
-                supersedeInstructions(current,pending.superseded);
                 auto workInstruction = work ? instruction : "";
                 const auto userAnswer = field(event,"userAnswer");
                 if (work && !userAnswer.empty() && workInstruction.find(userAnswer) == std::string::npos)
                     workInstruction += "\n\nUser answer:\n" + userAnswer;
                 if (tool == "delegate" && current.value("newSessionRequired",false) && event["kind"] == "bot_answer") {
-                    workInstruction += "\n\nTask intent:\n" + intent(current) +
-                        "\n\nCompletion criteria:\n" + field(current,"doneWhen") + priorInstructions(current);
                     workInstruction += "\n\nAnswer from the requesting Bot:\n" + field(event,"text");
                     const auto report = field(event.value("sessionResult",Json(nullptr)),"report");
                     if (!report.empty()) workInstruction += "\n\nPrevious Session report (reference only):\n" + report;
                 }
-                queueAction(current,action,tool,std::move(workInstruction),args,pending.instructions,charge);
+                queueAction(current,action,tool,std::move(workInstruction),args,charge);
             }
             return true;
         });
@@ -1338,11 +1398,16 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
             const auto bot = notes(field(task,"botId"));
-            Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",intent(task)},
+            const auto goal = taskIntent(task);
+            Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",goal},
                 {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
             if (task.contains("requestedDoneWhen")) summary["requestedDoneWhen"] = task.at("requestedDoneWhen");
-            if (task.contains("restartContext")) summary["restartContext"] = task.at("restartContext");
+            if (const auto restart = task.find("restartContext"); restart != task.end()) {
+                summary["restartContext"] = {{"taskId",restart->at("taskId")},{"intent",goal},
+                    {"pendingInstructions",db.sessionInstructions(task,goal,task.value("pendingInstructions",Json::array()))}};
+                summary["request"] = task.at("request");
+            }
             if (hasPending(task)) {
                 const auto pending = pendingBatch(task);
                 Json applicable = Json::array();

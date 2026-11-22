@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <random>
+#include <set>
 #include <system_error>
 
 namespace flockv0 {
@@ -45,6 +47,10 @@ std::string bounded(std::string_view text, std::size_t bytes) {
     while (bytes && (static_cast<unsigned char>(text[bytes]) & 0xc0) == 0x80) --bytes;
     return std::string(text.substr(0, bytes));
 }
+std::string sessionPrompt(const std::string& actionId, const std::string& instruction) {
+    return "[Flock action " + actionId + "]\n\n" + instruction + "\n\n[/Flock action]";
+}
+
 std::string field(const Json& j, std::string_view key) {
     const auto found = j.find(key);
     return found != j.end() && found->is_string() ? found->get<std::string>() : std::string{};
@@ -292,6 +298,108 @@ void Store::Impl::unlockQuestion(Json& task, std::string_view reason) {
     if (task["question"].is_null()) return;
     journal(task["id"], "session_question_closed", {{"requestId", task["question"]["requestId"]}, {"resolution", reason}});
     task["question"] = nullptr;
+}
+
+std::string taskIntent(const Json& task) {
+    const auto intent = field(task,"intent");
+    return intent.empty() ? field(task,"request") : intent;
+}
+
+Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
+                                      std::size_t availableBytes, std::string_view instruction) const {
+    std::lock_guard lock(mutex);
+    std::map<std::pair<Id,int>,Json> byMessage;
+    std::size_t sourceBytes = 8192;
+    // A live move overrides another destination. On replay, only its work revision can still apply.
+    const auto workKey = [](const Json& item) -> std::string {
+        if (item.contains("doneWhen")) return "criteria";
+        if (item.contains("intent")) return "intent";
+        return field(item,"replaceKey");
+    };
+    std::set<std::string> replaced{"environment"};
+    for (const auto& item : pending) replaced.insert(workKey(item));
+    const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
+
+    // Newest first, so a later change supersedes earlier directions with the same replacement key.
+    const auto remember = [&](Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
+        const auto key = workKey(item);
+        if (!key.empty() && !replaced.insert(key).second) return;
+        if ((item.contains("intent") && item.at("intent") != intent) ||
+            (item.contains("doneWhen") && item.at("doneWhen") != criteria)) return;
+        const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
+        if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
+        auto text = field(item,"text");
+        if (item.contains("environmentId")) {
+            text = "Apply the work directions in this earlier message. The current execution destination is " +
+                   field(task,"environmentId") + " and supersedes any destination in the quote.\n" + text;
+            item["replaceKey"] = key;
+            item.erase("environmentId");
+        }
+        text = bounded(text,std::min(bytes-separatorBytes,availableBytes-2));
+        if (text.empty()) return;
+        bytes -= text.size() + separatorBytes;
+        availableBytes -= text.size() + 2;
+        item["text"] = std::move(text);
+        item.erase("intent");
+        item.erase("doneWhen");
+        if (auto source = item.find("source"); source != item.end()) {
+            const auto excerpt = bounded(field(*source,"text"),sourceBytes);
+            sourceBytes -= excerpt.size();
+            (*source)["text"] = excerpt;
+        }
+        byMessage.emplace(id,std::move(item));
+    };
+    const auto delivered = [&](Id owner, int& count, std::size_t& bytes) {
+        if (!count || !bytes) return;
+        auto rows = query(R"SQL(
+SELECT entry.value FROM outbox JOIN runs ON runs.action_id=outbox.id, json_each(outbox.data,'$.instructions') entry
+WHERE runs.task_id=? AND outbox.phase='accepted'
+ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
+)SQL",{owner,count});
+        while (bytes && rows.next()) {
+            --count;
+            remember(rows.json(0),bytes);
+        }
+    };
+
+    if (!task.at("lastRun").is_null()) {
+        int count = 20;
+        std::size_t bytes = 4000;
+        delivered(task.at("id"),count,bytes);
+    }
+
+    int deliveredCount = 20;
+    std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes;
+    const auto rememberResume = [&](Id message, const std::string& request) {
+        if (!deliveredCount || !message || request.empty() || request == intent ||
+            instruction.find(request) != instruction.npos) return;
+        --deliveredCount;
+        const auto context = "Earlier resume request, subject to the current task intent, completion criteria, "
+            "and execution destination (" + field(task,"environmentId") + "):\n" + request;
+        remember({{"messageId",message},{"text",context}},deliveredBytes);
+    };
+    const auto restart = task.find("restartContext");
+    Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
+    if (parent && !task.at("lastRun").is_null())
+        rememberResume(task.at("sourceMessageId"),field(task,"request"));
+    Id child = task.at("id");
+    while (parent && availableBytes > 2) {
+        auto row = query("SELECT json_extract(data,'$.restartContext.taskId'),"
+                         "coalesce(json_extract(data,'$.cancelledInstructions'),'[]'),"
+                         "json_extract(data,'$.sourceMessageId'),json_extract(data,'$.request') FROM tasks WHERE id=? AND id<?",
+                         {parent,child});
+        if (!row.next()) throw Conflict("Invalid cancelled task reference");
+        const auto cancelled = row.json(1);
+        for (auto item = cancelled.rbegin(); item != cancelled.rend() && pendingBytes > 4; ++item)
+            remember(*item,pendingBytes,4);
+        delivered(parent,deliveredCount,deliveredBytes);
+        if (row.number(0)) rememberResume(row.number(2),row.string(3));
+        child = parent;
+        parent = row.number(0);
+    }
+    Json directions = Json::array();
+    for (auto& [id,item] : byMessage) directions.push_back(std::move(item));
+    return directions;
 }
 
 Store::Store(std::filesystem::path db) : p_(std::make_unique<Impl>(std::move(db))) {}

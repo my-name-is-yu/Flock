@@ -391,7 +391,6 @@ Attribution attribute(Client& client, const RunRef& run, const std::string& requ
 std::string actionPrompt(const Command& command) {
     return "[Flock action " + command.actionId + "]\n\n" + command.instruction + "\n\n[/Flock action]";
 }
-
 void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_view origin) {
     // checkedUrl permits plaintext HTTP only on loopback. A local-only T3 environment
     // opens in its own browser client, where the user authorized this connection.
@@ -401,7 +400,7 @@ void useLocalThreadLink(RunRef& run, std::string_view environment, std::string_v
 
 Json launchArgs(const Command& command) {
     Json args = {{"projectId", command.projectId}, {"title", "Flock task"},
-                 {"message", actionPrompt(command)}, {"clientRequestId", command.actionId}};
+                 {"message", sessionPrompt(command.actionId,command.instruction)}, {"clientRequestId", command.actionId}};
     if (!command.config.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
     const auto settings = command.config.value("session", Json::object());
     if (!settings.is_object()) throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
@@ -442,7 +441,7 @@ void verifyCommand(const Command& command) {
         (command.tool != "delegate" && !hasRun(command.target)) || command.projectId.empty() ||
         command.actionId.empty() || command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
-        actionPrompt(command).size() > 120000)
+        sessionPrompt(command.actionId,command.instruction).size() > maxSessionPromptBytes)
         throw Failure(Failure::Kind::Settings, "Invalid T3 command, action ID or destination");
 }
 
@@ -504,7 +503,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
     auto threads = launch ? projectThreads(client, scan, command.projectId) : std::vector{command.target.threadId};
     const auto& hint = command.candidate.threadId;
     if (!hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end()) threads.push_back(hint);
-    const auto expected = actionPrompt(command);
+    const auto expected = sessionPrompt(command.actionId,command.instruction);
     std::map<std::pair<std::string, std::string>, RunRef> matches;
     bool incomplete = false;
     for (const auto& threadId : threads) {
@@ -696,7 +695,7 @@ public:
                     return result(Outcome::NotAccepted, "T3 has other work or the assigned Run could not be confirmed as the latest settled Run");
                 invoked = true;
                 reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "queue"},
-                    {"message", actionPrompt(command)}, {"clientRequestId", command.actionId}});
+                    {"message", sessionPrompt(command.actionId,command.instruction)}, {"clientRequestId", command.actionId}});
                 const auto delivery = str(reply, "delivery");
                 if (str(reply, "threadId") != command.target.threadId || str(reply, "runId") == command.target.runId ||
                     (delivery != "started" && delivery != "queued")) invalidResponse();
