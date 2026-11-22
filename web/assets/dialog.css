@@ -112,9 +112,21 @@
   border-radius: 10px; background: var(--field); color: var(--text);
   font-size: var(--text-xl); font-weight: 600; text-align: center;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+  animation: inline-edit-in .18s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes inline-edit-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: none; }
 }
 .settings-name-input:focus { outline: none; border-color: color-mix(in srgb, var(--focus) 60%, var(--hairline)); }
-.settings-status { color: var(--text-2); font-size: var(--text-xs); text-align: center; }
+.settings-status {
+  color: var(--text-2); font-size: var(--text-xs); text-align: center;
+  animation: settings-note-in .18s ease-out;
+}
+@keyframes settings-note-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
 .settings-status.error { color: var(--danger); }
 .settings-card { display: grid; min-width: 0; padding: .95rem 1.1rem; border-radius: var(--radius-lg); background: var(--detail-card); overflow: hidden; }
 .settings-soul { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.7; }
@@ -131,7 +143,10 @@ button.settings-row:active, a.settings-row:active { background: var(--selected);
 button.settings-row:focus-visible, a.settings-row:focus-visible { outline-offset: -2px; border-radius: var(--radius-lg); }
 .settings-row-value { margin-left: auto; color: var(--text-2); }
 a.settings-row svg { margin-left: auto; }
-.settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; }
+.settings-row svg { width: 1rem; height: 1rem; color: var(--text-3); margin-right: -.25rem; transition: transform .16s cubic-bezier(0.23, 1, 0.32, 1), color .14s ease; }
+@media (hover: hover) and (pointer: fine) {
+  button.settings-row:hover svg, a.settings-row:hover svg { transform: translateX(2px); color: var(--text-2); }
+}
 
 .cron-list { padding: 0; }
 .cron-row { display: grid; gap: .35rem; padding: .95rem 1.1rem; }
@@ -209,13 +224,19 @@ a.settings-row svg { margin-left: auto; }
   @starting-style { .detail[open] { transform: none; } }
   .detail-tab:active, .settings-avatar-button:hover, .settings-avatar-button:active,
   .settings-name-button:active, .dialog-button:active:not(:disabled), .peer-choice:active { transform: none; }
+  .settings-name-input, .settings-status, .peer-picker-list .peer-choice { animation: none; }
+  .settings-row svg { transition: none; transform: none; }
 }
 .peer-picker-list { display: grid; gap: .15rem; padding: 0; margin: 0; list-style: none; }
 .peer-choice {
   display: flex; align-items: center; gap: .65rem; min-height: 2.9rem; padding: .3rem .55rem;
   border-radius: var(--radius-md); color: var(--text); text-decoration: none; font-size: var(--text-md);
   transition: background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+  animation: settings-note-in .18s cubic-bezier(0.23, 1, 0.32, 1) backwards;
 }
+.peer-picker-list li:nth-child(2) .peer-choice { animation-delay: 25ms; }
+.peer-picker-list li:nth-child(3) .peer-choice { animation-delay: 50ms; }
+.peer-picker-list li:nth-child(4) .peer-choice { animation-delay: 75ms; }
 .peer-choice:hover { background: var(--hover); }
 .peer-choice:active { transform: scale(.985); }
 .peer-choice-avatar { width: 2.1rem; height: 2.1rem; }

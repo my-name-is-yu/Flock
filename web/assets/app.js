@@ -931,10 +931,15 @@ function iconButton(name, label, click) {
 async function copyMessage(control, text) {
   try {
     await navigator.clipboard.writeText(text);
+    clearTimeout(control._copyTimer);
+    delete control.dataset.copied;
+    void control.offsetWidth;
+    control.dataset.copied = 'true';
     control.replaceChildren(icon('copied'));
     control.setAttribute('aria-label', 'Copied');
     control.title = 'Copied';
-    setTimeout(() => {
+    control._copyTimer = setTimeout(() => {
+      delete control.dataset.copied;
       control.replaceChildren(icon('copy'));
       control.setAttribute('aria-label', 'Copy text');
       control.title = 'Copy text';
