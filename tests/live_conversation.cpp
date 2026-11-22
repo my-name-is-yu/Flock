@@ -1,20 +1,29 @@
 // Opt-in evaluation of conversation turns with a live model. It is not part of ctest.
 // Usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]
+// Offline check: flock_live_conversation --self-test
 #include "flock/core.hpp"
 #include "model.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
+#include <cstddef>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <ranges>
 #include <regex>
+#include <set>
 #include <unistd.h>
 
 using namespace flockv0;
 
 namespace {
+void check(bool passed, const std::string& failure) {
+    if (!passed) throw std::runtime_error(failure);
+}
+
 struct Directory {
     std::filesystem::path path;
     Directory() {
@@ -28,7 +37,7 @@ struct Directory {
 // The conversation uses the live model. Task decisions stay scripted so each scenario starts from known state.
 struct Mixed : Model {
     Model& live;
-    std::map<std::string,Json> questions;
+    std::map<Id,Json> questions;
     Json trace = Json::array();
     explicit Mixed(Model& model) : live(model) {}
     Decision decide(const ModelInput& input) override {
@@ -39,7 +48,8 @@ struct Mixed : Model {
             return decision;
         }
         const auto request = input.task.value("request","");
-        if (const auto question = questions.find(request); question != questions.end() && !input.event.contains("userAnswer"))
+        if (const auto question = questions.find(input.task.at("id").get<Id>());
+            input.event.at("kind") == "intake" && question != questions.end() && !input.event.contains("userAnswer"))
             return {"ask_user",question->second,"The fixture needs a decision"};
         if (input.event.value("kind","") == "result")
             return {"complete",{{"report",input.event.value("report","")}},"The fixture report is the result"};
@@ -67,9 +77,22 @@ struct Runs : T3 {
     Observation observe(const std::string&, const Json&, const RunRef& run) override { return runs[run.runId]; }
     void interrupt(const std::string&, const Json&, const RunRef& run) override { interrupted.push_back(run.runId); }
     void finish(const std::string& run, std::string report) {
-        runs[run] = {.kind = Observation::Kind::Finished, .status = "completed", .report = std::move(report),
-                     .resultRunId = run, .itemId = "report-" + run, .settled = true};
+        runs.at(run) = {.kind = Observation::Kind::Finished, .question = {}, .status = "completed",
+                        .report = std::move(report), .resultRunId = run, .itemId = "report-" + run,
+                        .settled = true, .detail = {}};
     }
+};
+
+using Tasks = std::map<Id,Json>;
+
+struct Turn {
+    Json reply;
+    Tasks before, after;
+    std::vector<Command> steers;
+    std::size_t interrupts;
+
+    Id message() const { return reply.at("replyToMessageId").get<Id>(); }
+    Id replyMessage() const { return reply.at("messageId").get<Id>(); }
 };
 
 struct Scene {
@@ -87,13 +110,42 @@ struct Scene {
     Intake intake(std::string request = {}, std::string project = "project") const {
         return {"release",std::move(request),"desktop",std::move(project),config,{},0};
     }
-    Id task(std::string request, std::string project) {
-        const auto id = store.submit(intake(std::move(request),std::move(project)));
-        for (int i = 0; i < 12 && store.task(id).at("state") != "running" && store.task(id).at("state") != "waiting"; ++i)
+    void reach(Id id, std::string_view expected) {
+        constexpr int tickLimit = 20;
+        auto state = store.task(id).at("state").get<std::string>();
+        for (int tick = 0; tick < tickLimit && state != expected; ++tick) {
             runtime.tick();
+            state = store.task(id).at("state").get<std::string>();
+        }
+        check(state == expected, "fixture task " + std::to_string(id) + " expected state " +
+              std::string(expected) + " after at most " + std::to_string(tickLimit) + " ticks, got " + state);
+    }
+    Id task(std::string request, std::string project, Json question = nullptr) {
+        const auto id = store.submit(intake(std::move(request),std::move(project)));
+        const bool asksQuestion = !question.is_null();
+        if (asksQuestion) model.questions.emplace(id,std::move(question));
+        reach(id,asksQuestion ? "waiting" : "running");
+        if (asksQuestion) {
+            const auto wait = store.task(id).at("wait");
+            const auto& expected = model.questions.at(id);
+            check(wait.at("reason") == "user_question" && wait.at("text") == expected.at("question") &&
+                  wait.at("choices") == expected.at("choices"),
+                  "fixture expected question " + expected.dump() + ", got wait " + wait.dump());
+        }
         return id;
     }
-    Json send(const std::string& text, Id replyTo = 0) {
+    Tasks snapshot() const {
+        Tasks tasks;
+        for (auto& task : store.tasks("release",0,200)) {
+            const auto id = task.at("id").get<Id>();
+            tasks.emplace(id,std::move(task));
+        }
+        return tasks;
+    }
+    Turn send(const std::string& text, Id replyTo = 0) {
+        auto before = snapshot();
+        const auto steerCount = t3.notes.size();
+        const auto interruptCount = t3.interrupted.size();
         const auto receipt = store.receive(intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
                                            text,replyTo);
         runtime.runConversations();
@@ -103,16 +155,46 @@ struct Scene {
             const auto route = data.at("route").get<std::string>();
             if (route != "reply")
                 throw std::runtime_error("Turn ended with " + route + ": " + data.at("text").get<std::string>());
-            return data;
+            return {data,std::move(before),snapshot(),
+                    {t3.notes.begin() + static_cast<std::ptrdiff_t>(steerCount),t3.notes.end()},
+                    t3.interrupted.size() - interruptCount};
         }
         throw std::runtime_error("The turn did not reply");
     }
 };
 
-int count(const Json& actions, std::string_view tool, Id task = 0) {
-    return static_cast<int>(std::ranges::count_if(actions,[&](const Json& action) {
-        return action.at("tool") == tool && (!task || action.at("taskId") == task);
-    }));
+using Action = std::pair<std::string,Id>;
+
+// Only applied, task-affecting tools appear in reply.actions. Read-only lookups are free.
+void checkActions(const Turn& turn, std::initializer_list<Action> expected) {
+    std::set<Action> remaining(expected);
+    std::set<Id> touched, started;
+    std::size_t steers = 0;
+    for (const auto& [tool,id] : expected) {
+        touched.insert(id);
+        if (tool == "start_task") started.insert(id);
+        if (tool == "message_session") ++steers;
+    }
+    for (const auto& action : turn.reply.at("actions")) {
+        const auto tool = action.at("tool").get<std::string>();
+        const auto id = action.at("taskId").get<Id>();
+        check(remaining.erase({tool,id}) == 1, "unexpected action " + action.dump());
+    }
+    if (!remaining.empty()) {
+        const auto& [tool,id] = *remaining.begin();
+        throw std::runtime_error("missing " + tool + " for task " + std::to_string(id));
+    }
+
+    for (const auto& [id,task] : turn.before) {
+        check(turn.after.contains(id), "task disappeared: " + std::to_string(id));
+        if (!touched.contains(id))
+            check(turn.after.at(id) == task, "untouched task changed: " + std::to_string(id));
+    }
+    std::set<Id> created;
+    for (const auto& [id,task] : turn.after)
+        if (!turn.before.contains(id)) created.insert(id);
+    check(created == started,"the tasks created by the turn did not match its start actions");
+    check(turn.steers.size() == steers && turn.interrupts == 0,"unexpected T3 steer or interrupt count");
 }
 
 std::string lower(std::string text) {
@@ -120,132 +202,378 @@ std::string lower(std::string text) {
     return text;
 }
 
-bool mentions(const std::string& text, std::string_view needle) {
-    return lower(text).find(lower(std::string(needle))) != std::string::npos;
+bool matches(const std::string& text, const std::regex& pattern) {
+    return std::regex_search(text,pattern);
 }
 
-std::vector<Json> events(Scene& s, Id task, std::string_view kind) {
+bool includes(std::string_view text, std::string_view part) {
+    return text.find(part) != std::string_view::npos;
+}
+
+bool contradictsInstruction(const std::string& text) {
+    static const std::regex denial(
+        R"(\b(?:not|no|never|avoid|omit|exclude|skip|without|optional|unnecessary|instead of|rather than)\b|n['’]t\b)");
+    return matches(text,denial);
+}
+
+std::vector<Json> turnEvents(const Scene& s, const Turn& turn, Id task, std::string_view kind) {
     std::vector<Json> found;
-    for (const auto& row : s.store.history(task,0,200))
+    for (const auto& row : s.store.history(task,turn.message(),200)) {
+        if (row.at("id") >= turn.replyMessage()) break;
         if (row.at("kind") == kind) found.push_back(row.at("data"));
+    }
     return found;
 }
 
-// Everything the turn handed to the task: queued or steered instructions, plus any changed intent or criteria.
-std::string delivered(Scene& s, Id task, const Json& reply) {
-    std::string text;
-    for (const auto* kind : {"instruction_accepted","instruction_steered"})
-        for (const auto& data : events(s,task,kind))
-            if (data.value("messageId",Json(nullptr)) == reply.at("replyToMessageId")) text += data.value("text","") + "\n";
-    const auto current = s.store.task(task);
-    return text + current.value("intent","") + "\n" + current.value("requestedDoneWhen","") + "\n" + current.value("doneWhen","");
+void checkCancellation(const Scene& s, const Turn& turn, Id id) {
+    checkActions(turn,{{"cancel_task",id}});
+    const auto& state = turn.after.at(id).at("state");
+    check((state == "cancelling" || state == "cancelled") &&
+          turnEvents(s,turn,id,"cancel_requested").size() == 1,"the requested task was not stopped by this turn");
 }
 
-bool stopped(Scene& s, Id task) {
-    const auto state = s.store.task(task).at("state");
-    return state == "cancelled" || state == "cancelling" || !events(s,task,"cancel_requested").empty();
+bool asksWhichTask(const Json& reply) {
+    bool mobile = false, desktop = false;
+    for (const auto& option : reply.value("suggestions",Json::array())) {
+        const auto& text = option.get_ref<const std::string&>();
+        const bool namesMobile = includes(text,"モバイル");
+        const bool namesDesktop = includes(text,"デスクトップ");
+        mobile |= namesMobile && !namesDesktop;
+        desktop |= namesDesktop && !namesMobile;
+    }
+    const auto text = lower(reply.at("text").get<std::string>());
+    const bool asks = includes(text,"?") || includes(text,"？") || includes(text,"教えて") || includes(text,"ください");
+    const bool identifiesChoice = includes(text,"どちら") || includes(text,"どの") || includes(text,"どっち") ||
+        includes(text,"which") || (includes(text,"モバイル") && includes(text,"デスクトップ"));
+    return (mobile && desktop) || (asks && identifiesChoice);
 }
 
-// A correct action followed by a cancellation in the same turn is still wrong.
-std::string untouched(Scene& s, const Json& reply, std::initializer_list<Id> tasks) {
-    if (count(reply.at("actions"),"cancel_task")) return "the turn also cancelled work";
-    for (const auto task : tasks)
-        if (stopped(s,task)) return "task " + std::to_string(task) + " was stopped";
-    return "";
+bool requiresStartupColumn(const std::string& criteria) {
+    static const std::regex column(R"(\bstartup_p95_ms\b)");
+    static const std::regex field(R"(\b(?:column|field)\b)");
+    static const std::regex requirement(
+        R"(\b(?:include[sd]?|contain[s]?|require[sd]?|add|must|report|provide|with)\b)");
+    const auto text = lower(criteria);
+    return matches(text,column) && matches(text,field) && matches(text,requirement) && !contradictsInstruction(text);
 }
 
-using Scenario = std::function<std::string(Scene&)>;
+void checkCriteria(const Scene& s, const Turn& turn, Id id) {
+    checkActions(turn,{{"change_task",id}});
+    const auto& before = turn.before.at(id);
+    const auto& after = turn.after.at(id);
+    const auto& criteria = after.at("doneWhen").get_ref<const std::string&>();
+    auto revisions = before.at("revisions");
+    const auto& savedRevisions = after.at("revisions");
+    check(savedRevisions.size() == revisions.size() + 1,"expected one new saved revision");
+    const auto& revision = savedRevisions.back();
+    revisions.push_back(revision);
+    check(savedRevisions == revisions && revision.at("id") == after.at("currentRevision") &&
+          revision.at("sourceMessageId") == turn.message() && revision.at("doneWhen") == criteria &&
+          revision.at("intent") == before.at("intent") && after.at("intent") == before.at("intent") &&
+          before.at("doneWhen") != criteria && requiresStartupColumn(criteria),
+          "the new revision did not preserve the benchmark and require the startup_p95_ms report column");
+
+    const auto accepted = turnEvents(s,turn,id,"instruction_accepted");
+    check(turn.reply.at("actions").front().at("effect") == "replanning" && after.value("replanning",false) &&
+          accepted.size() == 1 && accepted.front().at("messageId") == turn.message() &&
+          after.at("pendingInstructions").back() == accepted.front() && accepted.front().at("conflicting") == true &&
+          accepted.front().at("replaceKey") == "criteria" && accepted.front().at("revisionId") == revision.at("id") &&
+          !contradictsInstruction(lower(accepted.front().at("text").get<std::string>())),
+          "the turn did not queue a consistent criteria replan for its new revision");
+}
+
+bool explainsCanary(const std::string& reply) {
+    const auto text = lower(reply);
+    static const std::regex flag(R"(\brollout_[a-z0-9_]+\b)");
+    static const std::regex canary(R"(\brollout_canary\b)");
+    static const std::regex percentage(R"(\b[0-9]+(?:\.[0-9]+)?\s*(?:%|percent\b))");
+    static const std::regex allowedPercentage(R"(^(?:5|100)\s*(?:%|percent)$)");
+    static const std::regex duration(R"(\b(?:[0-9]+(?:\.[0-9]+)?|one|two|three|a)\s+(?:hours?|days?|weeks?)\b)");
+    static const std::regex allowedDuration(R"(^(?:24\s+hours?|(?:1|one|a)\s+day)$)");
+    static const std::regex wrongValue(
+        R"(\b(?:not|never|instead of|rather than|avoid)\b[^.!?\n]{0,40}\b(?:5\s*(?:%|percent)|rollout_canary|(?:one|a)\s+day|24\s+hours|everyone|all users)|\b(?:never|not)\s+(?:expand|roll out|enable))");
+    static const std::regex rollout(
+        R"(\b5\s*(?:%|percent)\s+(?:of\s+(?:the\s+)?)?(?:users|audience)\b)"
+        R"([\s\S]{0,160}?\b(?:24\s+hours?|(?:1|one|a)\s+day)\b)"
+        R"([\s\S]{0,160}?\b(?:then|after(?:ward|wards| that)?|before|followed by)\b)"
+        R"([\s\S]{0,160}?\b(?:everyone|all users|(?:the\s+)?(?:entire|full)\s+(?:audience|user base)|100\s*(?:%|percent)|full rollout))");
+    if (!matches(text,canary) || !matches(text,rollout) || matches(text,wrongValue)) return false;
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),flag); it != std::sregex_iterator(); ++it)
+        if (it->str() != "rollout_canary") return false;
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),percentage); it != std::sregex_iterator(); ++it)
+        if (!matches(it->str(),allowedPercentage)) return false;
+    for (auto it = std::sregex_iterator(text.begin(),text.end(),duration); it != std::sregex_iterator(); ++it)
+        if (!matches(it->str(),allowedDuration)) return false;
+    return true;
+}
+
+enum class NoteTiming { Immediate, SafeBoundary };
+
+void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing) {
+    const bool immediate = timing == NoteTiming::Immediate;
+    checkActions(turn,{{immediate ? "message_session" : "send_to_task",id}});
+    const auto& before = turn.before.at(id);
+    const auto& after = turn.after.at(id);
+    const auto kind = immediate ? "instruction_steered" : "instruction_accepted";
+    const auto notes = turnEvents(s,turn,id,kind);
+    check(notes.size() == 1 && notes.front().at("messageId") == turn.message(),
+          "expected one new " + std::string(kind) + " event for this message");
+    const auto& note = notes.front();
+    const auto& instruction = note.at("text").get_ref<const std::string&>();
+    static const std::regex staging(
+        R"(\b(?:use|switch to|target|connect to|benchmark against|run against)\s+(?:the\s+)?staging\s+(?:database|db)\b)");
+    static const std::regex otherDatabase(R"(\b(?:production|prod|development|dev)\s+(?:database|db)\b)");
+    const auto text = lower(instruction);
+    check(matches(text,staging) && !contradictsInstruction(text) && !matches(text,otherDatabase),
+          "the new instruction did not direct the benchmark to use the staging database");
+
+    const auto& effect = turn.reply.at("actions").front().at("effect");
+    const auto& run = before.at("activeRun");
+    if (immediate) {
+        const auto& steer = turn.steers.front();
+        check(effect == "delivered" && note.at("run").at("runId") == run.at("runId") &&
+              note.at("run").at("threadId") == run.at("threadId") &&
+              steer.target.runId == run.at("runId").get<std::string>() &&
+              steer.target.threadId == run.at("threadId").get<std::string>() && steer.instruction == instruction && after == before,
+              "the steer did not reach the current run without changing the task");
+    } else {
+        auto pending = before.value("pendingInstructions",Json::array());
+        pending.push_back(note);
+        check(effect == "accepted" && note.at("conflicting") == false &&
+              note.at("revisionId") == before.at("currentRevision") && after.at("pendingInstructions") == pending &&
+              after.at("state") == before.at("state") && after.at("activeRun") == run &&
+              after.at("currentRevision") == before.at("currentRevision") && after.at("revisions") == before.at("revisions") &&
+              !after.value("replanning",false),"the note was not queued for the current revision's next safe boundary");
+    }
+}
+
+using Scenario = std::function<void(Scene&)>;
 
 const std::vector<std::pair<std::string,Scenario>> scenarios{
-    {"new request on a named destination",[](Scene& s) -> std::string {
-        const auto reply = s.send("Run the project's existing test suite on the cloud Mac and report any failures");
-        const auto tasks = s.store.tasks("release");
-        if (count(reply.at("actions"),"start_task") != 1 || tasks.size() != 1) return "expected one new task";
-        const auto id = tasks[0]["id"].get<Id>();
-        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
-        return s.store.task(id).at("environmentId") == "cloud" ? "" : "the task did not use the cloud Mac";
+    {"new request on a named destination",[](Scene& s) {
+        const auto turn = s.send("Run the project's existing test suite on the cloud Mac and report any failures");
+        check(turn.after.size() == 1,"expected one new task");
+        const auto& [id,task] = *turn.after.begin();
+        checkActions(turn,{{"start_task",id}});
+        check(task.at("environmentId") == "cloud","the task did not use the cloud Mac");
     }},
-    {"a reply that matches an offered choice answers the question",[](Scene& s) -> std::string {
-        s.model.questions["Prepare the release label"] = {{"question","Which label should I use?"},
-                                                          {"choices",{"Cancel this task","Status"}}};
-        const auto id = s.task("Prepare the release label","label");
-        const auto question = s.store.task(id).at("wait").at("messageId").get<Id>();
-        const auto reply = s.send("Cancel this task",question);
-        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
-        if (count(reply.at("actions"),"answer_task_question",id) != 1) return "the question was not answered";
-        const auto answers = events(s,id,"user_answer");
-        return answers.size() == 1 && lower(answers[0].value("text","")) == "cancel this task"
-            ? "" : "the saved answer was not the offered choice";
+    {"a reply that matches an offered choice answers the question",[](Scene& s) {
+        const auto id = s.task("Prepare the release label","label",
+            {{"question","Which label should I use?"},{"choices",{"Cancel this task","Status"}}});
+        const auto wait = s.store.task(id).at("wait");
+        const auto turn = s.send("Cancel this task",wait.at("messageId").get<Id>());
+        checkActions(turn,{{"answer_task_question",id}});
+        const auto answers = turnEvents(s,turn,id,"user_answer");
+        const auto& task = turn.after.at(id);
+        check(answers.size() == 1 && answers.front().at("messageId") == turn.message() &&
+              answers.front().at("waitId") == wait.at("id") &&
+              lower(answers.front().at("text").get<std::string>()) == "cancel this task" &&
+              task.at("state") == "deciding" && task.at("wait").is_null(),
+              "the offered choice was not saved as the answer to the open question");
     }},
-    {"a named stop cancels only that task",[](Scene& s) -> std::string {
-        const auto notes = s.task("Write the release notes","notes");
+    {"a named stop cancels only that task",[](Scene& s) {
+        s.task("Write the release notes","notes");
         const auto benchmark = s.task("Benchmark the startup time","benchmark");
-        const auto reply = s.send("Stop the benchmark");
-        if (count(reply.at("actions"),"cancel_task",notes) || stopped(s,notes)) return "the release notes were cancelled";
-        return count(reply.at("actions"),"cancel_task",benchmark) == 1 && stopped(s,benchmark)
-            ? "" : "the benchmark was not cancelled";
+        const auto turn = s.send("Stop the benchmark");
+        checkCancellation(s,turn,benchmark);
     }},
-    {"an ambiguous stop waits for a named target",[](Scene& s) -> std::string {
+    {"an ambiguous stop waits for a named target",[](Scene& s) {
         const auto mobile = s.task("モバイル版のログイン画面を修正","mobile");
         s.task("デスクトップ版のログイン画面を修正","desktop");
-        const auto reply = s.send("その作業をキャンセルして");
-        if (!reply.at("actions").empty()) return "work changed before the user identified a target";
-        // The first reply is free text. Score what happens when the user identifies the target.
-        const auto followUp = s.send("モバイル版のほうです",reply.at("messageId").get<Id>());
-        const auto& actions = followUp.at("actions");
-        return actions.size() == 1 && count(actions,"cancel_task",mobile) == 1
-            ? "" : "expected only the mobile task to be cancelled";
+        const auto turn = s.send("その作業をキャンセルして");
+        checkActions(turn,{});
+        check(asksWhichTask(turn.reply),"the reply did not ask which task to cancel or offer both choices");
+        const auto followUp = s.send("モバイル版のほうです",turn.replyMessage());
+        checkCancellation(s,followUp,mobile);
     }},
-    {"new criteria change the task",[](Scene& s) -> std::string {
+    {"new criteria change the task",[](Scene& s) {
         const auto id = s.task("Benchmark the startup time","benchmark");
-        const auto reply = s.send("For the startup benchmark, change the completion criteria to require a report column named startup_p95_ms");
-        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
-        const auto criteria = s.store.task(id).at("doneWhen").get<std::string>();
-        static const std::regex column(R"(\bstartup_p95_ms\b)");
-        return std::regex_search(criteria,column) ? "" : "the saved completion criteria omitted the required column";
+        const auto turn = s.send("For the startup benchmark, change only the completion criteria to require a report column named startup_p95_ms");
+        checkCriteria(s,turn,id);
     }},
-    {"two requests in one message start two tasks",[](Scene& s) -> std::string {
-        const auto reply = s.send("Write the release notes. Separately, audit the third-party licenses.");
-        const auto tasks = s.store.tasks("release");
-        if (count(reply.at("actions"),"start_task") != 2 || tasks.size() != 2) return "expected two new tasks";
-        if (const auto failure = untouched(s,reply,{tasks[0]["id"].get<Id>(),tasks[1]["id"].get<Id>()}); !failure.empty())
-            return failure;
-        const auto first = s.store.task(tasks[0]["id"]).value("request",""), second = s.store.task(tasks[1]["id"]).value("request","");
-        const auto notes = [](const std::string& request) { return mentions(request,"release note"); };
-        const auto audit = [](const std::string& request) { return mentions(request,"licens"); };
-        return (notes(first) && audit(second)) || (audit(first) && notes(second))
-            ? "" : "the two tasks were not the release notes and the license audit";
+    {"two requests in one message start two tasks",[](Scene& s) {
+        const auto turn = s.send("Write the release notes. Separately, audit the third-party licenses.");
+        check(turn.after.size() == 2,"expected two new tasks");
+        const auto first = turn.after.begin();
+        const auto second = std::next(first);
+        checkActions(turn,{{"start_task",first->first},{"start_task",second->first}});
+        static const std::regex notes(R"(\brelease[- ]notes?\b)");
+        static const std::regex licenses(R"(\blicen[cs](?:e[sd]?|ing)\b)");
+        static const std::regex audit(R"(\b(?:audit|review|check|inspect|verify|assess)\b)");
+        const auto role = [&](const Json& task) {
+            const auto request = lower(task.at("request").get<std::string>());
+            const bool hasNotes = matches(request,notes);
+            const bool hasLicenses = matches(request,licenses);
+            if (contradictsInstruction(request) || hasNotes == hasLicenses) return "";
+            if (hasNotes) return "release notes";
+            return matches(request,audit) ? "license audit" : "";
+        };
+        const std::set<std::string> roles{role(first->second),role(second->second)};
+        check(roles == std::set<std::string>{"release notes","license audit"},
+              "the tasks did not map one-to-one to release notes and a license audit");
     }},
-    {"explaining a result changes no work",[](Scene& s) -> std::string {
+    {"explaining a result changes no work",[](Scene& s) {
         const auto id = s.task("Compare three rollout plans","plans");
         s.t3.finish(s.store.task(id).at("activeRun").at("runId").get<std::string>(),
                     "1. Use rollout_global for a big bang release\n"
                     "2. Use rollout_canary for 5% of users for a day, then everyone\n"
                     "3. Use rollout_team to enable one team at a time");
-        for (int i = 0; i < 6 && s.store.task(id).at("state") != "completed"; ++i) s.runtime.tick();
-        const auto before = s.store.tasks("release");
-        const auto reply = s.send("Explain the second option in more detail and include its rollout flag name");
-        if (!reply.at("actions").empty() || s.store.tasks("release") != before) return "the explanation changed work";
-        static const std::regex flag(R"(\brollout_canary\b)");
-        return std::regex_search(reply.at("text").get_ref<const std::string&>(),flag)
-            ? "" : "the answer omitted the second option's rollout flag";
+        s.reach(id,"completed");
+        const auto turn = s.send("Explain the second option in more detail and include its rollout flag name");
+        checkActions(turn,{});
+        check(explainsCanary(turn.reply.at("text").get_ref<const std::string&>()),
+              "the reply did not explain rollout_canary's 5% one-day rollout followed by full release");
     }},
-    {"a note for running work reaches that task",[](Scene& s) -> std::string {
+    {"a note for running work reaches that task immediately",[](Scene& s) {
         const auto id = s.task("Benchmark the startup time","benchmark");
-        const auto reply = s.send("For the running benchmark, use the staging database from now on");
-        if (s.store.tasks("release").size() != 1) return "a new task was started";
-        if (const auto failure = untouched(s,reply,{id}); !failure.empty()) return failure;
-        const auto& actions = reply.at("actions");
-        if (count(actions,"message_session",id) + count(actions,"send_to_task",id) + count(actions,"change_task",id) != 1)
-            return "the note did not reach the benchmark";
-        return mentions(delivered(s,id,reply),"staging") ? "" : "what reached the benchmark did not name the staging database";
+        const auto turn = s.send("Tell the running benchmark session right now to use the staging database from now on. Keep the run going.");
+        checkStagingNote(s,turn,id,NoteTiming::Immediate);
+    }},
+    {"a note for running work waits for a safe boundary",[](Scene& s) {
+        const auto id = s.task("Benchmark the startup time","benchmark");
+        const auto turn = s.send("Leave a note for the benchmark task to use the staging database at its next safe point. Let the current run continue.");
+        checkStagingNote(s,turn,id,NoteTiming::SafeBoundary);
     }},
 };
+
+struct Script : Model {
+    std::vector<Decision> steps;
+    std::size_t next = 0;
+
+    explicit Script(std::vector<Decision> decisions) : steps(std::move(decisions)) {}
+    Decision decide(const ModelInput& input) override {
+        auto decision = steps.at(next++);
+        if (!decision.args.contains("fixtureRequest")) return decision;
+        const auto request = decision.args.at("fixtureRequest");
+        decision.args.erase("fixtureRequest");
+        const auto& tasks = input.task.at("tasks");
+        const auto task = std::ranges::find_if(tasks,[&](const Json& item) { return item.at("request") == request; });
+        check(task != tasks.end(),"scripted task was missing: " + request.dump());
+        decision.args["taskId"] = task->at("taskId");
+        if (decision.tool == "answer_task_question") {
+            decision.args["waitId"] = task->at("wait").at("waitId");
+        } else {
+            decision.args["generation"] = task->at("generation");
+            if (decision.tool == "change_task") decision.args["revisionId"] = task->at("revisionId");
+        }
+        return decision;
+    }
+};
+
+void selfTest() {
+    int passed = 0;
+    const auto run = [&](std::string_view name, const Scenario& scenario, std::vector<Decision> steps,
+                         std::string_view expectedFailure = {}) {
+        Script script(std::move(steps));
+        Mixed model(script);
+        Scene scene(model,"offline");
+        std::string failure;
+        try {
+            scenario(scene);
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+        check(script.next == script.steps.size() &&
+              (expectedFailure.empty() ? failure.empty() : includes(failure,expectedFailure)),
+              std::string(name) + " expected " + (expectedFailure.empty() ? "a pass" : std::string(expectedFailure)) +
+              ", got " + (failure.empty() ? "a pass" : failure) + "; script steps " +
+              std::to_string(script.next) + "/" + std::to_string(script.steps.size()));
+        ++passed;
+    };
+    const auto test = [&](std::string_view prefix, std::vector<Decision> steps, std::string_view failure = {}) {
+        const auto scenario = std::ranges::find_if(scenarios,[&](const auto& item) { return item.first.starts_with(prefix); });
+        check(scenario != scenarios.end(),"missing offline scenario: " + std::string(prefix));
+        run(scenario->first,scenario->second,std::move(steps),failure);
+    };
+    const auto say = [](const std::string& text) { return Decision{"reply",{{"text",text}},"Scripted reply"}; };
+    const auto start = [](const std::string& request) {
+        return Decision{"start_task",{{"request",request}},"Scripted start"};
+    };
+    const auto action = [](std::string tool, std::string_view task, Json args = Json::object()) {
+        args["fixtureRequest"] = task;
+        return Decision{std::move(tool),std::move(args),"Scripted action"};
+    };
+    const auto done = say("Done.");
+    const auto notes = start("Write the release notes");
+    const auto audit = start("Audit the third-party licenses");
+    const auto answer = action("answer_task_question","Prepare the release label",{{"text","Cancel this task"}});
+    constexpr auto benchmark = "Benchmark the startup time";
+    const auto stop = action("cancel_task",benchmark);
+    const auto stopMobile = action("cancel_task","モバイル版のログイン画面を修正");
+    const auto clarify = say("モバイル版とデスクトップ版のどちらをキャンセルしますか？");
+    auto choices = say("対象を選んでください。");
+    choices.args["suggestions"] = {"モバイル版","デスクトップ版"};
+    const auto criteria = [&](std::string text) {
+        return action("change_task",benchmark,{{"doneWhen",std::move(text)},{"instruction","Update the report criteria"}});
+    };
+    const auto steer = action("message_session",benchmark,{{"text","Use the staging database"}});
+    const auto queue = action("send_to_task",benchmark,{{"instruction","Use the staging database at the next safe point"}});
+
+    auto cloud = start("Run the existing test suite");
+    cloud.args["environment"] = "cloud Mac";
+    test("new request",{cloud,done});
+    test("a reply",{answer,done});
+    test("a reply",{answer,notes,done},"unexpected action");
+    test("a named stop",{stop,done});
+    test("a named stop",{stop,action("send_to_task","Write the release notes",{{"instruction","Pause drafting"}}),done},
+         "unexpected action");
+    test("an ambiguous stop",{clarify,stopMobile,done});
+    test("an ambiguous stop",{choices,stopMobile,done});
+    test("an ambiguous stop",{say("キャンセルしました。")},"did not ask which task");
+    test("new criteria",{criteria("Include a report column named startup_p95_ms"),done});
+    test("new criteria",{criteria("Do not include the startup_p95_ms column"),done},"did not preserve the benchmark and require");
+    test("two requests",{notes,audit,done});
+    test("two requests",{start("Write the release notes and audit the third-party licenses"),audit,done},"one-to-one");
+    test("explaining",{say("Use rollout_canary for 5% of users for 24 hours, then expand it to everyone.")});
+    test("explaining",{say("Use rollout_canary for 50% of users for a week, then everyone.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then everyone. Start with 50%.")},"did not explain");
+    test("explaining",{say("Use rollout_canary for 5% of users for a day, then never expand it to everyone.")},"did not explain");
+    test("a note for running work reaches",{steer,done});
+    test("a note for running work reaches",{queue,done},"unexpected action");
+    test("a note for running work reaches",
+         {action("message_session",benchmark,{{"text","Do not use the staging database"}}),done},"did not direct");
+    test("a note for running work waits",{queue,done});
+    test("a note for running work waits",{steer,done},"unexpected action");
+    test("a note for running work waits",
+         {action("send_to_task",benchmark,{{"instruction","Avoid the staging database"}}),done},"did not direct");
+
+    constexpr auto stagingBenchmark = "Benchmark startup using the staging database";
+    const auto queuedNote = [&](std::string text) {
+        return action("send_to_task",stagingBenchmark,{{"instruction",std::move(text)}});
+    };
+    run("old intent and instruction cannot satisfy the new turn",[&](Scene& s) {
+        const auto id = s.task(stagingBenchmark,"benchmark");
+        const auto prior = s.send("Use the staging database");
+        checkStagingNote(s,prior,id,NoteTiming::SafeBoundary);
+        const auto turn = s.send("Use staging for the next batch too");
+        checkStagingNote(s,turn,id,NoteTiming::SafeBoundary);
+    },{queuedNote("Use the staging database"),done,queuedNote("Continue measuring"),done},"did not direct");
+
+    for (const auto* field : {"state","currentRevision","pendingInstructions"}) {
+        run("unreported change to an untouched task",[&](Scene& s) {
+            const auto id = s.task(benchmark,"benchmark");
+            auto turn = s.send("What's the status?");
+            turn.after.at(id)[field] = "unexpected change";
+            checkActions(turn,{});
+        },{done},"untouched task changed");
+    }
+    std::cout << "Offline scoring self-test: " << passed << " cases passed\n";
+}
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--self-test") {
+        try {
+            selfTest();
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc < 3 || argc > 5) {
-        std::cerr << "usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n";
+        std::cerr << "usage: flock_live_conversation <FLOCK_HOME> <model-slug> [trials] [scenario filter]\n"
+                     "       flock_live_conversation --self-test\n";
         return 2;
     }
     try {
@@ -275,7 +603,7 @@ int main(int argc, char** argv) {
                 Mixed model(live);
                 try {
                     Scene scene(model,argv[2]);
-                    failure = scenario(scene);
+                    scenario(scene);
                 } catch (const std::exception& error) {
                     failure = error.what();
                 }
