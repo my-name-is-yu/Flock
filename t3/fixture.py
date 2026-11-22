@@ -147,9 +147,10 @@ class Fixture(BaseHTTPRequestHandler):
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
         if name == "t3_thread_send" and args["mode"] == "steer":
-            assert scenario == "running" and args["threadId"] == "thread"
+            assert scenario in ("running", "resumed") and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-turn-7-2"
-            return {"threadId": "thread", "runId": "root", "delivery": "steered"}
+            return {"threadId": "thread", "runId": "continued" if scenario == "resumed" else "root",
+                    "delivery": "steered"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
@@ -167,6 +168,8 @@ class Fixture(BaseHTTPRequestHandler):
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
+            if scenario == "resumed":
+                return {"threadId": "thread", "runId": "continued", "timedOut": True, "status": "running"}
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
             timed_out = active or scenario in ("settling", "manual-active")
             reply = {"threadId": "thread", "runId": "root", "timedOut": timed_out,
@@ -192,7 +195,7 @@ class Fixture(BaseHTTPRequestHandler):
             return {"sequence": 10}
         assert name == "t3_thread_read", name
         thread_id = args["threadId"]
-        active = "unrelated" if scenario == "manual-active" else "root" if scenario == "running" else None
+        active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
         count = 1 if scenario in ("question", "ambiguous", "approval", "race") else 0
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,

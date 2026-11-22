@@ -628,10 +628,13 @@ bool followUpReady(Client& client, const Command& command) {
 
 // Delivers a note into the assigned Run while it is still running. It never starts another Run.
 Delivery steer(Client& client, const Command& command, bool& invoked) {
+    // Like interrupt, an explicit wait resolves T3's own restart continuation of the assigned Run.
+    const auto current = wait(client, command.target, false, 1);
+    const auto effective = str(current, "runId");
     const auto head = threadHead(client, command.target.threadId);
     const auto& info = detail(head, command.target.threadId);
-    if (str(info, "projectId") != command.projectId || boolean(info, "archived") ||
-        member(info, "activeRunId") != Json(command.target.runId))
+    if (!active(str(current, "status")) || str(info, "projectId") != command.projectId || boolean(info, "archived") ||
+        member(info, "activeRunId") != Json(effective))
         return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
     invoked = true;
     const auto reply = client.call("t3_thread_send", {{"threadId", command.target.threadId}, {"mode", "steer"},
@@ -640,6 +643,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     // between, report the Run that actually received the note.
     if (str(reply, "threadId") != command.target.threadId || str(reply, "delivery") != "steered") invalidResponse();
     RunRef received = command.target;
+    received.runId = effective;
     if (const auto runId = str(reply, "runId"); !runId.empty()) received.runId = runId;
     return result(Outcome::Accepted, {}, std::move(received));
 }

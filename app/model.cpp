@@ -297,7 +297,7 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
         description = "Send your reply to the user and end this turn. Ask here when you need more information.";
         text("text","Your message to the user.");
         fields["suggestions"] = {{"type","array"},{"maxItems",4},{"items",{{"type","string"}}},
-            {"description","Optional short replies the user can tap, such as the choices in your question."}};
+            {"description","Optional distinct short replies the user can tap, such as the choices in your question. Later turns see them with your message."}};
     } else if (name == "session_read") {
         description = "Read a bounded excerpt of a Run that belongs to this task when the report is insufficient.";
         text("threadId","The owned T3 Thread identifier.");

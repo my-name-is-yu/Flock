@@ -229,10 +229,13 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 addTask(taskId);
             } else if (kind == "conversation_reply") {
                 replyTo.update({{"kind","bot_message"},{"text",bounded(field(data,"text"),2000)}});
-                auto original = query("SELECT id,text FROM messages WHERE id=? AND bot_id=?",
+                if (data.contains("suggestions")) replyTo["suggestions"] = data.at("suggestions");
+                auto original = query("SELECT id,text,reply_to FROM messages WHERE id=? AND bot_id=?",
                                       {integer(data,"replyToMessageId"),message.bot});
-                if (original.next())
+                if (original.next()) {
                     replyTo["inReplyTo"] = {{"messageId",original.number(0)},{"text",bounded(original.string(1),messageSize)}};
+                    if (original.number(2)) replyTo["inReplyTo"]["replyToMessageId"] = original.number(2);
+                }
             } else if (kind == "conversation_message") {
                 replyTo.update({{"kind","user_message"},{"text",bounded(row.string(3),2000)}});
             } else {
@@ -265,6 +268,7 @@ ORDER BY j.id DESC LIMIT ?
                 entry["role"] = "bot";
                 body = field(data,"text");
                 if (data.contains("actions")) entry["actions"] = data.at("actions");
+                if (data.contains("suggestions")) entry["suggestions"] = data.at("suggestions");
             } else {
                 entry["role"] = "task";
                 body = field(data,kind == "report" ? "report" : "text");
@@ -716,6 +720,8 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
                     for (const auto& item : *list) {
                         if (!item.is_string() || !hasText(item.get<std::string>()) || item.get<std::string>().size() > 200)
                             throw ToolError("Each suggestion must be a nonempty string up to 200 bytes");
+                        if (std::ranges::find(suggestions,item) != suggestions.end())
+                            throw ToolError("Each suggestion must be distinct so the user's choice is unambiguous");
                         suggestions.push_back(item);
                     }
                 }
