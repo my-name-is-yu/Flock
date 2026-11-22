@@ -1,13 +1,17 @@
 .main { --conversation-top: 1rem; }
 
-.conversation-header { position: relative; z-index: 3; height: var(--header-height); box-shadow: inset 0 -1px var(--hairline); }
+.conversation-header {
+  --profile-avatar-size: 3.125rem;
+  --profile-header-padding: .5rem .375rem;
+  position: relative; z-index: 3; height: var(--header-height); box-shadow: inset 0 -1px var(--hairline);
+}
 .header-inner {
   position: absolute; inset: 0;
   display: flex; justify-content: center; align-items: center;
   padding: 0 clamp(.75rem, 2vw, 1.25rem);
 }
 .conversation-header:has(.profile-identity:not([hidden])) { height: auto; }
-.header-inner:has(> .profile-identity:not([hidden])) { position: relative; padding-block: .5rem .375rem; }
+.header-inner:has(> .profile-identity:not([hidden])) { position: relative; padding-block: var(--profile-header-padding); }
 .header-menu { position: absolute; left: clamp(.75rem, 2vw, 1.25rem); top: .75rem; }
 .header-text-button {
   position: absolute; top: .75rem; display: flex; align-items: center; gap: .4rem;
@@ -42,7 +46,7 @@
   padding: .125rem .25rem; border: 0; border-radius: var(--radius-md); background: none;
 }
 .profile-face { position: relative; display: block; flex: none; }
-.avatar-profile { width: 3.125rem; height: 3.125rem; }
+.avatar-profile { width: var(--profile-avatar-size); height: var(--profile-avatar-size); }
 .status-indicator {
   position: absolute; right: -.15rem; bottom: -.1rem; width: .72rem; height: .72rem; border-radius: var(--radius-full);
   border: 2px solid var(--canvas); background: var(--text-3); display: none;
@@ -224,7 +228,7 @@
 .msg.bot > .event-actions { margin-top: .15rem; padding-left: var(--avatar-col); }
 
 @media (max-width: 700px) {
-  .avatar-profile { width: 2.625rem; height: 2.625rem; }
+  .conversation-header { --profile-avatar-size: 2.625rem; }
   .conversation { scrollbar-gutter: auto; }
   .timeline { --avatar-size: 1.5rem; --avatar-gap: .45rem; }
   .bubble { max-width: calc(100% - 2.2rem); }
@@ -240,6 +244,17 @@
 }
 @media (max-width: 360px) {
   .header-inner:has(.peer-identity:not([hidden])) { grid-template-columns: 2.15rem 2.15rem minmax(0, 1fr); }
+}
+@container conversation-layout (max-height: 400px) {
+  .conversation-header {
+    --profile-avatar-size: 2rem;
+    --profile-header-padding: .25rem;
+  }
+}
+@container conversation-layout (max-height: 220px) {
+  .conversation-header { --profile-header-padding: .125rem; }
+  .profile { flex-direction: row; }
+  .profile-name { min-width: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .typing span { animation: none; opacity: .55; }

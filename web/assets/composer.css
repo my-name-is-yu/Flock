@@ -102,9 +102,12 @@
 @media (max-width: 700px), (any-pointer: coarse) {
   .composer textarea { font-size: 16px; }
 }
+@container conversation-layout (max-height: 400px) {
+  /* Use the height left by the keyboard or browser window to leave room for history. */
+  .composer textarea { max-height: 20cqh; }
+  .screenshot-preview { height: 3.5rem; }
+}
 @media (any-pointer: coarse) {
-  .main { container: conversation-layout / size; }
-
   @container conversation-layout (max-height: 220px) {
     .composer-container {
       display: flex;
@@ -116,7 +119,6 @@
       min-height: 0;
       grid-template-rows: auto minmax(calc(var(--composer-control-size) + .3rem), auto) auto;
     }
-    .composer textarea { max-height: 100%; }
   }
 }
 @media (prefers-reduced-motion: reduce) {
