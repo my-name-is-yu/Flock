@@ -521,6 +521,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto copy = std::find(pending.begin(),pending.end(),item);
             if (copy != pending.end()) pending.erase(copy);
             db.journal(task["id"],"instruction_delivered",{{"actionId",action["id"]},{"messageId",item["messageId"]},
+                {"step",item.value("step",0)},
                 {"revisionId",action.value("revisionId",Json(nullptr))},{"run",task["activeRun"]},
                 {"source",item.value("source",Json(nullptr))}});
         }
@@ -532,7 +533,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         for (const auto& item : items) {
             const auto copy = std::find(pending.begin(),pending.end(),item);
             if (copy != pending.end()) pending.erase(copy);
-            db.journal(task["id"],"instruction_superseded",{{"messageId",item["messageId"]},
+            db.journal(task["id"],"instruction_superseded",{{"messageId",item["messageId"]},{"step",item.value("step",0)},
                 {"revisionId",item["revisionId"]}});
         }
     }
@@ -1112,6 +1113,20 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         });
     }
 
+    // An unfinished conversation turn can still change any task of its Bot. Call alongside the closing write.
+    bool deferUntilTurnsFinish(const Json& current, Id eventId, const Decision& decision) {
+        if (!db.conversationPending(field(current,"botId"))) return false;
+        auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,current["id"]});
+        if (!row.next()) return true;
+        auto data = row.json(0);
+        data["_flockDeferredCompletion"] = true;
+        // Preserve the task generation and reuse the decision if the turn leaves the task unchanged.
+        data["_flockSavedCompletion"] = {{"generation",current["generation"]},{"tool",decision.tool},
+            {"args",decision.args},{"reason",decision.reason},{"usage",decision.usage}};
+        db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,current["id"]});
+        return true;
+    }
+
     void acceptCompletion(const Json& snapshot, const Json& event, const Decision& decision) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
@@ -1122,21 +1137,10 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             hasPending(current) || current.value("replanning",false) ||
             (event["kind"] == "result" && revision(current) != event.value("revisionId",Json(nullptr)))) return;
 
-        // A received message can still name any task of this Bot. Check alongside the completion write.
-        const bool pending = db.conversationPending(field(current,"botId"));
-        if (pending || db.completionHeld(current)) {
-            auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=? AND consumed=0",{eventId,id});
-            if (!row.next()) return;
-            auto data = row.json(0);
-            data["_flockDeferredCompletion"] = true;
-            // Preserve the task generation and reuse the decision if inbox routing leaves the task unchanged.
-            if (pending) data["_flockSavedCompletion"] = {{"generation",current["generation"]},{"args",decision.args},
-                {"reason",decision.reason},{"usage",decision.usage}};
-            db.exec("UPDATE events SET data=? WHERE id=? AND task_id=? AND consumed=0",{data,eventId,id});
+        if (deferUntilTurnsFinish(current,eventId,decision)) {
         } else {
             clearDeferredCompletionMarker(id,eventId);
             db.consumeEvent(current);
-            current.erase("deferredCompletionEventId");
             recordDecision(current,event,decision,actionId());
             current.erase("feedback");
             current["state"] = "completed";
@@ -1181,10 +1185,20 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                 (!present(text) && !(text.empty() && args.value("forwardUserMessage",false))))
                 throw Conflict("A Bot message requires text or a forwarded user message");
             if (tool == "reply_to_bot") {
-                change(snapshot,[&](Json& current) {
-                    replyPeer(current,event,decision,actionId());
-                    return true;
-                });
+                // Check unfinished turns in the same transaction that closes the exchange.
+                const auto kind = field(args,"kind");
+                std::lock_guard lock(db.mutex);
+                Transaction transaction(db.db);
+                auto current = db.load(snapshot["id"]);
+                if (current["generation"] != snapshot["generation"]) return;
+                if ((kind == "result" || kind == "failed") &&
+                    deferUntilTurnsFinish(current,event["id"].get<Id>(),decision)) {
+                    transaction.commit();
+                    return;
+                }
+                replyPeer(current,event,decision,actionId());
+                db.save(current);
+                transaction.commit();
                 return;
             }
             const auto kind = field(args,"kind");
@@ -1238,7 +1252,6 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             }
             clearDeferredCompletionMarker(id,event["id"].get<Id>());
             db.consumeEvent(current);
-            current.erase("deferredCompletionEventId");
             const auto action = actionId();
             recordDecision(current,event,decision,action);
             current.erase("feedback");
@@ -1277,14 +1290,12 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
-            if ((event.value("_flockDeferredCompletion",false) ||
-                 task.value("deferredCompletionEventId",Id{0}) == event["id"].get<Id>()) && db.completionHeld(task)) return;
             event.erase("_flockDeferredCompletion");
             const auto deferred = event.value("_flockSavedCompletion",Json(nullptr));
             event.erase("_flockSavedCompletion");
             if (deferred.is_object() && deferred["generation"] == task["generation"]) {
                 if (db.conversationPending(field(task,"botId"))) return;
-                savedCompletion = Decision{"complete",deferred["args"],deferred["reason"],deferred["usage"]};
+                savedCompletion = Decision{deferred.value("tool","complete"),deferred["args"],deferred["reason"],deferred["usage"]};
             } else {
                 peer = db.peerExchange(task["id"]);
                 if (event["kind"] == "bot_answer" || event["kind"] == "bot_result") {
@@ -1310,7 +1321,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             }
         }
         try {
-            if (savedCompletion) return acceptCompletion(task,event,*savedCompletion);
+            if (savedCompletion) {
+                if (savedCompletion->tool == "complete") return acceptCompletion(task,event,*savedCompletion);
+                return accept(task,event,*savedCompletion);
+            }
             auto choices = Json::array();
             bool canRead = false;
             if (!peer && task["activeRun"].is_null()) {
@@ -1427,15 +1441,15 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
 Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeOptions options)
     : p_(std::make_unique<Impl>(*store.p_,model,t3,std::move(notes),std::move(options))) {}
 Runtime::~Runtime() = default;
-void Runtime::routeConversation() {
+void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.routeMessage(pending.front().second,p_->model,p_->notes)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes)) break;
     }
 }
 void Runtime::tick() {
-    routeConversation();
+    runConversations();
     for (auto id : p_->eligible()) p_->step(id);
 }
 void Runtime::tickConcurrent() {
@@ -1456,7 +1470,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.routeMessage(id,p_->model,p_->notes);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes);
                 }));
             }
         }

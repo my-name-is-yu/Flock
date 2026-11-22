@@ -17,6 +17,20 @@
 using namespace flockv0;
 
 namespace {
+Decision converse(const ModelInput& input, const std::string& tool, Id taskId, Json args) {
+    if (!input.event.at("turn").empty()) return {"reply",{{"text","Done."}},"Report the change"};
+    if (taskId) {
+        for (const auto& task : input.task.at("tasks")) {
+            if (task.at("taskId") != taskId) continue;
+            args["taskId"] = taskId;
+            args["generation"] = task.at("generation");
+            if (tool == "change_task") args["revisionId"] = task.at("revisionId");
+        }
+    }
+    const auto text = tool == "start_task" ? "request" : "instruction";
+    if (!args.contains(text)) args[text] = input.event.at("text");
+    return {tool,std::move(args),"Scripted turn"};
+}
 void check(bool ok, const char* why) { if (!ok) throw std::runtime_error(why); }
 void setSessionReadJournalFailure(const std::filesystem::path& databaseFile, bool active) {
     sqlite3* database = nullptr;
@@ -847,11 +861,7 @@ void revisionWaitsForPeerClarification() {
     bool answeredPeer = false;
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& kind = input.event.at("kind");
-        if (kind == "route_conversation") {
-            return {"route_conversation",{{"routes",Json::array({
-                {{"kind","revise_task"},{"taskId",root},{"environment","cloud"}}
-            })}},{}};
-        }
+        if (kind == "conversation_turn") return converse(input,"change_task",root,{{"environment","cloud"}});
         if (input.task.at("botId") == "beta") {
             if (kind == "bot_request") return botReply("question","Which branch?");
             check(kind == "bot_answer" && input.event.at("text") == "Use main",
@@ -870,7 +880,7 @@ void revisionWaitsForPeerClarification() {
 
     f.reach(root,"peer_waiting");
     f.store->receive(routing,"move-release-check","Run Release check on cloud");
-    f.runtime->routeConversation();
+    f.runtime->runConversations();
     check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
           "The requested destination change did not reach the task");
     f.reach(root,"running");
@@ -889,11 +899,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& event = input.event;
         const auto kind = event.at("kind").get<std::string>();
-        if (kind == "route_conversation") {
-            return {"route_conversation",{{"routes",Json::array({
-                {{"kind","revise_task"},{"taskId",recipient},{"doneWhen",revisedCriteria}}
-            })}},"Revise the receiving task's completion criteria"};
-        }
+        if (kind == "conversation_turn") return converse(input,"change_task",recipient,{{"doneWhen",revisedCriteria}});
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta","work","Verify release");
             check(kind == "bot_result" && event["text"] == "Verified under revised criteria" &&
@@ -914,7 +920,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
     const Intake betaRouting{"beta",revisionText,"e","p",{{"runTimeoutSeconds",10},{"model","beta-model"}}};
     f.store->receive(betaRouting,"recipient-revision",revisionText);
-    f.runtime->routeConversation();
+    f.runtime->runConversations();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["doneWhen"] == revisedCriteria &&
           f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
           "the recipient revision did not remain in the existing work exchange");
@@ -965,10 +971,10 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& event = input.event;
         const auto kind = event.at("kind").get<std::string>();
-        if (kind == "route_conversation") {
-            Json route = {{"kind","revise_task"},{"taskId",recipient},{"doneWhen",revisedCriteria}};
-            if (moves) route["environment"] = "cloud";
-            return {"route_conversation",{{"routes",Json::array({route})}},"Revise the recipient task"};
+        if (kind == "conversation_turn") {
+            Json fields = {{"doneWhen",revisedCriteria}};
+            if (moves) fields["environment"] = "cloud";
+            return converse(input,"change_task",recipient,fields);
         }
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta","work","Verify the release");
@@ -1020,7 +1026,7 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
     const Intake betaRouting{"beta",revisionText,"e","beta-project",{{"runTimeoutSeconds",10},{"model","beta-model"},
         {"conversationEnvironments",{{"cloud","cloud"}}}}};
     f.store->receive(betaRouting,"recipient-question-revision",revisionText);
-    f.runtime->routeConversation();
+    f.runtime->runConversations();
     for (int step = 0; step < 3; ++step) f.runtime->tick();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["state"] == "peer_waiting" &&
           f.task(recipient)["doneWhen"] == revisedCriteria && f.task(sender)["wait"]["reason"] == "user_question",
@@ -1075,11 +1081,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     Id recipient = 0, unrelated = 0;
     f.model.script = [&](const ModelInput& input) -> Decision {
         const auto& kind = input.event.at("kind");
-        if (kind == "route_conversation") {
-            return {"route_conversation",{{"routes",Json::array({
-                {{"kind","revise_task"},{"taskId",recipient},{"environment","desktop"}}
-            })}},"Move the receiving task"};
-        }
+        if (kind == "conversation_turn") return converse(input,"change_task",recipient,{{"environment","desktop"}});
         if (input.task["id"] == sender) {
             if (kind == "intake") return botRequest("beta","work","Verify the release");
             check(kind == "bot_result" && input.event["references"][0]["environmentId"] == "e",
@@ -1099,7 +1101,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     if (!sharesSenderQueue) f.reach(unrelated,"running");
     const auto launchesBeforeMove = f.t3.launches;
     f.store->receive(betaRouting,"recipient-move","Move Verify the release to desktop");
-    f.runtime->routeConversation();
+    f.runtime->runConversations();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["pendingEnvironmentId"] == "e",
           "the destination change did not reach the task");
     f.t3.finish("run-1");
@@ -1140,10 +1142,9 @@ void consultationRepliesAfterUserInstructions() {
         f.model.script = [&](const ModelInput& input) -> Decision {
             const auto& event = input.event;
             const auto& kind = event.at("kind");
-            if (kind == "route_conversation") {
-                Json route = {{"kind",revise ? "revise_task" : "append_instruction"},{"taskId",recipient}};
-                if (revise) route["intent"] = "inspect rollback policy";
-                return {"route_conversation",{{"routes",Json::array({route})}},"Apply the consultation instruction"};
+            if (kind == "conversation_turn") {
+                if (revise) return converse(input,"change_task",recipient,{{"intent","inspect rollback policy"}});
+                return converse(input,"send_to_task",recipient,Json::object());
             }
             if (input.task["id"] == sender) {
                 if (kind == "intake") return botRequest("beta","consult","Check the release");
@@ -1167,7 +1168,7 @@ void consultationRepliesAfterUserInstructions() {
         recipient = f.store->tasks("beta").front()["id"].get<Id>();
         const auto wait = f.wait(sender,"user_question");
         f.store->receive({"beta","","e","p",Json::object()},"consultation-instruction",instruction);
-        f.runtime->routeConversation();
+        f.runtime->runConversations();
         check(f.logs(recipient,"instruction_accepted") == 1 && f.task(recipient).value("replanning",false) == revise,
               "the instruction did not reach the open consultation");
         f.store->operate(sender,wait,"answer",{{"text","Use main"}});
@@ -1224,10 +1225,9 @@ void modelBudgetFollowsBotConsultation() {
     Fixture f;
     f.allowBeta();
     constexpr auto request = "Check the release policy";
-    const auto receipt = f.store->receive({"alpha",request,"e","p",{{"modelCallLimit",2}}},"policy",request);
+    const auto receipt = f.store->receive({"alpha",request,"e","p",{{"modelCallLimit",3}}},"policy",request);
     f.model.script = [&](const ModelInput& input) -> Decision {
-        if (input.event["kind"] == "route_conversation")
-            return {"route_conversation",{{"routes",Json::array({{{"kind","create_task"}}})}},"Start the request"};
+        if (input.event["kind"] == "conversation_turn") return converse(input,"start_task",0,Json::object());
         if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
         if (input.event["kind"] == "bot_request") {
             check(input.config["model"] == "beta-model","recipient did not get its own model configuration");
@@ -1236,7 +1236,7 @@ void modelBudgetFollowsBotConsultation() {
         check(input.event["kind"] == "bot_result","sender did not resume with the consultation reply");
         return complete();
     };
-    f.runtime->routeConversation();
+    f.runtime->runConversations();
     const Id sender = f.store->tasks("alpha").front().at("id");
     check(f.task(sender)["sourceMessageId"] == receipt["messageId"],"routed task lost its originating message");
     f.reach(sender,"peer_waiting");
@@ -1244,18 +1244,46 @@ void modelBudgetFollowsBotConsultation() {
     const auto recipientWait = f.wait(recipient,"model_budget");
     f.restart();
     for (int i = 0; i < 4; ++i) f.runtime->tick();
-    check(f.model.calls == 2 && f.task(recipient)["wait"]["id"] == recipientWait,
+    check(f.model.calls == 3 && f.task(recipient)["wait"]["id"] == recipientWait,
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory/"state.db");
     writer.operate(recipient,recipientWait,"approve");
     f.rejects(recipient,recipientWait,"approve");
     const auto senderWait = f.wait(sender,"model_budget");
-    check(f.model.calls == 3 && f.task(recipient)["state"] == "completed",
+    check(f.model.calls == 4 && f.task(recipient)["state"] == "completed",
           "one approval did not resume only one call in the exchange");
     writer.operate(sender,senderWait,"approve");
     f.reach(sender,"completed");
-    check(f.model.calls == 4 && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
+    check(f.model.calls == 5 && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
           "the sender did not finish under its shared model budget and separate Run allowance");
+}
+
+void peerResultWaitsForRecipientTurn() {
+    Fixture f;
+    f.allowBeta();
+    const auto root = f.submit("Check the release");
+    int recipientDecisions = 0;
+    bool noted = false;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        const auto& kind = input.event.at("kind");
+        if (kind == "conversation_turn") return {"reply",{{"text","Noted."}},"Acknowledge the note"};
+        if (input.task.at("botId") == "beta") {
+            ++recipientDecisions;
+            if (!std::exchange(noted,true))
+                f.store->receive({"beta","","e","p",Json::object()},"beta-note","How is the release check going?");
+            return botReply("result","Verified");
+        }
+        if (kind == "bot_result") return complete();
+        return botRequest("beta","consult","Check the release");
+    };
+    f.reach(root,"peer_waiting");
+    for (int i = 0; i < 4 && !noted; ++i) f.runtime->tick();
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    check(noted && f.task(recipient)["state"] != "completed" && f.task(root)["state"] == "peer_waiting",
+          "the recipient closed the exchange while its own conversation turn was unfinished");
+    f.reach(root,"completed");
+    check(recipientDecisions == 1 && f.task(recipient)["state"] == "completed",
+          "the held peer result asked the model again or was lost");
 }
 
 void modelBudgetCountsFailedAttempts() {
@@ -1647,7 +1675,8 @@ int main() {
             {"work recipient move waits for an unrelated owner",workRecipientMoveWaitsForUnrelatedOwner},
             {"consultation replies after user instructions",consultationRepliesAfterUserInstructions},
             {"Bot consultation and permission",peerConsultationAndPermission},
-            {"Model budget across routing and Bot consultation",modelBudgetFollowsBotConsultation},
+            {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
+            {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
             {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
             {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},

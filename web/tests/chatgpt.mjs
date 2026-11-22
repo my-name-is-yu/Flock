@@ -20,27 +20,39 @@ function call(name, fields, reason) {
     arguments: JSON.stringify({ ...fields, reason }) };
 }
 
-function route(event) {
-  const decide = fields => call("route_conversation", { routes: [fields] }, "Route the user's request.");
+function converse(task, event) {
+  const reply = (text, reason, suggestions) =>
+    call("reply", suggestions ? { text, suggestions } : { text }, reason);
+  if (event.turn.length) {
+    const last = event.turn.at(-1);
+    assert.equal(last.result.ok, true, JSON.stringify(last.result));
+    if (last.tool === "read_result") {
+      assert.equal(last.result.text, report);
+      if (event.text === why)
+        return reply("The release is blocked by the expired signing certificate.", "The report identifies the expired certificate.");
+      assert.equal(event.text, renewal);
+      return reply("What is the planned certificate renewal date?", "The report only gives the expiration date.");
+    }
+    return reply("I queued your request.", "Confirm the new task.");
+  }
   switch (event.text) {
     case blockers:
     case consultation:
     case notes:
-      return decide({ kind: "create_task" });
+      return call("start_task", { request: event.text }, "Start the requested work.");
     case checksums:
-      assert.ok(event.environments.includes("backup"));
-      return decide({ kind: "create_task", environment: "backup" });
+      assert.ok(task.environments.some(environment => environment.name === "backup"));
+      return call("start_task", { request: event.text, environment: "backup" }, "Use the requested destination.");
     case why:
     case renewal: {
-      const source = event.results.find(result => result.request === blockers);
-      assert.equal(source?.text, report);
-      return decide({ kind: "answer_result", resultMessageId: source.messageId });
+      const source = task.tasks.find(item => item.request === blockers);
+      assert.equal(source?.latestResult?.excerpt, report);
+      return call("read_result", { messageId: source.latestResult.messageId }, "Read the saved report.");
     }
     case "それ止めて": {
-      const active = event.tasks.filter(task => task.state === "running");
-      assert.deepEqual(active.map(task => task.request).sort(), [checksums, notes].sort());
-      return decide({ kind: "clarify", operation: "cancel_task", text: "どの作業を停止しますか？",
-        candidates: active.map(task => task.taskId) });
+      const active = task.tasks.filter(item => item.state === "running");
+      assert.deepEqual(active.map(item => item.request).sort(), [checksums, notes].sort());
+      return reply("どの作業を停止しますか？", "Two tasks are running.", active.map(item => item.request));
     }
     default:
       assert.fail(`Unexpected composer message ${event.text}`);
@@ -49,17 +61,8 @@ function route(event) {
 
 function output({ task, event }) {
   switch (event.kind) {
-    case "route_conversation":
-      return route(event);
-    case "answer_conversation_result":
-      assert.equal(event.source.text, report);
-      if (event.text === why) {
-        return call("answer_conversation_result", { text: "The release is blocked by the expired signing certificate." },
-          "The report identifies the expired certificate.");
-      }
-      assert.equal(event.text, renewal);
-      return call("clarify_conversation_result", { text: "What is the planned certificate renewal date?" },
-        "The report only gives the expiration date.");
+    case "conversation_turn":
+      return converse(task, event);
     case "intake":
       if (task.request === consultation) {
         assert.deepEqual(task.peers, [{ botId: "verifier", name: "Verifier" }]);
@@ -102,14 +105,8 @@ function mockResponses() {
       const args = JSON.parse(result.arguments);
       assert.ok(tool.parameters.required.every(key => key in args));
       assert.ok(Object.keys(args).every(key => key in tool.parameters.properties));
-      if (result.name === "route_conversation") {
-        const segment = tool.parameters.properties.routes.items.properties;
-        assert.ok(segment.kind.enum.includes(args.routes[0].kind));
-        assert.ok(Object.keys(args.routes[0]).every(key => key in segment));
-        assert.match(request.instructions, /omit environment to use the Bot's configured default/);
-        if (context.event.text === consultation)
-          assert.match(request.instructions, /to consult another Bot as create_task/);
-      }
+      if (context.event.kind === "conversation_turn")
+        assert.match(request.instructions, /You are a Flock Bot talking with your user/);
       if (context.event.kind === "bot_request")
         assert.match(tool.parameters.properties.kind.description, /Use result to return work or consultation advice/);
       const response = { type: "response.completed", response: { output: [result] } };

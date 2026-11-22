@@ -135,27 +135,6 @@ Json waitView(const Json& wait) {
 
 std::string displayState(const Json& task);
 
-// Candidates are offered by request text. Start time and state tell same-named requests apart.
-Json candidateViews(const Json& candidates, const std::map<Id,const Json*>* active = nullptr) {
-    Json result = Json::array();
-    if (!candidates.is_array()) return result;
-    for (const auto& candidate : candidates) {
-        Json view = Json::object();
-        copyFields(view,candidate,{"taskId","request"});
-        if (view.empty()) continue;
-        const auto id = candidate.find("taskId");
-        if (active && id != candidate.end() && id->is_number_integer()) {
-            const auto task = active->find(id->get<Id>());
-            if (task != active->end()) {
-                copyFields(view,*task->second,{"createdAt"});
-                view["state"] = displayState(*task->second);
-            } else view["state"] = "ended";
-        }
-        result.push_back(std::move(view));
-    }
-    return result;
-}
-
 Json sourceView(const Json& source, bool includeText = false) {
     Json view = Json::object();
     copyFields(view,source,{"taskId","messageId","revisionId","option"});
@@ -198,8 +177,19 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
-        if (data.contains("source")) details["source"] = sourceView(data.at("source"));
-        if (data.contains("candidates")) details["candidates"] = candidateViews(data.at("candidates"));
+        if (const auto actions = data.find("actions"); actions != data.end() && actions->is_array()) {
+            details["actions"] = Json::array();
+            for (const auto& action : *actions) {
+                Json item = Json::object();
+                copyFields(item,action,{"tool","taskId","effect"});
+                details["actions"].push_back(std::move(item));
+            }
+        }
+        if (const auto suggestions = data.find("suggestions"); suggestions != data.end() && suggestions->is_array()) {
+            details["suggestions"] = Json::array();
+            for (const auto& suggestion : *suggestions)
+                if (suggestion.is_string()) details["suggestions"].push_back(suggestion);
+        }
     }
     view["data"] = std::move(details);
     return view;
@@ -394,24 +384,13 @@ Json botView(Store& store, const Json& bot) {
     result.update(activity(store,id));
     result.update(sessions(store,id,0));
     result["bot"] = settingsView(bot);
-    const auto activeTasks = store.activeTasks(id);
-    std::map<Id,const Json*> active;
-    for (const auto& task : activeTasks) active.emplace(task.at("id").get<Id>(),&task);
-    auto& clarifications = result["clarifications"] = Json::array();
-    for (const auto& clarification : store.clarifications(id)) {
+    auto& paused = result["pausedConversations"] = Json::array();
+    for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();
-        copyFields(view,clarification,{"messageId","text","route"});
-        if (const auto destinations = clarification.find("destinations");
-            destinations != clarification.end() && destinations->is_array()) {
-            view["destinations"] = Json::array();
-            for (const auto& destination : *destinations)
-                if (destination.is_string()) view["destinations"].push_back(destination);
-        }
-        if (clarification.contains("candidates"))
-            view["candidates"] = candidateViews(clarification.at("candidates"),&active);
-        clarifications.push_back(std::move(view));
+        copyFields(view,turn,{"messageId","text","route"});
+        paused.push_back(std::move(view));
     }
-    if (!clarifications.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
+    if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))
         result["presence"] = "waiting";
     return result;
 }

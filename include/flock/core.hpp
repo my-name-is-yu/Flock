@@ -130,13 +130,13 @@ public:
 
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
-    // candidateTaskId is a hidden choice among the candidates of the clarification at replyToMessageId.
     Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
-                 Id replyToMessageId = 0, Id candidateTaskId = 0);
+                 Id replyToMessageId = 0);
     std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
-                                std::string_view text, Id replyToMessageId = 0, Id candidateTaskId = 0) const;
-    Json clarifications(std::string_view botId) const;
-    // Approve one call for an original message paused before routing finishes.
+                                std::string_view text, Id replyToMessageId = 0) const;
+    // Conversation turns paused on the model call limit, newest first.
+    Json pausedConversations(std::string_view botId) const;
+    // Approve one call for a conversation turn paused on the model call limit.
     void approveMessageModelCall(std::string_view botId, Id waitMessageId);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
@@ -177,7 +177,7 @@ public:
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
-    void routeConversation();
+    void runConversations();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.
     void tick();

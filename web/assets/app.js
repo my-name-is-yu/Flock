@@ -7,7 +7,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'reply-choice', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -44,7 +44,6 @@ const errors = {
   intake_settings: 'Flock could not accept the request. Check the Bot’s execution settings.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
-  invalid_candidate: 'That choice is no longer available. Check the latest confirmation.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -526,10 +525,10 @@ function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
   const waits = data?.waits ?? [];
-  const clarifications = data?.clarifications ?? [];
-  if (changed('waits', view?.id, loading, waits, clarifications)) {
-    elements['wait-count'].textContent = waits.length + clarifications.length;
-    elements['wait-count'].hidden = !(waits.length + clarifications.length);
+  const paused = data?.pausedConversations ?? [];
+  if (changed('waits', view?.id, loading, waits, paused)) {
+    elements['wait-count'].textContent = waits.length + paused.length;
+    elements['wait-count'].hidden = !(waits.length + paused.length);
     elements['wait-list'].setAttribute('aria-busy', loading);
     const repeated = repeatedRequests(waits);
     const rows = waits.map((task) => {
@@ -544,13 +543,13 @@ function renderActivity() {
       });
       return row;
     });
-    for (const clarification of clarifications) {
-      const row = activityRow('button', 'wait-row', clarification.text, 'Clarification requested', 'waiting');
+    for (const turn of paused) {
+      const row = activityRow('button', 'wait-row', turn.text, waitLabel('model_budget'), 'waiting');
       row.type = 'button';
-      row.title = clarification.text;
+      row.title = turn.text;
       row.addEventListener('click', () => {
         openNavigation(false);
-        openDetail({ kind: 'clarification', messageId: clarification.messageId });
+        openDetail({ kind: 'paused', messageId: turn.messageId });
       });
       rows.push(row);
     }
@@ -596,13 +595,12 @@ function renderActivity() {
   else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
 }
 
-function beginReply(target, text = '', choice = null) {
+function beginReply(target, text = '') {
   if (!target.messageId || sendingMessages.has(view.id)) return;
   if (view.dm) selectBot(view.id);
   const current = replies.get(view.id);
   if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
-  if (current?.messageId !== target.messageId || text || choice || current?.candidateTaskId)
-    replies.set(view.id, { ...target, text, ...(choice ? { candidateTaskId: choice.taskId, choice: choice.label } : {}) });
+  if (current?.messageId !== target.messageId || text) replies.set(view.id, { ...target, text });
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -645,9 +643,10 @@ async function copyMessage(control, text) {
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
+  // A choice is a complete answer to this question, so it goes to the task without a conversation turn.
   for (const choice of task.wait.choices ?? []) {
     const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
-      if (view?.id === context.id) beginReply(target, choice);
+      if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
     });
     option.disabled = pendingWaits.has(task.wait.id);
     actions.append(option);
@@ -659,50 +658,21 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
-function candidateButton(target, candidate, order) {
-  const started = startedText(candidate.createdAt, !!order);
-  const state = candidate.state ? stateLabels[candidate.state] ?? '' : '';
-  const label = order ? `${candidate.request} (${[order, started].filter(Boolean).join(', ')})` : candidate.request;
-  const option = button(null, 'button candidate', () => beginReply(target, label, { taskId: candidate.taskId, label }));
-  option.append(node('span', 'candidate-request', candidate.request));
-  const detail = [order, started, state].filter(Boolean).join(' · ');
-  if (detail) option.append(node('span', 'candidate-detail', detail));
-  option.setAttribute('aria-label', [candidate.request, detail].filter(Boolean).join(', '));
-  option.disabled = candidate.state === 'ended';
-  return option;
-}
-function clarificationTitle(clarification) {
-  return clarification?.route === 'model_budget' ? waitLabel('model_budget') : 'Clarification requested';
-}
-function clarificationActions(clarification) {
+function pausedActions(turn) {
   const actions = node('div', 'event-actions');
-  if (clarification.route === 'model_budget') {
-    const waitMessageId = clarification.messageId;
-    const key = `message/${waitMessageId}`;
-    const approve = button('Approve one more model call', 'button',
-      () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
-    approve.disabled = pendingWaits.has(key);
-    actions.append(approve);
-    return actions;
-  }
-  const target = { kind: 'clarification', messageId: clarification.messageId, summary: clarification.text };
-  if (clarification.destinations) {
-    for (const destination of clarification.destinations)
-      actions.append(button(destination, 'button', () => beginReply(target, destination)));
-  } else {
-    const candidates = clarification.candidates ?? [];
-    const repeated = repeatedRequests(candidates);
-    const ordinals = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
-    const order = (candidate) => {
-      if (!repeated.has(candidate.request)) return '';
-      const same = candidates.filter((item) => item.request === candidate.request)
-        .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || a.taskId - b.taskId);
-      const index = same.indexOf(candidate);
-      return index === same.length - 1 ? 'requested last' : `requested ${ordinals[index] ?? `${index + 1}th`}`;
-    };
-    for (const candidate of candidates) actions.append(candidateButton(target, candidate, order(candidate)));
-  }
-  actions.append(button('Write a reply', 'text-button', () => beginReply(target)));
+  const waitMessageId = turn.messageId;
+  const key = `message/${waitMessageId}`;
+  const approve = button('Approve one more model call', 'button',
+    () => void submitOperation(view, key, { waitMessageId, operation: 'approve' }));
+  approve.disabled = pendingWaits.has(key);
+  actions.append(approve);
+  return actions;
+}
+function suggestionActions(event) {
+  const actions = node('div', 'event-actions');
+  const target = { kind: 'message', messageId: event.id, summary: event.data.text };
+  for (const suggestion of event.data.suggestions)
+    actions.append(button(suggestion, 'button', () => beginReply(target, suggestion)));
   return actions;
 }
 function messageSide(event) {
@@ -813,14 +783,10 @@ function eventCard(event, context, place) {
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
     bubble.append(text);
-    const clarification = context.clarifications.get(data.messageId);
-    if (clarification) extras.push(clarificationActions(clarification));
-    if (data.source?.messageId) {
-      const links = node('div', 'event-actions');
-      links.append(sourceAction(data.source));
-      extras.push(links);
-      if (data.route === 'respond') replyTarget = ['Reply to this answer', { kind: 'result', messageId: event.id, summary: data.text }];
-    }
+    const paused = context.paused.get(data.messageId);
+    if (paused) extras.push(pausedActions(paused));
+    else if (data.suggestions?.length) extras.push(suggestionActions(event));
+    if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
     text.textContent = copy;
@@ -1001,11 +967,11 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     return;
   }
   if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.clarifications, bots, dayFormat.format(Date.now()))) return;
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
-    clarifications: new Map((data?.clarifications ?? []).map(item => [item.messageId, item])),
+    paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
@@ -1063,7 +1029,7 @@ function setNotice(context, text, isError = false) {
   notices.set(context.id, { text, isError });
   if (showingComposer(context.id)) renderComposer();
 }
-const replyLabels = { wait: 'Reply to a question', clarification: 'Reply to a clarification', result: 'Reply to a result' };
+const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
@@ -1099,8 +1065,6 @@ function renderComposer() {
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
   elements['reply-question'].textContent = reply?.summary ?? '';
-  elements['reply-choice'].hidden = !reply?.choice;
-  elements['reply-choice'].textContent = reply?.choice ? `Selected: ${reply.choice}` : '';
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
@@ -1506,12 +1470,12 @@ function renderDetail() {
     }
     return;
   }
-  if (detail.kind === 'clarification') {
-    const clarification = view.data.clarifications.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, clarification, [...pendingWaits])) {
-      elements['detail-title'].textContent = clarificationTitle(clarification);
-      elements['detail-body'].replaceChildren(node('p', 'prose', clarification?.text ?? 'This request has closed.'));
-      if (clarification) elements['detail-body'].append(clarificationActions(clarification));
+  if (detail.kind === 'paused') {
+    const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
+    if (changed('detail', detail, turn, [...pendingWaits])) {
+      elements['detail-title'].textContent = waitLabel('model_budget');
+      elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
+      if (turn) elements['detail-body'].append(pausedActions(turn));
     }
     return;
   }
@@ -1555,13 +1519,6 @@ function mergeLatest(context, latest) {
     else {
       replies.delete(context.id);
       setNotice(context, 'That question is no longer open, so your reply was not sent.');
-    }
-  } else if (reply.kind === 'clarification' &&
-             !latest.clarifications.some((item) => item.messageId === reply.messageId)) {
-    if (reply.text.trim()) reply.closed = true;
-    else {
-      replies.delete(context.id);
-      setNotice(context, 'That confirmation has closed, so your reply was not sent.');
     }
   }
 }
@@ -1671,7 +1628,7 @@ async function operate(context, task, operation, fields = {}) {
 async function submitOperation(context, key, payload) {
   if (!context || pendingWaits.has(key)) return;
   const isOpen = () => view === context && (payload.waitMessageId
-    ? detail?.kind === 'clarification' && detail.messageId === payload.waitMessageId
+    ? detail?.kind === 'paused' && detail.messageId === payload.waitMessageId
     : detail?.waitId === payload.waitId);
   pendingWaits.set(key, context.id);
   setNotice(context, 'Submitting action…');
@@ -1697,13 +1654,11 @@ async function submit(event) {
   const reply = replies.get(context.id);
   const text = reply ? reply.text : drafts.get(context.id);
   const replyToMessageId = reply?.messageId;
-  const candidateTaskId = reply?.candidateTaskId;
   const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId &&
-    previous.candidateTaskId === candidateTaskId ? previous.clientMessageId : crypto.randomUUID();
+  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
+    ? previous.clientMessageId : crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  if (replyToMessageId && candidateTaskId) payload.candidateTaskId = candidateTaskId;
   rememberMessage(context.id, { payload, reply });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
@@ -1763,10 +1718,6 @@ elements.message.addEventListener('input', () => {
   const reply = replies.get(view.id);
   if (reply) reply.text = elements.message.value;
   else drafts.set(view.id, elements.message.value);
-  if (reply?.candidateTaskId && reply.text !== reply.choice) {
-    delete reply.candidateTaskId;
-    delete reply.choice;
-  }
   fitMessage();
   notices.delete(view.id);
   const limit = composerLimit(reply);

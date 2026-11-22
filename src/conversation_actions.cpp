@@ -41,7 +41,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
     return id;
 }
 
-bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, std::string_view instruction,
+bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int step, std::string_view instruction,
                                     const Json& source, const Json& routing, const TaskChange* change) {
     auto task = load(taskId);
     bool conflicting = change != nullptr;
@@ -64,7 +64,8 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, std::s
         conflicting = !change->doneWhen.empty() || !change->intent.empty() || environment.empty() ||
                       environment != field(task,"environmentId") || task.value("replanning",false);
     }
-    Json pending = {{"messageId",messageId},{"text",instruction},{"revisionId",revision},{"conflicting",conflicting}};
+    Json pending = {{"messageId",messageId},{"step",step},{"text",instruction},{"revisionId",revision},
+                    {"conflicting",conflicting}};
     if (!source.is_null()) {
         pending["source"] = source;
         auto& references = task["sourceResultRefs"];
