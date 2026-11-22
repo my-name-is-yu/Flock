@@ -3,8 +3,8 @@ import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from
 const labels = {
   user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
   model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
-  unknown_delivery: 'Delivery confirmation', grant_request: 'Access request',
-  protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
+  unknown_delivery: 'Delivery confirmation',
+  protected_input: 'Protected input', pr_review: 'Pull request review',
   pr_reconciliation: 'Pull request reconciliation',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Reconciliation requested', request_changes: 'Changes requested',
@@ -16,9 +16,7 @@ const actions = {
   model_budget: [['approve', 'Approve one call']],
   conversation_model_budget: [['approve', 'Approve one call']],
   unknown_delivery: [['reconcile', 'Reconcile delivery']],
-  grant_request: [['approve', 'Approve access'], ['deny', 'Deny']],
   protected_input: [['supply', 'Save protected value']],
-  bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
   pr_reconciliation: [['reject_pr', 'Reject operation']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };

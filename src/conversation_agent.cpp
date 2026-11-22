@@ -33,7 +33,7 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
-    "list_grants","request_access","list_secrets","request_secret_input",
+    "list_secrets","request_secret_input",
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
@@ -217,7 +217,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (!Access(*this).permits(message.bot,{"shared_memory",field(args,"docId"),reading ? "read" : "write"},true)) {
+                if (!Policy(*this).allows(message.bot,reading ? Action::shared_memory_read : Action::shared_memory_write,field(args,"docId"))) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -381,7 +381,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now) {
+                                Seconds now, const ApplyBotChange& applyBotChange) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -409,6 +409,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
+        if (tool == "request_bot_change") {
+            const auto id = Policy(*this).applyBotChange(bot,turnActor(message),
+                toolText(args,"operation",32),toolText(args,"targetBotId",128),toolText(args,"name",128),
+                message.id,step,applyBotChange);
+            return {{"ok",true},{"changeId",id},{"status","applied"}};
+        }
         auto result = accessTool(bot,message.id,routing,decision);
         if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
         if (result.is_null()) result = automationTool(bot,routing,decision,now);
@@ -500,7 +506,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!Access(*this).permitsPerson(turnActor(message),bot,Role::decide)) throw DecisionDenied{};
+        if (!Policy(*this).allows(turnActor(message),Action::bot_decide,bot)) throw DecisionDenied{};
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
@@ -654,7 +660,7 @@ Person Store::Impl::turnActor(const Message& message) {
         case PrincipalSource::trusted: return admitted;
         case PrincipalSource::channel: return {admitted.id,false};
         case PrincipalSource::legacy:
-            return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
+            return admitted == localOwner && !Policy(*this).requiresIdentity() ? localOwner : Person{};
         case PrincipalSource::web: {
             if (!resolveWebIdentity) return {};
             try {
@@ -678,7 +684,7 @@ bool Store::Impl::authorizeTurn(const Message& message) {
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
-    } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
+    } else if (Policy(*this).allows(turnActor(message),Action::bot_talk,message.bot)) return true;
     if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
@@ -717,7 +723,7 @@ void Store::Impl::resolveOfferedAnswer(const Message& message) {
 }
 
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
-                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
+                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
                           std::stop_token shutdown) {
     Message message;
     bool offeredAnswer = false;
@@ -976,7 +982,7 @@ LIMIT 1
         if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
         } else if (readSession) {
-            result = sessionReadTool(message.bot,message.channelScope,decision,t3);
+            result = sessionReadTool(message.bot,message.channelScope,message.routing,decision,t3);
         } else if (checkEnvironment) {
             try {
                 result = readiness(message.bot,message.routing,decision.args,t3);
@@ -1015,7 +1021,7 @@ LIMIT 1
             if (shutdown.stop_requested()) return;
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,decision,clock());
+                result = applyTurnTool(message,step,decision,clock(),applyBotChange);
                 exec("RELEASE turn_tool");
             } catch (const StorageError&) {
                 throw;

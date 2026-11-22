@@ -197,7 +197,7 @@ FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
             if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
             upgrade.commit();
         }
-        initializeAccessSchema();
+        initializePolicySchema();
         initializeParticipationSchema();
         initializeRootDeliverySchema();
         initializeSpecialistSchema();
@@ -580,7 +580,7 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation,
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
-    if (!Access(*this).permitsPerson(actor,bot,Role::decide)) {
+    if (!Policy(*this).allows(actor,Action::bot_decide,bot)) {
         if (operation!="answer") throw DecisionDenied{};
         auto origin = query(R"SQL(
 SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id

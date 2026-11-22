@@ -917,6 +917,34 @@ public:
         return excerpt;
     }
 
+    std::pair<std::vector<std::string>,bool> projectSessions(
+        std::string_view environment, std::string_view project, SessionReadDeadline deadline) override {
+        try {
+            Client client(loadCredential(directory_,std::string(environment)),deadline);
+            std::vector<std::string> threads;
+            Position offset = 0;
+            for (int pageIndex = 0; pageIndex < 20; ++pageIndex) {
+                const auto page = client.call("t3_thread_list",{{"projectId",project},{"includeSubagents",false},
+                                                               {"limit",50},{"cursor",offset}});
+                if (str(page,"projectId") != project) invalidResponse();
+                const auto& listed = array(page,"threads");
+                for (const auto& thread : listed) {
+                    const auto id = str(thread,"threadId");
+                    if (id.empty() || str(thread,"projectId") != project) invalidResponse();
+                    threads.push_back(id);
+                }
+                const auto next = cursor(page,"nextCursor");
+                if (!next) return {std::move(threads),false};
+                if (*next <= offset || *next != offset + static_cast<Position>(listed.size())) invalidResponse();
+                offset = *next;
+            }
+            return {std::move(threads),true};
+        } catch (const Failure& error) {
+            if (error.kind == Failure::Kind::Auth || error.kind == Failure::Kind::Settings) return {};
+            throw;
+        }
+    }
+
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
                                                   SessionReadDeadline deadline) override {
         return t3detail::sessionMetadata(directory_,target,includeMessages,deadline);

@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 #include "model.hpp"
 
 #include <algorithm>
@@ -111,8 +111,6 @@ struct Scene {
         : store(directory.path / "state.db"), model(mixed),
           runtime(store,model,t3,[](std::string_view) { return std::string{}; }),
           config({{"modelProvider","chatgpt"},{"model",slug},{"conversationEnvironments",{{"cloud Mac","cloud"}}}}) {
-        for (const auto* environment : {"desktop","cloud"})
-            store.access().resourceGrant({"fixture",true},"release",{"environment",environment,"launch"},GrantChange::grant);
     }
 
     Intake intake(std::string request = {}, std::string project = "project") const {

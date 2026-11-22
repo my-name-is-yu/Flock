@@ -78,7 +78,7 @@ Ask a Bot in its conversation to remember a convention, manage a schedule or
 reminder, or follow up on a webhook. Flock imports `MEMORY.md` on the first
 private memory access. SQLite supplies private memory for conversation and task
 decisions from then on. Use the memory tools or Web API to edit it. Shared
-playbooks and text documents use an explicit document ID and require a Bot grant
+playbooks and text documents use an explicit document ID and follow the installation policy
 for the requested `shared_memory` operation.
 
 ## Connect and run
@@ -113,12 +113,9 @@ build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 ## Offline demo
 
 For an offline demonstration, set `FLOCK_HOME` to a separate directory and
-configure the `release` Bot there. Replace `ENVIRONMENT_ID` with the value of
-`environmentId` in its `config.json`. Grant launch access before submitting a
-task, then start the demo runtime.
+configure the `release` Bot there. Start the demo runtime.
 
 ```sh
-build/app/flock access grant release environment ENVIRONMENT_ID launch
 build/app/flock run --fixed --no-web
 ```
 
@@ -128,8 +125,15 @@ In a second terminal using the same Flock home, submit a task.
 build/app/flock submit release "Check the upcoming release"
 ```
 
-Use `flock access list release` to see its grants and `flock access revoke
-release environment ENVIRONMENT_ID launch` to remove this grant. A request
+Full mode is the default. Manage installation-wide Never rules with
+`flock rules list`, `flock rules add never ACTION TARGET` and
+`flock rules remove never ACTION TARGET`. For example, target `demo-*` with
+`environment.launch` to block launches into matching environments.
+The local owner manages Bots created from the CLI or configuration. A person
+who creates a Bot in Web owns it and can add shared members for conversation
+and decisions.
+
+A request
 starting with `ask:` produces a demo Bot question. Answering it lets the
 fixture Session run to completion.
 
@@ -178,9 +182,9 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 ## Bot tools
 
 Conversation turns can use the Bot's workspace under `<home>/workspaces/<botId>`.
-Grant `workspace/<botId>/read` for files and search, `write` for edits, and
-`exec` plus `read` to run a command. Commands receive write access when the Bot
-also has the `write` grant. macOS uses the system sandbox. Linux requires
+Policy actions `workspace.read`, `workspace.write` and `workspace.exec` target
+the Bot ID. Commands require read and exec and receive write access when the
+policy allows it. macOS uses the system sandbox. Linux requires
 `/usr/bin/bwrap` with unprivileged namespaces, FD-based bind support, and
 seccomp filtering; Linux builds also require the libseccomp development
 library. Existing single-command `argv` calls retain their behavior. On
@@ -227,9 +231,10 @@ Relative paths are resolved against the Flock home.
 }
 ```
 
-Grant `skill/catalog/list` for discovery and `skill/<skill>/read` per skill.
-MCP uses Streamable HTTP. Grant `mcp_server/<name>/discover`, `invoke` and
-`read_resource` independently. `tokenEnv` is optional and points to a
+Skill actions are `skill.list` for the catalog and `skill.read` for individual
+skills. MCP uses Streamable HTTP with `mcp.discover`, `mcp.invoke` and
+`mcp.read_resource` actions targeting the configured server name. `tokenEnv`
+is optional and points to a
 host-managed bearer token. Discovery lists one collection per call and returns
 `nextCursor` when another page is available.
 

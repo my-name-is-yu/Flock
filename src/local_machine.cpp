@@ -137,7 +137,7 @@ void Store::setWebOrigin(std::string origin) {
 
 bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
     const Person person{std::string(owner),std::ranges::find(rootPeople,owner) != rootPeople.end()};
-    return Access(const_cast<Impl&>(*this)).permitsPerson(person,bot,Role::decide);
+    return Policy(const_cast<Impl&>(*this)).allows(person,Action::bot_decide,bot);
 }
 
 Json Store::Impl::localMachineTool(std::string_view bot, std::string_view scope, const Decision& decision) {
@@ -231,7 +231,7 @@ FROM local_machine_connections ORDER BY id DESC
     Json result = Json::array();
     while (rows.next()) {
         const auto bot = rows.string(1);
-        if (rows.string(5) != actor.id || !Access(*p_).permitsPerson(actor,bot,Role::decide)) continue;
+        if (rows.string(5) != actor.id || !Policy(*p_).allows(actor,Action::bot_decide,bot)) continue;
         result.push_back(p_->redactor(bot).record({{"id",rows.number(0)},{"botId",bot},{"threadId",rows.string(2)},
             {"runId",rows.string(3)},{"machineId",rows.string(4)},{"rules",rows.json(6)},{"status",rows.string(7)}}));
     }
@@ -245,7 +245,7 @@ void Store::decideLocalConnection(const Person& actor, Id id, bool approve) {
 SELECT c.bot_id,c.machine_id,c.machine_owner,c.status,t.state,t.data,c.thread_id,c.environment_id
 FROM local_machine_connections c JOIN tasks t ON t.id=c.task_id WHERE c.id=?
 )SQL",{id});
-    if (!row.next() || row.string(2) != actor.id || !Access(*p_).permitsPerson(actor,row.string(0),Role::decide))
+    if (!row.next() || row.string(2) != actor.id || !Policy(*p_).allows(actor,Action::bot_decide,row.string(0)))
         throw ChannelAccessDenied("Only the machine owner can review this connection");
     if (row.string(3) != "pending") throw Conflict("Local connection is no longer pending");
     if (approve) {
@@ -266,7 +266,7 @@ void Store::disconnectLocalConnection(const Person& actor, Id id) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
     auto row = p_->query("SELECT bot_id,machine_owner,status FROM local_machine_connections WHERE id=?",{id});
-    if (!row.next() || row.string(1) != actor.id || !Access(*p_).permitsPerson(actor,row.string(0),Role::decide))
+    if (!row.next() || row.string(1) != actor.id || !Policy(*p_).allows(actor,Action::bot_decide,row.string(0)))
         throw ChannelAccessDenied("Only the machine owner can disconnect this connection");
     if (row.string(2) != "approved") throw Conflict("Local connection is not approved");
     p_->exec("UPDATE local_machine_connections SET status='disconnected',decided_by=?,decided_at=? WHERE id=?",

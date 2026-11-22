@@ -228,6 +228,11 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_thread_list":
             assert args["projectId"] == "project"
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
+            if scenario == "sparse-session-search":
+                ids = (["deadline-1", "deadline-2", "deadline-3"] if state.get("searchTitles", {}).get("deadline-2")
+                       else [f"candidate-{i}" for i in range(1000, 1130)])
+            elif scenario == "session-read":
+                ids = ["deleted", "manual"]
             start = args.get("cursor", 0)
             end = min(start + args.get("limit", len(ids)), len(ids))
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
@@ -603,7 +608,7 @@ esac
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, expected_mode, flags, rewritten, restart=False):
+    def connect(environment, flags, rewritten, restart=False):
         server.state["claimedEnvironment"] = environment
         argv_before = claude_argv.read_text() if claude_argv.exists() else ""
         with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
@@ -626,7 +631,7 @@ esac
                 if process.poll() is None:
                     process.kill()
         details = json.loads(output)
-        assert details["mode"] == expected_mode and details["port"] == port
+        assert "mode" not in details and details["port"] == port
         assert details["configuredProviders"] == (["codex", "claude"] if rewritten else [])
         assert ("Restart 'flock run'" in errors) == restart
         codex = codex_config.read_text()
@@ -646,10 +651,10 @@ esac
             assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
         return token
 
-    old = connect("env-1", "full", ["--port", str(port)], rewritten=True, restart=True)
-    token = connect("env-1", "consult", ["--mode", "consult"], rewritten=True)
+    old = connect("env-1", ["--port", str(port)], rewritten=True, restart=True)
+    token = connect("env-1", [], rewritten=True)
     assert token != old
-    assert connect("env-2", "consult", [], rewritten=False) == token
+    assert connect("env-2", [], rewritten=False) == token
 
     previous_port = port
     with socket.socket() as choose_port:
@@ -659,7 +664,7 @@ esac
             port = replacement.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
     before_port_change = token
-    token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], rewritten=True, restart=True)
+    token = connect("env-2", ["--port", str(port)], rewritten=True, restart=True)
     assert token != before_port_change
 
     for option in ("--headless", "--no-web"):

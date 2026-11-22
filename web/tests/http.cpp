@@ -223,7 +223,6 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
 
 void failedCompletion(const std::filesystem::path& path) {
     Store store(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
@@ -449,9 +448,9 @@ void peerConversationAnchor(const std::filesystem::path& path) {
         return credential == "Bearer reader" ? Person{"reader"} : Person{};
     };
     const Person owner{"fixture",true};
-    auto access = store.access();
-    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
-    access.personGrant(owner,"settings","reader",Role::view,GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,"release","reader",true);
+    access.setMember(owner,"settings","reader",true);
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer reader"}});
@@ -471,7 +470,7 @@ void peerConversationAnchor(const std::filesystem::path& path) {
     const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
     const auto anchor = "&anchor=" + std::to_string(targetId);
     Browser::checked(browser.client.Get(primary + anchor),403);
-    access.personGrant(owner,"triage","reader",Role::view,GrantChange::grant);
+    access.setMember(owner,"triage","reader",true);
 
     const auto latest = browser.get(primary);
     check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
@@ -498,9 +497,6 @@ void peerConversationAnchor(const std::filesystem::path& path) {
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
-    store.access().resourceGrant({"fixture",true},"settings",{"environment","local-env","launch"},GrantChange::grant);
-    store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
     const auto notes = [](std::string_view) { return std::string{}; };
@@ -782,7 +778,6 @@ void recurringRequestStatus(const std::filesystem::path& path) {
 void eventStream(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
-    store.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
     auto web = callbacks();
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
@@ -848,10 +843,9 @@ void eventStream(const std::filesystem::path& path) {
 void conversationPermissions(const std::filesystem::path& path) {
     Store store(path);
     const Person owner{"fixture",true};
-    auto access = store.access();
-    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
-    access.personGrant(owner,"release","decider",Role::decide,GrantChange::grant);
-    access.resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,"release","reader",true);
+    access.setMember(owner,"release","decider",true);
     auto web = callbacks();
     web.authenticate = [](std::string_view credential) {
         if (credential == "Bearer reader") return Person{"reader"};
@@ -898,7 +892,7 @@ void conversationPermissions(const std::filesystem::path& path) {
     const auto viewPath = "/api/view?bot=release";
     const auto readable = reader.get(viewPath);
     const auto writable = decider.get(viewPath);
-    check(readable.at("canDecide") == false && writable.at("canDecide") == true,"conversation permission did not follow the caller");
+    check(readable.at("canDecide") == true && writable.at("canDecide") == true,"conversation permission did not follow the caller");
     check(!readable.at("events").empty() && readable.at("events") == writable.at("events") &&
           readable.at("waits") == writable.at("waits"),"reader lost conversation or wait history");
 
@@ -906,16 +900,15 @@ void conversationPermissions(const std::filesystem::path& path) {
     const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
         {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
         {"targetGeneration",wait.at("generation")}};
-    reader.post("/api/messages",message,403);
+    auto memberMessage = message;
+    memberMessage["clientMessageId"] = "shared-member-message";
+    reader.post("/api/messages",memberMessage,201);
+    runtime.runConversations();
+    access.setMember(owner,"release","reader",false);
+    Browser::checked(reader.client.Get(viewPath),403);
     reader.post("/api/operations",answer,403);
-    unsigned updates = 0;
-    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        check(change.at("bot") == "release","permission change did not invalidate the open conversation");
-        check(reader.get(viewPath).at("canDecide") == (updates == 1),"refreshed conversation has stale permission");
-        if (++updates == 3) return false;
-        access.personGrant(owner,"release","reader",updates == 1 ? Role::decide : Role::view,GrantChange::grant);
-        return true;
-    });
+    access.setMember(owner,"release","reader",true);
+
     decider.post("/api/operations",answer);
     const auto authorized = decider.post("/api/messages",message,201).at("messageId");
     runtime.runConversations();
@@ -1210,8 +1203,13 @@ void botProfileEndpoints(const std::filesystem::path& path) {
 }
 void accessEndpoints(const std::filesystem::path& path) {
     Store store(path);
-    const auto id = store.access().request("release",{"repository","github.com/org/private","read"});
+    store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
+    cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
+        auto intake = original(bot,request);
+        intake.config.erase("token");
+        return intake;
+    };
     const auto file = path.parent_path()/"identities.json";
     const Json accounts = Json::array({{{"authorization","Bearer fixture-owner"},{"person","owner"},{"adminRoot",true}},
                                        {{"authorization","Bearer fixture-alice"},{"person","alice"}}});
@@ -1232,18 +1230,15 @@ void accessEndpoints(const std::filesystem::path& path) {
     auto crossOrigin = browser.headers();
     crossOrigin.erase("Origin");
     crossOrigin.emplace("Origin","https://example.invalid");
-    Browser::checked(browser.client.Post("/api/access/decision",crossOrigin,
-        Json{{"botId","release"},{"requestId",id},{"approve",true}}.dump(),"application/json"),403);
-    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true},{"resourceId","wrong"}},400);
-    const auto secretRequest = store.access().requestSecret("release",{"fixture-token"});
+    const Json share{{"botId","release"},{"person","alice"},{"add",true}};
+    Browser::checked(browser.client.Post("/api/access/members",crossOrigin,share.dump(),"application/json"),403);
+    const auto secretRequest = store.policy().requestSecret("release",{"fixture-token"});
     browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
     browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
-    browser.post("/api/access/person",{{"botId","release"},{"action","grant"},{"person","alice"},{"role","view"}});
-    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true}});
-    auto state = browser.get("/api/access?bot=release");
-    check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
-    browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
-                                          {"resourceId","github.com/org/private"},{"operation","read"}});
+    browser.post("/api/access/members",share);
+    const auto state = browser.get("/api/access?bot=release");
+    check(state.at("mode") == "full" && state.at("rules").size() == 1 &&
+          state.at("members") == Json::array({"alice"}),"policy settings view lost rules or membership");
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");
@@ -1258,8 +1253,8 @@ void accessEndpoints(const std::filesystem::path& path) {
     Browser::checked(browser.client.Get("/api/compactions?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=triage"),403);
     Browser::checked(browser.client.Get("/api/events?bot=release&peer=triage"),403);
-    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);
-    browser.post("/api/access/resource",{{"botId","release"},{"adminRoot",true}},403);
+    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},201);
+    browser.post("/api/access/members",{{"botId","release"},{"person","owner"},{"add",false}},403);
     browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
 }
 

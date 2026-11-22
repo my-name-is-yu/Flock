@@ -25,14 +25,14 @@ Seconds Store::Impl::environmentTimeout(std::string_view bot, std::string_view e
 }
 
 Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Json& args, T3& t3) {
-    Access access(*this);
+    Policy access(*this);
     const auto& config = routing.at("config");
     const auto environment = field(routing,"environmentId");
     auto id = args.contains("environmentId") ? argument(args,"environmentId") : environment;
     auto settings = "/settings/"+std::string(bot)+"/environment";
     auto failure = [&](std::string reason) -> Json {return {{"ready",false},{"reason",reason},{"settingsLink",settings}};};
     if (!environments(routing).contains(id) || field(routing,"projectId").empty()) return failure("Configure the environment and project");
-    if (!access.permits(bot,{"environment",id,"launch"},true)) return failure("Approve environment launch access");
+    if (!access.allows(bot,Action::environment_launch,id)) return failure("Environment launch denied by installation policy");
     Command command;
     command.ownerBotId = bot;
     command.environmentId = id;
@@ -48,22 +48,15 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
 }
 
 Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
-    Access access(*this);
+    Policy access(*this);
     const auto& tool = decision.tool;
     const auto& args = decision.args;
     const auto& config = routing.at("config");
-    if (tool == "list_grants") return {{"grants",access.grants(bot)}};
-    if (tool == "request_access") {
-        auto id = access.request(bot,{argument(args,"resourceKind"),argument(args,"resourceId"),argument(args,"operation")},sourceMessage);
-        return {{"requestId",id},{"status","pending"}};
-    }
     if (tool == "list_secrets") {
-        auto rows = query(R"SQL(
-SELECT name FROM protected_inputs p WHERE status='fulfilled' AND (bot=? OR EXISTS
- (SELECT 1 FROM bot_grants g WHERE g.bot=? AND g.kind='secret' AND g.resource=p.name AND g.op='use')) ORDER BY name
-)SQL",{bot,bot});
+        auto rows = query("SELECT name FROM protected_inputs WHERE status='fulfilled' ORDER BY name");
         auto names = Json::array();
-        while (rows.next()) names.push_back(rows.string(0));
+        while (rows.next())
+            if (access.allows(bot,Action::secret_use,rows.string(0))) names.push_back(rows.string(0));
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
@@ -75,7 +68,7 @@ SELECT name FROM protected_inputs p WHERE status='fulfilled' AND (bot=? OR EXIST
                     {"mcpServers",config.value("mcpServers",Json::array())}};
         for (const auto& id : environments(routing)) {
             Json entry{{"environmentId",id}};
-            if (access.permits(bot,{"environment",id,"inspect"},true))
+            if (access.allows(bot,Action::environment_inspect,id))
                 entry["runTimeoutSeconds"] = environmentTimeout(bot,id,config);
             result["environments"].push_back(entry);
         }
@@ -83,18 +76,13 @@ SELECT name FROM protected_inputs p WHERE status='fulfilled' AND (bot=? OR EXIST
     }
     if (tool == "update_bot_settings") {
         const auto id = argument(args,"environmentId");
-        if (!environments(routing).contains(id) || !access.permits(bot,{"environment",id,"configure"},true)) throw Conflict("Environment configure access required");
+        if (!environments(routing).contains(id) || !access.allows(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");
         const auto timeout = args.at("runTimeoutSeconds").get<Id>();
         if (timeout<1 || timeout>2147483647) throw Conflict("Invalid timeout");
         exec("INSERT INTO environment_settings VALUES(?,?,?) ON CONFLICT(bot,environment) DO UPDATE SET timeout=excluded.timeout",
              {bot,id,timeout});
         return {{"updated",true}};
-    }
-    if (tool == "request_bot_change") {
-        const auto operation = argument(args,"operation"), target = argument(args,"targetBotId"), name = argument(args,"name");
-        auto id = access.requestBotChange(bot,operation,target,name,sourceMessage);
-        return {{"requestId",id},{"status","pending"}};
     }
     return nullptr;
 }

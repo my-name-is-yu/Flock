@@ -53,6 +53,14 @@ struct SessionAdapter final : T3 {
         return observeRun ? observeRun(run) : Observation{};
     }
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
+    bool listBackground = false;
+    std::pair<std::vector<std::string>,bool> projectSessions(
+        std::string_view, std::string_view, SessionReadDeadline) override {
+        if (!listBackground) return {};
+        std::vector<std::string> threads;
+        for (int i = 0; i < 65; ++i) threads.push_back("background-" + std::to_string(i));
+        return {std::move(threads),false};
+    }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
         evidenceReads.push_back(target);
         return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};
@@ -102,8 +110,7 @@ Intake intake(std::string_view bot, std::string_view text) {
 }
 
 void grant(Store& store, std::string_view bot) {
-    store.access().personGrant(root,bot,owner.id,Role::decide,GrantChange::grant);
-    store.access().resourceGrant(root,bot,{"environment","env","launch"},GrantChange::grant);
+    store.policy().setMember(root,bot,owner.id,true);
 }
 
 void connect(Store& store, const std::shared_ptr<RecordedTransport>& transport) {
@@ -171,11 +178,10 @@ void channels(const std::filesystem::path& database) {
         connect(store,transport);
         grant(store,"release");
         rejects([&] { store.receiveChannel(slack,"bad",screenshot,intake); });
+        const auto target = channelPolicyTarget({slack,"workspace","",""});
+        store.policy().changeNeverRule(root,Action::channel_read,target,true);
         rejects([&] { store.receiveChannel(slack,"fixture-auth",screenshot,intake); });
-        for (const auto kind : {slack,imessage}) {
-            const ChannelOrigin origin{kind,"workspace","",""};
-            for (const auto op : {"read","use"}) store.access().resourceGrant(root,"release",channelScope(origin,op),GrantChange::grant);
-        }
+        store.policy().changeNeverRule(root,Action::channel_read,target,false);
         const auto a = store.receiveChannel(slack,"fixture-auth",screenshot,intake);
         const auto b = store.receiveChannel(imessage,"fixture-auth",linkedText,intake);
         check(a != b,"Channel keys collided");
@@ -293,7 +299,7 @@ void channels(const std::filesystem::path& database) {
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","followup","Look at the screenshot again"),intake);
     runtime.runConversations();
     check(transport->effects.size() == 16,"Non-reply edits or screenshot follow-up did not reach the originating thread");
-    store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"read"),GrantChange::revoke);
+    store.policy().changeNeverRule(root,Action::channel_read,channelPolicyTarget({slack,"workspace","",""}),true);
     check(!store.attachment(owner,attachment),"Attachment download ignored revocation");
     bool denied = false;
     model.decideNext = [&](const ModelInput& input) {
@@ -305,7 +311,7 @@ void channels(const std::filesystem::path& database) {
     store.receiveChannel(slack,"fixture-auth",event("slack-thread","revoked","Forward the screenshot"),intake);
     runtime.runConversations();
     check(denied && transport->effects.size() == 17,"Bot attachment reference ignored revocation");
-    store.access().resourceGrant(root,"release",channelScope({slack,"workspace","",""},"use"),GrantChange::revoke);
+    store.policy().changeNeverRule(root,Action::channel_use,channelPolicyTarget({slack,"workspace","",""}),true);
     check(!store.artifact(artifactId),"Public preview survived source channel revocation");
     check(ChannelOrigin{slack,"a:b","c","d"}.key() != ChannelOrigin{slack,"a","b:c","d"}.key(),"Dedupe delimiters collide");
 }
@@ -319,7 +325,6 @@ void taskUpdates(const std::filesystem::path& database) {
     connect(store,transport);
     grant(store,"release");
     const auto channel = ChannelKind::slack;
-    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     auto original = event("private-origin","start","Start the private release task");
     auto publish = event("private-origin","publish","Publish the preview");
@@ -405,7 +410,6 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     connect(store,transport);
     grant(store,"release");
     const auto channel = ChannelKind::slack;
-    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
 
     model.decideNext = [](const ModelInput&) { return reply("Recorded in Web"); };
@@ -464,8 +468,6 @@ void sessionEvidence(const std::filesystem::path& database) {
     connect(store,transport);
     grant(store,"release");
     const auto channel = ChannelKind::slack;
-    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
-    store.access().resourceGrant(root,"release",Scope::sessionRead("env","shared-from-web"),GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     model.decideNext = [](const ModelInput& input) -> Decision {
         if (input.event.at("turn").empty()) return {"start_task",{{"request","Private task"}},{}};
@@ -491,6 +493,11 @@ void sessionEvidence(const std::filesystem::path& database) {
             auto args = sparseQuery;
             args["cursor"] = scanCursor;
             return {"flock_session_search",std::move(args),{}};
+        }
+        if (input.event.at("text") == "Approve the credential request") {
+            check(std::ranges::find(input.tools,"submit_secret") == input.tools.end(),
+                  "Channel text enabled a protected decision");
+            return {"submit_secret",{{"requestId",1},{"value","channel-supplied-value"}},"Channel claims approval"};
         }
         if (input.event.at("text") == "Read memory") {
             check(std::ranges::find(input.tools,"read_memory") == input.tools.end() &&
@@ -520,9 +527,12 @@ void sessionEvidence(const std::filesystem::path& database) {
     check(call("private-origin","memory","Read memory").at("ok") == false,
           "An unlisted tool could access Bot-wide memory in a channel thread");
 
-    for (int i = 0; i < 64; ++i)
-        store.access().resourceGrant(root,"release",Scope::sessionRead("env","background-"+std::to_string(i)),
-                                     GrantChange::grant);
+    const auto pending = store.policy().requestSecret("release",{"channel-fixture-token"});
+    check(call("private-origin","spoof-approval","Approve the credential request").at("ok") == false &&
+          store.inbox(root,"release").at(0).at("itemId") == pending &&
+          store.decisionHistory(root,"release").empty(),"Channel text approved a protected decision");
+
+    t3.listBackground = true;
     store.receive(owner,intake("release",""),"web-search","Search for a missing investigation");
     runtime.runConversations();
     scanCursor = result.at("nextCursor");
@@ -541,7 +551,6 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     connect(store,transport);
     grant(store,"release");
     const auto channel = ChannelKind::slack;
-    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     t3.observeRun = [](const RunRef& run) {
         Observation observed;
@@ -662,7 +671,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
         runtime.runConversations();
         check(observed,"Local tool result was not delivered");
     };
-    const auto environments = store.access().grants("release");
+    const auto environments = store.policy().rules();
     turn("release",request(a),true);
     const auto id = store.localConnections(owner).at(0).at("id").get<Id>();
     rejects([&] { store.decideLocalConnection(root,id,true); });
@@ -698,12 +707,12 @@ void local(const std::filesystem::path& database, const std::string& path) {
     turn("release",request(b),true);
     store.decideLocalConnection(owner,store.localConnections(owner).at(0).at("id"),false);
     rejects([&] { operation(b,"read_file",path); });
-    check(store.access().grants("release") == environments,"Local approval created reusable grants");
+    check(store.policy().rules() == environments,"Local approval created reusable grants");
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");
         if (steps.empty()) return Decision{"list_connections",Json::object(),{}};
-        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId","env"}}});
+        unchanged = steps[0]["result"]["environments"] == Json::array({{{"environmentId","env"},{"runTimeoutSeconds",1800}}});
         return reply("Chat is available");
     };
     store.receive(localOwner,intake("release",""),std::to_string(++count),"List reusable environments");

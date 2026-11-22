@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 #include <barrier>
 #include <filesystem>
 #include <future>
@@ -40,7 +40,7 @@ struct Adapter : T3 {
     InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
 };
 const Person owner{"local-owner",true}, admin{"alice"}, viewer{"bob"};
-const Scope readRepo{"repository","github.com/org/private","read"}, writeRepo{"repository","github.com/org/private","write"};
+const Resource readRepo{Action::repository_read,"github.com/org/private"};
 struct WorkModel : Model {
     ModelTurn decide(const ModelInput& in) override { return {{choose(in)}}; }
     Decision choose(const ModelInput& in) {
@@ -60,9 +60,7 @@ struct RunningAdapter : Adapter {
 
 void runningSessions(const std::filesystem::path& path) {
     Store store(path);
-    auto access = store.access();
-    access.resourceGrant(owner,"Ernest",readRepo,GrantChange::grant);
-    for (auto bot : {"Ernest","Reviewer"}) access.resourceGrant(owner,bot,{"environment","env","launch"},GrantChange::grant);
+    auto access = store.policy();
     WorkModel model;
     RunningAdapter adapter;
     RuntimeOptions options;
@@ -82,58 +80,52 @@ void runningSessions(const std::filesystem::path& path) {
             completed.push_back(bot);
         });
     };
-    const auto ernestHistory = Scope::sessionRead("env",adapter.running.at("Ernest").threadId);
-    check(access.permits("Ernest",ernestHistory,true) && !access.permits("Reviewer",ernestHistory,true) &&
-          !access.permits("Ernest",ernestHistory,false),"Session ownership or OAuth scope incorrect");
-    check(!access.permits("Ernest",Scope{"session",ernestHistory.resource,"coordinate"},true),
-          "Session ownership implicitly granted coordination");
-    access.resourceGrant(owner,"Reviewer",ernestHistory,GrantChange::grant);
-    check(access.permits("Reviewer",ernestHistory,true) &&
-          !access.permits("Reviewer",Scope::sessionRead("other",adapter.running.at("Ernest").threadId),true),
-          "session grant crossed environments");
-    access.resourceGrant(owner,"Reviewer",ernestHistory,GrantChange::revoke);
-    check(!access.permits("Reviewer",ernestHistory,true),"revoked shared Session stayed visible");
     read("Ernest");
-    denied([&]{read("Reviewer");});
-    access.resourceGrant(owner,"Reviewer",readRepo,GrantChange::grant);
     read("Reviewer");
     denied([&]{read("Reviewer",false);});
     Store authority(path);
-    denied([&]{
-        access.executeSessionResource("env",adapter.running.at("Ernest"),readRepo,[&]{
-            authority.access().resourceGrant(owner,"Ernest",readRepo,GrantChange::revoke);
+    denied([&] {
+        access.executeSessionResource("env",adapter.running.at("Ernest"),readRepo,[&] {
+            authority.policy().changeNeverRule(owner,readRepo.action,readRepo.target,true);
             return true;
-        },[&](Id){ completed.push_back("revoked"); });
+        },[&](Id){ completed.push_back("denied"); });
     });
     denied([&]{read("Ernest");});
-    read("Reviewer");
-    check(completed == std::vector<std::string>{"Ernest","Reviewer","Reviewer"},"completed actions after revocation");
+    denied([&]{read("Reviewer");});
+    check(completed == std::vector<std::string>{"Ernest","Reviewer"},"Never rule did not apply across Bots");
 }
 
-void concurrentApproval(const std::filesystem::path& path) {
-    Store left(path), right(path);
-    auto access = left.access();
-    auto id = access.request("Ernest",readRepo);
-    denied([&]{ access.decide(owner,"Reviewer",id,true); });
-    std::barrier start(2);
-    auto decide = [&](Store& db) {
-        start.arrive_and_wait();
-        try { db.access().decide(owner,"Ernest",id,true); return true; }
-        catch (const Conflict&) { return false; }
-    };
-    auto other = std::async(std::launch::async,decide,std::ref(right));
-    const bool approved = decide(left);
-    check(approved!=other.get(),"concurrent approval must apply exactly once");
-    auto state = access.administration(owner,"Ernest");
-    auto request = state.at("requests").at(0);
-    check(state.at("grants").size()==1 && state.at("audit").size()==2 &&
-          request.at("requestedBy")=="Ernest" && request.at("decidedBy")=="local-owner" &&
-          request.at("requestedAt")>0 && request.at("decidedAt")>=request.at("requestedAt"),
-          "grant request and decision audit diverged");
-    access.resourceGrant(owner,"Ernest",readRepo,GrantChange::revoke);
-    auto revocation = right.access().administration(owner,"Ernest").at("audit").back();
-    check(revocation.at("action")=="revoke" && revocation.at("actor")==owner.id &&
-          revocation.at("scope").at("resourceId")==readRepo.resource,"revocation audit missing");
+void policyRules(const std::filesystem::path& path) {
+    Store store(path);
+    auto policy = store.policy();
+    check(policy.mode() == "full" && policy.rules().empty(),"fresh installation is not Full");
+    check(policy.check("Ernest",readRepo.action,readRepo.target) == PolicyResult::allow,"Full denied a read");
+    policy.changeNeverRule(owner,readRepo.action,readRepo.target,true);
+    policy.changeNeverRule(owner,Action::repository_write,"github.com/*/private*",true);
+    check(policy.check("Reviewer",readRepo.action,readRepo.target) == PolicyResult::deny &&
+          policy.allows("Ernest",readRepo.action,"github.com/org/public") &&
+          !policy.allows("Ernest",Action::repository_write,"github.com/org/private-1") &&
+          !policy.allows("Ernest",Action::repository_write,"github.com//private") &&
+          policy.allows("Ernest",Action::repository_write,"github.com/org/public-private") &&
+          policy.allows("Ernest",Action::repository_review,"github.com/org/private"),
+          "exact or wildcard matching failed");
+    policy.changeNeverRule(owner,readRepo.action,readRepo.target,false);
+    Store reopened(path);
+    check(reopened.policy().rules().size() == 1 && reopened.policy().allows("Ernest",readRepo),
+          "rule changes were not persisted");
+    denied([&] { policy.changeNeverRule(admin,readRepo.action,readRepo.target,true); });
+
+    policy.setOwner(admin,"Ernest");
+    policy.setMember(admin,"Ernest",viewer.id,true);
+    const Person stranger{"stranger"};
+    for (auto action : {Action::bot_view,Action::bot_talk,Action::bot_decide})
+        check(policy.allows(admin,action,"Ernest") && policy.allows(viewer,action,"Ernest") &&
+              !policy.allows(stranger,action,"Ernest"),"owner or member admission failed");
+    check(policy.allows(admin,Action::bot_settings,"Ernest") && policy.allows(owner,Action::bot_settings,"Ernest") &&
+          !policy.allows(viewer,Action::bot_settings,"Ernest"),"settings were not restricted to the owner");
+    denied([&] { policy.setMember(viewer,"Ernest",stranger.id,true); });
+    policy.setMember(admin,"Ernest",viewer.id,false);
+    check(!policy.allows(viewer,Action::bot_talk,"Ernest"),"removed member retained access");
 }
 
 void freshLaunch(const std::filesystem::path& path) {
@@ -142,7 +134,7 @@ void freshLaunch(const std::filesystem::path& path) {
     WorkModel model;
     Runtime runtime(store,model,adapter,[](auto){ return std::string{}; });
     auto task = store.submit({"Fresh","read repository","env","project"});
-    store.access().request("Fresh",{"environment","env","launch"});
+    store.policy().changeNeverRule(owner,Action::environment_launch,"env",true);
     for (int i=0;i<6;++i) runtime.tick();
     check(adapter.running.empty() && store.task(task).at("wait").at("reason")=="settings",
           "pending launch permission reached T3");
@@ -151,18 +143,18 @@ void freshLaunch(const std::filesystem::path& path) {
 void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(!std::filesystem::exists(path),"secret schema fixture must start with a fresh database");
     Store left(path), right(path);
-    auto access = left.access();
+    auto access = left.policy();
     check(access.administration(owner,"Ernest").at("secretInputs").empty(),"fresh protected input table is not empty");
     const SecretRef ref{"fixture-token"};
     std::barrier start(2);
     auto request = [&](Store& store) {
         start.arrive_and_wait();
-        return store.access().requestSecret("Ernest",ref);
+        return store.policy().requestSecret("Ernest",ref);
     };
     auto other = std::async(std::launch::async,request,std::ref(right));
     const auto id = request(left);
     check(id == other.get(),"repeated secret request returned a different ID");
-    check(right.access().requestSecret("Reviewer",ref) != id,"pending secret uniqueness crossed Bot boundaries");
+    check(right.policy().requestSecret("Reviewer",ref) != id,"pending secret uniqueness crossed Bot boundaries");
     denied([&]{ access.submitSecret(owner,"Ernest",id,"nest"); });
     access.submitSecret(owner,"Ernest",id,credential);
     check(access.administration(owner,"Ernest").at("secretInputs") ==
@@ -172,21 +164,16 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
 
 void exercise(const std::filesystem::path& dir) {
     auto path=dir/"state.db";
-    Id request;
-    {
-        Store store(path);
-        auto access=store.access();
-        check(access.grants("Ernest").empty(),"fresh grants");
-        request=access.request("Ernest",readRepo);
-        check(!access.permits("Ernest",readRepo,true),"pending request granted");
-    }
     Store store(path);
-    auto access=store.access();
+    auto access=store.policy();
     Intake ernest{"Ernest","read","env","project"}, reviewer{"Reviewer","review","env","project"};
     auto child=store.submit(ernest), peerChild=store.submit(reviewer);
     ToolModel model;
     Adapter t3;
-    Runtime runtime(store,model,t3,[](std::string_view){return std::string{};});
+    std::vector<BotChange> applied;
+    RuntimeOptions options;
+    options.applyBotChange = [&](const BotChange& change) { applied.push_back(change); };
+    Runtime runtime(store,model,t3,[](std::string_view){return std::string{};},options);
     unsigned message=0;
     auto turn=[&](std::string name, Json args=Json::object(),std::string text="acknowledged") {
         model.next={std::move(name),std::move(args),""};
@@ -194,34 +181,18 @@ void exercise(const std::filesystem::path& dir) {
         runtime.runConversations();
         return model.result.dump();
     };
-    turn("list_grants");
-    check(turn("request_access",{{"resourceKind","repository"},{"resourceId","github.com/org/other"},{"operation","write"}}).find("pending")!=std::string::npos,
-          "request tool missing");
-    check(!access.permits("Ernest",{"repository","github.com/org/other","write"},true),"request tool granted scope");
+    for (const auto* removed : {"list_grants","request_access"})
+        check(turn(removed).find("Tool unavailable")!=std::string::npos,"removed tool was offered");
     ernest.config["services"]={"github"};
     ernest.config["mcpServers"]={"docs"};
     auto connections=turn("list_connections");
     check(connections.find("github")!=std::string::npos && connections.find("docs")!=std::string::npos,"connection metadata");
-    access.decide(owner,"Ernest",access.request("Ernest",{"web","docs","fetch"}),true);
-    check(!access.permitsTask(child,readRepo,true),"restart, chat or unrelated approval granted read");
-    access.personGrant(owner,"Ernest","alice",Role::admin,GrantChange::grant);
-    access.personGrant(owner,"Ernest","bob",Role::view,GrantChange::grant);
-    denied([&]{access.personGrant(viewer,"Ernest","bob",Role::admin,GrantChange::grant);});
-    denied([&]{access.decide(admin,"Ernest",request,true);});
-    denied([&]{access.resourceGrant(admin,"Ernest",readRepo,GrantChange::grant);});
-    access.personScope(owner,"alice",readRepo,GrantChange::grant);
-    access.decide(admin,"Ernest",request,true);
-    check(access.permitsTask(child,readRepo,true) && !access.permitsTask(child,writeRepo,true) &&
-          !access.permitsTask(peerChild,readRepo,true) && !access.permitsTask(child,readRepo,false),"scope or upstream denial");
-    denied([&]{access.decide(owner,"Ernest",request,true);});
-    access.resourceGrant(owner,"Reviewer",readRepo,GrantChange::grant);
-    access.resourceGrant(owner,"Ernest",readRepo,GrantChange::revoke);
-    check(!access.permitsTask(child,readRepo,true) && access.permitsTask(peerChild,readRepo,true),"live revocation");
-    access.resourceGrant(owner,"Ernest",Scope::sessionRead("env","s"),GrantChange::grant);
-    for (auto op:{"steer","interrupt","stop","modify"}) check(!access.permitsTask(child,{"session",Scope::sessionRead("env","s").resource,op},true),"Session control");
     check(turn("request_secret_input",{{"name","repo-token"}}).find("pending")!=std::string::npos,"protected input request");
     auto metadata=access.administration(owner,"Ernest");
     Id input=metadata.at("secretInputs").at(0).at("id");
+    check(turn("submit_secret",{{"requestId",input},{"value","text-supplied-value"}}).find("Tool unavailable") !=
+              std::string::npos && store.decisionHistory(owner).empty(),
+          "A Bot response fulfilled a protected decision");
     denied([&]{access.submitSecret(viewer,"Ernest",input,credential);});
     access.submitSecret(owner,"Ernest",input,credential);
     denied([&]{ access.requestSecret("Ernest",{"../outside"}); });
@@ -234,34 +205,36 @@ void exercise(const std::filesystem::path& dir) {
     check(!stat((dir/"secrets").c_str(),&st) && (st.st_mode&0777)==0700,"directory permissions");
     check(!stat(vaultFile.c_str(),&st) && (st.st_mode&0777)==0600,"secret permissions");
     check(turn("list_secrets",Json::object(),credential).find("repo-token")!=std::string::npos,"names unavailable");
-    access.resourceGrant(owner,"Ernest",{"secret","repo-token","use"},GrantChange::grant);
     access.useSecret(child,{"repo-token"},true,[](auto v){check(v==credential,"resolution");});
+    access.useSecret(peerChild,{"repo-token"},true,[](auto v){check(v==credential,"shared resolution");});
+    access.changeNeverRule(owner,Action::secret_use,"repo-*",true);
     denied([&]{access.useSecret(peerChild,{"repo-token"},true,[](auto){});});
+    access.changeNeverRule(owner,Action::secret_use,"repo-*",false);
     try {
         access.useSecret(child,{"repo-token"},true,[](auto v){throw Conflict(std::string(v));});
         throw std::runtime_error("adapter exception disappeared");
     }
     catch(const Conflict& e){check(std::string(e.what()).find(credential)==std::string::npos,"adapter error leaked");}
+    access.changeNeverRule(owner,Action::environment_launch,"env",true);
     check(turn("check_environment_readiness",{{"environmentId","env"}}).find("/settings/Ernest")!=std::string::npos,"missing setup link");
-    access.resourceGrant(owner,"Ernest",{"environment","env","launch"},GrantChange::grant);
+    access.changeNeverRule(owner,Action::environment_launch,"env",false);
     check(turn("check_environment_readiness",{{"environmentId","env"}}).find("\"ready\":true")!=std::string::npos,"readiness");
     t3.connected = false;
     check(turn("check_environment_readiness").find("T3 sign-in")!=std::string::npos,"OAuth denial");
     t3.connected = true;
+    access.changeNeverRule(owner,Action::environment_configure,"env",true);
     check(turn("update_bot_settings",{{"environmentId","env"},{"runTimeoutSeconds",123}}).find("configure access required")!=std::string::npos,
           "settings mutation accepted without a grant");
-    access.resourceGrant(owner,"Ernest",{"environment","env","configure"},GrantChange::grant);
+    access.changeNeverRule(owner,Action::environment_configure,"env",false);
     turn("update_bot_settings",{{"environmentId","env"},{"runTimeoutSeconds",123}});
-    access.resourceGrant(owner,"Ernest",{"environment","env","inspect"},GrantChange::grant);
     check(turn("list_connections").find("\"runTimeoutSeconds\":123")!=std::string::npos,"settings not effective");
-    for (auto op:{"create_bot","rename_bot"}) {
-        access.resourceGrant(owner,"Ernest",{"bot_admin","Target",op},GrantChange::grant);
-        turn("request_bot_change",{{"operation",op},{"targetBotId","Target"},{"name","New"}});
-    }
-    Store reopened(path);
-    auto changes=reopened.access().administration(owner,"Ernest").at("botChanges");
-    check(changes.size()==2 && changes.at(0).at("status")=="pending","durable pending changes");
-    denied([&]{access.reviewBotChange(viewer,"Ernest",changes.at(0).at("id"),true,[](const BotChange&){});});
+    for (auto op : {"create_bot","rename_bot"})
+        check(turn("request_bot_change",{{"operation",op},{"targetBotId","Target"},{"name","New"}})
+                  .find("\"status\":\"applied\"") != std::string::npos,"Full did not apply a Bot change");
+    check(applied.size() == 2 && store.inbox(owner).size() == 1,"Full queued a Bot change for review");
+    access.changeNeverRule(owner,Action::bot_rename,"Target",true);
+    check(turn("request_bot_change",{{"operation","rename_bot"},{"targetBotId","Target"},{"name","Denied"}})
+              .find("denied by policy") != std::string::npos && applied.size() == 2,"Never allowed a Bot change");
     check(store.conversation("Ernest").dump().find(credential)==std::string::npos &&
           access.administration(owner,"Ernest").dump().find(credential)==std::string::npos,"value in conversation or audit");
     check(chmod(vaultFile.c_str(),0644)==0,"fixture mode");
@@ -281,8 +254,8 @@ void exercise(const std::filesystem::path& dir) {
     model.next={"list_secrets",Json::object(),"list"};
     store.receive(localOwner,reviewer,"peer-names","show names",0);
     runtime.runConversations();
-    check(model.result.at("turn").at(0).at("result").at("names").empty(),"other Bot's secret names visible");
-    check(access.redactSecrets("Reviewer",Json(credential))==credential &&
+    check(model.result.at("turn").at(0).at("result").at("names") == Json::array({"repo-token"}),"shared secret names unavailable");
+    check(access.redactSecrets("Reviewer",Json(credential))=="[redacted]" &&
           access.redactSecrets("Ernest",Json(credential))=="[redacted]","redaction crossed Bot authority");
     for (auto suffix:{"","-wal"}) {
         std::ifstream file(path.string()+suffix,std::ios::binary);
@@ -296,7 +269,7 @@ int main() {
     if (!mkdtemp(tmp)) return 1;
     try {
         const std::filesystem::path directory(tmp);
-        concurrentApproval(directory/"race.db");
+        policyRules(directory/"race.db");
         freshLaunch(directory/"fresh.db");
         runningSessions(directory/"peers.db");
         freshPendingSecretRequests(directory/"secret-requests"/"state.db");

@@ -185,14 +185,13 @@ void Store::protectGitCredential(std::string value) {
     p_->gitRedactionEpoch = epoch.number(0);
 }
 
-SecretRedactor Store::Impl::redactor(std::string_view bot, Json* revision) const {
+SecretRedactor Store::Impl::redactor(std::string_view, Json* revision) const {
     std::lock_guard lock(mutex);
     auto rows = query(R"SQL(
 SELECT file,id FROM protected_inputs p WHERE p.status='fulfilled'
- AND (p.bot=? OR EXISTS (SELECT 1 FROM grant_audit_log a WHERE a.bot=? AND a.action IN ('approve','grant')
-      AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
+
  ORDER BY id
-)SQL",{bot,bot});
+)SQL");
     auto values = gitCredentials;
     if (revision) *revision = Json::array({gitRedactionEpoch});
     while (rows.next()) {
@@ -207,7 +206,7 @@ SecretRedactor Store::Impl::sharedRedactor() const {
     return readRedactor(query("SELECT file FROM protected_inputs WHERE status='fulfilled'"),secrets,gitCredentials);
 }
 
-Json Access::redactSecrets(std::string_view bot, const Json& data) const {
+Json Policy::redactSecrets(std::string_view bot, const Json& data) const {
     return db_.redactor(bot).record(data,SecretRedactor::Fields::external);
 }
 }

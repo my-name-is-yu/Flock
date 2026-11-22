@@ -217,9 +217,6 @@ struct Fixture {
         directory = path;
         restart();
         for (auto bot : {"alpha","beta"}) {
-            for (auto env : {"e","cloud"})
-                store->access().resourceGrant({"fixture",true},bot,{"environment",env,"launch"},GrantChange::grant);
-            store->access().resourceGrant({"fixture",true},bot,Scope::sessionRead("e","thread-1"),GrantChange::grant);
         }
     }
     ~Fixture() {
@@ -869,7 +866,7 @@ void settledReportCanRecoverAfterRestart() {
     for (const bool available : {false,true}) {
         Fixture f;
         const std::string secret = "private-report-diagnostic";
-        auto access = f.store->access();
+        auto access = f.store->policy();
         access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"diagnostic"}),secret);
         const auto id = f.submit();
         f.model.script = [&](const ModelInput& i) {
@@ -1096,7 +1093,7 @@ void redactedHistoryPagination() {
     f.read = "on_demand";
     f.restart();
     const std::string secret = "fixture-history-secret";
-    auto access = f.store->access();
+    auto access = f.store->policy();
     access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"history-token"}),secret);
     f.t3.historyPages = {
         {"Token: " + secret,{},{},"history-item","7",64,true},
@@ -1347,7 +1344,7 @@ void peerCompletionKeepsEvidenceWithinTheReadGrant() {
     f.reach(sender,"peer_waiting");
     const Id recipient = f.store->tasks("beta").front().at("id");
     f.reach(recipient,"running");
-    f.store->access().resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    f.store->policy().changeNeverRule({"fixture",true},Action::session_read,Resource::sessionRead("e","thread-1").target,true);
     f.t3.finish("run-1");
     f.reach(recipient,"completed");
     f.restart();
@@ -2490,7 +2487,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, ConsultRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
+enum class SpecialistMode { Single, PolicyRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -2527,10 +2524,9 @@ void specialistAdmission(SpecialistMode mode) {
             return f.peers.at(std::string(bot));
         });
     };
-    auto access = f.store->access();
-    access.resourceGrant(localOwner,"beta",{"environment","e","launch"},GrantChange::revoke);
+    auto access = f.store->policy();
     if (!person.adminRoot) {
-        access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
+        access.setMember(localOwner,"alpha",person.id,true);
     }
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
                         mode==SpecialistMode::NestedWorkflowPause;
@@ -2542,7 +2538,7 @@ void specialistAdmission(SpecialistMode mode) {
         f.peers["alpha"].push_back(f.peers["beta"].back());
     }
     T3Connections connections(*f.store);
-    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,4173));
     const auto channel = handoffs().invoke(*connection,
         {{"threadId",target.threadId},{"botId","alpha"},{"requestId","request"},
          {"text","Check the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
@@ -2586,13 +2582,13 @@ void specialistAdmission(SpecialistMode mode) {
     auto changed = request;
     changed.commitSha = std::string(40,'b');
     denied(changed);
-    if (mode==SpecialistMode::ConsultRevoked || mode==SpecialistMode::Disconnected) {
+    if (mode==SpecialistMode::PolicyRevoked || mode==SpecialistMode::Disconnected) {
         f.model.script = [](const ModelInput&) { return work("delegate",false); };
         f.reach(first.recipientTaskId,"sending");
         f.t3.onPreflight = [&] {
             T3Connections connections(*f.store);
-            if (mode==SpecialistMode::ConsultRevoked)
-                connections.connect(target.environmentId,person.id,T3ConnectionMode::Consult,4173);
+            if (mode==SpecialistMode::PolicyRevoked)
+                access.changeNeverRule(localOwner,Action::t3_coordinate,target.environmentId,true);
             else connections.disconnect(target.environmentId);
         };
         f.reach(first.recipientTaskId,"completed");
@@ -3175,7 +3171,7 @@ void exhaustedSavedSpecialistEffect() {
     };
     f.restart();
     T3Connections connections(*f.store);
-    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,4173));
     const auto channel = SessionHandoff(*f.store,session,f.specialistPerson).invoke(*connection,
         {{"threadId",target.threadId},{"botId","alpha"},{"requestId","budget-effect"},
          {"text","Review the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
@@ -3239,12 +3235,11 @@ void inferenceInvalidatedByCancel() {
     f.reach(id,"cancelled");
     check(f.t3.launches == 0 && f.logs(id,"decision") == 0,"cancelled inference committed");
 }
-void prefillWithoutGrant() {
+void prefillInFull() {
     Fixture f;
     f.read = "prefill";
     f.restart();
-    auto access = f.store->access();
-    access.resourceGrant({"fixture",true},"alpha",Scope::sessionRead("e","thread-1"),GrantChange::revoke);
+    auto access = f.store->policy();
     for (const auto& [name,token] : std::map<std::string,std::string>{{"first","result"},{"second","complete"}}) {
         auto request = access.requestSecret("alpha",{name});
         access.submitSecret({"fixture",true},"alpha",request,token);
@@ -3296,7 +3291,7 @@ int main() {
             {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},
             {"late report recovery for a peer result",lateReportCanRestorePeerResult},
             {"cancellation with unavailable report",missingReportDoesNotBlockCancellation},
-            {"history reading restart",evidenceResume},{"prefill using Session ownership",prefillWithoutGrant},
+            {"history reading restart",evidenceResume},{"prefill in Full mode",prefillInFull},
             {"redacted history pagination",redactedHistoryPagination},
             {"project owners on task pages",taskPagesShowProjectOwners},
             {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
@@ -3329,13 +3324,13 @@ int main() {
             {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
-            {"pinned specialist admission without a launch grant",[] { specialistAdmission(SpecialistMode::Single); }},
-            {"consult mode blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::ConsultRevoked); }},
+            {"pinned specialist admission in Full mode",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"Never rule blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::PolicyRevoked); }},
             {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
             {"ordinary launch still needs a grant with a full connection",[] {
                 Fixture f;
-                f.store->access().resourceGrant(localOwner,"alpha",{"environment","e","launch"},GrantChange::revoke);
-                T3Connections(*f.store).connect("e",localOwner.id,T3ConnectionMode::Full,4173);
+                f.store->policy().changeNeverRule(localOwner,Action::environment_launch,"e",true);
+                T3Connections(*f.store).connect("e",localOwner.id,4173);
                 f.model.script = [](const ModelInput&) { return work(); };
                 f.wait(f.submit(),"settings");
                 check(f.t3.launches==0,"the connector granted an ordinary Bot launch");

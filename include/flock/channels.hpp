@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 namespace flockv0 {
 enum class ChannelKind { slack, imessage };
@@ -44,7 +44,7 @@ struct ChannelConnector {
 };
 
 ChannelCapabilities channelCapabilities(ChannelKind);
-Scope channelScope(const ChannelOrigin&, std::string_view operation);
+std::string channelPolicyTarget(const ChannelOrigin&);
 
 struct ChannelResource {
     std::string name, mimeType, bytes;

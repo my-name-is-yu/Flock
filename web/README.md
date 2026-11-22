@@ -19,7 +19,7 @@ The loopback listener runs as the local owner by default. For a shared listener,
 JSON file (mode 0600). Provide an array with one entry per credential. Each entry
 has a unique `authorization` string (the complete Basic or Bearer authorization
 header), a `person` ID, and an optional boolean `adminRoot`. Keep one root
-identity for initial grants. Restart the listener after changing this file.
+identity for installation administration. Restart the listener after changing this file.
 Browsers can sign in through the Basic challenge.
 
 Queued and resumed shared Web messages use the sender's current identity and
@@ -45,14 +45,11 @@ request coordination with a goal for ongoing work. Flock looks for the exact
 tool call in the active Run across connected environments and uses the proving
 environment and Thread for replies.
 
-One mode applies to all connected environments. The initial default, `full`,
-permits consultation, coordination, and specialist delegation. Set
-`--mode consult` to allow consultations only. Adding an environment without
-`--mode` keeps the saved mode. In full-mode coordination the live connection
-authorizes specialists to launch inside the handoff's environment and project.
-Specialists still need a valid role and must be configured as peers of the
-root Bot. Nested assignments also require the immediate requester's peer
-configuration. Ordinary Bot launches still require their environment grants.
+The installation policy applies to consultation, coordination and specialist
+delegation. The connector verifies the invoking person's Bot membership and
+the origin of the call. Specialists still need a valid role and must be
+configured as peers of the root Bot. Nested assignments also require the
+immediate requester's peer configuration.
 
 The first connection saves port 4173 by default. Use `--port PORT` to change
 it and restart any running `flock run`. Keep the Web listener enabled for T3
@@ -83,39 +80,33 @@ ends the local coordination. Already-dispatched messages may still reach T3,
 and admitted specialist work may still finish. The handoff view shows the
 queued or unresolved messages and admitted work separately from local state.
 
-## Access administration
+## Access and credentials
 
-An administrator can GET `/api/access?bot=ID` and POST to `/api/access/person`,
-`resource`, `decision`, `secret` and `bot-change` under the same prefix. These
-routes require the usual same-origin JSON mutation headers. Grant mutations use
-`botId`, `action` (grant or revoke) and either `person` and `role` or
-`resourceKind`, `resourceId` and `operation`. Decisions use a saved `requestId`
-and boolean `approve`. Protected input uses a saved `requestId` and `value`.
-Supplying a named secret requires Bot admin access and personal authority for
-that secret, or a root identity. The Bot needs its own `secret:use` grant to
-resolve the value.
+Bot settings shows the installation policy and its Never rules. Full is the
+current mode. Manage rules with `flock rules list`,
+`flock rules add never ACTION TARGET` and `flock rules remove never ACTION TARGET`.
 
-A root can assign a person's delegation authority with `POST /api/access/person-scope`
-using `botId`, `person`, `action` and the exact resource tuple. An ordinary
-administrator needs both admin access to the receiving Bot and personal authority
-for the resource operation to approve it. Approving a Bot change applies the
-saved name to the exact target ID. Creation requires a root identity. Rename
-requires admin access to the requesting and target Bots. If the profile write
-fails after approval, use **Apply approved change** to retry.
+The creator owns the Bot. A root identity can manage all Bots. Shared members
+can view and talk to their Bot and answer its Decision Inbox items. With Web
+identities configured, the owner manages members in Bot settings.
+
+`GET /api/access?bot=ID` returns settings visible to that person.
+`POST /api/access/members` takes `botId`, `person` and boolean `add`.
+`POST /api/access/secret` accepts `botId`, `requestId` and `value`.
+Mutations use the usual same-origin JSON headers. Fulfilled secret values
+stay inside adapters and follow the `secret.use` policy.
 
 `POST /api/messages` optionally accepts an `attachments` array with up to four
 objects containing `name`, `mimeType` and `dataBase64`. Supported types are
 `image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
-to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
-`attachment/<botId>/inspect` to let the Bot inspect media in its conversation.
+to 64 KiB and the attachment array to 98,000 JSON bytes. Media inspection follows the `attachment.inspect` action with the Bot ID as its target.
 An image-capable ChatGPT model receives authorized image contents. Audio
 inspection returns file properties and WAV format and duration.
 
 In the Web composer, attach PNG or JPEG screenshots with the attachment button
 or paste them into the message field. Each image can be up to 8,192 pixels per
 side and 4,194,304 pixels total. A message still requires text. The sent message
-shows the number of images attached. Bot inspection requires the existing
-`attachment/<botId>/inspect` grant. Screenshot drafts and their retry keys live
+shows the number of images attached. Bot inspection follows the `attachment.inspect` rule. Screenshot drafts and their retry keys live
 in the current page and are cleared on reload.
 
 ## Memory and automation

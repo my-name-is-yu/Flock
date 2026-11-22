@@ -115,12 +115,12 @@ std::string branch(const Json& args, const char* key) {
     return ref;
 }
 
-bool repositoryAccess(const Access& access, GitHost& host, const GitContext& context,
+bool repositoryAccess(const Policy& policy, GitHost& host, const GitContext& context,
                       const GitRepository& repo, std::string_view op, const Decision* storedRead = nullptr) {
-    const Scope scope{"repository",repo.resource(),std::string(op)};
-    if (!access.permits(context.botId,scope,true)) return false;
+    const auto action = parseAction("repository." + std::string(op));
+    if (!action || !policy.allows(context.botId,*action,repo.resource())) return false;
     const bool upstream = storedRead ? host.permitsStoredRead(context,repo,*storedRead) : host.permits(context,repo,op);
-    return access.permits(context.botId,scope,upstream);
+    return upstream && policy.allows(context.botId,*action,repo.resource());
 }
 
 GitContext taskGitContext(const Json& task) {
@@ -224,7 +224,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     if (!event.contains("gitResults")) return;
 
     const auto scrub = sharedRedactor();
-    const Access access(*this);
+    const Policy access(*this);
     std::set<Id> authorized;
     for (const auto& [id,read] : requested) {
         const auto& [source,result] = read;
@@ -247,8 +247,8 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     }
     std::lock_guard lock(mutex);
     Transaction projection(db,Transaction::Mode::read);
-    const auto localReadGranted = [&](std::string_view repo) {
-        return access.permits(context.botId,{"repository",GitRepository::parse(host.name(),repo).resource(),"read"},true);
+    const auto localReadAllowed = [&](std::string_view repo) {
+        return access.allows(context.botId,Action::repository_read,GitRepository::parse(host.name(),repo).resource());
     };
     for (auto& entry : event.at("gitResults")) {
         if (!entry.contains("readId")) continue;
@@ -257,9 +257,9 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
             const auto& [source,result] = requested.at(id);
             const bool localAllowed = source.tool == "git_find_repos"
                 ? std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
-                    return localReadGranted(repo.get_ref<const std::string&>());
+                    return localReadAllowed(repo.get_ref<const std::string&>());
                 })
-                : localReadGranted(field(source.args,"repo"));
+                : localReadAllowed(field(source.args,"repo"));
             if (localAllowed) {
                 entry.update({{"sourceTool",source.tool},{"target",scrub.payload(source.args)},
                               {"result",scrub.payload(result)}});
@@ -298,23 +298,16 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             if (previous.next()) return {{"readId",previous.number(0)}};
         }
     }
-    const Access access(*this);
+    const Policy access(*this);
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
         return repositoryAccess(access,host,context,repository,required);
     };
     if (decision.tool == "git_find_repos") {
-        std::vector<GitRepository> candidates;
-        {
-            std::lock_guard lock(mutex);
-            auto rows = query("SELECT resource FROM bot_grants WHERE bot=? AND kind='repository' AND op=?"
-                              " AND substr(resource,1,?)=? ORDER BY resource",{bot,op,hostId.size()+1,hostId + "/"});
-            while (rows.next()) candidates.push_back({hostId,rows.string(0).substr(hostId.size()+1)});
-        }
+        const auto [candidates,more] = host.repositories(context,lower(field(args,"query")));
         Json repos = Json::array();
-        const auto search = lower(field(args,"query"));
-        bool truncated = false;
+        bool truncated = more;
         for (const auto& candidate : candidates) {
-            if (candidate.repo.find(search) == candidate.repo.npos || !permits(candidate,op)) continue;
+            if (!permits(candidate,op)) continue;
             if (repos.size() == 100) {
                 truncated = true;
                 break;

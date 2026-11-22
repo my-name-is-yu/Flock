@@ -43,10 +43,16 @@ struct Backend : T3 {
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
+    std::pair<std::vector<std::string>,bool> projectSessions(
+        std::string_view environment, std::string_view, SessionReadDeadline) override {
+        if (environment == otherEnv) return {{staging},false};
+        return {{staging,second,"internal-shared-but-denied"},false};
+    }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
                                                   SessionReadDeadline) override {
         if (!allowed(target)) return {};
-        std::string title = target.threadId == second ? "Staging investigation 2" : "Staging investigation";
+        std::string title = target.threadId == second ? "Staging investigation 2" :
+            target.threadId == "foreign-thread" ? "Foreign investigation" : "Staging investigation";
         if (!secret.empty()) title.append(235-title.size(),'x').append(secret);
         SessionMetadata metadata{title,"Release Pipeline","release","failed",timestamp,timestamp,{},false};
         if (includeMessages) {
@@ -161,7 +167,7 @@ struct Fixture {
         runtime = std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     }
     Intake intake(std::string bot) {
-        return {std::move(bot),"Investigate staging",env,"release",Json::object()};
+        return {std::move(bot),"Investigate staging",env,"release",{{"conversationEnvironments",{{"Remote",otherEnv}}}}};
     }
     Json call(std::string tool, Json args, std::string bot = "alpha") {
         model.result = nullptr;
@@ -172,8 +178,8 @@ struct Fixture {
         check(!model.result.is_null(),"conversation did not dispatch tool");
         return model.result;
     }
-    void share(std::string_view thread, GrantChange change = GrantChange::grant) {
-        store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(env,thread),change);
+    void blockSession(std::string_view thread, bool blocked = false) {
+        store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(env,thread).target,blocked);
     }
 };
 
@@ -184,19 +190,18 @@ void acceptance() {
     const Json filters{{"query","staging"},{"project","Release Pipeline"},{"status","failed"},
                        {"fromTime","2026-11-21T00:00:00Z"},{"toTime","2026-11-22T00:00:00Z"},{"limit",1}};
     const Json empty{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr},{"truncated",false}};
-    check(f.call(search,filters) == empty && f.t3.reads == 0,"unshared Session contacted T3 or entered search");
+    f.blockSession(staging,true);
+    f.blockSession(second,true);
+    f.blockSession("internal-shared-but-denied",true);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
+    check(f.call(search,filters) == empty && f.t3.reads == 0,"blocked Session contacted T3 or entered search");
     const auto missing = f.call(events,{{"sessionRef","random"},{"operation","counts"}});
     check(missing == f.call(events,{{"sessionRef",staging},{"operation","counts"},{"bot","beta"}}) &&
-          missing.at("ok") == false && f.t3.reads == 0,"manual thread ID exposed the unshared Session");
-
-    f.store->access().personGrant({"root",true},"alpha","alice",Role::admin,GrantChange::grant);
-    try {
-        f.store->access().resourceGrant({"alice"},"alpha",Scope::sessionRead(env,staging),GrantChange::grant);
-        throw std::runtime_error("an administrator shared a scope she does not hold");
-    } catch (const Conflict&) {}
-    f.share(staging);
-    f.share(second);
-    f.share("internal-shared-but-denied");
+          missing.at("ok") == false && f.t3.reads == 0,"manual thread ID exposed the blocked Session");
+    f.blockSession(staging);
+    f.blockSession(second);
+    f.blockSession("internal-shared-but-denied");
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
     const auto found = f.call(search,filters);
     const auto searchCursor = found.at("nextCursor");
     check(found.at("sessions").size() == 1 && searchCursor.is_string(),"search pagination missing");
@@ -265,7 +270,7 @@ void acceptance() {
     check(log.at("attachment").at("content").get<std::string>().starts_with("fixture failed") &&
           log.at("attachment").at("content").get<std::string>().size() == 8192 && log.at("truncated") == true,
           "attachment content or truncation was lost");
-    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::grant);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,false);
     const auto acrossEnvironments = f.call(search,Json::object()).at("sessions");
     const auto remoteRef = acrossEnvironments.back().at("sessionRef");
     check(acrossEnvironments.size() == 3 && remoteRef != sessionRef &&
@@ -274,7 +279,7 @@ void acceptance() {
           f.call(events,{{"sessionRef",remoteRef},{"operation","get_attachment"},{"attachmentRef",attachmentRef}}).dump() ==
               missingAttachment.dump(),
           "references crossed environments for the same T3 thread identifier");
-    f.store->access().resourceGrant({"root",true},"alpha",Scope::sessionRead(otherEnv,staging),GrantChange::revoke);
+    f.store->policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(otherEnv,staging).target,true);
     auto tampered = sessionRef.get<std::string>();
     tampered.back() = tampered.back() == 'a' ? 'b' : 'a';
     check(f.call(events,{{"sessionRef",tampered},{"operation","counts"}}).dump() == missing.dump() &&
@@ -286,19 +291,18 @@ void acceptance() {
     check(fetchLog() == log && request("list",{{"cursor",cursor},{"limit",2}}) == secondPage &&
           f.call(search,nextSearch) == next,"restart lost scoped references or the read grant");
 
-    f.store->access().resourceGrant({"root",true},"beta",{"environment",env,"launch"},GrantChange::grant);
     const auto task = f.store->submit(f.intake("beta"));
     for (int i = 0; i < 8 && f.store->task(task).at("state") != "running"; ++i) f.runtime->tick();
     const auto running = f.store->task(task);
     check(running.at("state") == "running" && f.t3.writes.size() == 1,"foreign task did not start");
-    const auto foreign = Scope::sessionRead(env,"foreign-thread");
-    check(f.store->access().permits("beta",foreign,true) && !f.store->access().permits("alpha",foreign,true),
-          "owned Session access is incorrect");
-    check(f.call(search,Json::object(),"beta").at("sessions").size() == 1,"owned Session missing without a grant");
+    const auto foreign = Resource::sessionRead(env,"foreign-thread");
+    check(f.store->policy().allows("beta",foreign) && f.store->policy().allows("alpha",foreign),
+          "Full did not allow Session reads for both Bots");
+    check(f.call(search,{{"query","Foreign"}},"beta").at("sessions").size() == 1,"owned Session missing without a grant");
     f.t3.denied["foreign-thread"] = true;
-    check(f.call(search,Json::object(),"beta") == empty,"T3 denial did not override Session ownership");
+    check(f.call(search,{{"query","Foreign"}},"beta") == empty,"T3 denial did not override Session ownership");
     f.t3.denied["foreign-thread"] = false;
-    f.share("foreign-thread");
+    f.blockSession("foreign-thread");
     for (auto tool : {"message_session","interrupt_session","send_to_task","cancel_task"}) {
         const auto outcome = f.call(tool,{{"taskId",task},{"generation",running.at("generation")},
                                          {"text","Deliver this"},{"instruction","Deliver this"}});
@@ -315,7 +319,7 @@ void acceptance() {
           request("unknown").dump() == f.call(events,{{"operation","unknown"},{"sessionRef","missing"}}).dump(),
           "request validation depended on whether a Session existed");
     f.t3.denied[staging] = false;
-    f.share(second,GrantChange::revoke);
+    f.blockSession(second,true);
     auto missingSearch = nextSearch;
     missingSearch["cursor"] = "missing";
     check(f.call(search,nextSearch).dump() == f.call(search,missingSearch).dump() &&
@@ -323,21 +327,21 @@ void acceptance() {
 
     f.t3.onRead = [&] {
         Store writer(f.dir/"state.db");
-        writer.access().resourceGrant({"root",true},"alpha",Scope::sessionRead(env,staging),GrantChange::revoke);
+        writer.policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead(env,staging).target,true);
     };
     check(request("read_event",{{"eventRef",eventRef}}) == missing,"revocation during an upstream read was ignored");
     f.t3.onRead = {};
     check(request("list",{{"cursor",cursor},{"limit",2}}) == missing &&
           request("read_event",{{"eventRef",eventRef}}) == missing && fetchLog() == missingAttachment &&
           request("counts") == missing,"revoked Session references still exposed evidence");
-    f.share("foreign-thread",GrantChange::revoke);
+    f.blockSession("foreign-thread",true);
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
 }
 
 void redactionAndResumedHistory() {
     Fixture f;
-    f.share(staging);
-    auto access = f.store->access();
+    f.blockSession(staging);
+    auto access = f.store->policy();
     const auto secret = "synthetic-session-credential";
     const auto key = access.requestSecret("beta",{"beta-fixture"});
     access.submitSecret({"root",true},"beta",key,secret);
@@ -387,7 +391,7 @@ void redactionAndResumedHistory() {
     pauseThenRevoke({"flock_session_events",attachment,"Read the log"},[&] { f.t3.denyAttachment = true; });
     pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.t3.denied[staging] = true; });
     f.t3.denied[staging] = false;
-    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.share(staging,GrantChange::revoke); });
+    pauseThenRevoke({"flock_session_search",Json::object(),"Find staging"},[&] { f.blockSession(staging,true); });
 }
 }
 

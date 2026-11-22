@@ -36,7 +36,7 @@ bool allowedAfterWebEvidence(const Decision& call) {
     if (gitOperation(call) == "read") return true;
     constexpr std::string_view readOnly[]{
         "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
-        "list_grants","list_secrets","list_connections","check_environment_readiness","workspace_read_file",
+        "list_secrets","list_connections","check_environment_readiness","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment","workflow_status","expand_context","read_tool_result",
         "read_memory","memory_history","list_schedules"

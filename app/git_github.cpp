@@ -166,6 +166,21 @@ public:
         return true;
     }
 
+    std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query) override {
+        std::vector<GitRepository> matches;
+        constexpr int pageLimit = 10;
+        for (int page = 1; page <= pageLimit; ++page) {
+            const auto response = json("GET","/user/repos?sort=full_name&per_page=100&page=" + std::to_string(page));
+            if (!response.is_array()) throw Conflict("Expected a list of GitHub repositories");
+            for (const auto& item : response) {
+                auto repo = GitRepository::parse(name(),str(item,"full_name"));
+                if (repo.repo.find(query) != repo.repo.npos) matches.push_back(std::move(repo));
+            }
+            if (response.size() < 100) return {std::move(matches),false};
+        }
+        return {std::move(matches),true};
+    }
+
     GitPullRequest createPullRequest(const GitContext&, const GitOpenPr& request) override {
         const auto& [base,head,baseRef,headRef] = request.target;
         const auto owner = head.repo.substr(0,head.repo.find('/'));

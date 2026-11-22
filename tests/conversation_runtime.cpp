@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
 #include <sqlite3.h>
 #include <algorithm>
@@ -194,9 +194,6 @@ struct Fixture {
         if (!created) throw std::runtime_error("cannot create a test directory");
         dir = created;
         restart();
-        for (auto bot : {"alpha","beta"})
-            for (auto env : {"desktop","cloud"})
-                store->access().resourceGrant({"fixture",true},bot,{"environment",env,"launch"},GrantChange::grant);
     }
     ~Fixture() {
         runtime.reset();
@@ -559,8 +556,6 @@ void attachedChoiceRemainsAuthoritative() {
     f.reach(id,"waiting");
     const auto wait = f.task(id).at("wait");
     const auto other = f.store->submit(f.routing("Check the logs"));
-    f.store->access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
-    f.store->access().resourceGrant(localOwner,"alpha",{"attachment","alpha","inspect"},GrantChange::grant);
     f.script(choice,{
         [](const ModelInput&) {
             return Decision{"workspace_write_file",{{"path","note.txt"},{"text","Unrelated note"}},"Scripted write"};
@@ -1612,7 +1607,6 @@ void cancellationReleasesOnlyAfterStopConfirmation() {
 
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
-    f.store->access().resourceGrant({"fixture",true},"alpha",{"environment","desktop","configure"},GrantChange::grant);
     f.script("Set the desktop timeout",{[](const ModelInput&){
         return Decision{"update_bot_settings",{{"environmentId","desktop"},{"runTimeoutSeconds",123}},"Set timeout"};
     }});

@@ -66,6 +66,11 @@ public:
     std::function<void(std::string_view)> onPrStateUpdate;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
     std::string_view name() const override { return hostName; }
+    std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query) override {
+        if (std::string_view(repoName).find(query) == std::string_view::npos) return {};
+        return {{{hostName,repoName}},false};
+    }
+
     bool permits(const GitContext&, const GitRepository&, std::string_view) const override {
         return upstreamPermitted;
     }
@@ -129,10 +134,6 @@ private:
 inline Intake intake(std::string bot = "owner", std::string project = "project") {
     return {std::move(bot),"Ship the tested change","sandbox",std::move(project),
             {{"modelProvider","chatgpt"},{"model","fixture"}}};
-}
-
-inline void grant(Store& store, std::string_view bot, std::string kind, std::string resource, std::string op) {
-    store.access().resourceGrant(localOwner,bot,{std::move(kind),std::move(resource),std::move(op)},GrantChange::grant);
 }
 
 inline RuntimeOptions options(const std::shared_ptr<FakeHost>& host) {

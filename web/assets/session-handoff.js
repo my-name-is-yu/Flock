@@ -249,10 +249,8 @@ async function loadConnections() {
   const key = JSON.stringify(connections);
   if (key === connectionsRendered) return;
   connectionsRendered = key;
-  const { environments, mode } = connections;
+  const { environments } = connections;
   $('connect-hint').hidden = environments.length > 0;
-  $('connection-mode').hidden = !mode;
-  $('connection-mode').textContent = mode ? `Mode: ${mode}` : '';
   $('connections').hidden = environments.length === 0;
   $('connections').replaceChildren(...environments.map(listItem));
 }

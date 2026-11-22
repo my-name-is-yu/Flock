@@ -1,5 +1,5 @@
 #include "model.hpp"
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <algorithm>
 
@@ -11,7 +11,7 @@ void check(bool pass, std::string_view reason) {
 }
 
 void sessionConversationDispatch(Store& store, const Json& config) {
-    const auto shared = Scope::sessionRead("env-canonical","manual-staging");
+    const auto shared = Resource::sessionRead("env-canonical","manual-staging");
     struct HistoryT3 final : T3 {
         int sends = 0;
         std::string authGeneration(const std::string&,const Json&) override { return "test-auth"; }
@@ -19,6 +19,13 @@ void sessionConversationDispatch(Store& store, const Json& config) {
         Delivery reconcile(const Command&) override { throw std::runtime_error("Unexpected reconcile"); }
         Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
         InterruptOutcome interrupt(const std::string&,const Json&,const RunRef&) override { return InterruptOutcome::Requested; }
+        std::pair<std::vector<std::string>,bool> projectSessions(
+            std::string_view, std::string_view, SessionReadDeadline) override {
+            std::vector<std::string> sessions;
+            for (int i = 0; i < 64; ++i) sessions.push_back("background-" + std::to_string(i));
+            sessions.push_back("manual-staging");
+            return {std::move(sessions),false};
+        }
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
                                                       SessionReadDeadline) override {
             if (target.threadId.starts_with("background-")) return {};
@@ -38,10 +45,10 @@ void sessionConversationDispatch(Store& store, const Json& config) {
     } t3;
     struct HistoryModel final : Model {
         Store& store;
-        const Scope& shared;
+        const Resource& shared;
         bool paged = false, revoked = false;
         Json sessionRef, emptyPage;
-        HistoryModel(Store& store, const Scope& shared) : store(store), shared(shared) {}
+        HistoryModel(Store& store, const Resource& shared) : store(store), shared(shared) {}
         ModelTurn decide(const ModelInput& input) override {
             const auto request = responseRequest(input);
             const auto& steps = input.event.at("turn");
@@ -64,7 +71,7 @@ void sessionConversationDispatch(Store& store, const Json& config) {
             } else if (steps.size() == 4) {
                 const auto& event = steps[3].at("result").at("events").at(0);
                 paged = event.at("excerpt") == "staging failed";
-                store.access().resourceGrant({"root",true},"release",shared,GrantChange::revoke);
+                store.policy().changeNeverRule(localOwner,shared.action,shared.target,true);
                 tool = "flock_session_events";
                 args = {{"sessionRef",sessionRef},{"operation","read_event"},{"eventRef",event.at("eventRef")},
                         {"reason","Read details of the failure"}};
@@ -79,10 +86,6 @@ void sessionConversationDispatch(Store& store, const Json& config) {
                                     {"name",tool},{"arguments",args.dump()}}}),request);
         }
     } model(store,shared);
-    for (int i = 0; i < 64; ++i)
-        store.access().resourceGrant({"root",true},"release",
-            Scope::sessionRead("env-canonical","background-"+std::to_string(i)),GrantChange::grant);
-    store.access().resourceGrant({"root",true},"release",shared,GrantChange::grant);
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     store.receive(localOwner,{"release","Read staging","env-canonical","project-canonical",config},
                   "read-staging","How much work went into the staging investigation?");

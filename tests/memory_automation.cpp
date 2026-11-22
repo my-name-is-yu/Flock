@@ -73,11 +73,8 @@ void memoryFlow(const std::filesystem::path& db) {
     Store store(db,[](std::string_view id) {
         return id == "alpha" ? "Prefer CSV.\n" : "Beta private.";
     });
-    auto access = store.access();
+    auto access = store.policy();
     const std::string path = "team/staging.md";
-    for (const auto* bot : {"alpha","beta"})
-        for (const auto* op : {"read","write"})
-            access.resourceGrant(owner,bot,{"shared_memory",path,op},GrantChange::grant);
 
     Adapter adapter;
     Script bot;
@@ -131,13 +128,14 @@ void memoryFlow(const std::filesystem::path& db) {
     });
     check(lastResult(bot.inputs.at(reader+1)).at("content") == "Staging playbook" &&
           lastResult(bot.inputs.at(reader+2)).at("content") == "Beta private." &&
-          lastResult(bot.inputs.at(reader+3)).at("ok") == false,"Shared or private memory boundary violated");
-    access.resourceGrant(owner,"beta",{"shared_memory","bot:alpha:memory","read"},GrantChange::grant);
+          lastResult(bot.inputs.at(reader+3)).at("content") == "","Shared or private memory boundary violated");
     const auto spoof = turn(beta,"Inspect the granted shared key",{
         {"read_memory",{{"docId","bot:alpha:memory"}},"Read shared key"},
     });
     check(lastResult(bot.inputs.at(spoof+1)).at("docKey") == "shared:bot:alpha:memory" &&
           lastResult(bot.inputs.at(spoof+1)).at("content") == "","Grant to a shared key exposed private memory");
+    access.changeNeverRule(owner,Action::shared_memory_read,path,true);
+    access.changeNeverRule(owner,Action::shared_memory_write,path,true);
     const Intake gamma{"gamma","","env","gamma-project"};
     const auto denied = turn(gamma,"Try the staging playbook",{
         {"read_memory",{{"docId",path}},"Try unauthorized read"},
@@ -146,6 +144,8 @@ void memoryFlow(const std::filesystem::path& db) {
     check(lastResult(bot.inputs.at(denied+1)).at("ok") == false &&
           lastResult(bot.inputs.at(denied+2)).at("ok") == false,"Ungranted Bot accessed a shared file");
 
+    access.changeNeverRule(owner,Action::shared_memory_read,path,false);
+    access.changeNeverRule(owner,Action::shared_memory_write,path,false);
     Store left(db), right(db);
     std::barrier start(2);
     const auto personEdit = [&](Store& connection, const Person& person, const Intake& target, std::string_view content) {
@@ -159,8 +159,7 @@ void memoryFlow(const std::filesystem::path& db) {
         }
     };
     const Person editor{"editor",false};
-    access.personGrant(owner,"beta",editor.id,Role::decide,GrantChange::grant);
-    access.personScope(owner,editor.id,{"shared_memory",path,"write"},GrantChange::grant);
+    access.setMember(owner,"beta",editor.id,true);
     auto firstEdit = std::async(std::launch::async,[&] { return personEdit(left,owner,alpha,"Alpha version"); });
     auto secondEdit = std::async(std::launch::async,[&] { return personEdit(right,editor,beta,"Beta version"); });
     const auto alphaWon = firstEdit.get(), betaWon = secondEdit.get();
@@ -191,7 +190,7 @@ void memoryFlow(const std::filesystem::path& db) {
     const auto receipt = store.receive(localOwner,limited,"paused-shared-read","Check the shared playbook");
     runtime.runConversations();
     const Id pauseId = store.pausedConversations(beta.botId).at(0).at("messageId");
-    access.resourceGrant(owner,beta.botId,{"shared_memory",path,"read"},GrantChange::revoke);
+    access.changeNeverRule(owner,Action::shared_memory_read,path,true);
     store.decideInbox(owner,{beta.botId,InboxKind::conversation_model_budget,receipt.at("messageId"),pauseId,0,0,pauseId},
                       "approve");
     runtime.runConversations();
@@ -202,7 +201,7 @@ void memoryFlow(const std::filesystem::path& db) {
 
 void memoryRedactionLimit(const std::filesystem::path& db) {
     Store store(db,[](auto) { return "Original"; });
-    auto access = store.access();
+    auto access = store.policy();
     const auto secret = access.requestSecret(alpha.botId,{"short-fixture-value"});
     access.submitSecret(owner,alpha.botId,secret,"z9q7");
 
@@ -320,7 +319,7 @@ void isolatedFirings(const std::filesystem::path& db) {
     };
     const auto invalid = reminder({"broken","","env","protected-destination"});
     const auto regular = reminder(beta);
-    auto access = store.access();
+    auto access = store.policy();
     const auto secret = access.requestSecret("broken",{"deployment-token"});
     access.submitSecret(owner,"broken",secret,"protected-destination");
     store.fireDueAutomations(now);
@@ -386,9 +385,9 @@ void webhookGrants(const std::filesystem::path& db) {
     Json alphaReceipt;
     {
         Store store(db);
-        auto access = store.access();
-        access.personGrant(owner,"alpha",sender.id,Role::decide,GrantChange::grant);
-        access.personGrant(owner,"beta",other.id,Role::decide,GrantChange::grant);
+        auto access = store.policy();
+        access.setMember(owner,"alpha",sender.id,true);
+        access.setMember(owner,"beta",other.id,true);
         access.submitSecret(owner,"beta",access.requestSecret("beta",{"webhook-secret"}),"fixture-webhook-token");
         store.createAutomation(owner,alpha,trigger,now);
         store.createAutomation(owner,beta,trigger,now);
@@ -420,7 +419,7 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
     };
     const auto marker = trigger("[redacted]");
     trigger(secret);
-    auto access = store.access();
+    auto access = store.policy();
     const auto request = access.requestSecret(alpha.botId,{"status-token"});
     access.submitSecret(owner,alpha.botId,request,secret);
 
@@ -444,7 +443,7 @@ void webhookRechecksSavedMetadata(const std::filesystem::path& db) {
         {"request","Check " + token},{"eventFilter",{{token,"ready"}}}},now).at("id");
     const auto publicId = store.createAutomation(owner,alpha,{{"kind","trigger"},{"source",source},
         {"request","Check " + token}},now).at("id");
-    auto access = store.access();
+    auto access = store.policy();
     access.submitSecret(owner,beta.botId,access.requestSecret(beta.botId,{"source-token"}),source);
     access.submitSecret(owner,beta.botId,access.requestSecret(beta.botId,{"request-token"}),token);
 
@@ -488,8 +487,8 @@ void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026,1,1);
     const Person sender{"sender",false};
-    auto access = store.access();
-    access.personGrant(owner,alpha.botId,sender.id,Role::decide,GrantChange::grant);
+    auto access = store.policy();
+    access.setMember(owner,alpha.botId,sender.id,true);
     const Json trigger{{"kind","trigger"},{"source","deploy"},{"request","Check deployment"}};
     store.createAutomation(owner,alpha,trigger,now);
     store.createAutomation(owner,beta,trigger,now);

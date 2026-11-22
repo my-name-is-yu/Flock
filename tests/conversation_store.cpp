@@ -137,8 +137,6 @@ struct RuntimeFixture {
     explicit RuntimeFixture(Store& store, std::function<void(std::string_view)> contention = {})
         : runtime(store,model,t3,[this](std::string_view bot) { return notes(bot); },
                   RuntimeOptions{.clock = [this] { return now; },.storageContention = std::move(contention)}) {
-        for (auto bot : {"alpha","beta"})
-            store.access().resourceGrant({"fixture",true},bot,{"environment","env","launch"},GrantChange::grant);
     }
 
     void reach(Store& store, Id id, std::string_view state) {
@@ -294,7 +292,7 @@ void protectedArgumentKeyCannotReachTaskIntake() {
     Store store(fixture.database());
     RuntimeFixture execution(store);
     const std::string marker = "protected-top-level-key-fixture";
-    auto access = store.access();
+    auto access = store.policy();
     access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),marker);
     Json observed;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
@@ -315,7 +313,7 @@ void rejectedSessionReadStillAllowsAnOrdinaryReply() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    auto access = store.access();
+    auto access = store.policy();
     access.submitSecret(localOwner,"alpha",access.requestSecret("alpha",{"fixture"}),"text");
     bool rejected = false;
     execution.model.conversation = [&](const ModelInput& input) -> Decision {
@@ -334,7 +332,6 @@ void savedCallsAreCheckedBeforeExecution() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    store.access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
     const auto save = [&](Id message, const Decision& call) {
         const auto id = std::to_string(message);
         const auto decision = Json::array({{{"tool",call.tool},{"args",call.args},{"reason",call.reason}}});

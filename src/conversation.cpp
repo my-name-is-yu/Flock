@@ -126,7 +126,7 @@ std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, st
                                    std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
     if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
-    if (!Access(*p_).permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+    if (!Policy(*p_).allows(actor,Action::bot_talk,bot)) throw DecisionDenied{};
     return p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
 }
 
@@ -153,7 +153,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+        if (!policy().allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
         const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {

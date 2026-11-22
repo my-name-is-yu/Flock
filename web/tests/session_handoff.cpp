@@ -115,10 +115,9 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     const auto intake = cb.intake;
 
     const Person alice{"alice",true};
-    db.access().personGrant(alice,"release","bob",Role::decide,GrantChange::grant);
-    db.access().personGrant(alice,"triage","bob",Role::view,GrantChange::grant);
+    db.policy().setMember(alice,"release","bob",true);
     T3Connections connections(db);
-    const auto consult = connections.connect(target.environmentId,"bob",T3ConnectionMode::Consult,4173);
+    const auto consult = connections.connect(target.environmentId,"bob",4173);
 
     auto server = startWeb(db,0,std::move(cb));
     Browser browser(*server);
@@ -137,20 +136,17 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     mcp.use(consult);
     const auto rows = mcp.request("tools/call",{{"name","list_flock_bots"}}).at("result").at("structuredContent").at("bots");
     check(rows == Json::array({{{"id","release"},{"name","Release"},{"role","custom"},{"skill","flock-release"}}}),
-          "catalog showed a view-only Bot or exposed private metadata");
-    const auto forbidden = mcp.call(invocation(target,"coord-forbidden",true)).at("result");
-    check(forbidden.at("isError") == true && forbidden.dump().find("consult mode") != std::string::npos,
-          "consult mode allowed coordination or hid the reason");
+          "catalog showed a Bot without membership or exposed private metadata");
     auto viewOnly = invocation(target,"role-forbidden");
     viewOnly["botId"] = "triage";
-    check(mcp.call(viewOnly).at("result").at("isError") == true,"view role allowed invocation");
+    check(mcp.call(viewOnly).at("result").at("isError") == true,"a stranger could invoke the Bot");
 
-    const auto token = connections.connect(target.environmentId,alice.id,T3ConnectionMode::Full,4173);
+    const auto token = connections.connect(target.environmentId,alice.id,4173);
     authFailure({{"Authorization","Bearer " + consult}});
     mcp.use(token);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
     check(browser.get("/api/t3-connections") ==
-          Json{{"mode","full"},{"environments",Json::array({target.environmentId})}},
+          Json{{"environments",Json::array({target.environmentId})}},
           "connection view returned an unexpected projection");
     Browser::checked(mcp.client.Post(endpoint,{{"Origin",browser.origin}},ping,"application/json"),403);
     Browser::checked(mcp.client.Post(endpoint,{{"Sec-Fetch-Site","same-origin"}},ping,"application/json"),403);
@@ -232,7 +228,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     browser.post(coordPath + "/resume",Json::object(),403);
     check(connections.disconnect(target.environmentId),"registered connection was not removed");
     authFailure({{"Authorization","Bearer " + token}});
-    check(browser.get("/api/t3-connections") == Json{{"mode",nullptr},{"environments",Json::array()}},
+    check(browser.get("/api/t3-connections") == Json{{"environments",Json::array()}},
           "disconnected environment was still listed");
 }
 }

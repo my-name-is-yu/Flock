@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS automation_firings(
 Json Store::createAutomation(const Person& actor, const Intake& target, const Json& args, Seconds now) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    if (!access().permitsPerson(actor,target.botId,Role::decide)) throw AccessDenied("Automation access denied");
+    if (!policy().allows(actor,Action::bot_decide,target.botId)) throw AccessDenied("Automation access denied");
     auto result = p_->createAutomation(target,args,"person:" + actor.id,now);
     tx.commit();
     return result;
@@ -147,7 +147,7 @@ VALUES(?,?,?,?,'active',?,?,?)
 Json Store::automations(const Person& actor, std::string_view bot, Id before) const {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db,Transaction::Mode::read);
-    if (!Access(*p_).permitsPerson(actor,bot,Role::view)) throw AccessDenied("Automation access denied");
+    if (!Policy(*p_).allows(actor,Action::bot_view,bot)) throw AccessDenied("Automation access denied");
     auto result = p_->automations(bot,before);
     tx.commit();
     return result;
@@ -194,7 +194,7 @@ WHERE bot_id=? AND config_id IS NOT NULL AND status='active'
 Json Store::cancelAutomation(const Person& actor, std::string_view bot, Id id) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    if (!access().permitsPerson(actor,bot,Role::decide)) throw AccessDenied("Automation access denied");
+    if (!policy().allows(actor,Action::bot_decide,bot)) throw AccessDenied("Automation access denied");
     auto result = p_->cancelAutomation(bot,id);
     tx.commit();
     return result;
@@ -286,12 +286,16 @@ Json Store::Impl::automationTool(std::string_view bot, const Json& routing, cons
     const auto& name = decision.tool;
     const auto& args = decision.args;
     if (name == "list_schedules") return automations(bot,args.contains("before") ? requiredInteger(args,"before") : 0);
-    if (name == "remove_schedule") return cancelAutomation(bot,requiredInteger(args,"id"));
+    if (name == "remove_schedule") {
+        if (!Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
+        return cancelAutomation(bot,requiredInteger(args,"id"));
+    }
     std::string_view kind;
     if (name == "create_schedule") kind = "schedule";
     else if (name == "create_reminder") kind = "reminder";
     else if (name == "create_trigger") kind = "trigger";
     else return nullptr;
+    if (!Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
     auto definition = args;
     definition["kind"] = kind;
     return createAutomation(intake(bot,field(args,"request"),routing),definition,"bot:" + std::string(bot),now);
@@ -360,7 +364,7 @@ Json Store::receiveWebhook(const Person& actor, std::string_view source, std::st
     const auto key = "webhook:" + std::string(source) + ":" + std::string(eventId);
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    const auto permits = [&](std::string_view bot) { return access().permitsPerson(actor,bot,Role::decide); };
+    const auto permits = [&](std::string_view bot) { return policy().allows(actor,Action::bot_decide,bot); };
     std::map<std::string,Json> delivered;
     auto existing = p_->query("SELECT bot_id,receipts FROM automation_firings WHERE dedupe_key=?",{key});
     while (existing.next()) {

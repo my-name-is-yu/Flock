@@ -71,8 +71,6 @@ void notesAndRoutingOnRestart() {
     {
         Store store(db,seed);
         Runtime runtime(store,model,t3,soul);
-        for (auto bot : {"first","second"})
-            store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
         runtime.tick();
         runtime.tick();
@@ -184,8 +182,6 @@ void notesAcrossConversationAndWork() {
         if (!memory.empty()) memory += std::string(64,'X');
         return memory;
     });
-    for (auto bot : {"first","second"})
-        store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
     NotesT3 t3;
     t3.finished = true;
     std::optional<std::string> noteReadError;
@@ -354,8 +350,8 @@ void responseContract() {
                    "record_task_blocker","withdraw_task_question",
                    "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
                    "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
-                   "expand_context","continue_fresh_session","list_grants",
-                   "request_access","list_secrets","request_secret_input","list_connections",
+                   "expand_context","continue_fresh_session",
+                   "list_secrets","request_secret_input","list_connections",
                    "check_environment_readiness","update_bot_settings","request_bot_change",
                    "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
                    "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger",
@@ -376,7 +372,6 @@ void responseContract() {
           turnTool("compact_conversation")["required"].back() == "summary" &&
           turnTool("expand_context")["properties"].contains("compactionId") &&
           turnTool("continue_fresh_session")["required"].back() == "taskId" &&
-          turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
@@ -392,13 +387,12 @@ void responseContract() {
           turnTool("withdraw_task_question")["required"] == Json::array({"reason","taskId","generation","waitId"}) &&
           turnTool("withdraw_task_question")["properties"]["generation"]["minimum"] == 0,
           "blocker and withdrawal schemas must expose their exact task targets");
-    for (auto name : {"list_grants","list_secrets","list_connections","check_environment_readiness"})
+    for (auto name : {"list_secrets","list_connections","check_environment_readiness"})
         check(turnTool(name).at("required")==Json::array({"reason"}),"unexpected mandatory access-tool parameter");
     check(turnTool("update_bot_settings").at("required")==Json::array({"reason","environmentId","runTimeoutSeconds"}) &&
           turnTool("update_bot_settings").at("properties").at("runTimeoutSeconds").at("maximum")==2147483647 &&
           turnTool("request_bot_change").at("required")==Json::array({"reason","operation","targetBotId","name"}) &&
-          turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}) &&
-          turnTool("request_access").at("properties").at("resourceKind").at("enum").size()==resourceOperations().size(),
+          turnTool("request_bot_change").at("properties").at("operation").at("enum")==Json::array({"create_bot","rename_bot"}),
           "access request and settings schemas do not match dispatch");
     const std::map<std::string,Json> memoryAutomationRequired{
         {"read_memory",{"reason"}}, {"memory_history",{"reason"}},
@@ -584,7 +578,6 @@ void acceptanceRunner() {
 void fixedDemoWithUserCriteriaAndContinuation() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     struct ChangeModel final : Model {
         std::string tool;
         Json args;
@@ -654,7 +647,6 @@ void fixedDemoWithUserCriteriaAndContinuation() {
 void fixedDemoFollowUpKeepsTheExplainedResult() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
@@ -680,7 +672,6 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
 void fixedDemoAnswersAnAnchoredQuestion() {
     Sandbox fixture;
     Store store(fixture.path / "state.db");
-    store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
     Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });

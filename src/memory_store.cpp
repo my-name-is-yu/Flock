@@ -127,10 +127,10 @@ Json Store::Impl::memory(std::string_view bot, const Person* actor, std::string_
     if (!validBotId(bot) || !args.is_object()) throw Conflict("Invalid memory arguments");
     const bool shared = args.contains("docId");
     const auto id = shared ? field(args,"docId") : "memory";
-    const Scope scope{"shared_memory",id,reading ? "read" : "write"};
-    auto access = Access(*this);
-    if ((actor && !access.permitsPerson(*actor,bot,reading ? Role::view : Role::decide)) ||
-        (shared && !(actor ? access.permitsPersonScope(*actor,scope) : access.permits(bot,scope,true))))
+    const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+    auto access = Policy(*this);
+    if ((actor && !access.allows(*actor,reading ? Action::bot_view : Action::bot_decide,bot)) ||
+        (shared && !actor && !access.allows(bot,action,id)))
         throw AccessDenied("Memory access denied");
 
     const auto key = shared ? "shared:" + id : privateKey(bot);

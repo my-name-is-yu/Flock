@@ -5,21 +5,6 @@ $('back').href = '/?' + new URLSearchParams({bot: botId});
 fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
   $('back-label').textContent = bots.find(bot => bot.id === botId)?.name || botId;
 }).catch(() => { $('back-label').textContent = botId; });
-const resource = $('resource').elements;
-function configureResourceForm(operations) {
-  const kinds = Object.keys(operations);
-  resource.resourceKind.replaceChildren(...kinds.map(kind => new Option(kind)));
-  const selectOperations = () => {
-    const kind = resource.resourceKind.value;
-    const available = operations[kind];
-    $('resource-hint').textContent = ['session', 'consult', 'work'].includes(kind)
-      ? `Use the compact [environmentId,threadId] JSON array, for example ["local","thread-id"]. Operations: ${available.join(', ')}.`
-      : '';
-    resource.operation.replaceChildren(...available.map(op => new Option(op)));
-  };
-  resource.resourceKind.onchange = selectOperations;
-  selectOperations();
-}
 function post(url, data) {
   return fetch(url, {
     method: 'POST', headers: {'Content-Type':'application/json','X-Flock-Action':'1'},
@@ -29,21 +14,15 @@ function post(url, data) {
 async function submit(path, data) {
   try {
     const response = await post('/api/access/' + path, {botId, ...data});
-    if (response.status === 409 && (await response.json()).error === 'configure_web_identities_first') {
-      $('status').textContent = 'Configure FLOCK_WEB_IDENTITIES_FILE and restart Flock before granting people access.';
-      return;
-    }
     if (!response.ok) throw Error();
     await load();
-    $('status').textContent = response.status === 202 ? 'Approved. Retry applying this Bot change.' : 'Saved.';
+    $('status').textContent = 'Saved.';
   } catch { $('status').textContent = 'Could not save this change. Check your access and refresh.'; }
 }
-for (const path of ['person','resource']) {
-  $(path).onsubmit = (event) => {
-    event.preventDefault();
-    void submit(path, {action:'grant', ...Object.fromEntries(new FormData(event.target))});
-  };
-}
+$('members').onsubmit = (event) => {
+  event.preventDefault();
+  void submit('members', {add:true, ...Object.fromEntries(new FormData(event.target))});
+};
 function row(id, text) {
   const item = document.createElement('p');
   item.textContent = text;
@@ -53,7 +32,7 @@ function row(id, text) {
 function button(row, label, action) {
   const b = document.createElement('button');
   b.textContent = label;
-  b.className = /^(Deny|Decline|Revoke|Disconnect)$/.test(label) ? 'button danger' : 'button';
+  b.className = /^(Deny|Decline|Remove|Disconnect)$/.test(label) ? 'button danger' : 'button';
   b.onclick = action;
   row.append(b);
 }
@@ -62,8 +41,10 @@ async function load() {
   if (!response.ok) throw Error();
   const data = await response.json();
   $('administration').hidden = false;
-  configureResourceForm(data.operations);
-  for (const id of ['inputs','requests','changes','grants','people']) $(id).replaceChildren();
+  $('mode').textContent = data.mode === 'full' ? 'Full' : data.mode;
+  for (const id of ['inputs','rules','people']) $(id).replaceChildren();
+  if (data.rules.length === 0) row('rules', 'None');
+  for (const rule of data.rules) row('rules', rule.action + ' · ' + rule.target);
   for (const request of data.secretInputs.filter(x => x.status === 'pending')) {
     const item = row('inputs',request.name);
     const input = document.createElement('input');
@@ -77,20 +58,11 @@ async function load() {
       void submit('secret',{requestId:request.id,value});
     });
   }
-  const scope = r => [r.resourceKind,r.resourceId,r.operation].join(' / ');
-  for (const [list, endpoint, entries] of [['requests','decision',data.requests],['changes','bot-change',data.botChanges]]) {
-    for (const r of entries.filter(x => x.status === 'pending' || (endpoint === 'bot-change' && x.status === 'approved'))) {
-      const item = row(list,r.resourceKind ? scope(r) : [r.operation,r.target,r.name].join(' / '));
-      if (r.status === 'approved') {
-        button(item,'Apply approved change',() => submit(endpoint,{requestId:r.id,approve:true}));
-        continue;
-      }
-      for (const approve of [true,false]) button(item,approve?'Approve':'Deny',() => submit(endpoint,{requestId:r.id,approve}));
-    }
+  $('secrets').hidden = !$('inputs').childElementCount;
+  $('sharing').hidden = !data.canManageMembers;
+  for (const person of data.members) {
+    button(row('people',person),'Remove',() => submit('members',{person,add:false}));
   }
-  for (const [section, list] of [['secrets','inputs'],['access-requests','requests'],['bot-changes','changes']]) $(section).hidden = !$(list).childElementCount;
-  for (const r of data.grants) button(row('grants',scope(r)),'Revoke',() => submit('resource',{resourceKind:r.resourceKind,resourceId:r.resourceId,operation:r.operation,action:'revoke'}));
-  for (const p of data.people) button(row('people',p.person+' / '+p.role),'Revoke',() => submit('person',{...p,action:'revoke'}));
 }
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
@@ -129,5 +101,5 @@ async function loadMachines() {
 }
 const [machines, admin] = await Promise.allSettled([loadMachines(), load()]);
 if (machines.status === 'rejected') $('status').textContent = 'Could not load local machine connections.';
-else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Bot administrator access is required.';
+else if (admin.status === 'rejected' && !machines.value) $('status').textContent = 'Bot access is required.';
 document.getElementById(location.hash.slice(1) || section)?.scrollIntoView();

@@ -15,7 +15,7 @@ const env = Object.fromEntries(
 );
 const options = { encoding: "utf8", timeout: 5000, env };
 const cli = (...args) => JSON.parse(execFileSync(executable, [...cliArgs, ...args], options));
-const launch = ["release", "environment", "demo-env", "launch"];
+const launch = ["never", "environment.launch", "demo-*"];
 
 async function waitForState(id, state) {
   const deadline = Date.now() + 6000;
@@ -38,15 +38,10 @@ try {
     projectId: "demo-project",
   }));
 
-  assert.deepEqual(cli("access", "list", "release"), []);
-  const invalid = spawnSync(executable, [...cliArgs, "access", "grant", "release", "environment", "demo-env", "write"], options);
+  assert.deepEqual(cli("rules", "list"), []);
+  const invalid = spawnSync(executable, [...cliArgs, "rules", "add", "never", "environment.write", "demo-env"], options);
   assert.equal(invalid.status, 1);
-  assert.match(invalid.stderr, /Invalid access scope/);
-  cli("access", "grant", ...launch);
-  const grants = cli("access", "list", "release");
-  assert.equal(grants.length, 1);
-  const { resourceKind, resourceId, operation, approvedBy } = grants[0];
-  assert.deepEqual([resourceKind, resourceId, operation, approvedBy], ["environment", "demo-env", "launch", "local-cli"]);
+  assert.match(invalid.stderr, /Unknown policy action/);
 
   const daemon = spawn(executable, [...cliArgs, "run", "--fixed", "--no-web"], { env, stdio: ["ignore", "ignore", "inherit"] });
   const stopped = once(daemon, "close");
@@ -54,13 +49,21 @@ try {
     const submitted = cli("submit", "release", "Check the upcoming release");
     const completed = await waitForState(submitted.id, "completed");
     assert.match(completed.lastRun.runId, /^demo-run-/);
-    cli("access", "revoke", ...launch);
-    assert.deepEqual(cli("access", "list", "release"), []);
+    cli("rules", "add", ...launch);
+    cli("rules", "add", ...launch);
+    const [{kind, action, target, createdAt}, ...other] = cli("rules", "list");
+    assert.deepEqual([kind, action, target], launch);
+    assert.ok(createdAt > 0);
+    assert.deepEqual(other, []);
+
     const next = cli("submit", "release", "Check again");
     const blocked = await waitForState(next.id, "waiting");
     assert.equal(blocked.wait.reason, "settings");
-    assert.match(blocked.wait.text, /Access Settings.*flock access grant/);
+    assert.match(blocked.wait.text, /denied by installation policy/);
     assert.equal(blocked.lastRun, null);
+    assert.deepEqual(cli("rules", "remove", ...launch), []);
+    cli("reconcile", ...[blocked.id, blocked.wait.id, blocked.currentRevision, blocked.generation].map(String));
+    await waitForState(blocked.id, "completed");
   } finally {
     daemon.kill();
     await stopped;

@@ -49,6 +49,7 @@ public:
     virtual bool permitsStoredRead(const GitContext& context, const GitRepository& repo, const Decision&) {
         return permits(context,repo,"read");
     }
+    virtual std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view) { return {}; }
     virtual GitPullRequest createPullRequest(const GitContext&, const GitOpenPr&) = 0;
     virtual std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget&) = 0;
     virtual GitLog readCiLogs(const GitContext&, const GitRepository&, Id jobId, std::size_t maxBytes) = 0;

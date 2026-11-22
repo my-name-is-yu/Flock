@@ -144,14 +144,11 @@ void runner() {
     Id task, other;
     {
         Store store(path);
-        grant(store,"owner","environment","sandbox","launch");
-        grant(store,"owner","repository",repoGrant,"pr");
-        grant(store,"owner","repository",repoGrant,"read");
         task = store.submit(intake());
-        other = store.submit(intake("other","other-project"));
         Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(store.task(task).at("state") == "completed" && host->createCalls == 1,"Session-to-PR flow did not complete: " + store.history(task).dump());
+        other = store.submit(intake("other","other-project"));
         check(script.results.at("session-pr").at("prNumber") == 1,"task did not receive the PR number");
         check(historyCount(store,task,"git_mutation") == 2,"PR operation history must include intent and result");
         check(historyCount(store,task,"report") == 1,"Session result missing");
@@ -211,8 +208,6 @@ void webhookHeadPeriods() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","repository",repoGrant,"pr");
-    grant(store,"owner","repository",repoGrant,"read");
     const auto first = store.submit(intake());
     auto args = openArgs();
     args["taskId"] = first;
@@ -254,8 +249,6 @@ void reviewAfterTaskProgress() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"pr");
     const auto task = store.submit(intake());
     for (int i = 0; i < 4 && store.task(task).value("currentRevision",Id{0}) == 0; ++i) runtime.tick();
     check(store.task(task).value("currentRevision",Id{0}) > 0,"task has no initial revision");
@@ -298,9 +291,6 @@ void webhookDeliveryResumesAfterAnIdlePoll() {
     script.openAfterSession = true;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"pr");
-    grant(store,"owner","repository",repoGrant,"read");
     const auto task = store.submit(intake());
     host->inspect = [&](const GitContext&,const GitOpenPr&) {
         check(store.receiveGitWebhook({hostName,"early-ci",repoName,"ci","completed",{},sha,"Early head",0}),
@@ -330,8 +320,6 @@ void reconciliationAfterTaskRevision() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"pr");
     const auto task = store.submit(intake());
     for (int i = 0; i < 4 && store.task(task).value("currentRevision",Id{0}) == 0; ++i) runtime.tick();
     const auto before = store.task(task);
@@ -384,7 +372,6 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
     {
         Store store(path);
         task = store.submit(intake());
-        grant(store,"owner","repository",repoGrant,"pr");
         Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         host->inspect = [&](const GitContext& context, const GitOpenPr& request) {
             operationId = request.operationId;
@@ -487,8 +474,8 @@ void accessAndActions() {
         {"git_manage_issue",{{"action","create"},{"title","Follow-up"},{"labels",{"bug"}},{"assignees",{"alice"}}}},
         {"git_manage_issue",{{"action","update"},{"issueNumber",2},{"state","closed"},{"labels",Json::array()}}},
     };
-    grant(store,"owner","repository",repoGrant,"read");
-    grant(store,"owner","repository",repoGrant,"write");
+    for (auto action : {Action::repository_pr,Action::repository_issues})
+        store.policy().changeNeverRule(localOwner,action,repoGrant,true);
     auto readOnly = openArgs();
     readOnly["taskId"] = task;
     check(invoke(store,runtime,script,"read-is-not-pr","git_open_pr",readOnly).at("ok") == false &&
@@ -500,7 +487,11 @@ void accessAndActions() {
         {{"host",hostName},{"repo",repoName},{"taskId",task},{"action","update"},{"issueNumber",2},{"state","closed"}});
     check(deniedIssueUpdate.at("error") == "Repository access denied" && host->hostCalls == 0,
           "repository read or write allowed an issue update");
-    for (const auto* operation : {"pr","review","issues"}) grant(store,"owner","repository",repoGrant,operation);
+    for (auto action : {Action::repository_pr,Action::repository_issues})
+        store.policy().changeNeverRule(localOwner,action,repoGrant,false);
+    for (auto action : {Action::repository_read,Action::repository_write,Action::repository_pr,
+                        Action::repository_issues,Action::repository_review})
+        store.policy().changeNeverRule(localOwner,action,"github.com/*/private",true);
     auto argsFor = [task](Json args, std::string repo) {
         args.update({{"host",hostName},{"repo",std::move(repo)},{"taskId",task}});
         return args;
@@ -573,7 +564,6 @@ void newAttempts() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","repository",repoGrant,"pr");
     const auto originalTask = store.submit(intake());
     auto args = openArgs();
     args["taskId"] = originalTask;
@@ -606,9 +596,6 @@ void taskMutationAttempts() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"pr");
-    grant(store,"owner","repository",repoGrant,"issues");
     const auto task = store.submit(intake());
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     const std::vector<std::string> states{"closed","open","closed"};
@@ -644,8 +631,6 @@ void taskMutationRestart(bool protectTitleOnRestart) {
     Id task;
     {
         Store store(path);
-        grant(store,"owner","environment","sandbox","launch");
-        grant(store,"owner","repository",repoGrant,"pr");
         task = store.submit(intake());
         Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         auto args = openArgs();
@@ -705,8 +690,6 @@ void taskReadRecovery() {
     {
         Store store(path);
         store.protectGitCredential(secret);
-        grant(store,"owner","environment","sandbox","launch");
-        grant(store,"owner","repository",repoGrant,"read");
         task = store.submit(intake());
         script.onTaskResult = [&](const ModelInput&) -> Decision {
             return {"git_read_ci_logs",{{"host","GITHUB.COM"},{"repo","ORG/FLOCK"},
@@ -717,8 +700,8 @@ void taskReadRecovery() {
         check(host->logCalls == 5,"fixture did not read five jobs");
     }
     Store store(path);
-    const auto grantRead = [&](GrantChange change) {
-        store.access().resourceGrant(localOwner,"owner",{"repository",repoGrant,"read"},change);
+    const auto blockRead = [&](bool block) {
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,block);
     };
     int phase = 0;
     Id saved = 0;
@@ -736,13 +719,13 @@ void taskReadRecovery() {
                   replay.at("target") == Json{{"host",hostName},{"repo",repoName},{"jobId",81},{"maxBytes",32}} &&
                   replay.at("result").at("data") == Json{{"text","job 81 [redacted]"},{"truncated",true}},
                   "reopened database did not recover the original authorized, redacted read");
-            grantRead(GrantChange::revoke);
+            blockRead(true);
         } else {
             check(std::ranges::all_of(recent,[](const Json& entry) {
                 return !entry.contains("target") && entry.at("result").at("ok") == false;
             }),"revoked read access leaked previous Git evidence");
             if (phase == 2) {
-                grantRead(GrantChange::grant);
+                blockRead(false);
                 host->upstreamPermitted = false;
             } else return {"complete",{{"report","Checked historical job evidence and revocation"}}, {}};
         }
@@ -768,8 +751,6 @@ void boundedTaskReadAndForeignReference(bool comments) {
     host->result = {{"items",std::move(page)},{"nextPage",2}};
     Script script;
     Sessions sessions;
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"read");
     const auto first = store.submit(intake());
     Id saved = 0;
     script.onTaskResult = [&](const ModelInput& input) -> Decision {
@@ -820,11 +801,9 @@ void redaction() {
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
     store.protectGitCredential(credential);
-    auto access = store.access();
+    auto access = store.policy();
     const auto input = access.requestSecret("other",{"example"});
     access.submitSecret(localOwner,"other",input,secret);
-    grant(store,"owner","repository",repoGrant,"read");
-    grant(store,"owner","repository",repoGrant,"pr");
     const auto task = store.submit(intake());
     host->result["description"] = credential + " " + secret;
     host->result[credential] = secret;
@@ -862,9 +841,6 @@ void notificationCannotControlASession() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","environment","sandbox","launch");
-    grant(store,"owner","repository",repoGrant,"read");
-    grant(store,"owner","repository",repoGrant,"pr");
     const auto task = store.submit(intake());
     for (int i = 0; i < 8 && store.task(task).at("state") != "running"; ++i) runtime.tick();
     check(store.task(task).at("state") == "running","Session did not start");
@@ -897,8 +873,6 @@ void notificationBudgetAndRevocation() {
     Script script;
     Sessions sessions;
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
-    grant(store,"owner","repository",repoGrant,"read");
-    grant(store,"owner","repository",repoGrant,"pr");
     auto limited = intake();
     limited.config["modelCallLimit"] = 1;
     const auto task = store.submit(limited);
@@ -925,7 +899,7 @@ void notificationBudgetAndRevocation() {
     check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos,"Approved model call did not resume");
 
     script.onNotification = [&] {
-        store.access().resourceGrant(localOwner,"owner",{"repository",repoGrant,"read"},GrantChange::revoke);
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,true);
     };
     const auto replies = historyCount(store,task,"conversation_reply");
     check(store.receiveGitWebhook({hostName,"revoked-turn",repoName,"comment","created",{1},sha,"An update",0}),

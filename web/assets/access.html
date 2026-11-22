@@ -7,14 +7,10 @@
 <p id="status" role="status"></p>
 <section id="local-connections" hidden><h2>Local machine connections</h2><div id="machines"></div></section>
 <div id="administration" hidden>
-<section id="environment"><h2>Environment</h2>
-<p>Set environmentId and projectId in the Bot’s config.json. Sign in with the T3 connection for that environment and grant the Bot its environment launch operation below.</p></section>
+<section><h2>Installation policy</h2><p id="mode"></p></section>
+<section><h2>Never rules</h2><div id="rules"></div></section>
 <section id="secrets" hidden><h2>Protected input</h2><div id="inputs"></div></section>
-<section id="access-requests" hidden><h2>Access requests</h2><div id="requests"></div></section>
-<section id="bot-changes" hidden><h2>Bot changes</h2><div id="changes"></div></section>
-<section><h2>Resource grants</h2><div id="grants"></div>
-<form id="resource"><label>Resource kind <select name="resourceKind"></select></label><label>Resource ID <input required name="resourceId"><small id="resource-hint"></small></label><label>Operation <select name="operation"></select></label><button class="button">Grant</button></form></section>
-<section><h2>People</h2><div id="people"></div>
-<form id="person"><label>Person ID <input required name="person"></label><label>Role <select name="role"><option>view</option><option>decide</option><option>admin</option></select></label><button class="button">Grant</button></form></section>
+<section id="sharing" hidden><h2>Shared members</h2><div id="people"></div>
+<form id="members"><label>Person ID <input required name="person"></label><button class="button">Add member</button></form></section>
 </div>
 </main></body></html>

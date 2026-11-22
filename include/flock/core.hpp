@@ -194,6 +194,8 @@ public:
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual std::pair<std::vector<std::string>,bool> projectSessions(
+        std::string_view, std::string_view, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
@@ -205,7 +207,7 @@ public:
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class GitHost;
 struct GitWebhook;
-class Access;
+class Policy;
 class ParticipationStore;
 class RootDelivery;
 class SessionHandoff;
@@ -236,7 +238,7 @@ public:
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
-    Access access();
+    Policy policy();
     Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;
@@ -251,7 +253,7 @@ public:
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
-                     const Json& data = Json::object(), const ApplyBotChange& = {});
+                     const Json& data = Json::object());
     Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
                        std::string_view title, std::string_view prompt);
     bool receiveGitWebhook(const GitWebhook&);
@@ -328,7 +330,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;
-    friend class Access;
+    friend class Policy;
     friend class T3Connections;
     friend class RootDelivery;
     friend class SessionHandoff;
@@ -356,6 +358,7 @@ struct RuntimeOptions {
     std::function<void(std::string_view)> storageContention = {};
     std::function<std::optional<Person>(std::string_view)> resolveSpecialistPerson = {};
     std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
+    ApplyBotChange applyBotChange = {};
 };
 class Runtime {
 public:
