@@ -3,6 +3,8 @@ import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { createTimelineRows, placeRows } from '/timeline-rows.js';
+import { replyArrivalId } from '/reply-arrival.mjs';
 import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
 import { createComposerDraftStore } from '/composer-drafts.mjs';
 
@@ -16,6 +18,14 @@ const elements = Object.fromEntries([
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
+const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function animateLiveReply(id) {
+  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
+    { opacity: .76, transform: 'translateY(4px)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+}
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -77,6 +87,7 @@ const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
+let visibilityGeneration = 0;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
@@ -215,7 +226,8 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
+    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
     void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
@@ -483,18 +495,6 @@ function draftRow(draft) {
   return row;
 }
 
-function placeSidebarRows(container, rows) {
-  const wanted = new Set(rows);
-  for (const child of [...container.children]) {
-    if (!wanted.has(child)) child.remove();
-  }
-  let next = container.firstElementChild;
-  for (const row of rows) {
-    if (row === next) next = next.nextElementSibling;
-    else container.insertBefore(row, next);
-  }
-}
-
 function renderBots() {
   const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
   if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds)) return;
@@ -513,7 +513,7 @@ function renderBots() {
     if (!sidebarEntries.has(id)) sidebarEntries.set(id, createSidebarEntry(id));
   }
   const rowFor = ({ id }) => sidebarEntries.get(id).row;
-  placeSidebarRows(elements.pinned, pinned.map(rowFor));
+  placeRows(elements.pinned, pinned.map(rowFor));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
@@ -521,7 +521,7 @@ function renderBots() {
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
   else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
-  placeSidebarRows(list, rows);
+  placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
@@ -772,6 +772,7 @@ function icon(name, className = 'glyph') {
 }
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
+  control.dataset.timelineAction = name;
   control.setAttribute('aria-label', label);
   control.title = label;
   control.append(icon(name));
@@ -861,7 +862,7 @@ function eventTime(event, extra) {
   return time;
 }
 function sourceAction(source, label = 'Open source') {
-  return button(label, 'text-button', async () => {
+  const control = button(label, 'text-button', async () => {
     const match = byId(`event-${source.messageId}`);
     const target = match?.closest('article') ?? match;
     if (target) {
@@ -884,6 +885,8 @@ function sourceAction(source, label = 'Open source') {
     }
     renderDetail();
   });
+  control.dataset.timelineAction = `source:${source.messageId}`;
+  return control;
 }
 function backToLatest() {
   view.source = null;
@@ -933,6 +936,7 @@ function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
   link.className = 'run-link';
+  link.dataset.timelineAction = `run:${link.href}`;
   link.title = 'Open in T3';
   link.setAttribute('aria-label', 'Open in T3');
   link.replaceChildren(icon('open'));
@@ -976,7 +980,7 @@ function eventCard(event, context, place, report) {
   row.append(meta);
 
   const line = node('div', 'msg-line');
-  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
@@ -1104,6 +1108,11 @@ function eventCard(event, context, place, report) {
   row.append(line, ...extras);
   return row;
 }
+function syncTimelineAvatar(row, show, bot) {
+  const current = row.querySelector('.msg-line')?.firstElementChild;
+  if (show && current?.classList.contains('msg-avatar-space')) current.replaceWith(avatar(bot, 'msg-avatar'));
+  else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
+}
 function workingLine(data) {
   const row = node('div', 'msg bot working group-start');
   const line = node('div', 'msg-line');
@@ -1127,58 +1136,60 @@ function dayLabel(seconds) {
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
 }
 
-function peerExchangeLink(messages, activeBot) {
-  const first = messages[0];
-  const { fromBotId, toBotId } = first.data;
-  const peer = participant(fromBotId === activeBot ? toBotId : fromBotId);
-  const count = messages.length === 1 ? '1 message' : `${messages.length} messages`;
+function peerExchangeLink(peer, messageCount, activeBot, firstMessageId) {
+  const count = messageCount === 1 ? '1 message' : `${messageCount} messages`;
   const link = peerLink(activeBot, peer.id, null, 'peer-exchange-link');
   link.append(avatar(peer, 'peer-exchange-avatar'), node('span', null, `${count} with ${peer.name}`));
-  link.dataset.peerFocus = first.id;
+  link.dataset.peerFocus = firstMessageId;
   return link;
 }
 
-function peerThread(events, dm) {
-  const fragment = document.createDocumentFragment();
+function peerThread(events, dm, keep) {
   if (!events.length) {
-    const empty = node('div', 'empty-state');
     const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
-    empty.append(node('h2', null, title));
-    if (dm.error) empty.append(node('p', null, dm.error));
-    fragment.append(empty);
+    return [keep('empty', [title, dm.error], () => {
+      const empty = node('div', 'empty-state');
+      empty.append(node('h2', null, title));
+      if (dm.error) empty.append(node('p', null, dm.error));
+      return empty;
+    })];
   }
+  const rows = [];
   let day = '';
   for (const event of events) {
     const nextDay = dayLabel(event.time);
     if (nextDay !== day) {
-      fragment.append(node('p', 'day', nextDay));
+      rows.push(keep(`day-${event.id}`, nextDay, () => node('p', 'day', nextDay)));
       day = nextDay;
     }
-    const { fromBotId, text, forwardedMessage } = event.data;
-    const from = participant(fromBotId);
-    const row = node('article', 'msg group-start peer-dm-message');
-    row.id = `event-${event.id}`;
-    if (forwardedMessage) {
-      const content = node('div', 'peer-forward-content');
-      const label = node('div', 'peer-forward-meta');
-      label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
-      const card = node('div', 'bubble peer-forwarded-message');
-      card.append(node('p', 'event-text', forwardedMessage.text));
-      content.append(label, card);
-      row.append(content);
-    }
-    if (text || !forwardedMessage) {
-      const metadata = node('div', 'msg-meta');
-      metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
-      const line = node('div', 'msg-line');
-      const bubble = node('div', 'bubble');
-      bubble.append(node('p', 'event-text', text));
-      line.append(avatar(from, 'msg-avatar'), bubble);
-      row.append(metadata, line);
-    }
-    fragment.append(row);
+    const from = participant(event.data.fromBotId);
+    rows.push(keep(`event-${event.id}`, [event, from.name, from.avatar], () => peerMessage(event, from)));
   }
-  return fragment;
+  return rows;
+}
+function peerMessage(event, from) {
+  const { text, forwardedMessage } = event.data;
+  const row = node('article', 'msg group-start peer-dm-message');
+  row.id = `event-${event.id}`;
+  if (forwardedMessage) {
+    const content = node('div', 'peer-forward-content');
+    const label = node('div', 'peer-forward-meta');
+    label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
+    const card = node('div', 'bubble peer-forwarded-message');
+    card.append(node('p', 'event-text', forwardedMessage.text));
+    content.append(label, card);
+    row.append(content);
+  }
+  if (text || !forwardedMessage) {
+    const metadata = node('div', 'msg-meta');
+    metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
+    const line = node('div', 'msg-line');
+    const bubble = node('div', 'bubble');
+    bubble.append(node('p', 'event-text', text));
+    line.append(avatar(from, 'msg-avatar'), bubble);
+    row.append(metadata, line);
+  }
+  return row;
 }
 
 function timelineScrollPosition() {
@@ -1232,7 +1243,7 @@ function updateJumpToLatest() {
   control.hidden = hidden;
 }
 
-function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
   const older = elements.older;
   const source = view?.source;
   const data = source ? null : view?.data;
@@ -1247,15 +1258,9 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   peerStatus.hidden = !olderFailed;
   peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
-  const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
-  const focusedLink = focused?.dataset.peerFocus;
   const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
   const position = key && readingPositions.get(key);
   const moveScroll = () => {
-    if (focusedLink) {
-      const link = [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((item) => item.dataset.peerFocus === focusedLink);
-      link?.focus({ preventScroll: true });
-    }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
     else if (position) {
       // The restored offset already includes the returning composer's height.
@@ -1271,13 +1276,25 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
-    elements.timeline.replaceChildren(peerThread(events, dm));
+    updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     return;
   }
-  if (!changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) return;
-  scroller.setAttribute('aria-label', 'Conversation history');
+  if (changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) {
+    scroller.setAttribute('aria-label', 'Conversation history');
+    updateTimelineRows(context, (keep) => conversationRows(data, events, keep, source));
+    moveScroll();
+  }
+  const canAnimate = !source && liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  if (canAnimate) {
+    const id = replyArrivalId(events, liveAfterId);
+    if (id != null) animateLiveReply(id);
+  }
+}
+
+function conversationRows(data, events, keep, source) {
   const timeline = {
     bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
     // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
@@ -1288,12 +1305,19 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
+  const bot = timeline.bot;
+  const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
   const shown = timelineMessages(events, dayLabel);
-  const fragment = document.createDocumentFragment();
+  const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
     if (!peerMessages.length) return;
-    fragment.append(peerExchangeLink(peerMessages, view.id));
+    const [first] = peerMessages;
+    const { fromBotId, toBotId } = first.data;
+    const peer = participant(fromBotId === view.id ? toBotId : fromBotId);
+    const count = peerMessages.length;
+    rows.push(keep(`peer-${first.id}`, [peer.id, peer.name, peer.avatar, count],
+      () => peerExchangeLink(peer, count, view.id, first.id)));
     peerMessages = [];
   };
   let day = '';
@@ -1302,7 +1326,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
-      fragment.append(node('p', 'day', eventDay));
+      rows.push(keep(`day-${event.id}`, eventDay, () => node('p', 'day', eventDay)));
       day = eventDay;
       previous = null;
     }
@@ -1315,26 +1339,39 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
       taskStart: previous?.taskId !== event.taskId,
       afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
     };
-    const message = eventCard(event, timeline, place, report);
-    if (event.id === source?.id) message.classList.add('conversation-source-target');
-    fragment.append(message);
+    const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
+    const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
+    const row = keep(`event-${event.id}`,
+      [event, report, botVersion, timeline.canDecide, timeline.readOnly, place.groupStart, place.taskStart, place.afterQuestion, wait,
+        event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
+        wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
+        event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
+      () => eventCard(event, timeline, place, report));
+    if (side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
+    row.classList.toggle('conversation-source-target', event.id === source?.id);
+    rows.push(row);
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
   appendPeerMessages();
-  if (!fragment.childElementCount && !source) {
-    const empty = node('div', 'empty-state');
-    if (data?.bot) empty.append(avatar(data.bot));
+  if (!rows.length) {
     const loaded = !!data || (!view && listLoaded);
-    empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
-    if (!data && loaded && !bots.length) {
-      empty.append(node('p', null, 'Create a Bot to get started.'));
-      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
-    }
-    fragment.append(empty);
+    rows.push(keep('empty', [!!data, loaded, !bots.length, botVersion], () => {
+      const empty = node('div', 'empty-state');
+      if (data?.bot) empty.append(avatar(data.bot));
+      empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
+      if (!data && loaded && !bots.length) {
+        empty.append(node('p', null, 'Create a Bot to get started.'));
+        empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+      }
+      return empty;
+    }));
   }
-  if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
-  elements.timeline.replaceChildren(fragment);
-  moveScroll();
+  if (data && (data.presence === 'working' || data.presence === 'thinking')) {
+    rows.push(keep('working', [botVersion, data.presence, data.activeSessions?.[0]?.request], () => workingLine(data)));
+  }
+  return rows;
 }
 
 const sendKey = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform ?? navigator.platform) ? '⌘' : 'Ctrl';
@@ -1828,13 +1865,13 @@ function renderDetail() {
   const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
   if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
 }
-function render(scroll) {
+function render(scroll, liveAfterId) {
   renderBots();
   renderHeader();
   renderActivity();
   const previousScroll = timelineScrollPosition();
   renderComposer();
-  renderTimeline(scroll, previousScroll);
+  renderTimeline(scroll, previousScroll, liveAfterId);
   renderDetail();
   scheduleReadCheck();
 }
@@ -1889,9 +1926,11 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll) {
-  if (context !== view) return;
-  const isCurrent = () => context === view;
+async function refreshView(context, scroll, liveGeneration) {
+  const isCurrent = () => context === view &&
+    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+  if (!isCurrent()) return;
+  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
     const eventHistory = eventHistoryForRefresh(context);
@@ -1918,7 +1957,7 @@ async function refreshView(context, scroll) {
     }
     return;
   }
-  render(scroll);
+  render(scroll, liveAfterId);
   if (context.openSettingsOnLoad) {
     context.openSettingsOnLoad = null;
     openSettingsFromMenu(context.id);
@@ -2180,10 +2219,10 @@ document.addEventListener('keydown', (event) => {
 
 let syncRetry;
 function retrySync() {
-  if (!document.hidden) syncRetry ??= setTimeout(syncAll, 2500);
+  if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
 
-function syncAll() {
+function catchUp() {
   clearTimeout(syncRetry);
   syncRetry = null;
   if (document.hidden) return;
@@ -2192,9 +2231,10 @@ function syncAll() {
   void view?.dm?.refresh();
 }
 
-const liveUpdates = createLiveUpdates(syncAll, (change) => {
+const liveUpdates = createLiveUpdates(catchUp, (change) => {
+  if (document.hidden) return;
   if (change.list === true) void refreshBots();
-  if (view && change.bot === view.id) void view.refresh();
+  if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
   const dm = view?.dm;
   if (dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId) void dm.refresh();
 });
@@ -2212,7 +2252,7 @@ function subscribeToView() {
 
 function resumeUpdates() {
   subscribeToView();
-  syncAll();
+  catchUp();
 }
 
 elements.conversation.addEventListener('scroll', scheduleReadCheck, { passive: true });
@@ -2220,8 +2260,14 @@ new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
 document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
-document.addEventListener('visibilitychange', resumeUpdates);
-window.addEventListener('pagehide', () => liveUpdates.use(null));
+document.addEventListener('visibilitychange', () => {
+  visibilityGeneration++;
+  resumeUpdates();
+});
+window.addEventListener('pagehide', () => {
+  visibilityGeneration++;
+  liveUpdates.use(null);
+});
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 
