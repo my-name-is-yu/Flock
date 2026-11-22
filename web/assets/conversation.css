@@ -109,6 +109,7 @@
 .msg.user .bubble ::selection { background: rgb(255 255 255 / .3); }
 .event-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-md); line-height: 1.65; }
 .channel-image { display: block; max-width: min(100%, 20rem); max-height: 14rem; object-fit: contain; }
+.read-only-choices { margin-block: .35rem 0; padding-inline-start: 1.2rem; color: var(--text-2); font-size: var(--text-sm); }
 .event-reason { margin-top: .4rem; color: var(--text-2); font-size: var(--text-sm); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .glyph { display: inline-grid; place-items: center; }
 .glyph svg { width: 1rem; height: 1rem; }

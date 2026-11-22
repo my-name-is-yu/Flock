@@ -290,7 +290,7 @@ public:
                             view["changedMessageIds"] = changed->second;
                         view["sessionCursor"] = sessionThrough;
                         setViewer(res,callbacks_,actor);
-                        json(res,200,view);
+                        json(res,200,withConversationAccess(actor,id,std::move(view)));
                     } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
@@ -488,11 +488,16 @@ private:
 
     Json snapshot(const Person& person, const ChangeFeed::BotList&) const { return botList(person); }
 
+    Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
+        view["canDecide"] = store_.access().permitsPerson(actor,bot,Role::decide);
+        return view;
+    }
+
     Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
         if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
         const auto bot = findBot(view.bot);
         if (bot.is_null()) return nullptr;
-        return store_.access().redactSecrets(view.bot,web::botView(store_,bot));
+        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot)));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {

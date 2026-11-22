@@ -11,7 +11,7 @@ const elements = Object.fromEntries([
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
   'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
   'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
@@ -802,6 +802,11 @@ function questionActions(context, task, { dialog = false } = {}) {
   actions.append(reply);
   return actions;
 }
+function readOnlyChoices(choices) {
+  const options = node('ul', 'read-only-choices');
+  for (const choice of choices) options.append(node('li', null, choice));
+  return options;
+}
 function pausedActions(turn) {
   const actions = node('div', 'event-actions');
   const waitMessageId = turn.messageId;
@@ -928,7 +933,9 @@ function eventCard(event, context, place, report) {
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
+    const choices = pendingWait?.wait.choices ?? data.choices;
+    if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
+    if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
@@ -947,8 +954,11 @@ function eventCard(event, context, place, report) {
     text.textContent = data.text;
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
-    if (paused) extras.push(pausedActions(paused));
-    else if (data.suggestions?.length) extras.push(suggestionActions(event));
+    if (paused && context.canDecide) extras.push(pausedActions(paused));
+    else if (data.suggestions?.length) {
+      if (context.canDecide) extras.push(suggestionActions(event));
+      else bubble.append(readOnlyChoices(data.suggestions));
+    }
     if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
@@ -1018,13 +1028,13 @@ function eventCard(event, context, place, report) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (pendingWait?.wait.reason === 'user_question') {
+  if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
     const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
   }
 
-  if (replyTarget) {
+  if (context.canDecide && replyTarget) {
     const [label, target] = replyTarget;
     actions.append(iconButton('reply', label, () => beginReply(target)));
   }
@@ -1204,6 +1214,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    canDecide: data?.canDecide === true,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
@@ -1289,9 +1300,12 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = context?.composer && !context.dm;
+  const available = !!context?.composer && !context.dm;
+  const canDecide = available && context.data?.canDecide === true;
   elements['composer-container'].hidden = !available;
-  if (!available) {
+  elements.composer.hidden = !canDecide;
+  elements['view-only-notice'].hidden = !available || canDecide;
+  if (!canDecide) {
     composition = null;
     elements.message.value = '';
     return;
@@ -1597,6 +1611,7 @@ function localDateTime(timestamp) {
 }
 function waitContent(context, task) {
   const wait = task.wait;
+  const canDecide = context.data.canDecide === true;
   elements['detail-title'].textContent = waitLabel(wait.reason);
   const request = node('blockquote', 'wait-request');
   request.append(node('p', 'wait-request-text', task.request));
@@ -1604,15 +1619,23 @@ function waitContent(context, task) {
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
+  if (wait.reason === 'deadline' && task.deadline)
+    reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
   const perform = (operation, fields) => void operate(context, task, operation, fields);
   const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
-  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'Approve in T3' : 'Open in T3');
+  const approveInT3 = canDecide && wait.reason === 't3_input';
+  const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
   if (runLink) {
-    runLink.className = wait.reason === 't3_input' ? 'dialog-button primary' : 'dialog-button quiet';
+    runLink.className = approveInT3 ? 'dialog-button primary' : 'dialog-button quiet';
     primary.append(runLink);
+  }
+  if (!canDecide) {
+    if (wait.choices?.length) reason.append(readOnlyChoices(wait.choices));
+    if (runLink) content.push(primary);
+    return content;
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
@@ -1620,7 +1643,6 @@ function waitContent(context, task) {
   else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
   else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
-    if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
@@ -1713,10 +1735,10 @@ function renderDetail() {
   }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, turn, [...pendingWaits])) {
+    if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
       elements['detail-title'].textContent = waitLabel('model_budget');
       elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
-      if (turn) elements['detail-body'].append(pausedActions(turn));
+      if (turn && view.data.canDecide === true) elements['detail-body'].append(pausedActions(turn));
     }
     return;
   }
@@ -1750,6 +1772,10 @@ function mergeSessionTasks(context, tasks) {
 }
 
 function mergeLatest(context, latest) {
+  if (context.data?.canDecide !== latest.canDecide) {
+    signatures.delete('timeline');
+    signatures.delete('detail');
+  }
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
@@ -1899,7 +1925,7 @@ async function operate(context, task, operation, fields = {}) {
     targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
 }
 async function submitOperation(context, key, payload) {
-  if (!context || pendingWaits.has(key)) return;
+  if (context?.data?.canDecide !== true || pendingWaits.has(key)) return;
   const isOpen = () => view === context && (payload.itemKind
     ? detail?.kind === 'paused' && detail.messageId === payload.waitId
     : detail?.waitId === payload.waitId);
@@ -1924,6 +1950,7 @@ async function submitOperation(context, key, payload) {
 }
 async function submit(event) {
   event.preventDefault();
+  if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
   const { composer } = context;

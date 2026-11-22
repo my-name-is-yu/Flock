@@ -626,6 +626,7 @@ void eventStream(const std::filesystem::path& path) {
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     Browser stream(*server);
+    check(browser.get("/api/view?bot=release").at("canDecide") == true,"local owner lost conversation access");
     Browser::checked(browser.client.Get("/api/events?peer=triage"),400);
     Browser::checked(browser.client.Get("/api/events",httplib::Headers{{"Origin","http://example.test"}}),403);
 
@@ -651,6 +652,61 @@ void eventStream(const std::filesystem::path& path) {
         ++changes;
         return true;
     });
+}
+
+void conversationPermissions(const std::filesystem::path& path) {
+    Store store(path);
+    const Person owner{"fixture",true};
+    auto access = store.access();
+    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
+    access.personGrant(owner,"release","decider",Role::decide,GrantChange::grant);
+    access.resourceGrant(owner,"release",{"environment","local-env","launch"},GrantChange::grant);
+    auto web = callbacks();
+    web.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer reader") return Person{"reader"};
+        if (credential == "Bearer decider") return Person{"decider"};
+        return Person{};
+    };
+
+    const auto taskId = store.submit(web.intake("release","Draft release notes"));
+    FixedModel model;
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    tick(runtime,3);
+    auto& observation = t3.observations["thread-release"];
+    observation.kind = Observation::Kind::Question;
+    observation.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
+    tick(runtime,2);
+
+    const auto server = startWeb(store,0,web);
+    Browser reader(*server), decider(*server), stream(*server);
+    reader.client.set_default_headers({{"Authorization","Bearer reader"}});
+    stream.client.set_default_headers({{"Authorization","Bearer reader"}});
+    decider.client.set_default_headers({{"Authorization","Bearer decider"}});
+    const auto viewPath = "/api/view?bot=release";
+    const auto readable = reader.get(viewPath);
+    const auto writable = decider.get(viewPath);
+    check(readable.at("canDecide") == false && writable.at("canDecide") == true,"conversation permission did not follow the caller");
+    check(!readable.at("events").empty() && readable.at("events") == writable.at("events") &&
+          readable.at("waits") == writable.at("waits"),"reader lost conversation or wait history");
+
+    const auto& wait = readable.at("waits").at(0);
+    const Json answer = {{"botId","release"},{"taskId",taskId},{"waitId",wait.at("wait").at("id")},
+        {"operation","answer"},{"text","すべて"},{"targetRevision",wait.at("currentRevision")},
+        {"targetGeneration",wait.at("generation")}};
+    const Json message = {{"botId","release"},{"clientMessageId","permission-test"},{"text","Check the next release"}};
+    reader.post("/api/messages",message,403);
+    reader.post("/api/operations",answer,403);
+    unsigned updates = 0;
+    readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
+        check(change.at("bot") == "release","permission change did not invalidate the open conversation");
+        check(reader.get(viewPath).at("canDecide") == (updates == 1),"refreshed conversation has stale permission");
+        if (++updates == 3) return false;
+        access.personGrant(owner,"release","reader",updates == 1 ? Role::decide : Role::view,GrantChange::grant);
+        return true;
+    });
+    decider.post("/api/operations",answer);
+    decider.post("/api/messages",message,201);
 }
 
 void retryEventProjection(const std::filesystem::path& path) {
@@ -914,6 +970,7 @@ int main() {
         exercise(directory.path / "state.db");
         sidebarReplies(directory.path / "sidebar.db");
         eventStream(directory.path / "events.db");
+        conversationPermissions(directory.path / "conversation-permissions.db");
         retryEventProjection(directory.path / "retry-events.db");
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
