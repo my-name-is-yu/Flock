@@ -861,6 +861,7 @@ function sourceAction(source, label = 'Open source') {
 }
 function backToLatest() {
   view.source = null;
+  view.pendingSource = null;
   render('bottom');
   elements.conversation.scrollTop = elements.conversation.scrollHeight;
   elements.conversation.focus({ preventScroll: true });
@@ -876,11 +877,14 @@ function cardSourceAction(bot, id, close) {
       return;
     }
     const context = view;
+    // A later jump or Jump to latest replaces this request; only the newest one may apply.
+    const request = context.pendingSource = { id };
     let page;
     try {
       page = await api(botQuery('conversation', botId, id + 1));
     } catch {}
-    if (context !== view) return;
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
     if (!page?.events.some((event) => event.id === id)) {
       setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
       return;
@@ -1934,6 +1938,7 @@ async function submit(event) {
   event.preventDefault();
   const context = view;
   if (!context?.data || context.dm || elements.send.disabled) return;
+  context.pendingSource = null;
   if (context.source) {
     context.source = null;
     render('bottom');
