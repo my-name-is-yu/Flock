@@ -134,6 +134,7 @@ struct Store::Impl {
     Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
     void deliverGitWebhooks();
+    std::optional<Id> gitWebhooksDrainedAt;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
@@ -158,6 +159,7 @@ struct Store::Impl {
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }
     void exec(const char*, const Json& args = Json::array()) const;
+    Id dataVersion() const;
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;

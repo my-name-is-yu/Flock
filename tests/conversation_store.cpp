@@ -582,6 +582,40 @@ void replyTargetsReachTheTurn() {
           seen[1]["inReplyTo"]["text"] == "Why so slow?","A reply to a Bot message lost the message it answered");
     check(seen[2]["kind"] == "unavailable","A reply to another Bot's message was exposed");
 }
+
+void conversationPagesCombineTaskAndMessageHistory() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    execution.model.conversation = [](const ModelInput&) { return say("Noted."); };
+
+    const auto older = store.history(task(store,"Older task")).at(0).at("id").get<Id>();
+    const auto message = receive(store,"message","Hello alpha");
+    task(store,"Another Bot's task","beta");
+    const auto newer = store.history(task(store,"Newer task")).at(0).at("id").get<Id>();
+    const auto cursor = store.conversationChangesSince(std::nullopt,"alpha").through;
+    execution.runtime.runConversations();
+
+    const auto latest = store.conversation("alpha",0,2);
+    check(latest.size() == 2 && latest.at(0).at("id") == newer &&
+          latest.at(1).at("kind") == "conversation_reply" &&
+          latest.at(1).at("data").at("replyToMessageId") == message,
+          "The newest page did not merge task and reply history in order");
+    const auto earlier = store.conversation("alpha",newer,2);
+    check(earlier.size() == 2 && earlier.at(0).at("id") == older &&
+          earlier.at(1).at("id") == message && earlier.at(1).at("data").at("text") == "Hello alpha" &&
+          store.conversation("alpha",older,2).empty(),
+          "An older page skipped, repeated, or lost details of a visible entry");
+
+    using Events = Store::ConversationEvents;
+    const auto incoming = store.conversation("alpha",0,2,Events::incoming);
+    check(incoming == Json::array({latest.at(1)}) &&
+          store.conversation("alpha",latest.at(1).at("id"),2,Events::incoming).empty(),
+          "The incoming-only page included outgoing history or repeated its cursor");
+    const auto changes = store.conversationChangesSince(cursor,"alpha");
+    check(changes.through == latest.at(1).at("id") && changes.messages.at("alpha") == std::vector<Id>{message},
+          "A new reply did not invalidate the earlier message");
+}
 }
 
 int main() {
@@ -600,6 +634,7 @@ int main() {
         longResultsAreReadInChunks();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         replyTargetsReachTheTurn();
+        conversationPagesCombineTaskAndMessageHistory();
         std::cout << "Conversation Store acceptance passed\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
