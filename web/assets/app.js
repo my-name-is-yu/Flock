@@ -234,10 +234,13 @@ function setTheme(mode) {
   document.dispatchEvent(new CustomEvent('flock-theme', { detail: mode }));
   renderTheme(mode);
 }
+const mainElement = byId('main');
+const navBackdrop = byId('nav-backdrop');
 function openNavigation(open, focus = true) {
   const expanded = open && narrow.matches;
   const navigationVisibilityChanged = workspace.classList.contains('nav-open') !== expanded;
   workspace.classList.toggle('nav-open', expanded);
+  if (mainElement) mainElement.inert = expanded;
   elements['open-navigation'].setAttribute('aria-expanded', expanded);
   if (focus && narrow.matches && navigationVisibilityChanged) elements[expanded ? 'close-navigation' : 'open-navigation'].focus();
 }
@@ -988,10 +991,15 @@ function iconButton(name, label, click) {
 async function copyMessage(control, text) {
   try {
     await navigator.clipboard.writeText(text);
+    clearTimeout(control._copyTimer);
+    delete control.dataset.copied;
+    void control.offsetWidth;
+    control.dataset.copied = 'true';
     control.replaceChildren(icon('copied'));
     control.setAttribute('aria-label', 'Copied');
     control.title = 'Copied';
-    setTimeout(() => {
+    control._copyTimer = setTimeout(() => {
+      delete control.dataset.copied;
       control.replaceChildren(icon('copy'));
       control.setAttribute('aria-label', 'Copy text');
       control.title = 'Copy text';
@@ -1189,7 +1197,12 @@ function focusConversationMessage(target) {
   const bottom = viewport.bottom - returnSpace;
   const center = top + Math.max(0, (bottom - top - message.height) / 2);
   row.focus({ preventScroll: true });
-  scroller.scrollTop += message.top - center;
+  const nextTop = Math.max(0, scroller.scrollTop + message.top - center);
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: nextTop, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = nextTop;
+  }
 }
 async function showConversationMessage(context, id, { bot, signal, preferLoaded } = {}) {
   if (context !== view || context.dm || signal?.aborted) return;
@@ -1228,6 +1241,7 @@ async function showConversationMessage(context, id, { bot, signal, preferLoaded 
     return;
   }
   elements.timeline.querySelector('.conversation-source-target')?.classList.remove('conversation-source-target');
+  void target.offsetWidth;
   target.classList.add('conversation-source-target');
   focusConversationMessage(target);
   updateJumpToLatest();
@@ -2731,6 +2745,7 @@ elements['theme-switch'].addEventListener('click', (event) => {
 elements['new-bot-button'].addEventListener('click', () => openNewBot(elements['new-bot-button']));
 elements['open-navigation'].addEventListener('click', () => openNavigation(true));
 elements['close-navigation'].addEventListener('click', () => openNavigation(false));
+navBackdrop?.addEventListener('click', () => openNavigation(false));
 narrow.addEventListener('change', () => openNavigation(false, false));
 const sidebarToggle = byId('toggle-chat-sidebar');
 const sidebarResizer = elements['sidebar-resizer'];
@@ -2851,7 +2866,11 @@ elements['jump-to-latest'].addEventListener('click', () => {
     scroller.focus({ preventScroll: true });
     return;
   }
-  scroller.scrollTop = scroller.scrollHeight;
+  if (typeof scroller.scrollTo === 'function') {
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: reducedMotion.matches ? 'auto' : 'smooth' });
+  } else {
+    scroller.scrollTop = scroller.scrollHeight;
+  }
   updateJumpToLatest();
 });
 elements.conversation.addEventListener('keydown', (event) => {
