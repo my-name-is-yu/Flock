@@ -439,16 +439,6 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                 if (!change(task,[&](Json& current) {
                     if (!saved.is_object() || saved.at("run") != current["activeRun"])
                         current["runStop"] = {{"run",current["activeRun"]}};
-                    // Adopt pending stops written by the separate cancellation and revision protocols.
-                    if (current.contains("stopActionId"))
-                        db.exec("UPDATE outbox SET phase='superseded' WHERE id=? AND phase IN ('ready','started')",
-                                {current["stopActionId"]});
-                    if (current.contains("interruptAt")) current["runStop"]["retryAt"] = current["interruptAt"].get<Seconds>() + 5;
-                    if (current.contains("replanInterruptAt")) current["runStop"]["retryAt"] = current["replanInterruptAt"];
-                    const auto reconcile = std::max(current.value("cancelReconcileAt",Seconds{}),current.value("replanReconcileAt",Seconds{}));
-                    if (reconcile) current["runStop"]["reconcileAt"] = reconcile;
-                    for (auto key : {"stopActionId","interruptAt","replanInterruptAt","cancelReconcileAt","replanReconcileAt"})
-                        current.erase(key);
                     current["runStop"]["intent"] = intent;
                     return true;
                 },&task)) return;
@@ -1273,21 +1263,6 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
             std::lock_guard lock(db.mutex);
             event = db.currentEvent(task);
             if (event.is_null() || event["consumed"] == true || event["retryAt"].get<Seconds>() > options.clock()) return;
-            if (event.contains("_flockSavedCompletion") || event.contains("_flockDeferredCompletion")) {
-                // Upgrade an open decision from before terminals were stored on the task.
-                Transaction transaction(db.db);
-                if (db.load(task["id"])["generation"] != task["generation"]) return;
-                auto prior = event.value("_flockSavedCompletion",Json(nullptr));
-                if (prior.is_object()) {
-                    prior["eventId"] = event["id"];
-                    prior["revisionId"] = revision(task);
-                    db.exec("UPDATE tasks SET data=json_set(data,'$.deferredTerminal',json(?)) WHERE id=?",{prior,task["id"]});
-                }
-                db.exec("UPDATE events SET data=json_remove(data,'$._flockSavedCompletion','$._flockDeferredCompletion') WHERE id=?",
-                        {event["id"]});
-                transaction.commit();
-                return;
-            }
             const auto deferred = task.value("deferredTerminal",Json(nullptr));
             if (deferred.is_object() && deferred["eventId"] == event["id"] &&
                 deferred["generation"] == task["generation"] && deferred["revisionId"] == revision(task)) {
