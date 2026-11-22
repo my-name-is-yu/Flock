@@ -161,7 +161,13 @@ int main(int argc, char** argv) {
               "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
+        check(observation.kind == Observation::Kind::Finished && !observation.settled && observation.status == "completed",
+              "a completed Run with no pending input stays unsettled");
+        fixture({{"scenario", "settling-input"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::ExternalInput &&
+              observation.question.requestId.empty() && observation.question.fields.empty(),
+              "pending input during delegated settlement is handed off to T3");
         fixture({{"scenario", "manual-result"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",

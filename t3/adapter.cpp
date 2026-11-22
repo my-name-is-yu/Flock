@@ -393,7 +393,7 @@ std::optional<Json> wireAnswers(const Json& fields, const Json& answers) {
             continue;
         }
         auto selected = answer->is_array() ? *answer : Json::array({*answer});
-        if (selected.empty() || (!field["multiple"].get<bool>() && selected.size() != 1)) return std::nullopt;
+        if (!field["multiple"].get<bool>() && selected.size() != 1) return std::nullopt;
         std::set<std::string> seen;
         bool singleCustom = false;
         for (const auto& value : selected) {
@@ -767,8 +767,8 @@ public:
             const auto reply = wait(client, run, true);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
-            if (terminal(status)) {
-                if (boolean(reply, "timedOut")) return state(Observed::Finished, status);
+            const bool finished = terminal(status);
+            if (finished && !boolean(reply, "timedOut")) {
                 auto source = RunRef{run.threadId, effective, run.link};
                 auto observed = state(Observed::Finished, status, true);
                 const auto later = reply.value("resultRun", Json::object());
@@ -795,13 +795,14 @@ public:
                 observed.resultRunId = source.runId;
                 return observed;
             }
-            if (!active(status)) invalidResponse();
+            if (!finished && !active(status)) invalidResponse();
             const auto head = threadHead(client, run.threadId);
             const auto& thread = detail(head, run.threadId);
             const auto count = position(member(thread, "pendingRequestCount"));
-            if (count != 0) {
+            if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
+            if (!finished && count == 1) {
                 const auto requests = pending(client, run.threadId);
-                if (count == 1 && requests.size() == 1) {
+                if (requests.size() == 1) {
                     const auto& id = *requests.begin();
                     auto match = attribute(client, {run.threadId, effective, run.link}, id);
                     if (match.kind == Attribution::Kind::Owned) {
@@ -811,9 +812,8 @@ public:
                     }
                     if (match.kind == Attribution::Kind::Resolved) return state(Observed::Running, status);
                 }
-                return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
             }
-            return state(Observed::Running, status);
+            return state(Observed::ExternalInput, "Review pending approvals or questions in the T3 Thread");
         } catch (const Failure& failure) {
             if (failure.kind == Failure::Kind::Settings) return state(Observed::Unavailable, "settings");
             return state(Observed::Unavailable, failure.kind == Failure::Kind::Auth ? "auth" : failure.what());

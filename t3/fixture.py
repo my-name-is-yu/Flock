@@ -193,7 +193,7 @@ class Fixture(BaseHTTPRequestHandler):
             if scenario == "resumed":
                 return {"threadId": "thread", "runId": "continued", "timedOut": True, "status": "running"}
             active = scenario in ("running", "question", "ambiguous", "approval", "race")
-            timed_out = active or scenario in ("settling", "manual-active")
+            timed_out = active or scenario in ("settling", "settling-input", "manual-active")
             reply = {"threadId": "thread", "runId": "root", "timedOut": timed_out,
                      "status": "running" if scenario == "running" else "waiting" if active else "completed"}
             if not timed_out and args["untilDelegatedWorkSettled"]:
@@ -203,6 +203,7 @@ class Fixture(BaseHTTPRequestHandler):
             assert scenario == "running" and args == {"threadId": "thread", "runId": "root"}
             return {"threadId": "thread", "runId": "root", "status": "interrupt_requested"}
         if name == "t3_pending_request":
+            assert scenario != "settling-input", "terminal Run cannot own a pending question"
             action = args["action"]
             if action == "list":
                 return {"requestIds": ["request"] if scenario in ("question", "ambiguous", "race") else []}
@@ -219,7 +220,7 @@ class Fixture(BaseHTTPRequestHandler):
         thread_id = args["threadId"]
         active = {"manual-active": "unrelated", "running": "root", "resumed": "continued"}.get(scenario)
         latest = "later" if scenario.endswith("-result") else (active or "root")
-        count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling") else 0
+        count = 1 if scenario in ("question", "ambiguous", "approval", "race", "settling-input") else 0
         summary = self.summary(thread_id) | {"activeRunId": active, "latestRunId": latest, "archived": False,
                                              "pendingRequestCount": count}
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
