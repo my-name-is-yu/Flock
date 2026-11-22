@@ -379,16 +379,16 @@ function createSidebarEntry(botId) {
   const face = node('span');
   const avatarHost = node('span', 'avatar');
   const pinPresence = node('span');
-  const pinUnread = node('span', 'unread-badge pin-unread', 'New');
+  const pinUnread = node('span', 'unread-dot pin-unread');
   pinUnread.setAttribute('aria-hidden', 'true');
   face.append(avatarHost, pinPresence, pinUnread);
 
   const name = node('span', 'bot-name');
   const nameText = node('span', 'bot-name-text');
   const presenceDot = node('span', 'presence-dot');
-  const rowUnread = node('span', 'unread-badge', 'New');
+  const rowUnread = node('span', 'unread-dot row-unread');
   rowUnread.setAttribute('aria-hidden', 'true');
-  name.append(nameText, presenceDot, rowUnread);
+  name.append(nameText, presenceDot);
   const preview = node('span', 'bot-preview');
   const dots = node('span', 'working-dots');
   dots.setAttribute('aria-hidden', 'true');
@@ -400,7 +400,7 @@ function createSidebarEntry(botId) {
 
   const pinName = node('span', 'pin-name');
   const status = node('span', 'sr-only');
-  select.append(face, text, pinName, status);
+  select.append(rowUnread, face, text, pinName, status);
   const tooltip = node('span', 'pin-tooltip');
   tooltip.setAttribute('aria-hidden', 'true');
   const tooltipName = node('span');
@@ -451,6 +451,7 @@ function createSidebarEntry(botId) {
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
       const unread = hasUnread(bot);
+      row.classList.toggle('unread', !!unread);
       pinUnread.hidden = !pinned || !unread;
       rowUnread.hidden = pinned || !unread;
       const label = [unread && 'New reply', hasPresence && stateLabels[bot.presence]].filter(Boolean).join(', ');
@@ -565,19 +566,16 @@ function scheduleReadCheck() {
     if (!view?.data || view.dm || sidebarViewer === null || responseViewers.get(view.data) !== sidebarViewer ||
         document.hidden || document.querySelector('dialog[open]')) return;
     const state = readState.get(view.id);
-    if (!state || view.newestEvent <= state.readThrough) return;
+    if (!state || state.incoming <= state.readThrough) return;
     const scroller = elements.conversation;
     if (!scroller.clientHeight) return;
-    const last = elements.timeline.lastElementChild;
-    const message = last?.classList.contains('working') ? last.previousElementSibling : last;
-    if (!message) return;
+    const message = byId(`event-${state.incoming}`);
+    if (!message || !elements.timeline.contains(message)) return;
     const viewport = scroller.getBoundingClientRect();
     const bounds = message.getBoundingClientRect();
     if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom || bounds.bottom > viewport.bottom + 1) return;
-    // The conversation can update before the sidebar receives the same reply.
-    const wasUnread = state.incoming > state.readThrough;
-    state.readThrough = view.newestEvent;
-    if (wasUnread && state.incoming <= state.readThrough) renderBots();
+    state.readThrough = state.incoming;
+    renderBots();
   });
 }
 
