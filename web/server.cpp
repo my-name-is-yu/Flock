@@ -286,7 +286,9 @@ public:
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
-        if (bound <= 0) throw std::runtime_error("Could not bind the Flock Web loopback listener");
+        if (bound <= 0) throw std::runtime_error(port ?
+            "Could not bind the Flock Web loopback listener on port " + std::to_string(port) + ". Check whether the port is in use." :
+            "Could not bind the Flock Web loopback listener");
         port_ = static_cast<unsigned>(bound);
         try {
             worker_ = std::thread([this] { server_.listen_after_bind(); });

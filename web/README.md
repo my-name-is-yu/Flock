@@ -30,35 +30,49 @@ shared Web messages and is rejected after an upgrade.
 
 ## Session handoffs
 
-Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine that runs the T3
-provider. Approve T3 OAuth access to read and operate Threads. This registers the
-loopback MCP server with installed Codex and Claude Code providers and exports
-their Flock skills. If you replace a Bot directory by hand, give the new Bot a
-new ID so old requests and cached skills keep their original identity. The
-default port is 4173. Specify `--port PORT` during setup
-to save a different default for `flock run`. If you use shared Web identities,
-include the CLI's `local-owner` person in the identity file and grant it
-`decide` on the Bots it may invoke.
+Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
+Approve T3 OAuth read and operate access for each connected environment.
+Flock registers one loopback MCP server with installed Codex and Claude Code
+2.1.327 or later and exports their Flock skills. If you replace a Bot directory
+by hand, give the new Bot a new ID so old requests and cached skills keep their
+original identity. For shared Web identities, include the CLI's `local-owner`
+person in the identity file and give it `decide` on the Bots it may invoke.
 
 Ask for a Bot in an active T3 Thread or select the provider's Flock skill
 (`/skill:flock-<bot>` or `$flock-<bot>`, depending on the provider). The generic
-`flock` skill can discover eligible Bots. Use a consultation for one reply or
-request coordination with a goal for ongoing work. Replies arrive in the same
-Thread.
+`flock` skill discovers eligible Bots. Use a consultation for one reply or
+request coordination with a goal for ongoing work. Flock looks for the exact
+tool call in the active Run across connected environments and uses the proving
+environment and Thread for replies.
 
-The default connection mode, `full`, permits consultation, coordination and
-specialist delegation. Use `--mode consult` for consultations only. The
-connection person must have `decide` on the invoked Bot. Specialists still need
-a role, an entry in the requester's `allowedBots`, and launch authority for the
-destination environment. Flock verifies the provider's actual tool invocation
-in the active Thread before accepting a request.
+One mode applies to all connected environments. The initial default, `full`,
+permits consultation, coordination, and specialist delegation. Set
+`--mode consult` to allow consultations only. Adding an environment without
+`--mode` keeps the saved mode. In full-mode coordination the live connection
+authorizes specialists to launch inside the handoff's environment and project.
+Specialists still need a valid role and must be configured as peers of the
+root Bot. Nested assignments also require the immediate requester's peer
+configuration. Ordinary Bot launches still require their environment grants.
 
-Running connect again rotates the token. The server named `flock` in each
-provider points to the most recently connected environment. Run
-`flock t3 disconnect ENVIRONMENT` to revoke its token and remove the provider
-registration if it points to that environment. For custom provider
-installations, set `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`,
-`FLOCK_CLAUDE_SKILLS_DIR`, or `FLOCK_CODEX_SKILLS_DIR`.
+The first connection saves port 4173 by default. Use `--port PORT` to change
+it and restart any running `flock run`. Keep the Web listener enabled for T3
+skills. A busy saved port prevents startup. Adding an environment at the same
+port keeps the shared provider configuration. Reconnecting an existing
+environment or changing the port rotates the shared bearer. Existing provider
+sessions may need to reload their configuration. `flock t3 disconnect
+ENVIRONMENT` removes the environment from handoff verification and delivery.
+Disconnecting the final environment revokes the bearer and removes the provider
+registration. T3 OAuth credentials remain available for separately authorized
+ordinary Bot work. For custom provider installations, set `FLOCK_CLAUDE_CLI`,
+`FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or
+`FLOCK_CODEX_SKILLS_DIR`.
+
+Only providers running on the same machine as Flock can call its loopback
+MCP endpoint. Flock can read, verify, and queue replies through a reachable
+remote T3 MCP endpoint using that environment's OAuth credential. A provider
+running on that remote machine cannot initiate a Flock handoff through the local
+registration. Pinned specialist work also requires a loopback T3 MCP endpoint
+because Flock checks the workspace on its own filesystem.
 
 Flock queues Bot messages through the T3 API, so someone can keep typing in the
 T3 composer. T3 orders submitted inputs. Flock rechecks observed human progress

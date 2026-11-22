@@ -98,7 +98,8 @@ through `flock model login --reconsent`. The active connection and a link to
 manage plan usage appear in `flock model status`.
 
 The foreground process prints the local Web URL. Use `flock run --no-web`
-for headless operation. Once the daemon is running, submit work with the Web
+for headless operation. T3 skills require the Web listener on the port saved by
+`flock t3 connect`. Once the daemon is running, submit work with the Web
 conversation or with CLI commands such as the following.
 
 ```sh

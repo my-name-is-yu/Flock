@@ -87,36 +87,41 @@ CREATE TABLE IF NOT EXISTS session_controls(
  initial_pending INTEGER NOT NULL DEFAULT 1)
 )SQL");
     exec(R"SQL(
-CREATE TABLE IF NOT EXISTS t3_connections(
- id TEXT PRIMARY KEY, environment_id TEXT NOT NULL UNIQUE, person_id TEXT NOT NULL,
- mode TEXT NOT NULL CHECK(mode IN ('full','consult')), token_digest TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL)
+CREATE TABLE IF NOT EXISTS t3_connector(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
+ mode TEXT NOT NULL CHECK(mode IN ('full','consult')), token_digest TEXT NOT NULL, port INTEGER NOT NULL)
 )SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS t3_connection_settings(
- singleton INTEGER PRIMARY KEY CHECK(singleton=1), port INTEGER NOT NULL, provider_environment TEXT)
-)SQL");
+    exec("CREATE TABLE IF NOT EXISTS t3_connected_environments(environment_id TEXT PRIMARY KEY)");
 }
 
 std::string T3Connections::connect(std::string_view environment, std::string_view person,
                                   T3ConnectionMode mode, unsigned port) {
     if (!validId(environment) || !validId(person) || port == 0 || port > 65535)
         throw Conflict("Invalid T3 connection");
-    std::array<unsigned char,32> bytes{};
-    if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
-        throw std::runtime_error("Could not generate T3 connection token");
-    const auto token = std::string(tokenPrefix) + hex(bytes);
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    db.exec(R"SQL(
-INSERT INTO t3_connections(id,environment_id,person_id,mode,token_digest,created_at) VALUES(?,?,?,?,?,?)
-ON CONFLICT(environment_id) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,mode=excluded.mode,
- token_digest=excluded.token_digest,created_at=excluded.created_at
-)SQL",{actionId(),environment,person,t3ConnectionModeName(mode),digest(token),unixTime()});
-    db.exec(R"SQL(
-INSERT INTO t3_connection_settings VALUES(1,?,?)
-ON CONFLICT(singleton) DO UPDATE SET port=excluded.port,provider_environment=excluded.provider_environment
-)SQL",{static_cast<Id>(port),environment});
+    const auto rotate = [&] {
+        auto row = db.query("SELECT person_id,port FROM t3_connector");
+        return !row.next() || row.string(0) != person || row.number(1) != port ||
+            !db.query("SELECT 1 FROM t3_connected_environments LIMIT 1").next() ||
+            db.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{environment}).next();
+    }();
+    std::string token;
+    if (rotate) {
+        std::array<unsigned char,32> bytes{};
+        if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
+            throw std::runtime_error("Could not generate T3 connection token");
+        token = std::string(tokenPrefix) + hex(bytes);
+        db.exec(R"SQL(
+INSERT INTO t3_connector VALUES(1,?,?,?,?,?)
+ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,mode=excluded.mode,
+ token_digest=excluded.token_digest,port=excluded.port
+)SQL",{actionId(),person,t3ConnectionModeName(mode),digest(token),static_cast<Id>(port)});
+    } else {
+        db.exec("UPDATE t3_connector SET mode=?",{t3ConnectionModeName(mode)});
+    }
+    db.exec("INSERT OR IGNORE INTO t3_connected_environments VALUES(?)",{environment});
     tx.commit();
     return token;
 }
@@ -125,18 +130,17 @@ bool T3Connections::disconnect(std::string_view environment) {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
-    db.exec("DELETE FROM t3_connections WHERE environment_id=?",{environment});
-    const bool removeProvider = db.query("SELECT 1 FROM t3_connection_settings WHERE provider_environment=?",
-                                         {environment}).next();
+    db.exec("DELETE FROM t3_connected_environments WHERE environment_id=?",{environment});
+    const bool removeProvider = db.query("SELECT 1 FROM t3_connector WHERE "
+                                        "NOT EXISTS(SELECT 1 FROM t3_connected_environments)").next();
     tx.commit();
     return removeProvider;
 }
 
-void T3Connections::providerRemoved(std::string_view environment) {
+void T3Connections::providerRemoved() {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    db.exec("UPDATE t3_connection_settings SET provider_environment=NULL WHERE provider_environment=?"
-            " AND NOT EXISTS(SELECT 1 FROM t3_connections WHERE environment_id=?)",{environment,environment});
+    db.exec("DELETE FROM t3_connector WHERE NOT EXISTS(SELECT 1 FROM t3_connected_environments)");
 }
 
 std::optional<T3Connection> T3Connections::authenticate(std::string_view token) const {
@@ -144,34 +148,34 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
         token.substr(tokenPrefix.size()).find_first_not_of("0123456789abcdef") != token.npos) return {};
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT id,environment_id,person_id,mode FROM t3_connections WHERE token_digest=?",{digest(token)});
+    auto row = db.query("SELECT id,person_id,mode FROM t3_connector WHERE token_digest=?"
+                        " AND EXISTS(SELECT 1 FROM t3_connected_environments)",{digest(token)});
     if (!row.next()) return {};
-    return T3Connection{row.string(0),row.string(1),row.string(2),
-                        row.string(3) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult};
+    return T3Connection{row.string(0),row.string(1),
+                        row.string(2) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult};
 }
 
-std::vector<T3Connection> T3Connections::list(std::string_view person) const {
+std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    auto rows = db.query("SELECT id,environment_id,mode FROM t3_connections WHERE person_id=? ORDER BY environment_id",{person});
-    std::vector<T3Connection> result;
-    while (rows.next())
-        result.push_back({rows.string(0),rows.string(1),std::string(person),
-                           rows.string(2) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult});
+    auto rows = db.query("SELECT mode,port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
+                         " WHERE person_id=? ORDER BY environment_id",{person});
+    if (!rows.next()) return {};
+    T3ConnectionSettings result{rows.string(0) == "full" ? T3ConnectionMode::Full : T3ConnectionMode::Consult,
+                                static_cast<unsigned>(rows.number(1)),{}};
+    do { result.environments.push_back(rows.string(2)); } while (rows.next());
     return result;
 }
 
 unsigned T3Connections::port() const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    auto row = db.query("SELECT port FROM t3_connection_settings WHERE singleton=1");
+    auto row = db.query("SELECT port FROM t3_connector WHERE EXISTS(SELECT 1 FROM t3_connected_environments)");
     return row.next() ? static_cast<unsigned>(row.number(0)) : 0;
 }
 
 bool T3Connections::configured() const {
-    auto& db = *store_.p_;
-    std::lock_guard lock(db.mutex);
-    return db.query("SELECT 1 FROM t3_connections").next();
+    return port() != 0;
 }
 
 bool matchesThreadInvocation(const Json& item, std::string_view threadId,
@@ -201,7 +205,8 @@ Participation Store::Impl::authorizeParticipation(const Person& person, Id chann
 SELECT c.environment_id,c.project_id,c.thread_id,c.request_id,c.bot_id,c.person_id,c.context,
        s.permission,s.consult_command,t.mode
 FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
-LEFT JOIN t3_connections t ON t.environment_id=c.environment_id AND t.person_id=c.person_id WHERE c.id=?
+LEFT JOIN t3_connected_environments e ON e.environment_id=c.environment_id
+LEFT JOIN t3_connector t ON t.person_id=c.person_id AND e.environment_id IS NOT NULL WHERE c.id=?
 )SQL",{channel});
     if (!row.next() || person.id != row.string(5) || !Access(*this).permitsPerson(person,row.string(4),Role::decide))
         throw Conflict("Session participation access denied");
@@ -245,14 +250,24 @@ HandoffAck SessionHandoff::invoke(const T3Connection& connection, const Json& ar
     if (!actor || actor->id != connection.personId || !store_.access().permitsPerson(*actor,bot,Role::decide))
         throw Conflict("Bot decision access is required");
 
+    const auto settings = T3Connections(store_).settings(connection.personId);
+    if (!settings) throw Conflict("T3 connection no longer permits this handoff");
+    const auto& environments = settings->environments;
     const auto deadline = std::chrono::steady_clock::now() + proofTimeout;
     do {
-        const auto proof = session_.proveInvocation(connection.environmentId,thread,arguments,deadline);
-        if (proof && proof->target.environmentId == connection.environmentId && proof->target.threadId == thread &&
-            validId(proof->target.projectId) && !proof->activeRunId.empty() && !proof->authGeneration.empty() &&
-            !proof->itemId.empty()) {
-            if (!botExists(bot)) throw Conflict("Unknown Bot");
-            return openChannel(connection,*proof,bot,request,text,digest(arguments.dump()),coordination);
+        for (std::size_t i = 0; i < environments.size(); ++i) {
+            const auto now = std::chrono::steady_clock::now();
+            // Give each environment a share of the remaining time, including when an endpoint stalls.
+            const auto probeDeadline = now + std::max(deadline-now,std::chrono::steady_clock::duration::zero()) /
+                static_cast<std::chrono::steady_clock::duration::rep>(environments.size()-i);
+            const auto& environment = environments[i];
+            const auto proof = session_.proveInvocation(environment,thread,arguments,probeDeadline);
+            if (proof && proof->target.environmentId == environment && proof->target.threadId == thread &&
+                validId(proof->target.projectId) && !proof->activeRunId.empty() && !proof->authGeneration.empty() &&
+                !proof->itemId.empty()) {
+                if (!botExists(bot)) throw Conflict("Unknown Bot");
+                return openChannel(connection,*proof,bot,request,text,digest(arguments.dump()),coordination);
+            }
         }
         std::this_thread::sleep_until(std::min(deadline,std::chrono::steady_clock::now()+std::chrono::milliseconds(150)));
     } while (std::chrono::steady_clock::now() < deadline);
@@ -267,8 +282,9 @@ HandoffAck SessionHandoff::openChannel(const T3Connection& connection, const Thr
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     const auto actor = person(connection);
-    auto current = db.query("SELECT mode FROM t3_connections WHERE id=? AND environment_id=? AND person_id=?",
-                            {connection.id,target.environmentId,connection.personId});
+    auto current = db.query("SELECT mode FROM t3_connector WHERE id=? AND person_id=? AND "
+                            "EXISTS(SELECT 1 FROM t3_connected_environments WHERE environment_id=?)",
+                            {connection.id,connection.personId,target.environmentId});
     if (!actor || actor->id != connection.personId || !store_.access().permitsPerson(*actor,bot,Role::decide) ||
         !current.next() || (scope && current.string(0) != "full"))
         throw Conflict("T3 connection or Bot access changed");

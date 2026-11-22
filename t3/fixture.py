@@ -192,7 +192,7 @@ class Fixture(BaseHTTPRequestHandler):
         if self.server.stock_thread:
             return self.stock_tool(name, args)
         if name == "t3_environment_read":
-            return {"environmentId": "env-1", "serverVersion": "0.1.11"}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"), "serverVersion": "0.1.11"}
         if name == "t3_project_read":
             if args["projectId"] == "slow-search-project":
                 time.sleep(4)
@@ -570,12 +570,14 @@ def test_connection_setup(server, flock, temp):
     codex_skills = directory / "codex-skills"
     claude_state = directory / "claude-state"
     claude = directory / "claude"
+    claude_argv = directory / "claude-argv"
     claude.write_text("""#!/bin/sh
+printf '%s\\n' "$@" >> "$FIXTURE_CLAUDE_ARGV"
 case "$2" in
-    add)
-        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "--transport" ] &&
-        [ "$6" = "http" ] && [ "$7" = "flock" ] && [ "$9" = "--header" ] || exit 2
-        printf '%s\n%s\n' "$8" "${10}" > "$FIXTURE_CLAUDE_STATE" ;;
+    add-json)
+        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "flock" ] && [ "$6" = "-" ] &&
+        [ "$#" = 6 ] || exit 2
+        cat > "$FIXTURE_CLAUDE_STATE" ;;
     remove)
         [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "flock" ] || exit 2
         rm "$FIXTURE_CLAUDE_STATE" ;;
@@ -586,7 +588,8 @@ esac
     claude.chmod(0o700)
     env = dict(os.environ, FLOCK_CODEX_CONFIG=str(codex_config), FLOCK_CLAUDE_CLI=str(claude),
                FLOCK_CODEX_CLI="/usr/bin/true", FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills),
-               FLOCK_CODEX_SKILLS_DIR=str(codex_skills), FIXTURE_CLAUDE_STATE=str(claude_state))
+               FLOCK_CODEX_SKILLS_DIR=str(codex_skills), FIXTURE_CLAUDE_STATE=str(claude_state),
+               FIXTURE_CLAUDE_ARGV=str(claude_argv))
     env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
     original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
     codex_config.write_text(original)
@@ -600,9 +603,11 @@ esac
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(mode, flags):
-        with subprocess.Popen(command + ["t3", "connect", "env-1", server.origin + "/mcp",
-                                         "--mode", mode, *flags], env=env, text=True,
+    def connect(environment, expected_mode, flags, rewritten, restart=False):
+        server.state["claimedEnvironment"] = environment
+        argv_before = claude_argv.read_text() if claude_argv.exists() else ""
+        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
+                                         *flags], env=env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
                 with selectors.DefaultSelector() as selector:
@@ -621,14 +626,19 @@ esac
                 if process.poll() is None:
                     process.kill()
         details = json.loads(output)
-        assert details["mode"] == mode and details["port"] == port
-        assert details["configuredProviders"] == ["codex", "claude"]
+        assert details["mode"] == expected_mode and details["port"] == port
+        assert details["configuredProviders"] == (["codex", "claude"] if rewritten else [])
+        assert ("Restart 'flock run'" in errors) == restart
         codex = codex_config.read_text()
         assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
         assert codex_config.stat().st_mode & 0o777 == 0o600
         token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
         assert token not in output and token not in errors
-        assert claude_state.read_text().splitlines() == [endpoint, "Authorization: Bearer " + token]
+        assert json.loads(claude_state.read_text()) == {
+            "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
+        }
+        argv = claude_argv.read_text()
+        assert "flock-t3-" not in argv and (argv != argv_before) == rewritten
         assert token.encode() not in (state / "flock.sqlite3").read_bytes()
         for root in [claude_skills, codex_skills]:
             assert (root / "flock" / "SKILL.md").is_file()
@@ -636,9 +646,39 @@ esac
             assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
         return token
 
-    old = connect("full", ["--port", str(port)])
-    token = connect("consult", [])
+    old = connect("env-1", "full", ["--port", str(port)], rewritten=True, restart=True)
+    token = connect("env-1", "consult", ["--mode", "consult"], rewritten=True)
     assert token != old
+    assert connect("env-2", "consult", [], rewritten=False) == token
+
+    previous_port = port
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", previous_port))
+        with socket.socket() as replacement:
+            replacement.bind(("127.0.0.1", 0))
+            port = replacement.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+    before_port_change = token
+    token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], rewritten=True, restart=True)
+    assert token != before_port_change
+
+    for option in ("--headless", "--no-web"):
+        with subprocess.Popen(command + ["run", option], env=env, text=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(headless.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "headless startup did not warn about the MCP endpoint"
+                    assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+            finally:
+                headless.terminate()
+                headless.wait(timeout=8)
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", port))
+        busy.listen()
+        result = subprocess.run(command + ["run"], env=env, capture_output=True, text=True, timeout=8)
+        assert result.returncode != 0 and f"port {port}" in result.stderr and "in use" in result.stderr
 
     def ping(value):
         request = urllib.request.Request(endpoint, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
@@ -656,8 +696,11 @@ esac
                 selector.register(daemon.stdout, selectors.EVENT_READ)
                 assert selector.select(8), "Flock did not listen on the saved port"
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
-            assert ping(old) == 401 and ping(token) == 200
+            assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 200 and endpoint in codex_config.read_text() and claude_state.exists()
+            subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 401
             assert codex_config.read_text() == original and not claude_state.exists()

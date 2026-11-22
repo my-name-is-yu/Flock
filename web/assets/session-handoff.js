@@ -249,10 +249,12 @@ async function loadConnections() {
   const key = JSON.stringify(connections);
   if (key === connectionsRendered) return;
   connectionsRendered = key;
-  $('connect-hint').hidden = connections.length > 0;
-  $('connections').hidden = connections.length === 0;
-  $('connections').replaceChildren(...connections.map(({ environmentId, mode }) =>
-    listItem(`${environmentId} · ${mode}`)));
+  const { environments, mode } = connections;
+  $('connect-hint').hidden = environments.length > 0;
+  $('connection-mode').hidden = !mode;
+  $('connection-mode').textContent = mode ? `Mode: ${mode}` : '';
+  $('connections').hidden = environments.length === 0;
+  $('connections').replaceChildren(...environments.map(listItem));
 }
 
 $('refresh').addEventListener('click', () => void run(async () => {

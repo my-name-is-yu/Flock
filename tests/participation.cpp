@@ -11,7 +11,8 @@ using namespace flockv0;
 
 namespace {
 const Person owner{"owner",true}, visitor{"visitor"};
-const ThreadTarget first{"desktop","project","first"}, second{"desktop","project","second"};
+const ThreadTarget first{"desktop","project","first"}, second{"desktop","project","second"},
+                   remote{"remote","other-project","remote-thread"};
 const auto resolve = [](std::string_view person) -> std::optional<Person> {
     return person == owner.id ? std::optional(owner) : person == visitor.id ? std::optional(visitor) : std::nullopt;
 };
@@ -35,22 +36,24 @@ template<class Call> void denied(Call call) {
 class Sessions final : public ThreadSession {
 public:
     struct Sent { ThreadTarget target; std::string id, text; };
-    std::map<std::string,std::vector<ThreadEvent>> history{{first.threadId,{}},{second.threadId,{}}};
+    std::map<std::string,std::vector<ThreadEvent>> history{{first.threadId,{}},{second.threadId,{}},{remote.threadId,{}}};
     std::vector<Sent> sent;
     std::function<void()> beforeSend;
     std::string auth = "auth";
     bool uncertain = false, dispatchUnavailable = false;
     std::function<void()> beforeProof;
+    std::vector<std::string> probed;
     std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
                                                const Json&, std::chrono::steady_clock::time_point) override {
         if (beforeProof) beforeProof();
-        for (auto* target : {&first,&second})
+        probed.emplace_back(environment);
+        for (auto* target : {&first,&second,&remote})
             if (target->environmentId == environment && target->threadId == thread)
                 return ThreadProof{*target,static_cast<Id>(history.at(target->threadId).size()),auth,"run","tool"};
         return {};
     }
     std::optional<ThreadPage> read(const ThreadTarget& target, std::optional<Id> after) override {
-        if (target != first && target != second) return {};
+        if (target != first && target != second && target != remote) return {};
         const auto& all = history.at(target.threadId);
         std::vector<ThreadEvent> events;
         auto cursor = after.value_or(0);
@@ -125,6 +128,38 @@ HandoffAck invoke(SessionHandoff& handoff, const T3Connection& connection, const
         arguments["goal"] = goal;
     }
     return handoff.invoke(connection,arguments,[](std::string_view bot) { return bot == "planner"; },{});
+}
+
+void multiEnvironment(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve);
+    T3Connections connections(store);
+    const auto token = connections.connect(first.environmentId,owner.id,T3ConnectionMode::Full,4173);
+    check(connections.connect(remote.environmentId,owner.id,T3ConnectionMode::Full,4173).empty(),
+          "adding an environment rotated the shared bearer");
+    const auto connection = connections.authenticate(token);
+    check(connection.has_value(),"adding an environment revoked the shared bearer");
+
+    const auto local = invoke(handoff,*connection,first,"local","Check the local project.");
+    check(sessions.probed == std::vector<std::string>{first.environmentId},"proof kept probing after a match");
+    sessions.probed.clear();
+    const auto other = invoke(handoff,*connection,remote,"remote","Check the remote project.");
+    check(sessions.probed == std::vector<std::string>{first.environmentId,remote.environmentId},
+          "proof did not check both environments for the remote Thread");
+    check(handoff.view(owner,other.channel).origin.invitation.target == remote,
+          "the return channel lost the proving environment and project");
+    check(!connections.disconnect(first.environmentId),"disconnecting one environment requested provider removal");
+    check(connections.authenticate(token).has_value(),"disconnecting one environment revoked the bearer");
+    Bot bot;
+    denied([&] { handoff.consult(owner,local.channel,bot,intake,soul); });
+    denied([&] { invoke(handoff,*connection,first,"local-again","Try the disconnected Thread."); });
+    bot.decision = {"reply"};
+    handoff.consult(owner,other.channel,bot,intake,soul);
+    check(sessions.sent.size() == 1 && sessions.sent.front().target == remote,
+          "disconnecting one environment changed delivery to the remaining Thread");
+    check(connections.disconnect(remote.environmentId) && !connections.authenticate(token),
+          "disconnecting the final environment did not revoke the bearer");
 }
 
 void invocationAndRecovery(const std::filesystem::path& path) {
@@ -435,6 +470,7 @@ int main() {
     try {
         originMatching();
         skillExport(path / "skills");
+        multiEnvironment(path / "environments.sqlite3");
         invocationAndRecovery(path / "invocation.sqlite3");
         coordinate(path / "coordination.sqlite3");
         concurrentHumanAndBudget(path / "human-policy.sqlite3");

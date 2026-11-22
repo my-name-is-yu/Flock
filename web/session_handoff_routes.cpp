@@ -238,10 +238,10 @@ void sessionHandoffRoutes(httplib::Server& server, Store& store, const WebCallba
     server.Get("/api/t3-connections",[&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
         const auto actor = person(callbacks,req);
         if (actor.id.empty()) return reply(res,401,{{"error","identity_required"}});
-        auto list = Json::array();
-        for (const auto& connection : T3Connections(store).list(actor.id))
-            list.push_back({{"environmentId",connection.environmentId},{"mode",t3ConnectionModeName(connection.mode)}});
-        reply(res,200,list);
+        const auto connection = T3Connections(store).settings(actor.id);
+        reply(res,200,connection ? Json{{"mode",t3ConnectionModeName(connection->mode)},
+                                        {"environments",connection->environments}}
+                                 : Json{{"mode",nullptr},{"environments",Json::array()}});
     });
     server.Get("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
         withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {

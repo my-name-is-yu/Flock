@@ -150,7 +150,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     mcp.use(token);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
     check(browser.get("/api/t3-connections") ==
-          Json::array({{{"environmentId",target.environmentId},{"mode","full"}}}),
+          Json{{"mode","full"},{"environments",Json::array({target.environmentId})}},
           "connection view returned an unexpected projection");
     Browser::checked(mcp.client.Post(endpoint,{{"Origin",browser.origin}},ping,"application/json"),403);
     Browser::checked(mcp.client.Post(endpoint,{{"Sec-Fetch-Site","same-origin"}},ping,"application/json"),403);
@@ -231,8 +231,9 @@ void sessionHandoffs(const std::filesystem::path& directory) {
           "local stop was not durable or showed remote seal state");
     browser.post(coordPath + "/resume",Json::object(),403);
     check(connections.disconnect(target.environmentId),"registered connection was not removed");
-    authFailure({});
-    check(browser.get("/api/t3-connections").empty(),"disconnected environment was still listed");
+    authFailure({{"Authorization","Bearer " + token}});
+    check(browser.get("/api/t3-connections") == Json{{"mode",nullptr},{"environments",Json::array()}},
+          "disconnected environment was still listed");
 }
 }
 

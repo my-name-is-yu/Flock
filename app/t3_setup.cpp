@@ -2,7 +2,9 @@
 
 #include "flock/skill_export.hpp"
 
+#include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <fcntl.h>
 #include <fstream>
 #include <spawn.h>
@@ -43,7 +45,15 @@ bool installed(const std::string& command) {
     return false;
 }
 
-bool runProvider(std::vector<std::string> args) {
+bool runProvider(std::vector<std::string> args, std::string_view input = {}) {
+    // A private, unnamed file lets the child read the configuration without putting it in argv.
+    std::unique_ptr<FILE,decltype(&std::fclose)> data(nullptr,std::fclose);
+    if (!input.empty()) {
+        data.reset(std::tmpfile());
+        if (!data || std::fwrite(input.data(),1,input.size(),data.get()) != input.size() ||
+            std::fflush(data.get()) != 0 || std::fseek(data.get(),0,SEEK_SET) != 0 ||
+            fcntl(fileno(data.get()),F_SETFD,FD_CLOEXEC) < 0) return false;
+    }
     std::vector<char*> argv;
     for (auto& arg : args) argv.push_back(arg.data());
     argv.push_back(nullptr);
@@ -51,7 +61,8 @@ bool runProvider(std::vector<std::string> args) {
     posix_spawn_file_actions_t actions;
     if (posix_spawn_file_actions_init(&actions) != 0) return false;
     const auto redirect = posix_spawn_file_actions_addopen(&actions,STDOUT_FILENO,"/dev/null",O_WRONLY,0) ||
-                          posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,"/dev/null",O_WRONLY,0);
+                          posix_spawn_file_actions_addopen(&actions,STDERR_FILENO,"/dev/null",O_WRONLY,0) ||
+                          (data && posix_spawn_file_actions_adddup2(&actions,fileno(data.get()),STDIN_FILENO));
     pid_t pid = 0;
     const auto started = redirect == 0 && posix_spawnp(&pid,argv.front(),&actions,nullptr,argv.data(),environ) == 0;
     posix_spawn_file_actions_destroy(&actions);
@@ -141,9 +152,9 @@ Json configureT3Providers(std::string_view url, std::string_view token) {
     const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
     if (installed(claude)) {
         runProvider({claude,"mcp","remove","--scope","user","flock"});
-        if (!runProvider({claude,"mcp","add","--scope","user","--transport","http","flock",
-                          std::string(url),"--header","Authorization: Bearer " + std::string(token)}))
-            throw Conflict("Could not configure the Claude Code MCP server");
+        const Json server{{"type","http"},{"url",url},{"headers",{{"Authorization","Bearer " + std::string(token)}}}};
+        if (!runProvider({claude,"mcp","add-json","--scope","user","flock","-"},server.dump()))
+            throw Conflict("Could not configure the Claude Code MCP server. Claude Code 2.1.327 or later is required.");
         providers.push_back("claude");
     }
     return providers;
