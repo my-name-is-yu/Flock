@@ -33,6 +33,7 @@ struct Temp {
 struct SessionAdapter final : T3 {
     int launches = 0;
     std::function<Observation(const RunRef&)> observeRun;
+    std::vector<SessionTarget> evidenceReads;
     std::string authGeneration(const std::string&, const Json&) override { return "auth"; }
     Delivery send(const Command& command) override {
         ++launches;
@@ -44,6 +45,14 @@ struct SessionAdapter final : T3 {
         return observeRun ? observeRun(run) : Observation{};
     }
     void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool) override {
+        evidenceReads.push_back(target);
+        return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};
+    }
+    std::optional<SessionCounts> sessionCounts(const SessionTarget& target) override {
+        evidenceReads.push_back(target);
+        return SessionCounts{2,1};
+    }
 };
 
 class Script final : public Model {
@@ -373,6 +382,56 @@ void taskUpdates(const std::filesystem::path& database) {
     check(transport->effects.size() == 7,"Task replay repeated a channel update");
 }
 
+void sessionEvidence(const std::filesystem::path& database) {
+    Store store(database);
+    SessionAdapter t3;
+    Script model;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    connect(store,transport);
+    grant(store,"release");
+    const auto channel = ChannelKind::slack;
+    store.access().resourceGrant(root,"release",channelScope({channel,"workspace","",""},"use"),GrantChange::grant);
+    store.access().resourceGrant(root,"release",Scope::sessionRead("env","shared-from-web"),GrantChange::grant);
+    Runtime runtime(store,model,t3,[](auto) { return BotNotes{}; });
+    model.decideNext = [](const ModelInput& input) -> Decision {
+        if (input.event.at("turn").empty()) return {"start_task",{{"request","Private task"}},{}};
+        return reply("Started");
+    };
+    store.receiveChannel(channel,"fixture-auth",event("private-origin","start","Start work"),intake);
+    for (int i = 0; i < 4; ++i) runtime.tick();
+    check(t3.launches == 1,"Expected a Session in the originating thread");
+
+    Json ref, result;
+    model.decideNext = [&](const ModelInput& input) -> Decision {
+        const auto& steps = input.event.at("turn");
+        if (!steps.empty()) {
+            result = steps.back().at("result");
+            return reply("Checked");
+        }
+        if (input.event.at("text") == "Count events")
+            return {"flock_session_events",{{"sessionRef",ref},{"operation","counts"}},{}};
+        return {"flock_session_search",Json::object(),{}};
+    };
+    const auto call = [&](std::string thread, std::string id, std::string request) {
+        result = nullptr;
+        store.receiveChannel(channel,"fixture-auth",event(std::move(thread),std::move(id),std::move(request)),intake);
+        runtime.runConversations();
+        check(result.is_object(),"Expected Session evidence tool result");
+        return result;
+    };
+    auto found = call("private-origin","search","Search Sessions");
+    check(found.at("sessions").size() == 1 && found.at("sessions").at(0).at("title") == "thread-1",
+          "Originating thread did not see exactly its own Session");
+    ref = found.at("sessions").at(0).at("sessionRef");
+    check(call("private-origin","count","Count events").at("counts").at("runs") == 1,
+          "Originating thread could not read its Session");
+    t3.evidenceReads.clear();
+    check(call("other-thread","search","Search Sessions").at("sessions").empty(),"Session search crossed channel threads");
+    check(call("other-thread","count","Count events").at("ok") == false && t3.evidenceReads.empty(),
+          "A Session reference bypassed channel scope");
+}
+
 void taskQuestionChoices(const std::filesystem::path& database) {
     Store store(database);
     SessionAdapter t3;
@@ -572,6 +631,7 @@ int main() {
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
         taskUpdates(temp.path / "task-updates.db");
+        sessionEvidence(temp.path / "session-evidence.db");
         taskQuestionChoices(temp.path / "task-question-choices.db");
         local(temp.path / "local.db",std::filesystem::canonical(path).string());
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -117,6 +117,46 @@ struct Excerpt {
     std::size_t nextOffset = 0;
     bool more = false;
 };
+inline constexpr unsigned sessionPageLimit = 20;
+
+struct SessionTarget {
+    std::string environmentId, threadId;
+    bool operator==(const SessionTarget&) const = default;
+};
+struct SessionPreview {
+    std::string text;
+    bool truncated = false;
+};
+struct SessionMetadata {
+    std::string title, project, projectId, status, createdAt, updatedAt;
+    std::vector<SessionPreview> messages;
+    bool moreMessages = false;
+};
+struct SessionAttachment {
+    std::string id, name, mimeType;
+    std::optional<std::string> content;
+    bool truncated = false;
+};
+struct SessionEvent {
+    std::string id, time, kind, status, title, text;
+    std::vector<SessionAttachment> attachments;
+    bool textTruncated = false, attachmentsTruncated = false;
+};
+struct SessionEventFilter {
+    std::string kind, fromTime, toTime;
+    unsigned limit = 10;
+    std::optional<Id> afterPosition;
+    std::function<bool(const SessionEvent&)> matchText;
+};
+struct SessionEventPage {
+    std::vector<SessionEvent> items;
+    std::optional<Id> nextPosition;
+    bool truncated = false;
+};
+struct SessionCounts {
+    Id messages = 0, runs = 0;
+};
+
 class T3 {
 public:
     virtual ~T3() = default;
@@ -128,6 +168,12 @@ public:
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool) { return {}; }
+    virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
+    virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
+    virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
+    virtual std::optional<SessionAttachment> sessionAttachment(const SessionTarget&, std::string_view,
+                                                               std::string_view) { return {}; }
 };
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
