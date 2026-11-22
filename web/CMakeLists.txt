@@ -61,5 +61,7 @@ if(BUILD_TESTING)
           "$<TARGET_FILE:flock_web_conversation_tests>")
       set_tests_properties(flock_web_chatgpt_conversation PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     endif()
+    add_test(NAME flock_web_composer_shortcuts
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-shortcuts.mjs")
   endif()
 endif()
