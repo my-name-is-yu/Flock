@@ -26,8 +26,12 @@ class Fixture(BaseHTTPRequestHandler):
         for key, item in headers.items():
             for header_value in item if isinstance(item, list) else [item]:
                 self.send_header(key.replace("_", "-"), header_value)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Deadline tests deliberately disconnect before a delayed reply.
+            pass
 
     def do_GET(self):
         origin = self.server.origin
@@ -157,6 +161,9 @@ class Fixture(BaseHTTPRequestHandler):
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
+            if args["projectId"] == "slow-search-project":
+                time.sleep(4)
+                return {"id": "slow-search-project", "title": "Release Pipeline"}
             assert args["projectId"] == "project"
             failure = state.get("projectReadFailure")
             if failure is not None:
@@ -241,6 +248,17 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 6, "later", "user_input_request", json.dumps(questions)))
         if "followup" in state:
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
+        if scenario == "sparse-session-search":
+            if thread_id in state.get("missingSearchThreads", []):
+                return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found",
+                        "message": "The thread was not found."}
+            title = state["searchTitles"].get(thread_id, "Background investigation")
+            summary |= {"title": title, "status": "failed", "createdAt": "2026-11-21T01:00:00Z",
+                        "updatedAt": "2026-11-21T13:00:00Z"}
+            if thread_id == state.get("slowSearchThread"):
+                time.sleep(1.6)
+                summary["projectId"] = "slow-search-project"
+            rows = [self.item(thread_id, 0, "root", "user_message", "Check the logs", source="web")]
         if scenario == "session-read":
             failure = state.get("threadReadErrors", {}).get(thread_id)
             if failure is not None:

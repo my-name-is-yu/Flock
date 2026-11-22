@@ -113,7 +113,7 @@ struct LocalT3 : T3 {
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
     void interrupt(const std::string&,const Json&,const RunRef&) override {}
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget&,bool) override {
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget&,bool,SessionReadDeadline) override {
         return SessionMetadata{std::string(historyMarker),"private-project","private-project","running",
                                "2026-11-21T00:00:00Z","2026-11-21T00:00:00Z",{},false};
     }

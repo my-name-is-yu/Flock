@@ -9,6 +9,9 @@ using namespace flockv0;
 using flockv0::t3detail::http;
 
 void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
+void boundedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
+                          const std::function<Json(std::string_view)>&);
+void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 
 namespace {
 void check(bool pass, std::string_view reason) {
@@ -322,6 +325,8 @@ int main(int argc, char** argv) {
         const auto readOnly = other.authGeneration;
         fixture({{"scenario","session-read"}});
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
+        boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);
+        sessionSearchDeadline(*restarted,home.parent_path()/"search-deadline.db",fixture);
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&

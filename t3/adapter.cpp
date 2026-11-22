@@ -783,8 +783,9 @@ public:
         return excerpt;
     }
 
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages) override {
-        return t3detail::sessionMetadata(directory_,target,includeMessages);
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool includeMessages,
+                                                  SessionReadDeadline deadline) override {
+        return t3detail::sessionMetadata(directory_,target,includeMessages,deadline);
     }
     std::optional<SessionEventPage> sessionEvents(const SessionTarget& target, const SessionEventFilter& filter) override {
         return t3detail::sessionEvents(directory_,target,filter);

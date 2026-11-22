@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -137,6 +138,10 @@ struct SessionMetadata {
     std::vector<SessionPreview> messages;
     bool moreMessages = false;
 };
+using SessionReadDeadline = std::optional<std::chrono::steady_clock::time_point>;
+struct SessionReadTimeout : std::runtime_error {
+    SessionReadTimeout() : std::runtime_error("Session read deadline exceeded") {}
+};
 struct SessionAttachment {
     std::string id, name, mimeType;
     std::optional<std::string> content;
@@ -173,7 +178,7 @@ public:
     virtual Observation observe(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual void interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
-    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool) { return {}; }
+    virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
     virtual std::optional<SessionCounts> sessionCounts(const SessionTarget&) { return {}; }
