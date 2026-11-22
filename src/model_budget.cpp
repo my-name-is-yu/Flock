@@ -183,15 +183,17 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         auto usage = scrub.payload(error.usage);
-        if (!usage.empty()) {
+        if (attemptId && !usage.empty()) {
             std::lock_guard lock(mutex);
             exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
         }
         throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
     }
-    if (!checked.usage.empty()) {
+    if (attemptId && !checked.usage.empty()) {
         std::lock_guard lock(mutex);
         exec("UPDATE model_attempts SET usage=? WHERE id=?",{checked.usage,attemptId});
     }

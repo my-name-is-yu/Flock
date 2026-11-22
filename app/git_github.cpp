@@ -159,6 +159,12 @@ public:
     bool permits(const GitContext&, const GitRepository& repository, std::string_view) const override {
         return repository.host == name();
     }
+    bool permitsStoredRead(const GitContext& context, const GitRepository& repo, const Decision& read) override {
+        if (repo.host != name()) return false;
+        if (read.tool == "git_read_ci_logs") jobLogUrl(repo,read.args.at("jobId"));
+        else call(context,repo,read);
+        return true;
+    }
 
     GitPullRequest createPullRequest(const GitContext&, const GitOpenPr& request) override {
         const auto& [base,head,baseRef,headRef] = request.target;
@@ -189,14 +195,7 @@ public:
     }
 
     GitLog readCiLogs(const GitContext&, const GitRepository& repo, Id job, std::size_t maxBytes) override {
-        const auto endpoint = std::string(api) + path(repo) + "/actions/jobs/" + std::to_string(job) + "/logs";
-        const auto response = request("GET",endpoint,nullptr,8192,true);
-        if (response.status != 302) {
-            requireSuccess(response.status);
-            throw Conflict("GitHub did not return a job log download URL");
-        }
-        if (!validLogUrl(response.redirect)) throw Conflict("GitHub returned an unexpected job log destination");
-        auto download = request("GET",response.redirect,nullptr,maxBytes,false);
+        auto download = request("GET",jobLogUrl(repo,job),nullptr,maxBytes,false);
         requireSuccess(download.status);
         return {std::move(download.body.text),download.body.truncated};
     }
@@ -245,6 +244,17 @@ public:
     }
 
 private:
+    std::string jobLogUrl(const GitRepository& repo, Id job) const {
+        const auto endpoint = std::string(api) + path(repo) + "/actions/jobs/" + std::to_string(job) + "/logs";
+        const auto response = request("GET",endpoint,nullptr,8192,true);
+        if (response.status != 302) {
+            requireSuccess(response.status);
+            throw Conflict("GitHub did not return a job log download URL");
+        }
+        if (!validLogUrl(response.redirect)) throw Conflict("GitHub returned an unexpected job log destination");
+        return response.redirect;
+    }
+
     HttpResponse request(const char* method, const std::string& url, const Json& data,
                          std::size_t maxBytes, bool authenticated) const {
         const std::unique_ptr<CURL,decltype(&curl_easy_cleanup)> curl(curl_easy_init(),curl_easy_cleanup);
