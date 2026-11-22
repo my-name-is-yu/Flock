@@ -621,6 +621,15 @@ bool Store::hasTask(Id id) const {
     return p_->query("SELECT 1 FROM tasks WHERE id=?", {id}).next();
 }
 
+template<class StoreImpl>
+static void restoreWaitAnchor(const StoreImpl& store, Json& task) {
+    auto& wait = task["wait"];
+    if (wait.is_null() || wait.contains("messageId")) return;
+    auto row = store.query("SELECT id FROM journal WHERE task_id=? AND kind='waiting'"
+                           " AND json_extract(data,'$.id')=? ORDER BY id DESC LIMIT 1", {task["id"],wait["id"]});
+    if (row.next()) wait["messageId"] = row.number(0);
+}
+
 Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     auto task = load(id);
     task["blockedBy"] = includeBlocker && task["state"] == "queued" ? queueBlocker(id) : Json(nullptr);
@@ -672,7 +681,7 @@ Json Store::activeTasks(std::string_view bot) const {
     Json result = Json::array();
     while (rows.next()) {
         auto task = pageTask(rows);
-        restoreWaitAnchor(*p_,task)
+        restoreWaitAnchor(*p_,task);
         result.push_back(std::move(task));
     }
     return result;

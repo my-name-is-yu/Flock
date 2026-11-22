@@ -852,7 +852,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                      const Json& args, const Json&, bool charge) {
         const bool work = tool == "delegate" || tool == "follow_up";
         if (charge) chargeAdditionalWork(task);
-        Json resultReferences = Json::array();
+        Json resultReferences = Json::array(), pending = Json::array();
         if (work) {
             if (task.contains("sourceTaskId") && task["lastRun"].is_null()) {
                 const auto request = field(task,"request");
@@ -914,7 +914,8 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
 
     void continueTask(const Json& task) {
         change(task,[&](Json& current) {
-            if (!hasPending(current)) return false;
+            const auto pending = pendingBatch(current);
+            if (pending.instructions.empty()) return false;
             const bool fresh = current.value("newSessionRequired",false);
             const std::string tool = fresh ? "delegate" : "follow_up";
             const std::string reason = "Apply the accepted user instructions at a settled Run boundary";
@@ -1314,7 +1315,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                     const auto report = field(event.value("sessionResult",Json(nullptr)),"report");
                     if (!report.empty()) workInstruction += "\n\nPrevious Session report (reference only):\n" + report;
                 }
-                queueAction(current,action,tool,std::move(workInstruction),args,pending.instructions,charge);
+                queueAction(current,action,tool,std::move(workInstruction),args,Json::array(),charge);
             }
             return true;
         });
