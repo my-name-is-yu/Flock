@@ -66,16 +66,19 @@ CREATE TABLE IF NOT EXISTS bot_grants(bot TEXT,kind TEXT,resource TEXT,op TEXT,a
 CREATE TABLE IF NOT EXISTS person_resource_grants(person TEXT,kind TEXT,resource TEXT,op TEXT,
  PRIMARY KEY(person,kind,resource,op));
 CREATE TABLE IF NOT EXISTS grant_requests(id INTEGER PRIMARY KEY,bot TEXT,kind TEXT,resource TEXT,op TEXT,
- requestedBy TEXT,requestedAt INTEGER,status TEXT DEFAULT 'pending',decidedBy TEXT,decidedAt INTEGER);
+ requestedBy TEXT,requestedAt INTEGER,status TEXT DEFAULT 'pending',decidedBy TEXT,decidedAt INTEGER,
+ source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS grant_audit_log(id INTEGER PRIMARY KEY,bot TEXT,time INTEGER,actor TEXT,action TEXT,scope TEXT);
 CREATE INDEX IF NOT EXISTS audit_by_bot ON grant_audit_log(bot,action);
 CREATE TRIGGER IF NOT EXISTS access_requested AFTER INSERT ON grant_requests BEGIN
  INSERT INTO grant_audit_log(bot,time,actor,action,scope) VALUES(NEW.bot,NEW.requestedAt,NEW.requestedBy,'request',
  json_object('requestId',NEW.id,'resourceKind',NEW.kind,'resourceId',NEW.resource,'operation',NEW.op));
 END;
-CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,status TEXT DEFAULT 'pending');
+CREATE TABLE IF NOT EXISTS protected_inputs(id INTEGER PRIMARY KEY,bot TEXT,name TEXT,file TEXT NOT NULL UNIQUE,
+ status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE UNIQUE INDEX IF NOT EXISTS fulfilled_secret ON protected_inputs(name) WHERE status='fulfilled';
-CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending');
+CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation TEXT,target TEXT,name TEXT,
+ request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Access migration failed");
@@ -205,12 +208,12 @@ void Access::resourceGrant(const Person& actor, std::string_view bot, const Scop
     tx.commit();
 }
 
-Id Access::request(std::string_view bot, const Scope& s) {
+Id Access::request(std::string_view bot, const Scope& s, Id sourceMessage) {
     if (!validBotId(bot) || !s.valid()) throw Conflict("Invalid resource scope");
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({bot,s.resource});
-    db_.exec("INSERT INTO grant_requests(bot,kind,resource,op,requestedBy,requestedAt) VALUES(?,?,?,?,?,?)",
-             {bot,s.kind,s.resource,s.operation,bot,unixTime()});
+    db_.exec("INSERT INTO grant_requests(bot,kind,resource,op,requestedBy,requestedAt,source_message_id) VALUES(?,?,?,?,?,?,?)",
+             {bot,s.kind,s.resource,s.operation,bot,unixTime(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     return db_.last();
 }
 
@@ -266,14 +269,14 @@ Json Access::administration(const Person& actor, std::string_view bot) const {
 }
 
 Id Access::requestBotChange(std::string_view bot, std::string_view operation, std::string_view target,
-                            std::string_view name) {
+                            std::string_view name, Id sourceMessage) {
     std::lock_guard lock(db_.mutex);
     if (!validBotId(bot) || !validBotId(target) ||
         !permits(bot,{"bot_admin",std::string(target),std::string(operation)},true))
         throw Conflict("Bot administration grant required");
     db_.redactor(bot).requirePublic({name,target});
-    db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key) VALUES(?,?,?,?,?)",
-             {bot,operation,target,botName(name),actionId()});
+    db_.exec("INSERT INTO bot_changes(bot,operation,target,name,request_key,source_message_id) VALUES(?,?,?,?,?,?)",
+             {bot,operation,target,botName(name),actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     return db_.last();
 }
 
@@ -327,11 +330,12 @@ void Access::reviewBotChange(const Person& actor, std::string_view bot, Id reque
     if (approve) applyApprovedBotChange(actor,bot,request,apply);
 }
 
-Id Access::requestSecret(std::string_view bot, const SecretRef& ref) {
+Id Access::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMessage) {
     if (!validBotId(bot) || !ref.valid()) throw Conflict("Invalid Bot or secret reference");
     std::lock_guard lock(db_.mutex);
     db_.redactor(bot).requirePublic({bot,ref.name});
-    db_.exec("INSERT INTO protected_inputs(bot,name,file) VALUES(?,?,?)",{bot,ref.name,actionId()});
+    db_.exec("INSERT INTO protected_inputs(bot,name,file,source_message_id) VALUES(?,?,?,?)",
+             {bot,ref.name,actionId(),sourceMessage ? Json(sourceMessage) : Json(nullptr)});
     return db_.last();
 }
 

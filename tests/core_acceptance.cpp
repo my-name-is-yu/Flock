@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/board_inbox.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -234,7 +234,7 @@ struct Fixture {
         return value["id"].get<Id>();
     }
     void rejects(Id id, Id waitId, const char* operation, Json data=Json::object()) {
-        try { store->operate(id,waitId,operation,data); }
+        try { store->operate(localOwner,TaskTarget::from(store->task(id),waitId),operation,data); }
         catch (const Conflict&) { return; }
         throw std::runtime_error("Expected stale or unsupported operation rejection");
     }
@@ -266,7 +266,7 @@ void invalidDecisions() {
     f.restart();
     const auto wait = f.wait(id,"model_failure");
     check(f.model.calls == 3 && f.t3.launches == 0 && f.logs(id,"decision") == 0,"invalid initial action executed");
-    f.store->operate(id,wait,"retry");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"retry");
     f.rejects(id,wait,"retry");
     f.model.script = [](const ModelInput&) { return work(); };
     f.reach(id,"running");
@@ -274,7 +274,7 @@ void invalidDecisions() {
     f.model.script = [](const ModelInput&) { return work(); };
     const auto questionWait = f.wait(id,"model_failure");
     check(f.t3.launches == 1 && f.t3.replies == 0 && f.task(id)["doneWhen"] == Evidence,"invalid in-question action executed");
-    f.store->operate(id,questionWait,"retry");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),questionWait),"retry");
     f.model.script = [](const ModelInput&) { return reply(); };
     f.reach(id,"running");
     f.t3.finish("run-1");
@@ -306,7 +306,7 @@ void ambiguityAndFailure() {
     check(f.t3.launches == 0 && f.task(next)["state"] == "queued" && f.task(next)["blockedBy"]["id"] == id,
           "ambiguous task delegated or did not hold project order");
     f.restart();
-    f.store->operate(id,wait,"answer",{{"text","main"}});
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"answer",{{"text","main"}});
     f.rejects(id,wait,"answer",{{"text","dev"}});
     f.reach(id,"running");
     f.notes.at("alpha").soul = "Edited SOUL";
@@ -342,7 +342,7 @@ void deadlineApprovalAndCancel() {
     f.wait(id,"deadline");
     f.runtime->tick();
     check(f.model.calls == calls && f.t3.interrupts == 0 && f.t3.launches == 1,"automatic work at deadline");
-    f.store->operate(id,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),0),"cancel");
     f.runtime->tick();
     check(f.t3.interrupts == 1 && f.task(id)["state"] == "cancelling" && f.task(queued)["state"] == "queued",
           "cancel released project before confirmation");
@@ -376,13 +376,13 @@ void budgetAndStaleWaits() {
     f.t3.finish("run-4");
     const auto question = f.wait(id,"user_question");
     f.rejects(id,question,"approve");
-    f.store->operate(id,question,"answer",{{"text","keep going"}});
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),question),"answer",{{"text","keep going"}});
     const auto budget = f.wait(id,"budget");
     f.rejects(id,budget,"answer",{{"text","yes"}});
     check(f.task(id)["remaining"] == 0 && f.t3.seen.size()==4,"normal answer increased budget or fourth work sent");
-    f.store->operate(id,budget,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),budget),"approve");
     f.rejects(id,budget,"approve");
-    f.store->operate(id,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),0),"cancel");
     f.reach(id,"cancelled");
     f.rejects(id,budget,"approve");
     f.runtime->tick();
@@ -409,7 +409,7 @@ void sessionQuestions() {
         if (needsUser) {
             const auto wait = f.wait(id,"user_question");
             f.restart();
-            f.store->operate(id,wait,"answer",{{"text","main"}});
+            f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"answer",{{"text","main"}});
         }
         f.reach(id,"running");
         check(f.t3.replies==1 && f.t3.launches==1 && f.t3.follows==0 &&
@@ -467,11 +467,11 @@ void recoveredDelivery() {
         f.restart();
         f.t3.generation = "fresh-oauth-session";
         f.t3.hasReconciledRun = false;
-        f.store->operate(id,waiting,"reconcile");
+        f.store->operate(localOwner,TaskTarget::from(f.store->task(id),waiting),"reconcile");
         waiting = f.wait(id,"unknown_delivery");
         check(f.t3.seen.size() == (launch ? 1ul : 2ul),"unmatched delivery was resent");
         f.t3.hasReconciledRun = true;
-        f.store->operate(id,waiting,"reconcile");
+        f.store->operate(localOwner,TaskTarget::from(f.store->task(id),waiting),"reconcile");
         f.reach(id,"running");
         check(f.t3.reconciles == 2 && f.t3.recovery.back().authGeneration == "same-oauth-session",
               "recovery lost original authentication generation");
@@ -495,7 +495,7 @@ void recoveredDelivery() {
     f.t3.loseAcknowledgement = true;
     const auto wait = f.wait(id,"unknown_delivery");
     f.restart();
-    f.store->operate(id,wait,"reconcile");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"reconcile");
     f.reach(id,"running");
     check(f.t3.replies==1 && f.t3.launches==1 && f.t3.reconciles==1 && f.task(id)["additionalUsed"]==0,
           "recovered answer created duplicate work");
@@ -512,7 +512,7 @@ void cancelDuringDelivery() {
     f.model.script = [=](const ModelInput& i) {
         return i.task["id"] == queued ? ask() : work();
     };
-    f.t3.beforeWorkAcknowledgement = [&] { cli.operate(id,0,"cancel"); };
+    f.t3.beforeWorkAcknowledgement = [&] { cli.operate(localOwner,TaskTarget::from(cli.task(id),0),"cancel"); };
     for (int i = 0; i < 12 && f.t3.launches < 2; ++i) f.runtime->tick();
     f.t3.beforeWorkAcknowledgement = {};
     f.restart();
@@ -552,7 +552,7 @@ void settleWhileAnswerDeliveryIsUnknown() {
         f.restart();
 
         if (cancel) {
-            f.store->operate(id,0,"cancel");
+            f.store->operate(localOwner,TaskTarget::from(f.store->task(id),0),"cancel");
             for (int i = 0; i < 12 && f.t3.interruptedRuns.empty(); ++i) f.runtime->tick();
             check(f.task(id)["state"] == "cancelling" &&
                   f.t3.interruptedRuns.size() == 1 &&
@@ -565,7 +565,7 @@ void settleWhileAnswerDeliveryIsUnknown() {
             for (int i = 0; i < 12 && f.task(id)["wait"]["id"] == wait; ++i) f.runtime->tick();
             const auto review = f.wait(id,"user_question");
             f.rejects(id,wait,"reconcile");
-            f.store->operate(id,review,"cancel");
+            f.store->operate(localOwner,TaskTarget::from(f.store->task(id),review),"cancel");
         }
         f.reach(id,"cancelled");
         check(f.logs(id,"report") == 1 && f.t3.replies == 1 && f.t3.launches == 1,
@@ -658,7 +658,7 @@ void peerWorkAndRestart() {
     check(f.task(recipient)["state"] == "peer_waiting" && f.task(unrelated)["state"] == "queued" && f.t3.launches == 0,
           "clarification started unrelated work or launched a Session prematurely");
     f.restart();
-    f.store->operate(root,humanWait,"answer",{{"text","main"}});
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(root),humanWait),"answer",{{"text","main"}});
     f.rejects(root,humanWait,"answer",{{"text","dev"}});
     f.reach(recipient,"running");
     check(f.t3.launches == 1 && f.t3.seen.back().projectId == "p" && f.t3.seen.back().config.at("model") == "beta-model" &&
@@ -744,7 +744,7 @@ void peerWorkSharesBudgetWithDirectT3Work() {
     check(f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 3 &&
           f.t3.launches == 0 && f.store->tasks("beta").size() == 4,
           "direct T3 work bypassed the allowance exhausted by peer work");
-    f.store->operate(root,budget,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(root),budget),"approve");
     f.reach(root,"running");
     check(f.t3.launches == 1 && f.task(root)["remaining"] == 0 && f.task(root)["additionalUsed"] == 4,
           "one approval did not admit exactly one direct T3 action");
@@ -809,7 +809,7 @@ void checkPeerClarificationAfterRun(std::string_view readMode) {
     const auto initialRun = f.task(recipient)["activeRun"];
     f.t3.finish("run-1");
     const auto waitId = f.wait(root,"user_question");
-    f.store->operate(root,waitId,"answer",{{"text","main"}});
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(root),waitId),"answer",{{"text","main"}});
     const auto answerWasDelivered = [&] {
         const auto messages = f.botMessages("beta");
         return !messages.empty() && messages.back().at("messageType") == "answer" &&
@@ -861,6 +861,8 @@ void revisionWaitsForPeerClarification() {
         if (kind == "bot_question") {
             check(f.task(root).at("environmentId") == "e" && f.t3.launches == 0,
                   "Replanning ran before the Bot exchange finished");
+            if (!input.event.contains("userAnswer")) return ask();
+            check(input.event.at("userAnswer") == "Use main","The peer question lost the human answer");
             answeredPeer = true;
             return botReply("answer","Use main");
         }
@@ -869,10 +871,22 @@ void revisionWaitsForPeerClarification() {
     };
 
     f.reach(root,"peer_waiting");
-    f.store->receive(routing,"move-release-check","Run Release check on cloud");
+    const auto oldWait = f.wait(root,"user_question");
+    const auto old = TaskTarget::from(f.task(root),oldWait);
+    f.store->receive(localOwner,routing,"move-release-check","Run Release check on cloud");
     f.runtime->runConversations();
     check(f.task(root).value("replanning",false) && f.task(root).at("pendingEnvironmentId") == "cloud",
           "The requested destination change did not reach the task");
+    try {
+        f.store->operate(localOwner,old,"answer",{{"text","Use an old branch"}});
+        throw std::runtime_error("The old peer question accepted an answer");
+    } catch (const RequestChanged&) {}
+    const auto pending = f.store->inbox(localOwner,"alpha");
+    check(pending.size() == 1 && pending.at(0).at("itemKind") == "user_question" && pending.at(0).at("waitId") != old.waitId,
+          "Replanning stranded the peer question");
+    const auto& current = pending.at(0);
+    f.store->decideInbox(localOwner,{"alpha",InboxKind::user_question,current.at("itemId"),current.at("waitId"),root,
+        current.at("targetRevision"),current.at("targetGeneration")},"answer",{{"text","Use main"}});
     f.reach(root,"running");
     const auto messages = f.botMessages("alpha");
     check(answeredPeer && messages.size() == 4 && messages.back().at("messageType") == "result" &&
@@ -909,7 +923,7 @@ void recipientRevisionContinuesTheOpenWorkExchange() {
     f.reach(recipient,"running");
     const std::string revisionText = "Revise Verify release completion criteria to " + std::string(revisedCriteria);
     const Intake betaRouting{"beta",revisionText,"e","p",{{"runTimeoutSeconds",10},{"model","beta-model"}}};
-    f.store->receive(betaRouting,"recipient-revision",revisionText);
+    f.store->receive(localOwner,betaRouting,"recipient-revision",revisionText);
     f.runtime->runConversations();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["doneWhen"] == revisedCriteria &&
           f.task(sender)["state"] == "peer_waiting" && f.botMessages("alpha").size() == 1,
@@ -1015,14 +1029,14 @@ void checkRecipientRevisionDuringPeerQuestion(bool moves) {
         (moves ? " and move it to cloud" : "");
     const Intake betaRouting{"beta",revisionText,"e","beta-project",{{"runTimeoutSeconds",10},{"model","beta-model"},
         {"conversationEnvironments",{{"cloud","cloud"}}}}};
-    f.store->receive(betaRouting,"recipient-question-revision",revisionText);
+    f.store->receive(localOwner,betaRouting,"recipient-question-revision",revisionText);
     f.runtime->runConversations();
     for (int step = 0; step < 3; ++step) f.runtime->tick();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["state"] == "peer_waiting" &&
           f.task(recipient)["doneWhen"] == revisedCriteria && f.task(sender)["wait"]["reason"] == "user_question",
           "the recipient replanned during the pending peer question");
 
-    f.store->operate(sender,waitId,"answer",{{"text","Use main"}});
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(sender),waitId),"answer",{{"text","Use main"}});
     f.reach(recipient,"running");
     const auto command = f.t3.seen.back();
     if (moves) {
@@ -1090,7 +1104,7 @@ void checkWorkRecipientMove(bool sharesSenderQueue) {
     unrelated = f.submit("Unrelated verification","alpha",project);
     if (!sharesSenderQueue) f.reach(unrelated,"running");
     const auto launchesBeforeMove = f.t3.launches;
-    f.store->receive(betaRouting,"recipient-move","Move Verify the release to desktop");
+    f.store->receive(localOwner,betaRouting,"recipient-move","Move Verify the release to desktop");
     f.runtime->runConversations();
     check(f.task(recipient).value("replanning",false) && f.task(recipient)["pendingEnvironmentId"] == "e",
           "the destination change did not reach the task");
@@ -1157,11 +1171,11 @@ void consultationRepliesAfterUserInstructions() {
         f.reach(sender,"peer_waiting");
         recipient = f.store->tasks("beta").front()["id"].get<Id>();
         const auto wait = f.wait(sender,"user_question");
-        f.store->receive({"beta","","e","p",Json::object()},"consultation-instruction",instruction);
+        f.store->receive(localOwner,{"beta","","e","p",Json::object()},"consultation-instruction",instruction);
         f.runtime->runConversations();
         check(f.logs(recipient,"instruction_accepted") == 1 && f.task(recipient).value("replanning",false) == revise,
               "the instruction did not reach the open consultation");
-        f.store->operate(sender,wait,"answer",{{"text","Use main"}});
+        f.store->operate(localOwner,TaskTarget::from(f.store->task(sender),wait),"answer",{{"text","Use main"}});
         f.reach(recipient,"completed");
         f.reach(sender,"completed");
         check(f.t3.seen.empty() && f.logs(recipient,"model_failure") == 0 && f.botMessages("alpha").size() == 4,
@@ -1182,7 +1196,7 @@ void peerConsultationAndPermission() {
     f.wait(denied,"model_failure");
     check(deniedAttempts == 3 && f.store->tasks().size() == 1 && f.botMessages("alpha").empty(),
           "an unlisted recipient received a message or the available send tool was not exercised");
-    f.store->operate(denied,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(denied),0),"cancel");
     f.reach(denied,"cancelled");
 
     f.peers.at("alpha").front().intake.projectId = "second";
@@ -1215,7 +1229,7 @@ void modelBudgetFollowsBotConsultation() {
     Fixture f;
     f.allowBeta();
     constexpr auto request = "Check the release policy";
-    const auto receipt = f.store->receive({"alpha",request,"e","p",{{"modelCallLimit",3}}},"policy",request);
+    const auto receipt = f.store->receive(localOwner,{"alpha",request,"e","p",{{"modelCallLimit",3}}},"policy",request);
     f.model.script = [&](const ModelInput& input) -> Decision {
         if (input.event["kind"] == "conversation_turn") return converse(input,"start_task",0,Json::object());
         if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
@@ -1237,12 +1251,12 @@ void modelBudgetFollowsBotConsultation() {
     check(f.model.calls == 3 && f.task(recipient)["wait"]["id"] == recipientWait,
           "the recipient reached the provider without approval, or restart changed its wait");
     Store writer(f.directory/"state.db");
-    writer.operate(recipient,recipientWait,"approve");
+    writer.operate(localOwner,TaskTarget::from(writer.task(recipient),recipientWait),"approve");
     f.rejects(recipient,recipientWait,"approve");
     const auto senderWait = f.wait(sender,"model_budget");
     check(f.model.calls == 4 && f.task(recipient)["state"] == "completed",
           "one approval did not resume only one call in the exchange");
-    writer.operate(sender,senderWait,"approve");
+    writer.operate(localOwner,TaskTarget::from(writer.task(sender),senderWait),"approve");
     f.reach(sender,"completed");
     check(f.model.calls == 5 && f.t3.launches == 0 && f.task(sender)["remaining"] == 3,
           "the sender did not finish under its shared model budget and separate Run allowance");
@@ -1260,7 +1274,7 @@ void peerResultWaitsForRecipientTurn() {
         if (input.task.at("botId") == "beta") {
             ++recipientDecisions;
             if (!std::exchange(noted,true))
-                f.store->receive({"beta","","e","p",Json::object()},"beta-note","How is the release check going?");
+                f.store->receive(localOwner,{"beta","","e","p",Json::object()},"beta-note","How is the release check going?");
             return botReply("result","Verified");
         }
         if (kind == "bot_result") return complete();
@@ -1310,7 +1324,7 @@ void modelBudgetCountsFailedAttempts() {
     const auto independent = f.store->submit({"alpha","Independent request","e","other",{{"modelCallLimit",2}}});
     f.wait(independent,"user_question");
     check(f.model.calls == 3 && f.task(id)["wait"]["id"] == wait,"an independent request needed the paused budget");
-    f.store->operate(id,wait,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"approve");
     f.wait(id,"user_question");
     check(f.model.calls == 4 && f.task(id)["remaining"] == 3,"approval did not resume the saved retry event");
 }
@@ -1322,7 +1336,7 @@ void modelBudgetAllowsT3ObservationAndRecovery() {
     f.reach(id,"sending");
     f.t3.loseAcknowledgement = true;
     const auto deliveryWait = f.wait(id,"unknown_delivery");
-    f.store->operate(id,deliveryWait,"reconcile");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),deliveryWait),"reconcile");
     f.reach(id,"running");
     check(f.model.calls == 1 && f.t3.reconciles == 1 && f.t3.launches == 1,
           "delivery recovery used a model call or resent the Run");
@@ -1333,7 +1347,7 @@ void modelBudgetAllowsT3ObservationAndRecovery() {
     f.runtime->tick();
     check(f.t3.polls > polls && f.model.calls == 1 && f.task(id)["wait"]["id"] == modelWait,
           "model approval blocked T3 observation or reset the pending decision");
-    f.store->operate(id,modelWait,"approve");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(id),modelWait),"approve");
     f.reach(id,"running");
     check(f.model.calls == 2 && f.t3.replies == 1 && f.task(id)["remaining"] == 3,
           "the approved call did not answer the original question");
@@ -1353,7 +1367,7 @@ void unsuccessfulConsultationsDoNotComplete() {
             return ask();
         };
         f.reach(id,"peer_waiting");
-        if (cancel) f.store->operate(f.store->tasks("beta").front().at("id"),0,"cancel");
+        if (cancel) f.store->operate(localOwner,TaskTarget::from(f.store->task(f.store->tasks("beta").front().at("id")),0),"cancel");
         f.wait(id,"user_question");
         check(f.logs(id,"completed") == 0 && f.t3.launches == 0,"unsuccessful consultation completed or launched work");
     }
@@ -1514,7 +1528,7 @@ void peerCancelWithLateSessionResult() {
     f.reach(root,"peer_waiting");
     const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
     f.reach(recipient,"running");
-    f.store->operate(root,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(root),0),"cancel");
     for (int step = 0; step < 8 && f.t3.interrupts == 0; ++step) f.runtime->tick();
     check(f.t3.interrupts == 1 && f.t3.interruptedRuns.back().threadId == "thread-1" &&
           f.t3.interruptedRuns.back().runId == "run-1" && f.task(unrelated)["state"] == "queued",
@@ -1556,7 +1570,7 @@ void peerProjectCycle() {
     check(f.task(beta)["doneWhen"] == "" && f.store->tasks("alpha").size() == 1 &&
           messagesBeforeCancel.size() == 1 && messagesBeforeCancel.front().at("fromBotId") == "alpha",
           "cross-project cycle was not rejected before creating work or saving a completion contract");
-    f.store->operate(beta,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(beta),0),"cancel");
     const auto recipient = f.store->tasks("beta").front()["id"].get<Id>();
     f.reach(recipient,"running");
     check(f.t3.launches == 1 && f.t3.seen.back().projectId == "second",
@@ -1587,7 +1601,7 @@ void peerCancelWhileQueued() {
     const auto queued = f.store->tasks("beta").front()["id"].get<Id>();
     check(f.task(queued)["state"] == "queued" && f.task(queued)["blockedBy"]["id"] == running,
           "test did not queue the delegated task behind an active Run");
-    f.store->operate(queued,0,"cancel");
+    f.store->operate(localOwner,TaskTarget::from(f.store->task(queued),0),"cancel");
     f.reach(queued,"cancelled");
     f.wait(source,"user_question");
     check(receivedCancellation && f.task(running)["state"] == "running" && f.t3.launches == 1 && f.t3.interrupts == 0,
@@ -1608,7 +1622,7 @@ void peerCancelDuringPreflight() {
     bool cancelledDuringPreflight = false;
     f.t3.onPreflight = [&] {
         Store cli(f.directory/"state.db");
-        cli.operate(source,0,"cancel");
+        cli.operate(localOwner,TaskTarget::from(cli.task(source),0),"cancel");
         cancelledDuringPreflight = true;
     };
     for (int step = 0; step < 8 && !cancelledDuringPreflight; ++step) f.runtime->tick();
@@ -1637,7 +1651,7 @@ void inferenceInvalidatedByCancel() {
         std::unique_lock lock(mutex);
         ready.wait(lock,[&] { return inModel; });
         Store cli(f.directory/"state.db");
-        cli.operate(id,0,"cancel");
+        cli.operate(localOwner,TaskTarget::from(cli.task(id),0),"cancel");
         cancelled = true;
         ready.notify_one();
     }

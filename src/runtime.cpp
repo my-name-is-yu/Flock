@@ -1440,8 +1440,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                 Transaction transaction(db.db);
                 auto current = db.load(task["id"]);
                 if (current["generation"] != task["generation"]) return;
-                const auto budget = db.taskModelBudget(current);
-                attempt = db.reserveModelCall(budget,"task_decision",0,task["id"],event["id"]);
+                auto reserved = db.query("SELECT reserved_attempt FROM events WHERE id=?",{event["id"]});
+                if (reserved.next()) attempt = reserved.number(0);
+                if (attempt) db.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event["id"]});
+                else attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
                 if (!attempt) {
                     db.wait(current,"model_budget",{{"text",
                         "The model call limit is exhausted. Approve one more model call to continue."}});
@@ -1468,17 +1470,17 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         }
     }
 
-    bool peerExchangeDefersReplan(Id id) {
+    bool canReplan(const Json& task) {
+        if (!task.value("replanning",false)) return false;
         std::lock_guard lock(db.mutex);
-        const auto peer = db.peerExchange(id);
-        return peer && !(peer->recipient == id && peer->kind == "work" && peer->phase == "working");
+        return !db.peerExchangeDefersReplan(task.at("id"));
     }
 
     void step(Id id) {
         const auto task = snapshot(id);
         const auto state = field(task,"state");
         if (state == "cancelling") cancel(task);
-        else if (task.value("replanning",false) && !peerExchangeDefersReplan(id)) replan(task);
+        else if (canReplan(task)) replan(task);
         else if (state == "queued") activate(task);
         else if (state == "deciding") {
             bool canContinue = false;

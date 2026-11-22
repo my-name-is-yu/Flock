@@ -12,15 +12,6 @@ constexpr std::pair<InboxKind,std::string_view> kinds[] = {
     {protected_input,"protected_input"}, {bot_change,"bot_change"}, {pr_review,"pr_review"}
 };
 
-std::optional<InboxKind> waitKind(std::string_view reason) {
-    if (reason == "user_question") return user_question;
-    if (reason == "budget") return extra_run;
-    if (reason == "deadline") return deadline;
-    if (reason == "model_budget") return model_budget;
-    if (reason == "unknown_delivery") return unknown_delivery;
-    return {};
-}
-
 Json key(const InboxTarget& item) {
     return {{"botId",item.botId},{"itemKind",inboxKindName(item.itemKind)},{"itemId",item.itemId},
             {"waitId",item.waitId},{"taskId",item.taskId},{"targetRevision",item.targetRevision},
@@ -39,9 +30,7 @@ std::string taskTitle(const Json& task) {
 Json publicWait(const Json& wait) {
     if (!wait.is_object()) return nullptr;
     const auto reason = field(wait,"reason");
-    Json view{{"id",wait.at("id")},{"reason",reason}};
-    if (reason == "unknown_delivery") view["text"] = "Delivery could not be confirmed. Check the Session before proceeding.";
-    else if (waitKind(reason)) view["text"] = field(wait,"text");
+    Json view{{"id",wait.at("id")},{"reason",reason},{"text",field(wait,"text")}};
     if (reason == "user_question") view["choices"] = wait.value("choices",Json::array());
     return view;
 }
@@ -50,13 +39,8 @@ std::string taskStatus(const Json& task, const std::string& blocker) {
     if (terminal(task) || task.at("state") == "cancelling") return field(task,"state");
     if (task.value("replanning",false)) return "replanning";
     if (!blocker.empty()) return "blocked";
-    if (task.at("state") == "waiting" && !waitKind(field(task.at("wait"),"reason"))) return "blocked";
+    if (task.at("state") == "waiting" && !inboxWaitKind(field(task.at("wait"),"reason"))) return "blocked";
     return field(task,"state");
-}
-
-void verifyVersion(const InboxTarget& item, const Json& task) {
-    if (task.at("generation") != item.targetGeneration || task.value("replanning",false))
-        throw RequestChanged{};
 }
 
 bool validDecision(InboxKind kind, std::string_view decision) {
@@ -71,6 +55,15 @@ bool validDecision(InboxKind kind, std::string_view decision) {
     }
     return false;
 }
+}
+
+std::optional<InboxKind> inboxWaitKind(std::string_view reason) {
+    if (reason == "user_question") return user_question;
+    if (reason == "budget") return extra_run;
+    if (reason == "deadline") return deadline;
+    if (reason == "model_budget") return model_budget;
+    if (reason == "unknown_delivery") return unknown_delivery;
+    return {};
 }
 
 std::string_view inboxKindName(InboxKind kind) {
@@ -146,16 +139,15 @@ WHERE t.bot_id=? ORDER BY t.id DESC
             if (blocker.empty() && task.at("state") == "queued" && !p_->queueBlocker(rows.number(0)).is_null())
                 blocker = "Waiting for the project to become available";
             const auto state = taskStatus(task,blocker);
+            if (state == "blocked" && blocker.empty()) blocker = field(task.at("wait"),"text");
             const bool matches = status.empty() || status == state ||
-                (status == "waiting" && (task.at("state") == "waiting" || task.at("state") == "peer_waiting") &&
-                 !task.value("replanning",false)) ||
                 (status == "active" && !terminal(task)) || (status == "terminal" && terminal(task));
             if (!matches) continue;
             const auto due = task.value("deadline",Id{0});
             auto links = rows.json(6);
             auto row = scrub.record({{"requestTitle",taskTitle(task)},{"request",task.at("request")},
                 {"description",task.value("intent",task.at("request"))},{"doneWhen",task.at("doneWhen")},
-                {"blockerReason",blocker},{"wait",publicWait(task.at("wait"))},{"prRefs",std::move(links)},
+                {"blockerReason",state == "blocked" ? blocker : ""},{"wait",publicWait(task.at("wait"))},{"prRefs",std::move(links)},
                 {"status",state},{"state",task.at("state")},{"taskId",rows.number(0)},
                 {"generation",rows.number(2)},{"revisionId",task.value("currentRevision",Id{0})},
                 {"deadlineAt",due > 0 ? Json(due) : Json(nullptr)},{"updatedAt",rows.number(7)}});
@@ -186,17 +178,22 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
             view["canDecide"] = inboxDecisionRole(target.itemKind) == Role::admin ? canAdmin : canDecide;
             result.push_back(std::move(view));
         };
+        const auto addAccess = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
+                                   std::string prompt) {
+            add({id,kind,requestId,0,0,0,0},{{"requestTitle",request.empty() ? std::string(label) : title(request)},
+                {"request",request},{"prompt",std::move(prompt)}});
+        };
         auto waits = p_->query(R"SQL(
 SELECT t.id,t.generation,t.data,w.id,w.data
 FROM tasks t JOIN waits w ON w.task_id=t.id AND w.resolution IS NULL
-WHERE t.bot_id=? AND t.state='waiting' AND NOT coalesce(json_extract(t.data,'$.replanning'),0)
+WHERE t.bot_id=? AND t.state='waiting'
 ORDER BY w.id DESC
 )SQL",{id});
         while (waits.next()) {
             const auto task = waits.json(2);
             auto wait = waits.json(4);
-            const auto kind = waitKind(field(wait,"reason"));
-            if (!kind) continue;
+            const auto kind = inboxWaitKind(field(wait,"reason"));
+            if (!kind || !p_->waitIsActionable(task)) continue;
             const auto waitId = waits.number(3);
             wait["id"] = waitId;
             const auto view = publicWait(wait);
@@ -213,38 +210,51 @@ WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
             add({id,conversation_model_budget,turns.number(0),turns.number(2),0,0,turns.number(2)},
                 {{"requestTitle",title(turns.string(1))},{"request",turns.string(1)},{"prompt",field(turns.json(3),"text")}});
         }
-        auto grants = p_->query("SELECT id,op,kind,resource FROM grant_requests WHERE bot=? AND status='pending' ORDER BY id DESC",{id});
+        auto grants = p_->query(R"SQL(
+SELECT g.id,g.op,g.kind,g.resource,m.text FROM grant_requests g
+LEFT JOIN messages m ON m.id=g.source_message_id AND m.bot_id=g.bot
+WHERE g.bot=? AND g.status='pending' ORDER BY g.id DESC
+)SQL",{id});
         while (grants.next())
-            add({id,grant_request,grants.number(0),0,0,0,0},
-                {{"requestTitle","Resource access"},{"prompt",grants.string(1)+" "+grants.string(2)+" "+grants.string(3)}});
+            addAccess(grant_request,grants.number(0),"Resource access",grants.string(4),
+                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3));
         auto inputs = p_->query(R"SQL(
-SELECT id,name FROM protected_inputs p WHERE bot=? AND status='pending'
+SELECT p.id,p.name,m.text FROM protected_inputs p
+LEFT JOIN messages m ON m.id=p.source_message_id AND m.bot_id=p.bot
+WHERE p.bot=? AND p.status='pending'
 AND NOT EXISTS (SELECT 1 FROM protected_inputs filled WHERE filled.name=p.name AND filled.status='fulfilled')
-ORDER BY id DESC
+ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
-            add({id,protected_input,inputs.number(0),0,0,0,0},
-                {{"requestTitle","Protected input"},{"prompt","Supply a value for "+inputs.string(1)}});
-        auto changes = p_->query("SELECT id,operation,target,name FROM bot_changes WHERE bot=? AND status='pending' ORDER BY id DESC",{id});
+            addAccess(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1));
+        auto changes = p_->query(R"SQL(
+SELECT c.id,c.operation,c.target,c.name,m.text FROM bot_changes c
+LEFT JOIN messages m ON m.id=c.source_message_id AND m.bot_id=c.bot
+WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
+)SQL",{id});
         while (changes.next())
-            add({id,bot_change,changes.number(0),0,0,0,0},{{"requestTitle","Bot change"},
-                {"prompt",(changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3)}});
+            addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
+                      (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3));
         auto reviews = p_->query(R"SQL(
-SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt
+SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
 AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
 AND NOT coalesce(json_extract(t.data,'$.replanning'),0) ORDER BY p.id DESC
 )SQL",{id});
-        while (reviews.next())
+        while (reviews.next()) {
+            const auto task = reviews.json(7);
             add({id,pr_review,reviews.number(0),0,reviews.number(1),reviews.number(2),reviews.number(3)},
-                {{"requestTitle",reviews.string(5)},{"prompt",reviews.string(6)},{"prUrl",reviews.string(4)}});
+                {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",reviews.string(6)},
+                 {"prTitle",reviews.string(5)},{"prUrl",reviews.string(4)}});
+        }
     }
     snapshot.commit();
     return result;
 }
 
 void Store::Impl::recordInboxDecision(const Person& actor, const InboxTarget& target, std::string_view decision) {
+    redactor(target.botId).requirePublic(actor.id);
     const auto now = unixTime();
     exec(R"SQL(
 INSERT INTO inbox_decisions(bot_id,item_kind,item_id,wait_id,task_id,target_revision,target_generation,
@@ -290,7 +300,6 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
     auto access = this->access();
-    if (!access.permitsPerson(actor,item.botId,inboxDecisionRole(item.itemKind))) throw DecisionDenied{};
     if (item.itemId <= 0 || !data.is_object() || !validDecision(item.itemKind,decision))
         throw std::invalid_argument("Invalid inbox decision");
     const auto textInput = [&](std::string_view fieldName) {
@@ -311,6 +320,7 @@ void Store::decideInbox(const Person& actor, const InboxTarget& item, std::strin
             access.decideBotChange(actor,item.botId,item.itemId,decision == "approve",change);
         }
     } else if (kind == conversation_model_budget) {
+        if (!access.permitsPerson(actor,item.botId,Role::decide)) throw DecisionDenied{};
         auto paused = p_->query(R"SQL(
 SELECT t.pause_id FROM conversation_turns t JOIN messages m ON m.id=t.message_id
 WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
@@ -318,41 +328,32 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!paused.next()) throw DecisionUnavailable{};
         if (item.taskId || item.targetRevision || item.waitId != paused.number(0) || item.targetGeneration != paused.number(0))
             throw RequestChanged{};
-        p_->approveMessageModelCall(item.botId,item.waitId);
+        p_->approveMessageModelCall(item.itemId,item.waitId);
         p_->recordInboxDecision(actor,item,decision);
-    } else {
+    } else if (kind == pr_review) {
+        if (!access.permitsPerson(actor,item.botId,Role::decide)) throw DecisionDenied{};
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
-        if (task.value("currentRevision",Id{0}) != item.targetRevision) throw RequestChanged{};
-        if (kind == pr_review) {
-            auto review = p_->query("SELECT target_revision,target_generation,status FROM pr_review_items WHERE id=? AND task_id=?",
-                                    {item.itemId,item.taskId});
-            if (!review.next()) throw RequestChanged{};
-            if (review.string(2) != "pending") throw DecisionUnavailable{};
-            if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration)
-                throw RequestChanged{};
-            verifyVersion(item,task);
-            p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
-                     {decision == "approve" ? "approved" : "changes_requested",item.itemId});
-        } else {
-            auto open = p_->query("SELECT data,resolution IS NULL FROM waits WHERE id=? AND task_id=?",{item.waitId,item.taskId});
-            if (item.itemId != item.waitId || !open.next() || waitKind(field(open.json(0),"reason")) != kind)
-                throw RequestChanged{};
-            if (!open.number(1)) throw DecisionUnavailable{};
-            verifyVersion(item,task);
-            const auto& wait = task.at("wait");
-            if (!wait.is_object() || wait.at("id") != item.waitId || task.at("state") != "waiting")
-                throw DecisionUnavailable{};
-            auto args = Json::object();
-            if (kind == user_question) args["text"] = textInput("text");
-            if (kind == deadline) args["deadline"] = data.at("deadline");
-            if (kind == unknown_delivery)
-                for (const auto* name : {"threadId","runId","questionId"})
-                    if (data.contains(name)) args[name] = textInput(name);
-            p_->operate(item.taskId,item.waitId,decision,p_->redactor(item.botId).payload(args));
-        }
+        auto review = p_->query("SELECT target_revision,target_generation,status FROM pr_review_items WHERE id=? AND task_id=?",
+                                {item.itemId,item.taskId});
+        if (!review.next()) throw RequestChanged{};
+        if (review.string(2) != "pending") throw DecisionUnavailable{};
+        if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration ||
+            task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration ||
+            task.value("replanning",false)) throw RequestChanged{};
+        p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
+                 {decision == "approve" ? "approved" : "changes_requested",item.itemId});
         p_->recordInboxDecision(actor,item,decision);
+    } else {
+        if (item.itemId != item.waitId) throw RequestChanged{};
+        auto args = Json::object();
+        if (kind == user_question) args["text"] = textInput("text");
+        if (kind == deadline) args["deadline"] = data.at("deadline");
+        if (kind == unknown_delivery)
+            for (const auto* name : {"threadId","runId","questionId"})
+                if (data.contains(name)) args[name] = textInput(name);
+        p_->operate(actor,{item.botId,item.taskId,item.waitId,item.targetRevision,item.targetGeneration},decision,args,0,kind);
     }
     transaction.commit();
     if (kind == bot_change && decision == "approve") {
@@ -364,7 +365,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
 Id Store::requestPrReview(Id taskId, Id revision, Id generation, std::string_view url,
                           std::string_view title, std::string_view prompt) {
     if (!(url.starts_with("https://") || url.starts_with("http://")) ||
-        url.find_first_of(" \t\r\n") != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
+        url.find_first_of(" \t\r\n") != url.npos || url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
         prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
     std::lock_guard lock(p_->mutex);

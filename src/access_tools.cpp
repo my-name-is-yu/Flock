@@ -47,14 +47,14 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     return {{"ready",true}};
 }
 
-Json Store::Impl::accessTool(std::string_view bot, const Json& routing, const Decision& decision) {
+Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
     Access access(*this);
     const auto& tool = decision.tool;
     const auto& args = decision.args;
     const auto& config = routing.at("config");
     if (tool == "list_grants") return {{"grants",access.grants(bot)}};
     if (tool == "request_access") {
-        auto id = access.request(bot,{argument(args,"resourceKind"),argument(args,"resourceId"),argument(args,"operation")});
+        auto id = access.request(bot,{argument(args,"resourceKind"),argument(args,"resourceId"),argument(args,"operation")},sourceMessage);
         return {{"requestId",id},{"status","pending"}};
     }
     if (tool == "list_secrets") {
@@ -67,7 +67,7 @@ SELECT name FROM protected_inputs p WHERE status='fulfilled' AND (bot=? OR EXIST
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
-        auto id = access.requestSecret(bot,{argument(args,"name")});
+        auto id = access.requestSecret(bot,{argument(args,"name")},sourceMessage);
         return {{"requestId",id},{"status","pending"},{"settingsLink","/settings/"+std::string(bot)+"/secrets"}};
     }
     if (tool == "list_connections") {
@@ -93,7 +93,7 @@ SELECT name FROM protected_inputs p WHERE status='fulfilled' AND (bot=? OR EXIST
     }
     if (tool == "request_bot_change") {
         const auto operation = argument(args,"operation"), target = argument(args,"targetBotId"), name = argument(args,"name");
-        auto id = access.requestBotChange(bot,operation,target,name);
+        auto id = access.requestBotChange(bot,operation,target,name,sourceMessage);
         return {{"requestId",id},{"status","pending"}};
     }
     return nullptr;

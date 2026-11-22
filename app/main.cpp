@@ -27,12 +27,12 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   tasks [BOT] [--before ID] [--limit N]
   status TASK
   history TASK [--after ID] [--limit N]
-  answer TASK WAIT TEXT
-  approve TASK WAIT
-  retry TASK WAIT
-  extend TASK WAIT NEW_UNIX_DEADLINE
-  reconcile TASK WAIT [--thread ID] [--run ID] [--question ID]
-  cancel TASK [WAIT]
+  answer TASK WAIT REVISION GENERATION TEXT
+  approve TASK WAIT REVISION GENERATION
+  retry TASK WAIT REVISION GENERATION
+  extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
+  reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
+  cancel TASK [WAIT REVISION GENERATION]
   t3 login ENVIRONMENT MCP_URL
   model login [--print-url] [--reconsent]
   model status
@@ -218,9 +218,14 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 
 void operate(Store& store, const Bots& bots, const std::string& operation, Arguments& args) {
     const auto task = number(args,"task ID");
-    Id wait = 0;
+    const auto status = store.task(task);
+    auto target = TaskTarget::from(status,0);
+    if (operation != "cancel" || !args.empty()) {
+        target.waitId = number(args,"wait ID");
+        target.revision = number(args,"revision ID",0);
+        target.generation = number(args,"generation",0);
+    }
     Json details = Json::object();
-    if (operation != "cancel" || !args.empty()) wait = number(args,"wait ID");
     if (operation == "answer") details["text"] = args.pop("answer");
     else if (operation == "extend") details["deadline"] = number(args,"new Unix deadline");
     else if (operation == "reconcile") {
@@ -231,8 +236,7 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
             else if (flag == "--question") details["questionId"] = args.pop("question ID");
             else throw Conflict("Unknown reconciliation option: " + flag);
         }
-        const auto status = store.task(task);
-        if (status["wait"].is_object() && status["wait"]["id"] == wait && status["wait"]["reason"] == "settings" &&
+        if (status["wait"].is_object() && status["wait"]["id"] == target.waitId && status["wait"]["reason"] == "settings" &&
             (status["pendingAction"].is_null() || status["pendingAction"]["phase"] == "ready")) {
             const auto bot = bots.get(status["botId"].get<std::string>());
             const auto destinations = bot.settings.value("conversationEnvironments",Json::object());
@@ -245,7 +249,7 @@ void operate(Store& store, const Bots& bots, const std::string& operation, Argum
         }
     }
     args.end();
-    store.operate(task,wait,operation,details);
+    store.operate(localOwner,target,operation,details);
     print(store.task(task));
 }
 

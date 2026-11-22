@@ -31,8 +31,9 @@ CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
 CREATE TABLE IF NOT EXISTS messages(
   id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL,
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
-  reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
-  UNIQUE(bot_id,client_message_id), UNIQUE(bot_id,sequence));
+    reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
+    person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
+    UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
   status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
@@ -65,6 +66,7 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
     const auto revision = last();
     task["currentRevision"] = revision;
     task.erase("blockerReason");
+    task.erase("blockerWaitId");
     task["intent"] = intent;
     task["doneWhen"] = doneWhen;
     journal(task["id"],"task_revision",{{"revisionId",revision},{"sourceMessageId",source}});
@@ -78,16 +80,16 @@ bool Store::Impl::conversationPending(std::string_view bot) const {
                  " AND json_extract(data,'$.status') IS NULL LIMIT 1",{bot}).next();
 }
 
-std::optional<Json> Store::receipt(std::string_view bot, std::string_view clientId,
+std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId,
                                    std::string_view text, Id replyTo) const {
     std::lock_guard lock(p_->mutex);
-    auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
-                         {bot,clientId});
+    auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND person_id=? AND client_message_id=?",
+                         {bot,actor.id,clientId});
     if (!row.next()) return std::nullopt;
     return receiptRow(row,p_->redactor(bot).text(std::string(text)),replyTo);
 }
 
-Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
+Json Store::receive(const Person& actor, const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
     if (routing.botId.empty() || !hasText(clientId) || clientId.size() > 256 ||
         !hasText(text) || text.size() > messageSize || replyTo < 0 || !routing.config.is_object())
         throw Conflict("Bot, client message ID and nonempty text are required");
@@ -95,21 +97,23 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        const auto existing = this->receipt(routing.botId,clientId,text,replyTo);
+        if (!access().permitsPerson(actor,routing.botId,Role::decide)) throw DecisionDenied{};
+        const auto existing = this->receipt(actor,routing.botId,clientId,text,replyTo);
         if (existing) receipt = *existing;
         else {
             modelCallLimit(routing.config);
             const Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},
                                 {"config",routing.config}};
             const auto scrub = p_->redactor(routing.botId);
-            scrub.requirePublic({routing.botId,clientId,saved});
+            scrub.requirePublic({routing.botId,actor.id,clientId,saved});
             p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
                      {unixTime(),routing.botId});
             const auto id = p_->last();
             p_->exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,routing.botId});
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,? FROM messages WHERE bot_id=?
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
+        actor.id,actor.adminRoot ? 1 : 0,routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
         transaction.commit();
