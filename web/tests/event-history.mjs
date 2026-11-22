@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { refreshEventHistory } from '../assets/event-history.mjs';
+import { refreshEventHistory, timelineMessages } from '../assets/event-history.mjs';
 import { replyArrivalId } from '../assets/reply-arrival.mjs';
 
 const page = (ids, olderBefore) => ({ events: ids.map(id => ({ id })), olderBefore });
@@ -72,6 +72,34 @@ assert.equal(loaded.events.has(1), false);
 assert.equal(loaded.olderBefore, 2);
 await refreshEventHistory(loaded, { ...latestAfterApproval, changedMessageIds: [] }, noPage, current);
 
+const report = {
+  id: 6, kind: 'report', time: 100, taskId: 1,
+  data: { report: 'Full report', status: 'completed', truncated: false, revisionId: 2, resultRunId: 'result',
+    run: { environmentId: 'env', threadId: 'thread', runId: 'launch' } },
+};
+const completion = {
+  id: 8, kind: 'completed', time: 101, taskId: 1,
+  data: { text: 'Full report', revisionId: 2, run: { environmentId: 'env', threadId: 'thread', runId: 'result' } },
+};
+const dayOf = time => Math.floor(time / 100);
+const timeline = (...events) => timelineMessages(events, dayOf);
+assert.deepEqual(timeline(report, completion), [{ event: completion, report }]);
+for (const data of [
+  { report: 'Full' }, { report: 'Full report ' }, { truncated: true }, { truncated: undefined },
+  { status: 'failed' }, { status: undefined }, { revisionId: null }, { revisionId: 3 },
+  { resultRunId: '' }, { resultRunId: 'launch' }, { run: null },
+  { run: { ...report.data.run, environmentId: 'other' } },
+  { run: { ...report.data.run, threadId: 'other' } },
+]) {
+  const distinct = { ...report, data: { ...report.data, ...data } };
+  assert.deepEqual(timeline(distinct, completion), [{ event: distinct }, { event: completion }]);
+}
+for (const distinct of [{ ...completion, taskId: 2 }, { ...completion, time: 200 }]) {
+  assert.deepEqual(timeline(report, distinct), [{ event: report }, { event: distinct }]);
+}
+assert.deepEqual(timeline(report, { kind: 'wait_closed' }, completion), [{ event: report }, { event: completion }]);
+assert.deepEqual(timeline(completion), [{ event: completion }]);
+
 const outgoing = (id) => ({ id, kind: 'conversation_message' });
 const reply = (id) => ({ id, kind: 'conversation_reply' });
 assert.equal(replyArrivalId([reply(4)], undefined), undefined, 'Initial history stays still');
@@ -79,13 +107,13 @@ assert.equal(replyArrivalId([reply(4), outgoing(5), reply(6)], 4), 6, 'The new r
 assert.equal(replyArrivalId([reply(4), outgoing(5), reply(6)], 6), undefined, 'A duplicate refresh stays still');
 assert.equal(replyArrivalId([reply(8), reply(9), reply(10)], 7), undefined, 'A large batch stays still');
 
-const report = { id: 11, kind: 'report', taskId: 2 };
+const pairedReport = { id: 11, kind: 'report', taskId: 2 };
 const complete = { id: 12, kind: 'completed', taskId: 2 };
 const closed = { id: 13, kind: 'wait_closed' };
-assert.equal(replyArrivalId([report, complete, closed], 10), 12, 'Only the visible completion in the pair animates');
-assert.equal(replyArrivalId([report, complete, closed], 13), undefined, 'The completion does not replay');
-assert.equal(replyArrivalId([report, { ...complete, taskId: 3 }], 10), undefined, 'Different requests stay still');
-assert.equal(replyArrivalId([report, { ...complete, kind: 'report' }], 10), undefined, 'Two reports stay still');
+assert.equal(replyArrivalId([pairedReport, complete, closed], 10), 12, 'Only the visible completion in the pair animates');
+assert.equal(replyArrivalId([pairedReport, complete, closed], 13), undefined, 'The completion does not replay');
+assert.equal(replyArrivalId([pairedReport, { ...complete, taskId: 3 }], 10), undefined, 'Different requests stay still');
+assert.equal(replyArrivalId([pairedReport, { ...complete, kind: 'report' }], 10), undefined, 'Two reports stay still');
 
 const liveUpdatesSource = await readFile(new URL('../assets/live-updates.js', import.meta.url));
 const { coalescedRefresh } = await import(`data:text/javascript;base64,${liveUpdatesSource.toString('base64')}`);
