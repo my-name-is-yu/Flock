@@ -4,6 +4,21 @@ namespace flockv0 {
 using conversation_storage::identifier;
 using conversation_storage::expandedContextBytes;
 
+namespace {
+std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_t bytes) {
+    auto prefix = bounded(text,std::min(limit,bytes));
+    if (Json(prefix).dump().size()-2 <= bytes) return prefix;
+
+    std::size_t low = 0, high = prefix.size()-1;
+    while (low < high) {
+        const auto middle = low + (high-low+1)/2;
+        if (Json(bounded(text,middle)).dump().size()-2 <= bytes) low = middle;
+        else high = middle-1;
+    }
+    return bounded(text,low);
+}
+}
+
 void Store::Impl::migrateCompaction() {
     Transaction tx(db);
     exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_compactions(
@@ -46,14 +61,14 @@ Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Jso
         boundary = saved.at("endMessageId");
         summary = {{"kind","conversation_compaction"},{"compactionId",saved.at("compactionId")},
                    {"startMessageId",saved.at("startMessageId")},{"endMessageId",boundary},{"summary",saved.at("summary")}};
-        remaining -= summary.dump().size()+1;
+        remaining -= summary.dump().size();
     }
     auto rows = query("SELECT id,task_id,kind,data,text FROM compactable_messages WHERE bot_id=? AND id>? AND id<?"
                       " ORDER BY id DESC LIMIT 24",{bot,boundary,before});
     while (rows.next()) {
         const auto kind = rows.string(2);
         const char* role = kind=="conversation_message" ? "user" : kind=="conversation_reply" ? "bot" : "task";
-        Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role}};
+        Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role},{"text",""}};
         if (rows.number(1)) entry["taskId"] = rows.number(1);
         if (kind=="conversation_reply") {
             const auto data = rows.json(3);
@@ -61,10 +76,10 @@ Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Jso
                 if (data.contains(key)) entry[key] = data.at(key);
         } else if (kind=="waiting") entry["waitId"] = rows.json(3).at("id");
         const std::size_t limit = kind=="conversation_message" ? 4000 : kind=="conversation_reply" ? 1500 : 700;
-        entry["text"] = bounded(rows.string(4),std::min(limit,remaining));
-        const auto bytes = entry.dump().size()+1;
+        const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes>remaining) break;
-        remaining -= bytes;
+        entry["text"] = boundedJsonText(rows.string(4),limit,remaining-bytes);
+        remaining -= bytes + (entry.at("text").dump().size()-2);
         history.push_back(std::move(entry));
     }
     if (!summary.is_null()) history.push_back(std::move(summary));

@@ -241,8 +241,10 @@ Json Store::Impl::workflowTool(std::string_view tool, const Json& args, std::str
         throw Conflict("Stage is stopping");
     if (stage.number(2) && (stage.string(1)=="failed" || (taskId && terminal(task)))) {
         Json next = {{"text",instruction},{"messageId",message},{"step",step}};
+        if (taskId) next["priorRevisionId"] = task.at("currentRevision");
         exec("UPDATE workflow_stages SET task_id=NULL,status='pending',deadline=0,alerted=0,input='',output='',"
-             "result_id=NULL,confirmed_at=0,confirmed_state='',unreachable=0,instruction=? WHERE workflow_id=? AND stage_id=?",
+             "result_id=NULL,confirmed_at=0,confirmed_state='',unreachable=0,"
+             "instruction=json_patch(coalesce(instruction,'{}'),?) WHERE workflow_id=? AND stage_id=?",
              {next,id,target});
     } else {
         if (!taskId) throw Conflict("Stage has no assigned task yet");
@@ -269,8 +271,12 @@ void Store::Impl::advanceWorkflows(Seconds now) {
         journal(task,"workflow_deadline_exceeded",{{"needsAttention",true},{"observedAt",now}});
     }
     auto ready = query(R"SQL(WITH ready AS MATERIALIZED (
-        SELECT s.workflow_id,s.spec,w.bot_id,w.routing,w.message_id,w.request,s.instruction
+        SELECT s.workflow_id,s.spec,w.bot_id,w.routing,w.message_id,s.instruction,
+               coalesce(r.intent,json_extract(s.spec,'$.request')),
+               coalesce(r.done_when,json_extract(s.spec,'$.request')),
+               coalesce(r.source_message_id,w.message_id)
         FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
+        LEFT JOIN task_revisions r ON r.id=json_extract(s.instruction,'$.priorRevisionId')
         WHERE w.stop_requested=0 AND s.status='pending' AND s.task_id IS NULL AND NOT EXISTS (
           SELECT 1 FROM workflow_dependencies d JOIN workflow_stages p ON p.workflow_id=d.workflow_id AND p.stage_id=d.parent_id
           LEFT JOIN outdated_workflow_stages old ON old.workflow_id=p.workflow_id AND old.stage_id=p.stage_id
@@ -301,20 +307,15 @@ void Store::Impl::advanceWorkflows(Seconds now) {
             exec("UPDATE workflow_stages SET status='failed' WHERE workflow_id=? AND stage_id=?",{id,spec.at("stageId")});
             continue;
         }
-        auto request = field(spec,"request");
-        if (role=="verify") request += "\nRequested change: " + ready.string(5);
-        if (!input.empty()) request += "\nPinned input artifact version: " + input;
-        if (role=="verify") request += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
-        else if (role=="implement") request += "\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
         const auto taskId = startConversationTask(ready.json(3),ready.string(2),field(spec,"request"),"",ready.number(4),nullptr,false);
         auto task = load(taskId);
         task["workflowId"] = id;
         task["stageId"] = spec.at("stageId");
         task["sourceResultRefs"] = std::move(sources);
         task["inputArtifactVersion"] = input;
-        addRevision(task,field(spec,"request"),request,ready.number(4));
-        if (!ready.string(6).empty()) {
-            const auto next = ready.json(6);
+        addRevision(task,ready.string(6),ready.string(7),ready.number(8));
+        if (!ready.string(5).empty()) {
+            const auto next = ready.json(5);
             acceptInstruction(task,next.at("messageId"),next.at("step"),
                               field(next,"text"),nullptr,ready.json(3),nullptr);
         } else save(task);
@@ -322,6 +323,17 @@ void Store::Impl::advanceWorkflows(Seconds now) {
              {taskId,input,id,spec.at("stageId")});
     }
     tx.commit();
+}
+
+void Store::Impl::appendStageRequirements(std::string& instruction, const Json& task) const {
+    auto stage = query("SELECT json_extract(s.spec,'$.role'),s.input,w.request FROM workflow_stages s"
+                       " JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?", {task.at("id")});
+    if (!stage.next()) throw Conflict("Missing workflow stage assignment");
+    const auto role = stage.string(0), pin = stage.string(1);
+    if (role=="verify") instruction += "\n\nRequested change: " + stage.string(2);
+    if (!pin.empty()) instruction += "\n\nPinned input artifact version: " + pin;
+    if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
+    else if (role=="implement") instruction += "\n\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
 }
 
 void Store::Impl::stageObservation(const Json& task, const Observation& observed, Seconds now) {

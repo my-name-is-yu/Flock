@@ -51,6 +51,7 @@ struct Store::Impl {
     Json workflowTool(std::string_view tool, const Json&, std::string_view bot, Id message, int step, const Json& routing);
     Json workflowStatus(Id id, std::string_view bot, Seconds now) const;
     void advanceWorkflows(Seconds now);
+    void appendStageRequirements(std::string& instruction, const Json& task) const;
     void stageObservation(const Json& task, const Observation&, Seconds now);
     bool settleStageReport(Json& task);
     void migrateConversation();

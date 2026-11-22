@@ -21,6 +21,10 @@ std::string intent(const Json& task) {
     return task.value("intent",field(task,"request"));
 }
 
+std::string taskAssignment(const Json& task) {
+    return "Task intent:\n" + intent(task) + "\n\nCompletion criteria:\n" + field(task,"doneWhen");
+}
+
 Json revision(const Json& task) { return task.value("currentRevision",Json(nullptr)); }
 
 bool hasPending(const Json& task) {
@@ -201,7 +205,7 @@ ORDER BY id)SQL");
             if (current.contains("workflowId") && current["lastRun"].is_null()) {
                 const auto pending = pendingBatch(current);
                 supersedeInstructions(current,pending.superseded);
-                queueAction(current,actionId(),"delegate",field(current,"doneWhen"),Json::object(),pending.instructions);
+                queueAction(current,actionId(),"delegate",taskAssignment(current),Json::object(),pending.instructions);
                 return true;
             }
             if (current["eventId"] == 0) db.event(current,"intake",{{"kind","intake"}});
@@ -883,6 +887,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     }
                 }
             }
+            if (task.contains("workflowId")) db.appendStageRequirements(instruction,task);
             instruction += "\n\n[Flock action ID: " + action + "]";
             task["deadline"] = 0;
         }
@@ -936,8 +941,7 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT 20
             const std::string reason = "Apply the accepted user instructions at a settled Run boundary";
             if (needsBudget(current,tool,reason,Json::object())) return true;
             const auto action = actionId();
-            auto instruction = "Continue this Flock task.\n\nTask intent:\n" + intent(current) +
-                "\n\nCompletion criteria:\n" + field(current,"doneWhen");
+            auto instruction = "Continue this Flock task.\n\n" + taskAssignment(current);
             if (fresh) instruction += priorInstructions(current);
             db.consumeEvent(current);
             db.journal(current["id"],"decision",{{"actionId",action},{"tool",tool},{"reason",reason},

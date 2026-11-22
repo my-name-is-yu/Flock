@@ -155,6 +155,82 @@ void verifyAfterRestart(bool advance) {
     }
 }
 
+void reviseQueuedVerifier() {
+    Fixture f;
+    f.call("start_workflow",{{"request","Preserve duplicate rows"},{"verificationCriteria","Run smoke tests"}});
+    f.ticks(2);
+    const Id workflow = f.status().at("workflowId");
+    const auto blocker = f.call("start_workflow",{{"request","Collect logs"},
+        {"stages",Json::array({{{"stageId","logs"},{"role","collect"}}})}}).at("workflowId");
+    f.ticks(1);
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
+    f.ticks(3);
+    const auto blocked = f.call("workflow_status",{{"workflowId",workflow}});
+    const auto task = f.store->task(blocked["stages"][1]["taskId"]);
+    require(task["state"]=="queued" && task["blockedBy"]["id"]==f.status()["stages"][0]["taskId"],
+            "verifier was not queued behind the other workflow");
+    f.call("change_task",{{"taskId",task["id"]},{"generation",task["generation"]},{"revisionId",task["currentRevision"]},
+        {"doneWhen","Run the duplicate-row regression"},{"instruction","Use the revised criteria."}});
+    f.t3.finish("run-2","Logs collected");
+    f.ticks(4);
+    require(f.status()["workflowId"]==blocker && f.status()["status"]=="completed" && f.t3.commands.size()==3,
+            "verifier did not start when the project slot became available");
+    const auto& assignment = f.t3.commands.back().instruction;
+    require(assignment.find("Run the duplicate-row regression")!=std::string::npos &&
+            assignment.find("Pinned input artifact version: "+shaA)!=std::string::npos &&
+            assignment.find("Return only JSON with artifactVersion and verdict (pass or fail)")!=std::string::npos &&
+            assignment.find("Requested change: Preserve duplicate rows")!=std::string::npos,
+            "queued criteria edit lost the verification assignment");
+    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
+    f.ticks(1);
+    const auto settled = f.call("workflow_status",{{"workflowId",workflow}});
+    require(settled["status"]=="completed" && settled["stages"][1]["verified"]==true &&
+            settled["verdicts"].size()==1 && settled["verdicts"][0]["artifactVersion"]==shaA,
+            "revised verifier did not settle against its pinned artifact");
+}
+
+void rerunRevisedDependentStage() {
+    Fixture f;
+    const Id workflow = f.call("start_workflow",{{"request","Implement feature"},{"verificationCriteria","Run smoke tests"}})
+        .at("workflowId");
+    f.ticks(2);
+    f.t3.finish("run-1",{{"artifactVersion",shaA}});
+    f.ticks(3);
+    const auto task = f.store->task(f.status()["stages"][1]["taskId"]);
+    const std::string intent = "Verify backward compatibility", criteria = "Run the migration suite";
+    f.call("change_task",{{"taskId",task["id"]},{"generation",task["generation"]},{"revisionId",task["currentRevision"]},
+        {"intent",intent},{"doneWhen",criteria},{"instruction","Use the revised assignment."}});
+    f.ticks(2);
+    require(f.t3.interrupts.contains("run-2"),"active verifier did not stop for the revision");
+    f.t3.finish("run-2",Json::object(),"interrupted");
+    f.ticks(5);
+    require(f.t3.commands.size()==3,"revised verifier did not start");
+    f.t3.finish("run-3",{{"artifactVersion",shaA},{"verdict","pass"}});
+    f.ticks(1);
+    require(f.status()["stages"][1]["verified"]==true,"revised verifier did not settle");
+
+    f.call("instruct_workflow_stage",{{"workflowId",workflow},{"stageId","implement"},{"instruction","Build the next revision"}});
+    f.ticks(3);
+    f.t3.finish("run-4",{{"artifactVersion",shaB}});
+    f.ticks(1);
+    f.call("instruct_workflow_stage",{{"workflowId",workflow},{"stageId","verify"},{"instruction","Repeat with the new build"}});
+    f.restart();
+    f.ticks(3);
+    const Id rerun = f.status()["stages"][1]["taskId"];
+    const auto revised = f.store->task(rerun);
+    require(revised["id"]!=task["id"] && revised["intent"]==intent && revised["doneWhen"]==criteria,
+            "dependent rerun lost the task revision");
+    const auto& assignment = f.t3.commands.back().instruction;
+    require(f.t3.commands.size()==5 && assignment.find(intent)!=std::string::npos &&
+            assignment.find(criteria)!=std::string::npos && assignment.find(shaB)!=std::string::npos &&
+            assignment.find(shaA)==std::string::npos && assignment.find("Repeat with the new build")!=std::string::npos,
+            "dependent rerun lost its revised assignment or rebound to the wrong artifact");
+    f.t3.finish("run-5",{{"artifactVersion",shaB},{"verdict","pass"}});
+    f.ticks(1);
+    require(f.status()["status"]=="completed" && f.status()["verdicts"].size()==2,
+            "dependent rerun did not settle or lost earlier evidence");
+}
+
 void rejectInvalidGraphAndArtifact() {
     Fixture f;
     f.turn("Cycle","start_workflow",{{"request","Invalid cycle"},{"stages",Json::array({
@@ -414,6 +490,27 @@ void scopedCompactionPages() {
     require(calls==6 && reviewed,"multi-step expansion did not respect the evidence budget");
 }
 
+void historyKeepsLargestFittingPrefix() {
+    Fixture f;
+    std::string original;
+    for (int i=0; i<500; ++i) original += "根拠\n\t\"\\\x01";
+    const Id target = f.turn(original);
+    for (int i=0; i<4; ++i) f.turn(std::string(4000,'x'));
+    f.turn(std::string(3987,'x'));
+    f.turn("Inspect history near its byte limit");
+    auto history = f.bot.history;
+    const auto partial = std::ranges::find_if(history,[&](const Json& entry) { return entry["messageId"]==target; });
+    require(partial!=history.end(),"history dropped a message whose prefix fit");
+    const auto excerpt = partial->at("text").get<std::string>();
+    require(!excerpt.empty() && excerpt.size()<4000 && original.starts_with(excerpt) &&
+            history.dump().size()<24000,"history prefix did not fit the serialized byte budget");
+    auto next = excerpt.size()+1;
+    while ((static_cast<unsigned char>(original.at(next))&0xc0)==0x80) ++next;
+    (*partial)["text"] = original.substr(0,next);
+    require(next>excerpt.size()+1 && history.dump().size()>24000,
+            "the next multi-byte character should exceed the remaining serialized bytes");
+}
+
 void compactAndContinue() {
     Fixture f;
     const std::string original = "Keep original instruction and artifact "+shaA;
@@ -460,6 +557,8 @@ int main() {
     try {
         verifyAfterRestart(false);
         verifyAfterRestart(true);
+        reviseQueuedVerifier();
+        rerunRevisedDependentStage();
         rejectInvalidGraphAndArtifact();
         stopAndDeadline();
         uncertainLaunchAndStageStop();
@@ -470,6 +569,7 @@ int main() {
         observeAfterUnsentAnswer();
         stopBeforeFirstSend();
         scopedCompactionPages();
+        historyKeepsLargestFittingPrefix();
         compactAndContinue();
     } catch (const std::exception& error) {
         std::cerr<<error.what()<<'\n';
