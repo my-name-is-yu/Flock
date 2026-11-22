@@ -220,7 +220,6 @@ public:
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
                         const Json& event, Seconds now);
-    Json board(const Person&, std::string_view bot = {}, std::string_view status = {}) const;
     Json inbox(const Person&, std::string_view bot = {}) const;
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
@@ -250,14 +249,16 @@ public:
     // Distinct active state and replanning combinations, grouped by Bot ID.
     Json activeTaskStatesByBot() const;
     Json sessionTasks(std::string_view botId, Id before, unsigned limit) const;
-    // Journal position and tasks with a newly recorded Run since that position.
+    // Journal position and tasks with a Run start or settled report since that position.
     // On the initial read only the position is needed, before loading the first page.
     std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
     // Latest completion or Session report for the Task's current revision.
     Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
-    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50, std::string_view viewer = {}) const;
+    enum class ConversationEvents { all, incoming };
+    Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,
+                      ConversationEvents events = ConversationEvents::all, std::string_view viewer = {}) const;
     // Same chronological page for either participant. Each exchange is journaled under both tasks.
     Json peerConversation(std::string_view bot, std::string_view peer, Id before = 0, unsigned limit = 50) const;
     std::vector<std::pair<std::string,std::string>> peerExchangePairs() const;

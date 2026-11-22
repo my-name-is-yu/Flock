@@ -169,6 +169,8 @@ Json eventView(const Json& event) {
             const auto& source = data.at("source");
             auto run = runView(source,field(source,"environmentId"));
             if (!run.is_null()) {
+                const auto status = field(source,"status");
+                if (!status.empty() && !field(run,"runId").empty()) details["runStatus"] = status;
                 copyFields(run,source,{"itemId"});
                 details["run"] = std::move(run);
             }
@@ -186,6 +188,7 @@ Json eventView(const Json& event) {
         details["run"] = runView(data.at("run"),field(data,"environmentId"));
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
+        if (kind == "conversation_message") copyFields(details,data,{"imageAttachmentCount"});
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(),*channel,{"channelKind","fromViewer"});
         for (const auto* key : {"attachments","artifacts"}) {
@@ -210,21 +213,36 @@ Json eventView(const Json& event) {
     return view;
 }
 
-std::string preview(Store& store, std::string_view bot) {
-    const auto events = store.conversation(bot,0,12);
+void conversationSummary(Json& row, Store& store, std::string_view bot) {
+    constexpr unsigned previewSize = 12;
+    const auto events = store.conversation(bot,0,previewSize);
     std::string request;
+    std::string preview;
+    Id latestIncoming = 0;
     for (auto event = events.rbegin(); event != events.rend(); ++event) {
         const auto kind = field(*event,"kind");
         const auto& data = event->at("data");
+        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
+            (kind == "waiting" && field(data,"reason") == "user_question");
         auto text = kind == "report" ? field(data,"report") : field(data,"text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage"))
             text = field(data.at("forwardedMessage"),"text");
-        if ((kind == "report" || kind == "completed" || kind == "conversation_reply" ||
-             (kind == "waiting" && field(data,"reason") == "user_question")) && !text.empty())
-            return bounded(text,240);
+        if (incoming) {
+            if (!latestIncoming) latestIncoming = event->at("id").get<Id>();
+            if (!text.empty()) {
+                preview = bounded(text,240);
+                break;
+            }
+        }
         if (request.empty() && (kind == "request" || kind == "conversation_message" || kind == "bot_message")) request = bounded(text,240);
     }
-    return request;
+    // A burst of outgoing messages can push an unread reply outside the preview page.
+    if (!latestIncoming && events.size() == previewSize) {
+        const auto earlier = store.conversation(bot,events.front().at("id").get<Id>(),1,Store::ConversationEvents::incoming);
+        if (!earlier.empty()) latestIncoming = earlier.front().at("id").get<Id>();
+    }
+    row["preview"] = preview.empty() ? std::move(request) : std::move(preview);
+    row["latestIncomingEventId"] = latestIncoming;
 }
 
 std::string displayState(const Json& task) {
@@ -263,7 +281,7 @@ Json sessionGroup(const Json& task) {
         if (!seen.emplace(field(session,"environmentId"),thread).second) continue;
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
-        session["state"] = active ? displayState(task) : "ended";
+        session["state"] = active ? displayState(task) : run->value("status","ended");
         sessions.push_back(std::move(session));
     }
     auto group = taskSummary(task);
@@ -326,7 +344,7 @@ Json botList(Store& store, const Json& bots) {
         const auto id = field(bot,"id");
         if (id.empty()) continue;
         auto row = botSummary(bot);
-        row["preview"] = preview(store,id);
+        conversationSummary(row,store,id);
         row["presence"] = botPresence(statesByBot.value(id,Json::array()));
         result.push_back(std::move(row));
     }
@@ -334,7 +352,7 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    const auto events = store.conversation(bot,before,conversationSize + 1,viewer);
+    const auto events = store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer);
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];

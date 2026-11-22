@@ -2,7 +2,7 @@
 
 The executable serves the embedded UI on its IPv4 loopback listener. The Web UI and CLI share the same SQLite Store. The HTTP layer projects explicit display fields from Bot descriptors and Store rows. Local POSTs require the server's exact origin, JSON and the Web UI request header. Browser text is rendered as text, while Session links use T3's environment-scoped hosted route.
 
-The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. Retrying the same payload returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Tapping one of a task question's choices answers that question directly through `POST /api/operations` without a conversation turn; a written reply to the question goes through the Bot. The CLI `submit` command and `POST /api/requests` each create an explicit new Task.
+The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. Retrying the same payload returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Select a task question's choice and press **Send answer** to answer directly through `POST /api/operations`. Written replies to questions go through the Bot. The CLI `submit` command and `POST /api/requests` each create an explicit new Task.
 
 The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
 
@@ -45,6 +45,13 @@ to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
 `attachment/<botId>/inspect` to let the Bot inspect media in its conversation.
 An image-capable ChatGPT model receives authorized image contents. Audio
 inspection returns file properties and WAV format and duration.
+
+In the Web composer, attach PNG or JPEG screenshots with the attachment button
+or paste them into the message field. Each image can be up to 8,192 pixels per
+side and 4,194,304 pixels total. A message still requires text. The sent message
+shows the number of images attached. Bot inspection requires the existing
+`attachment/<botId>/inspect` grant. Screenshot drafts and their retry keys live
+in the current page and are cleared on reload.
 
 ## Memory and automation
 

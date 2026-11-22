@@ -53,19 +53,16 @@ void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks&
             try {
                 const auto bot = parameter(req,"bot");
                 if (req.has_param("bot") && !validBotId(bot)) return error(res,400,"invalid_bot");
-                auto rows = project(actor,bot,req);
+                auto rows = project(actor,bot);
                 setBotNames(rows,store,callbacks);
                 reply(res,200,{{key,std::move(rows)}});
             } catch (const std::invalid_argument&) { error(res,400,"invalid_filter"); }
         });
     };
-    get("/api/board","tasks",[&store](const Person& actor, const std::string& bot, const Request& req) {
-        return store.board(actor,bot,parameter(req,"status"));
-    });
-    get("/api/inbox","items",[&store](const Person& actor, const std::string& bot, const Request&) {
+    get("/api/inbox","items",[&store](const Person& actor, const std::string& bot) {
         return store.inbox(actor,bot);
     });
-    get("/api/inbox/history","decisions",[&store](const Person& actor, const std::string& bot, const Request&) {
+    get("/api/inbox/history","decisions",[&store](const Person& actor, const std::string& bot) {
         return store.decisionHistory(actor,bot);
     });
 
