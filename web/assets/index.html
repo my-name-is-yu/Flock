@@ -73,10 +73,12 @@
           <button id="open-navigation" class="icon-button narrow-only header-menu" type="button" aria-controls="navigation" aria-expanded="false" aria-label="Open Bot list">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status" hidden>
-            <span class="profile-face"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator" aria-hidden="true"></span></span>
-            <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
-          </button>
+          <h1 id="profile-heading" class="profile-heading" aria-labelledby="profile-name" hidden>
+            <button id="profile" class="profile" type="button" aria-haspopup="dialog" aria-label="Open Bot settings" aria-describedby="profile-status">
+              <span class="profile-face" aria-hidden="true"><span id="profile-avatar" class="avatar avatar-profile"></span><span class="status-indicator"></span></span>
+              <span class="profile-text"><span id="profile-name" class="profile-name"></span><span id="profile-status" class="profile-status"></span></span>
+            </button>
+          </h1>
           <h1 id="profile-placeholder" class="profile-placeholder">Conversation</h1>
           <div id="peer-identity" class="peer-identity" hidden>
             <span id="peer-faces" class="peer-faces" aria-hidden="true"></span>
@@ -90,23 +92,23 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-5 3V6a2 2 0 0 1 1-2Zm14 4a2 2 0 0 1 2 2v10l-5-3h-4"/></svg>
             <span>Bot DMs</span>
           </button>
-          <button id="settings-button" class="icon-button settings-button" type="button" aria-label="Open Bot settings" aria-haspopup="dialog" hidden>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3m4 0h9M4 12h9m4 0h3M4 17h3m4 0h9"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="9" cy="17" r="2"/></svg>
-          </button>
         </div>
       </header>
-      <section id="conversation" class="conversation" aria-label="Conversation history" tabindex="0">
-        <div class="conversation-inner">
-          <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
-          <p id="peer-status" class="peer-status" role="status" hidden></p>
-          <div id="timeline" class="timeline"></div>
-        </div>
-      </section>
+      <div class="conversation-frame">
+        <section id="conversation" class="conversation" aria-label="Conversation history" tabindex="0">
+          <div class="conversation-inner">
+            <button id="older" type="button" class="text-button older" hidden>Show earlier messages</button>
+            <p id="peer-status" class="peer-status" role="status" hidden></p>
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </section>
+      </div>
       <button id="jump-to-latest" class="jump-to-latest" type="button" aria-controls="conversation" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-5-5 5 5 5-5"/></svg>
         Jump to latest
       </button>
       <div class="composer-container" id="composer-container" hidden>
+        <p id="view-only-notice" class="view-only-notice" role="status" hidden>View only</p>
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
             <svg class="reply-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
@@ -116,11 +118,15 @@
             </button>
           </div>
           <label class="sr-only" id="compose-label" for="message">Message</label>
-          <textarea rows="1" id="message" required aria-describedby="notice"></textarea>
+          <textarea rows="1" id="message" required enterkeyhint="enter" aria-describedby="notice"></textarea>
+          <ul id="screenshot-previews" class="screenshot-previews" aria-label="Attached screenshots" hidden></ul>
           <div class="composer-toolbar">
+            <input id="screenshot-input" type="file" accept="image/png,image/jpeg" multiple hidden>
+            <button id="attach-screenshots" class="icon-button attach-screenshots" type="button" aria-label="Attach screenshots" title="Attach screenshots">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
             <span id="notice" class="notice" role="status"></span>
-            <kbd id="send-hint" class="send-hint" aria-hidden="true"></kbd>
-            <button id="send" class="send" type="submit" aria-label="Send message">
+            <button id="send" class="send" type="submit" aria-label="Send message" aria-keyshortcuts="Enter Control+Enter Meta+Enter">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
             </button>
           </div>

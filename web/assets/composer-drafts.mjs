@@ -36,6 +36,14 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
       const text = texts.get(String(anchor));
       return typeof text === 'string' ? text : '';
     };
+    function clearSentText(payload) {
+      const anchor = payload.replyToMessageId ?? 0;
+      const key = String(anchor);
+      if (textAt(anchor) !== payload.text) return;
+      texts.delete(key);
+      suggestions.delete(key);
+      if (reply?.messageId === anchor) reply = null;
+    }
     const conversation = {
       get reply() { return reply; },
       get text() { return textAt(slot()); },
@@ -77,10 +85,12 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
         const key = String(anchor);
         if (pending.get(key)?.clientMessageId !== payload.clientMessageId) return;
         pending.delete(key);
-        if (received && textAt(anchor) === payload.text) {
-          texts.delete(key);
-          if (reply?.messageId === anchor) reply = null;
-        }
+        if (received) clearSentText(payload);
+        persist();
+      },
+      settleScreenshotSend(payload) {
+        pending.delete(String(payload.replyToMessageId ?? 0));
+        clearSentText(payload);
         persist();
       },
     };

@@ -1,8 +1,9 @@
 .composer-container { background: var(--canvas); padding: .4rem clamp(1rem, 4vw, 2rem) 1.1rem; width: 100%; min-width: 0; max-width: var(--content-width); margin: 0 auto; }
+.view-only-notice { padding-block: .45rem; color: var(--text-3); font-size: var(--text-sm); text-align: center; }
 .composer {
   --composer-control-size: 2.75rem;
-  display: grid; grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "reply reply" "message send" "feedback feedback";
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "reply reply reply" "screenshots screenshots screenshots" "attach message send" "feedback feedback feedback";
   align-items: end; column-gap: .25rem;
   background: var(--raised);
   border: 1px solid color-mix(in srgb, var(--hairline) 70%, transparent);
@@ -35,25 +36,43 @@
   max-height: min(calc(var(--keyboard-viewport-height, 100dvh) * .4), 18rem);
   resize: none; border: 0; background: transparent;
   padding-block: max(.35rem, calc((var(--composer-control-size) - 1.5em) / 2));
-  padding-inline: .95rem 0;
+  padding-inline: .15rem 0;
   font-size: var(--text-md); line-height: 1.5;
 }
 .composer textarea::placeholder { color: var(--text-3); }
 .composer textarea:focus-visible { outline: none; }
 .composer textarea:read-only { color: var(--text-2); }
 
+.screenshot-previews {
+  grid-area: screenshots; display: flex; gap: .55rem; overflow-x: auto; margin: 0;
+  padding: .45rem 1rem .3rem; list-style: none;
+}
+.screenshot-preview {
+  position: relative; flex: 0 0 7rem; width: 7rem; height: 4.75rem;
+  border: 1px solid var(--hairline); border-radius: var(--radius-lg); background: var(--canvas);
+}
+.screenshot-preview img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
+.screenshot-preview .remove-screenshot {
+  position: absolute; top: .2rem; right: .2rem; width: 1.65rem; height: 1.65rem;
+  border: 1px solid var(--hairline); border-radius: var(--radius-full); background: var(--raised); font-size: 1rem;
+}
+.screenshot-preview .remove-screenshot:hover:not(:disabled) { background: var(--hover); }
+
+.composer-toolbar .attach-screenshots {
+  grid-area: attach; width: var(--composer-control-size); height: var(--composer-control-size);
+  margin: .15rem; border: .3rem solid transparent; border-radius: var(--radius-full);
+  background: var(--selected); background-clip: padding-box;
+}
+.composer-toolbar .attach-screenshots:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--hover); }
+.composer-toolbar .attach-screenshots[aria-disabled="true"] { opacity: .5; cursor: wait; }
 .composer-toolbar { display: contents; }
-.composer-toolbar > :is(.notice, .send-hint) { grid-area: feedback; }
+.composer-toolbar > .notice { grid-area: feedback; }
 .composer-toolbar > .notice:not(:empty) { padding: 0 .95rem .65rem; }
-.composer-toolbar > .notice:not(:empty) + .send-hint { display: none; }
-.composer-toolbar > .send-hint { justify-self: end; padding: 0 .95rem .35rem; }
 .notice { min-width: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; transition: opacity .4s ease; }
 .notice.error { color: var(--danger); }
 .notice.fading { opacity: 0; }
-.send-hint { font: inherit; font-size: var(--text-xs); color: var(--text-3); letter-spacing: .04em; opacity: 0; transition: opacity .15s ease; user-select: none; }
-.composer.can-send:focus-within .send-hint { opacity: 1; }
 
-:is(.reply-cancel, .send):focus-visible { outline-offset: -2px; }
+:is(.reply-cancel, .attach-screenshots, .send):focus-visible { outline-offset: -2px; }
 .send {
   grid-area: send; position: relative; display: grid; place-items: center;
   width: var(--composer-control-size); height: var(--composer-control-size); margin: .15rem; padding: 0;
@@ -73,9 +92,6 @@
 }
 @keyframes send-spin { to { transform: rotate(1turn); } }
 
-@media (max-width: 700px), (hover: none) {
-  .send-hint { display: none; }
-}
 @media (max-width: 700px) {
   .composer-container {
     padding-left: max(.75rem, env(safe-area-inset-left));
@@ -104,6 +120,6 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer, .notice, .send-hint, .send { transition: none; }
+  .composer, .notice, .send { transition: none; }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }
