@@ -265,13 +265,13 @@ struct Runtime::Impl {
 
     struct SpecialistOrigin {
         Id channel, generation, senderTask;
-        std::string delegation, person, requester, commit, purpose, doneWhen, requestId, parent, rootBot, thread;
+        std::string delegation, person, requester, commit, purpose, doneWhen, requestId, parent, rootBot;
     };
 
     std::optional<SpecialistOrigin> specialistOrigin(Id taskId) const {
         auto row = db.query(R"SQL(
 SELECT d.channel_id,d.generation,d.sender_task,d.id,c.person_id,t.bot_id,d.commit_sha,d.purpose,d.done_when,
-       c.request_id,d.parent_id,c.bot_id,c.thread_id
+       c.request_id,d.parent_id,c.bot_id
 FROM specialist_delegations d JOIN return_channels c ON c.id=d.channel_id JOIN tasks t ON t.id=d.sender_task
 WHERE d.recipient_task=?1 OR d.id=(
  SELECT w.delegation_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?1)
@@ -279,7 +279,7 @@ WHERE d.recipient_task=?1 OR d.id=(
         if (!row.next()) return {};
         return SpecialistOrigin{row.number(0),row.number(1),row.number(2),row.string(3),row.string(4),
                                 row.string(5),row.string(6),row.string(7),row.string(8),row.string(9),
-                                row.string(10),row.string(11),row.string(12)};
+                                row.string(10),row.string(11)};
     }
 
     bool specialistAdmission(const SpecialistOrigin& origin, const Command& command, const Json& task) {
@@ -299,7 +299,6 @@ WHERE d.recipient_task=?1 OR d.id=(
                 const auto parent = allowedPeer(origin.rootBot,origin.requester);
                 if (!validBotRole(parent.role) || parent.intake.environmentId!=target.environmentId ||
                     parent.intake.projectId!=target.projectId ||
-                    !access.permits(origin.requester,Scope::workDelegate(target.environmentId,target.threadId),true) ||
                     !db.query("SELECT 1 FROM specialist_delegations d JOIN tasks t ON t.id=d.recipient_task"
                               " WHERE d.id=? AND d.channel_id=? AND d.generation=? AND d.parent_id IS NULL"
                               " AND t.bot_id=? AND t.state='specialist_waiting' AND json_extract(t.data,'$.nestedDelegationId')=?",
@@ -1826,9 +1825,18 @@ FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
     }
 
     bool canDelegateNested(const SpecialistOrigin& origin, const Json& task) const {
-        return origin.parent.empty() && !task.contains("nestedDelegationId") &&
-            task.at("activeRun").is_null() && task.at("lastRun").is_null() &&
-            access.permits(field(task,"botId"),Scope::workDelegate(field(task,"environmentId"),origin.thread),true);
+        if (!origin.parent.empty() || task.contains("nestedDelegationId") ||
+            !task.at("activeRun").is_null() || !task.at("lastRun").is_null() ||
+            !activeSpecialistCoordination(origin.channel,origin.generation)) return false;
+        try {
+            const auto person = specialistPerson(origin.person);
+            if (!person) return false;
+            const auto participation = db.authorizeParticipation(*person,origin.channel);
+            const auto* activation = std::get_if<CoordinationActivation>(&participation);
+            return activation && activation->binding.request.allowDelegation;
+        } catch (const Conflict&) {
+            return false;
+        }
     }
 
     bool scopedPeer(const SpecialistOrigin& origin, const Json& task, const PeerBot& peer) const {

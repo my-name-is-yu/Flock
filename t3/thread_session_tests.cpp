@@ -54,6 +54,33 @@ int main(int argc, char** argv) {
         check(!session->dispatchHistory(target,0),"an incomplete bounded history scan was treated as complete");
         fixture({{"stockHistory","default"},{"stockIncomplete",false}});
 
+        Json arguments{{"threadId","human"},{"botId","planner"},{"requestId","running-tool"},
+                       {"text","Review the pinned project"}};
+        const auto prove = [&](const Json& input) {
+            return session->proveInvocation(target.environmentId,target.threadId,input,
+                std::chrono::steady_clock::now()+std::chrono::seconds(3));
+        };
+        for (const auto* format : {"codex","claude"}) {
+            fixture({{"stockInvocation",format},{"stockArguments",arguments}});
+            const auto proof = prove(arguments);
+            check(proof && proof->target == target && proof->activeRunId == "root-run" &&
+                  proof->itemId == "invocation" && proof->cursor == 7,"active invocation did not yield its exact origin");
+        }
+        for (const auto* condition : {"wrong-thread","inherited","old-run","finished"}) {
+            fixture({{"stockInvocation",condition}});
+            check(!prove(arguments),"activity from an invalid Thread or Run yielded an origin");
+        }
+        fixture({{"stockInvocation","codex"}});
+        auto different = arguments;
+        different["text"] = "Different text";
+        check(!prove(different),"activity accepted different arguments");
+        arguments["mode"] = "coordinate";
+        arguments["text"] = std::string(8000,'\x01');
+        arguments["goal"] = "Observe the pinned project";
+        fixture({{"stockArguments",arguments}});
+        check(prove(arguments).has_value(),"truncated tool activity was not verified through item text paging");
+        fixture({{"stockInvocation",nullptr}});
+
         const auto generation = page->authGeneration;
         const auto send = [&](const ThreadTarget& destination, std::string_view auth = "") {
             return session->send(destination,auth.empty() ? generation : auth,"command-1","[Flock result] Complete.");

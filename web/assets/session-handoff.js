@@ -1,6 +1,5 @@
 const $ = (id) => document.getElementById(id);
 const status = $('status');
-const pairingForm = $('pair');
 const savedChannel = new URLSearchParams(location.search).get('channel') ?? '';
 const channel = /^[1-9][0-9]*$/.test(savedChannel) ? savedChannel : '';
 let busy = false;
@@ -9,7 +8,7 @@ let actionRevision = 0;
 let question;
 let rendered = '';
 let recentRendered = '';
-let pairingTimer;
+let connectionsRendered;
 const workAnswerDrafts = new Map();
 const handoffLabels = {
   active: 'Active', paused: 'Paused in Flock',
@@ -106,9 +105,9 @@ function render(view) {
   $('handoff-heading').textContent = `${coordination ? 'Coordination' : 'Consultation'} with ${view.botId}`;
   $('state').textContent = handoffLabels[view.state] ?? workState(view.state);
   fields('origin', [
-    ['Paired by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
+    ['Requested by', view.person], ['Environment', view.target.environmentId], ['Project', view.target.projectId],
     ['Thread', view.target.threadId], ['Request', view.requestId],
-    ...(coordination ? [['Goal', view.goal], ['Scope', view.allowDelegation ? 'Guide and delegate' : 'Guide'],
+    ...(coordination ? [['Goal', view.goal],
       ['Local generation', view.generation], ['Progress cursor', view.eventCursor]] : []),
   ]);
   const commandCount = view.residualCommandIds.length;
@@ -231,6 +230,7 @@ async function pollHandoffs() {
   refreshing = true;
   const revision = actionRevision;
   try {
+    await loadConnections();
     const recent = await request('');
     if (busy || revision !== actionRevision) return;
     renderRecent(recent);
@@ -242,50 +242,18 @@ async function pollHandoffs() {
   } finally { refreshing = false; }
 }
 
-function clearPairing() {
-  clearTimeout(pairingTimer);
-  $('pairing').hidden = true;
-  $('pairing-code').value = '';
-  $('pairing-help').textContent = '';
+async function loadConnections() {
+  const response = await fetch('/api/t3-connections');
+  if (!response.ok) throw new Error('Could not load T3 connections');
+  const connections = await response.json();
+  const key = JSON.stringify(connections);
+  if (key === connectionsRendered) return;
+  connectionsRendered = key;
+  $('connect-hint').hidden = connections.length > 0;
+  $('connections').hidden = connections.length === 0;
+  $('connections').replaceChildren(...connections.map(({ environmentId, mode }) =>
+    listItem(`${environmentId} · ${mode}`)));
 }
-
-pairingForm.elements.mode.addEventListener('change', () => {
-  const coordinating = pairingForm.elements.mode.value === 'coordinate';
-  $('coordination-scope').hidden = !coordinating;
-  pairingForm.elements.goal.required = coordinating;
-});
-
-pairingForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const { environmentId, projectId, threadId, botId, mode, goal, allowDelegation } = pairingForm.elements;
-  const data = {
-    target: { environmentId: environmentId.value.trim(), projectId: projectId.value.trim(), threadId: threadId.value.trim() },
-    botId: botId.value, mode: mode.value,
-  };
-  if (mode.value === 'coordinate') Object.assign(data, { goal: goal.value.trim(), allowDelegation: allowDelegation.checked });
-  void run(async () => {
-    clearPairing();
-    const ticket = await request('/pair', data);
-    $('pairing-code').value = ticket.code;
-    const expiry = new Date(ticket.expiresAt * 1000);
-    $('pairing-help').textContent =
-      `Give this code to the agent in the paired Thread and ask it to call request_flock_bot. Expires at ${expiry.toLocaleTimeString()}.`;
-    $('pairing').hidden = false;
-    pairingTimer = setTimeout(clearPairing, Math.max(0, expiry.getTime() - Date.now()));
-  }, 'Could not pair this Session. Check the IDs, T3 connection, and Flock access.');
-});
-
-$('copy-code').addEventListener('click', async () => {
-  const code = $('pairing-code');
-  try {
-    await navigator.clipboard.writeText(code.value);
-    status.textContent = 'Pairing code copied.';
-  } catch {
-    code.focus();
-    code.select();
-    status.textContent = 'Copy the selected code.';
-  }
-});
 
 $('refresh').addEventListener('click', () => void run(async () => {
   render(await request(`/${channel}`));
@@ -313,11 +281,7 @@ $('answer').addEventListener('submit', (event) => {
 });
 
 void (async () => {
-  const response = await fetch('/api/bots');
-  if (!response.ok) throw new Error('Could not load Bots');
-  const bots = await response.json();
-  if (!Array.isArray(bots)) throw new Error('Could not load Bots');
-  for (const bot of bots) pairingForm.elements.botId.add(new Option(bot.name || bot.id, bot.id));
+  await loadConnections();
   await loadRecent();
   if (channel) render(await request(`/${channel}`));
 })().catch(() => { status.textContent = 'Session handoffs are unavailable. Check your Flock sign-in.'; });

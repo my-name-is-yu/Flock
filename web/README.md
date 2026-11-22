@@ -30,40 +30,35 @@ shared Web messages and is rejected after an upgrade.
 
 ## Session handoffs
 
-Use stock T3 Code v0.1.11 or a compatible version. Sign in to T3 from Flock
-with its existing MCP authorization, and configure a Web identity in Flock.
-On the machine running the T3 provider, add the Flock MCP endpoint to the
-provider's normal MCP configuration. Set a stable Flock port, for example
-`flock run --port 4173`, and use it in the URL.
+Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine that runs the T3
+provider. Approve T3 OAuth access to read and operate Threads. This registers the
+loopback MCP server with installed Codex and Claude Code providers and exports
+their Flock skills. If you replace a Bot directory by hand, give the new Bot a
+new ID so old requests and cached skills keep their original identity. The
+default port is 4173. Specify `--port PORT` during setup
+to save a different default for `flock run`. If you use shared Web identities,
+include the CLI's `local-owner` person in the identity file and grant it
+`decide` on the Bots it may invoke.
 
-```sh
-codex mcp add flock --url http://127.0.0.1:4173/mcp/flock
-claude mcp add --scope user --transport http flock http://127.0.0.1:4173/mcp/flock
-```
+Ask for a Bot in an active T3 Thread or select the provider's Flock skill
+(`/skill:flock-<bot>` or `$flock-<bot>`, depending on the provider). The generic
+`flock` skill can discover eligible Bots. Use a consultation for one reply or
+request coordination with a goal for ongoing work. Replies arrive in the same
+Thread.
 
-Configure the provider instance that T3 uses before starting its Session. For
-a configured Claude project, project-local HTTP MCP registration also works.
-The endpoint runs on Flock's loopback listener.
+The default connection mode, `full`, permits consultation, coordination and
+specialist delegation. Use `--mode consult` for consultations only. The
+connection person must have `decide` on the invoked Bot. Specialists still need
+a role, an entry in the requester's `allowedBots`, and launch authority for the
+destination environment. Flock verifies the provider's actual tool invocation
+in the active Thread before accepting a request.
 
-1. In Flock, open **Session handoffs**, enter the destination environment,
-   project, and Thread IDs, and select a Bot. The T3 Session link contains the
-   environment and Thread IDs. Run `t3 thread list --json` from the T3 project
-   directory to find its project ID and Threads.
-2. Choose **One consultation reply** or **Ongoing coordination**. Coordination
-   requires a goal and can separately permit specialist checks.
-3. Copy the short-lived pairing code and give it to the agent in that Thread.
-   Ask the agent to call `request_flock_bot` with the code, a unique
-   `requestId`, and the request text. The tool acknowledges the request. Flock
-   sends replies back through ordinary T3 input when they are ready. An
-   identical retry uses the same request ID and payload. Keep the code private
-   until you give it to the intended agent.
-
-Grant the person Session read and Bot decision access. Grant the Bot
-`consult:reply-once` or `session:coordinate` for the environment and Thread.
-A coordinator also needs `session:read` to observe progress and
-`work:delegate` to select a specialist. Configure a role
-for each specialist, include it in the requester's `allowedBots`, and grant
-it permission to launch in the same project.
+Running connect again rotates the token. The server named `flock` in each
+provider points to the most recently connected environment. Run
+`flock t3 disconnect ENVIRONMENT` to revoke its token and remove the provider
+registration if it points to that environment. For custom provider
+installations, set `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`,
+`FLOCK_CLAUDE_SKILLS_DIR`, or `FLOCK_CODEX_SKILLS_DIR`.
 
 Flock queues Bot messages through the T3 API, so someone can keep typing in the
 T3 composer. T3 orders submitted inputs. Flock rechecks observed human progress

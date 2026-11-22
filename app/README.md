@@ -87,7 +87,7 @@ for the requested `shared_memory` operation.
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 login ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
 build/app/flock run
 ```
 

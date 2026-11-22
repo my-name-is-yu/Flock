@@ -3,6 +3,8 @@
 #include "demo.hpp"
 #include "model.hpp"
 #include "git_github.hpp"
+#include "t3_setup.hpp"
+#include "flock/t3_connection.hpp"
 
 #ifdef FLOCK_WITH_T3
 #include "flock/root_delivery.hpp"
@@ -38,7 +40,8 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   extend TASK WAIT REVISION GENERATION NEW_UNIX_DEADLINE
   reconcile TASK WAIT REVISION GENERATION [--thread ID] [--run ID] [--question ID]
   cancel TASK [WAIT REVISION GENERATION]
-  t3 login ENVIRONMENT MCP_URL
+  t3 connect ENVIRONMENT MCP_URL [--mode full|consult] [--port PORT]
+  t3 disconnect ENVIRONMENT
   model login [--print-url] [--reconsent]
   model status
   model models
@@ -131,20 +134,60 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
-int t3Command(Arguments& args, const std::filesystem::path& home) {
-    if (args.pop("T3 command") != "login") throw Conflict("Unknown T3 command");
+int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
+    const auto action = args.pop("T3 command");
+    if (action != "connect" && action != "disconnect") throw Conflict("Unknown T3 command");
     const auto environment = args.pop("canonical environment ID");
+#if defined(FLOCK_WITH_T3) && defined(FLOCK_WITH_WEB)
+    if (action == "disconnect") {
+        args.end();
+        const T3SetupLock setup(home);
+        auto store = openStore(home);
+        T3Connections connections(store);
+        if (connections.disconnect(environment)) {
+            removeT3Providers();
+            connections.providerRemoved(environment);
+        }
+        print({{"environmentId",environment},{"connected",false}});
+        return 0;
+    }
     const auto url = args.pop("T3 MCP URL");
-    args.end();
-#ifdef FLOCK_WITH_T3
+    auto mode = T3ConnectionMode::Full;
+    unsigned port = 0;
+    while (!args.empty()) {
+        const auto flag = args.pop("T3 connection option");
+        if (flag == "--port") port = static_cast<unsigned>(number(args,"port",1,65535));
+        else if (flag == "--mode") {
+            const auto value = args.pop("connection mode");
+            if (value == "consult") mode = T3ConnectionMode::Consult;
+            else if (value == "full") mode = T3ConnectionMode::Full;
+            else throw Conflict("T3 connection mode must be full or consult");
+        } else throw Conflict("Unknown T3 connection option: " + flag);
+    }
+    const T3SetupLock setup(home);
+    auto store = openStore(home);
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
+        WebCallbacks callbacks;
+        configureWebIdentities(store,identities,callbacks);
+        if (!callbacks.configuredPerson(localOwner.id))
+            throw Conflict("Configure a Web identity for local-owner before connecting T3");
+    } else if (store.access().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
+    T3Connections connections(store);
+    if (!port) port = connections.port();
+    if (!port) port = 4173;
     loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
-    });
-    print({{"environmentId",environment},{"connected",true}});
+    },true);
+    const auto token = connections.connect(environment,localOwner.id,mode,port);
+    const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",token);
+    syncT3Skills(bots.skillCards());
+    print({{"environmentId",environment},{"connected",true},{"mode",t3ConnectionModeName(mode)},
+           {"port",port},{"configuredProviders",providers}});
     return 0;
 #else
     (void)home;
-    throw Conflict("This build does not include the T3 adapter");
+    (void)bots;
+    throw Conflict("This build requires the T3 and Web adapters for connections");
 #endif
 }
 
@@ -153,7 +196,7 @@ void requestStop(int) { stopRequested = 1; }
 
 void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     bool fixed = false, web = true;
-    [[maybe_unused]] unsigned port = 0;
+    [[maybe_unused]] std::optional<unsigned> port;
     RuntimeOptions options;
     while (!args.empty()) {
         const auto option = args.pop("run option");
@@ -214,17 +257,43 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
 #ifdef FLOCK_WITH_WEB
+    Json exportedBots;
+    auto refreshSkills = [&] {
+        try {
+            auto descriptions = bots.skillCards();
+            if (descriptions != exportedBots) {
+                syncT3Skills(descriptions);
+                exportedBots = std::move(descriptions);
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "Could not refresh T3 skills: " << error.what() << '\n';
+        }
+    };
+    // Web callbacks and the filesystem refresh both update the same on-disk skills.
+    std::mutex skillMutex;
+    auto syncSkills = [&] {
+        if (!T3Connections(store).configured()) return;
+        std::lock_guard lock(skillMutex);
+        refreshSkills();
+    };
+    if (web) syncSkills();
     WebCallbacks callbacks{
         [&] { return bots.cards(); },
         [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
-        [&](const Json& profile,const std::optional<AvatarImage>& image) { return bots.create(profile,image); },
+        [&](const Json& profile,const std::optional<AvatarImage>& image) {
+            auto created = bots.create(profile,image);
+            syncSkills();
+            return created;
+        },
         [&](std::string_view botId,const Json& profile,const std::optional<AvatarImage>& image) {
-            return bots.updateProfile(botId,profile,image);
+            auto updated = bots.updateProfile(botId,profile,image);
+            syncSkills();
+            return updated;
         },
         [&](std::string_view botId) { return bots.avatarImage(botId); },
         options.peers,
         {},
-        [&](const BotChange& change) { bots.apply(change); },
+        [&](const BotChange& change) { bots.apply(change); syncSkills(); },
         options.clock,
     };
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
@@ -233,8 +302,11 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (bridges) configureChannelBridges(store,bridges,callbacks);
 #ifdef FLOCK_WITH_T3
     std::jthread handoffWorker;
-    if (handoffSession && callbacks.configuredPerson) {
-        handoffPeople = callbacks.configuredPerson;
+    if (handoffSession) {
+        handoffPeople = callbacks.configuredPerson ? callbacks.configuredPerson : [&store](std::string_view id)
+            -> std::optional<Person> {
+            return id == localOwner.id && !store.access().requiresIdentity() ? std::optional(localOwner) : std::nullopt;
+        };
         handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,handoffPeople,&runtime,options.peers);
         handoffs->recover();
         callbacks.sessionHandoffs = handoffs;
@@ -268,7 +340,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
-        server = startWeb(store,port,std::move(callbacks));
+        server = startWeb(store,port.value_or(T3Connections(store).port()),std::move(callbacks));
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
 #endif
@@ -276,7 +348,16 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::signal(SIGTERM,requestStop);
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
+#ifdef FLOCK_WITH_WEB
+    auto nextSkillRefresh = std::chrono::steady_clock::now();
+#endif
     while (!stopRequested) {
+#ifdef FLOCK_WITH_WEB
+        if (web && std::chrono::steady_clock::now() >= nextSkillRefresh) {
+            syncSkills();
+            nextSkillRefresh = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        }
+#endif
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -370,8 +451,8 @@ int runCli(Arguments& args) {
         return 0;
     }
     if (command == "model") return modelCommand(args,home);
-    if (command == "t3") return t3Command(args,home);
     Bots bots(home / "bots");
+    if (command == "t3") return t3Command(args,home,bots);
     if (command == "bots") {
         args.end();
         print(bots.cards());

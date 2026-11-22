@@ -400,7 +400,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("resourceKind","Resource type");
         for (const auto& entry : resourceOperations().items()) fields["resourceKind"]["enum"].push_back(entry.key());
         text("resourceId","Exact resource identifier. For session, consult and work scopes, encode the session as the compact JSON array [environmentId,threadId] in this string.");
-        text("operation","Request one listed operation: session supports read or coordinate; consult supports reply-once; work supports delegate.");
+        text("operation","Request one listed operation for the selected resource.");
     } else if (name == "list_secrets") {
         description = "List secret reference names.";
     } else if (name == "request_secret_input") {

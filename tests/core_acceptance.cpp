@@ -2503,6 +2503,11 @@ void specialistAdmission(SpecialistMode mode) {
     std::string currentPin = pin;
     struct Session final : ThreadSession {
         std::optional<std::string> pin;
+        std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
+                                                   const Json&, std::chrono::steady_clock::time_point) override {
+            return ThreadProof{{std::string(environment),"p",std::string(thread)},0,
+                               "root-credential-generation","origin-run","tool-call"};
+        }
         std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
             return ThreadPage{origin,0,"root-credential-generation","",{}};
         }
@@ -2521,11 +2526,7 @@ void specialistAdmission(SpecialistMode mode) {
     auto access = f.store->access();
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
-        access.personScope(localOwner,person.id,Scope::sessionRead("e","root-thread"),GrantChange::grant);
     }
-    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
                         mode==SpecialistMode::NestedWorkflowPause;
     if (nested) {
@@ -2535,11 +2536,13 @@ void specialistAdmission(SpecialistMode mode) {
         f.peers["gamma"] = {{"Too deep",{"delta","","e","p"},"reviewer"}};
         access.resourceGrant(localOwner,"gamma",{"environment","e","launch"},GrantChange::grant);
         access.resourceGrant(localOwner,"delta",{"environment","e","launch"},GrantChange::grant);
-        for (const auto* bot : {"beta","gamma"})
-            access.resourceGrant(localOwner,bot,Scope::workDelegate("e","root-thread"),GrantChange::grant);
     }
-    const auto pairing = handoffs().pair(person,target,"alpha",scope);
-    const auto channel = handoffs().intake(pairing.code,"request","Check the pinned project.").channel;
+    T3Connections connections(*f.store);
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto channel = handoffs().invoke(*connection,
+        {{"threadId",target.threadId},{"botId","alpha"},{"requestId","request"},
+         {"text","Check the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
+        [](std::string_view) { return true; }).channel;
     bool freezeBeforeReservation = false;
     bool freezeDuringWorkflowAdmission = false;
     unsigned workspaceChecks = 0;
@@ -3118,6 +3121,11 @@ void exhaustedSavedSpecialistEffect() {
     const std::string pin(40,'a');
     struct Session final : ThreadSession {
         std::optional<std::string> pin = std::string(40,'a');
+        std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
+                                                   const Json&, std::chrono::steady_clock::time_point) override {
+            return ThreadProof{{std::string(environment),"p",std::string(thread)},0,
+                               "root-credential-generation","origin-run","tool-call"};
+        }
         std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
             return ThreadPage{origin,0,"root-credential-generation","",{}};
         }
@@ -3134,12 +3142,12 @@ void exhaustedSavedSpecialistEffect() {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
     f.restart();
-    auto access=f.store->access();
-    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
-    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson).pair(person,target,"alpha",scope);
-    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
+    T3Connections connections(*f.store);
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto channel = SessionHandoff(*f.store,session,f.specialistPerson).invoke(*connection,
+        {{"threadId",target.threadId},{"botId","alpha"},{"requestId","budget-effect"},
+         {"text","Review the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
+        [](std::string_view) { return true; }).channel;
     const auto generation=SessionHandoff(*f.store,session,f.specialistPerson).view(person,channel).generation;
     int modelCalls=0;
     f.model.script=[&](const ModelInput& input)->Decision {

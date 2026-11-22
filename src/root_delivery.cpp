@@ -51,7 +51,7 @@ void RootDelivery::prepare(Id channel, Id generation, std::string_view commandId
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     const auto outward = "[Flock Bot " + std::string(bot) + " | request " + std::string(requestId) +
-                         " | action " + std::string(commandId) + "]\n" + redactPairingCodes(db.sharedRedactor().text(text));
+                         " | action " + std::string(commandId) + "]\n" + redactT3Tokens(db.sharedRedactor().text(text));
     auto existing = db.query("SELECT channel_id,generation,text FROM thread_deliveries WHERE command_id=?",{commandId});
     if (existing.next()) {
         if (existing.number(0) != channel || existing.number(1) != generation || existing.string(2) != outward)

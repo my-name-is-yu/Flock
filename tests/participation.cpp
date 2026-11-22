@@ -1,4 +1,6 @@
 #include "flock/session_handoff.hpp"
+#include "flock/skill_export.hpp"
+#include <fstream>
 
 #include <filesystem>
 #include <iostream>
@@ -11,7 +13,7 @@ namespace {
 const Person owner{"owner",true}, visitor{"visitor"};
 const ThreadTarget first{"desktop","project","first"}, second{"desktop","project","second"};
 const auto resolve = [](std::string_view person) -> std::optional<Person> {
-    return person == owner.id ? std::optional(owner) : std::nullopt;
+    return person == owner.id ? std::optional(owner) : person == visitor.id ? std::optional(visitor) : std::nullopt;
 };
 const auto intake = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","desktop","project"}; };
 IntakeResolver intakeWithLimit(Id limit) {
@@ -38,6 +40,15 @@ public:
     std::function<void()> beforeSend;
     std::string auth = "auth";
     bool uncertain = false, dispatchUnavailable = false;
+    std::function<void()> beforeProof;
+    std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
+                                               const Json&, std::chrono::steady_clock::time_point) override {
+        if (beforeProof) beforeProof();
+        for (auto* target : {&first,&second})
+            if (target->environmentId == environment && target->threadId == thread)
+                return ThreadProof{*target,static_cast<Id>(history.at(target->threadId).size()),auth,"run","tool"};
+        return {};
+    }
     std::optional<ThreadPage> read(const ThreadTarget& target, std::optional<Id> after) override {
         if (target != first && target != second) return {};
         const auto& all = history.at(target.threadId);
@@ -101,33 +112,49 @@ public:
     }
 };
 
-void access(Store& store, const ThreadTarget& target) {
-    for (const auto& scope : {Scope::consultReply(target.environmentId,target.threadId),
-                             Scope::sessionRead(target.environmentId,target.threadId),
-                             Scope::sessionCoordinate(target.environmentId,target.threadId)})
-        store.access().resourceGrant(owner,"planner",scope,GrantChange::grant);
+T3Connection connect(Store& store, const Person& person = owner, T3ConnectionMode mode = T3ConnectionMode::Full) {
+    T3Connections connections(store);
+    return *connections.authenticate(connections.connect(first.environmentId,person.id,mode,4173));
 }
 
-void pairingAndRecovery(const std::filesystem::path& path) {
+HandoffAck invoke(SessionHandoff& handoff, const T3Connection& connection, const ThreadTarget& target,
+                  std::string_view requestId, std::string_view text, std::string_view goal = {}) {
+    Json arguments{{"threadId",target.threadId},{"botId","planner"},{"requestId",requestId},{"text",text}};
+    if (!goal.empty()) {
+        arguments["mode"] = "coordinate";
+        arguments["goal"] = goal;
+    }
+    return handoff.invoke(connection,arguments,[](std::string_view bot) { return bot == "planner"; },{});
+}
+
+void invocationAndRecovery(const std::filesystem::path& path) {
     Sessions sessions;
     Id lost;
     {
         Store store(path);
-        access(store,first);
-        access(store,second);
         SessionHandoff handoff(store,sessions,resolve);
-        denied([&] { handoff.pair(visitor,first,"planner",{}); });
-        denied([&] { handoff.pair(owner,{"desktop","other","first"},"planner",{}); });
-        denied([&] { handoff.intake("unpaired","client-request","Run a check"); });
+        const auto visitorConnection = connect(store,visitor);
+        store.access().personGrant(owner,"planner",visitor.id,Role::view,GrantChange::grant);
+        denied([&] { invoke(handoff,visitorConnection,first,"request","Run a check"); });
+        store.access().personGrant(owner,"planner",visitor.id,Role::decide,GrantChange::grant);
+        sessions.beforeProof = [&] {
+            store.access().personGrant(owner,"planner",visitor.id,Role::decide,GrantChange::revoke);
+        };
+        denied([&] { invoke(handoff,visitorConnection,first,"request","Recheck my access"); });
+        sessions.beforeProof = {};
+        const auto consult = connect(store,owner,T3ConnectionMode::Consult);
+        denied([&] { invoke(handoff,consult,first,"request","Run a check","Coordinate"); });
+        const auto connection = connect(store);
+        denied([&] { invoke(handoff,consult,first,"request","Old token"); });
+        denied([&] { invoke(handoff,connection,{"desktop","project","missing"},"request","Run a check"); });
 
-        const auto left = handoff.pair(owner,first,"planner",{});
-        const auto right = handoff.pair(owner,second,"planner",{});
-        const auto a = handoff.intake(left.code,"client-request","Check first.");
-        const auto retry = handoff.intake(left.code,"client-request","Check first.");
-        const auto b = handoff.intake(right.code,"client-request","Check second.");
+        const auto a = invoke(handoff,connection,first,"client-request","Check first.");
+        const auto retry = invoke(handoff,connection,first,"client-request","Check first.");
+        const auto b = invoke(handoff,connection,second,"other-request","Check second.");
         check(a.channel == retry.channel && a.requestId == retry.requestId && b.channel != a.channel,
-              "pairing was duplicated or conversations were combined");
-        denied([&] { handoff.intake(left.code,"client-request","Changed request."); });
+              "invocation retry or routing changed the return channel");
+        denied([&] { invoke(handoff,connection,first,"client-request","Changed request."); });
+        denied([&] { invoke(handoff,connection,second,"client-request","Check first."); });
         denied([&] { handoff.view(visitor,a.channel); });
         denied([&] { handoff.resume(owner,a.channel); });
 
@@ -162,12 +189,10 @@ void coordinate(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
     SessionHandoff handoff(store,sessions,resolve);
-    access(store,first);
-    const CoordinationRequest goal{"Run two checks and report",false};
-    const auto ticket = handoff.pair(owner,first,"planner",goal);
-    const auto channel = handoff.intake(ticket.code,"coordinate-once","Start the checks.").channel;
-    const auto duplicate = handoff.pair(owner,first,"planner",goal);
-    denied([&] { handoff.intake(duplicate.code,"another","Start over."); });
+    const auto connection = connect(store);
+    constexpr auto goal = "Run two checks and report";
+    const auto channel = invoke(handoff,connection,first,"coordinate-once","Start the checks.",goal).channel;
+    denied([&] { invoke(handoff,connection,first,"another","Start over.",goal); });
     Bot bot;
     bot.decision = {"root_guidance","root_guidance","handoff_question","complete_handoff"};
     handoff.step(owner,channel,bot,intake,soul);
@@ -188,8 +213,7 @@ void coordinate(const std::filesystem::path& path) {
     const auto done = handoff.step(owner,channel,bot,intake,soul);
     check(done.state == "completed" && sessions.sent.size() == 2,"completion created another input");
 
-    const auto fresh = handoff.pair(owner,first,"planner",goal);
-    const auto stopped = handoff.intake(fresh.code,"stop-test","Check again.").channel;
+    const auto stopped = invoke(handoff,connection,first,"stop-test","Check again.",goal).channel;
     sessions.beforeSend = [&] { handoff.pause(owner,stopped); };
     bot.decision = {"root_guidance","root_guidance"};
     const auto paused = handoff.step(owner,stopped,bot,intake,soul);
@@ -207,9 +231,8 @@ void concurrentHumanAndBudget(const std::filesystem::path& path) {
     Sessions sessions;
     SessionHandoff handoff(store,sessions,resolve);
     const auto routing = intakeWithLimit(30);
-    access(store,first);
-    const auto pairing = handoff.pair(owner,first,"planner",CoordinationRequest{"Observe progress only",false});
-    const auto channel = handoff.intake(pairing.code,"request","Begin.").channel;
+    const auto connection = connect(store);
+    const auto channel = invoke(handoff,connection,first,"coordinate","Begin.","Observe progress only").channel;
     Bot bot;
     bot.decision = {"root_guidance"};
     bot.beforeDecision = [&] {
@@ -231,12 +254,11 @@ void concurrentHumanAndBudget(const std::filesystem::path& path) {
     check(stopped.state == "budget_exhausted" && bot.seen.size() == 24,
           "the cumulative planning budget did not stop further actions");
 
-    const auto consult = handoff.pair(owner,first,"planner",{});
-    const auto request = handoff.intake(consult.code,"request","Reply once.").channel;
-    store.access().resourceGrant(owner,"planner",Scope::consultReply(first.environmentId,first.threadId),GrantChange::revoke);
+    const auto request = invoke(handoff,connection,first,"request","Reply once.").channel;
+    T3Connections(store).disconnect(first.environmentId);
     denied([&] { handoff.consult(owner,request,bot,routing,soul); });
     check(handoff.freeze(owner,request).state == "stopped" && sessions.sent.empty(),
-          "revoking the Bot's scope removed the owner's ability to stop the request");
+          "revoking the connection removed the owner's ability to stop the request");
 }
 
 void dispatchHistoryCoverage(const std::filesystem::path& path) {
@@ -246,9 +268,8 @@ void dispatchHistoryCoverage(const std::filesystem::path& path) {
         Sessions sessions;
         sessions.dispatchUnavailable = !available;
         SessionHandoff handoff(store,sessions,resolve);
-        access(store,first);
-        const auto pairing = handoff.pair(owner,first,"planner",CoordinationRequest{"Check progress",false});
-        const auto channel = handoff.intake(pairing.code,name,"Recheck before dispatch.").channel;
+        const auto connection = connect(store);
+        const auto channel = invoke(handoff,connection,first,name,"Recheck before dispatch.","Check progress").channel;
         populate(sessions);
         Bot bot;
         bot.decision = {"root_guidance"};
@@ -277,11 +298,10 @@ void dispatchHistoryCoverage(const std::filesystem::path& path) {
 void lateRedactionProjection(const std::filesystem::path& path) {
     Store store(path/"late-redaction.sqlite3");
     Sessions sessions;
-    access(store,first);
+    const auto connection = connect(store);
     SessionHandoff handoff(store,sessions,resolve);
     const std::string secret="late-secret-value-007";
-    const auto pairing=handoff.pair(owner,first,"planner",CoordinationRequest{"Goal "+secret,false});
-    const auto channel=handoff.intake(pairing.code,"opaque-request-id","Request "+secret).channel;
+    const auto channel = invoke(handoff,connection,first,"opaque-request-id","Request "+secret,"Goal "+secret).channel;
     Bot bot;
     bot.response=[&](const ModelInput&) {
         ModelTurn turn;
@@ -321,12 +341,10 @@ void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bo
     Id channel = 0;
     {
         Store store(path);
-        access(store,first);
+        const auto connection = connect(store);
         SessionHandoff handoff(store,sessions,resolve);
-        std::optional<CoordinationRequest> permission;
-        if (coordination) permission=CoordinationRequest{"Bounded decision attempts",false};
-        const auto pairing = handoff.pair(owner,first,"planner",permission);
-        channel = handoff.intake(pairing.code,"bounded-model-attempts","Try this request.").channel;
+        channel = invoke(handoff,connection,first,"bounded-model-attempts","Try this request.",
+                         coordination ? "Bounded decision attempts" : "").channel;
         for (std::size_t call=1;call<=2;++call) {
             bool failed = false;
             try {
@@ -349,6 +367,64 @@ void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bo
     check(bot.seen.size()==2,"an exhausted handoff called the model again");
 }
 
+void originMatching() {
+    const Json args{{"threadId","first"},{"botId","planner"},{"requestId","sample"},{"text","Review"}};
+    const auto fixture = [&](std::string_view tool, const Json& input) {
+        return Json{{"type","dynamic_tool"},{"visibility","local"},{"sourceThreadId","first"},
+                    {"runId","active"},{"textTruncated",false},
+                    {"text",Json{{"toolName",tool},{"input",input}}.dump()}};
+    };
+    const auto match = [&](const Json& item) { return matchesThreadInvocation(item,"first","active",args); };
+    check(match(fixture("flock.invoke_flock_bot",args)), "Codex running call did not match");
+    check(match(fixture("mcp__flock__invoke_flock_bot",args)), "Claude running call did not match");
+    check(match(fixture("invoke_flock_bot",args.dump())), "JSON-string arguments did not match");
+    check(!match(fixture("invoke_flock_bot",Json::array())), "array arguments matched");
+    check(!match(fixture("invoke_flock_bot","{bad")), "invalid JSON arguments matched");
+    auto changed = args;
+    changed["mode"] = "consult";
+    check(!match(fixture("invoke_flock_bot",changed)), "different argument presence matched");
+    check(!match(fixture("service.other_tool",args)), "different tool matched");
+    const auto item = fixture("flock.invoke_flock_bot",args);
+    check(!matchesThreadInvocation(item,"first","",args), "finished run matched");
+    for (const auto& diff : {Json{{"visibility","inherited"}},Json{{"visibility","synthetic"}},
+                            Json{{"sourceThreadId","second"}},Json{{"runId","old"}},
+                            Json{{"textTruncated",true}},Json{{"text",28}},Json{{"text","{"}}}) {
+        auto wrong = item;
+        wrong.update(diff);
+        check(!match(wrong), "invalid activity matched");
+    }
+}
+
+void skillExport(const std::filesystem::path& root) {
+    const auto bots = Json::array({
+        {{"id","A___B."},{"name","設計レビュー"},{"role","reviewer"},{"private","secret settings"}},
+        {{"id","a.b"},{"name","Other"}},
+        {{"id",std::string(95,'X')},{"name","Long ID"}}
+    });
+    const auto names = flockSkillNames(bots);
+    check(names.at("A___B.").starts_with("flock-a-b-") && names.at("a.b") != names.at("A___B.") &&
+          names.at(std::string(95,'X')).size() == 64,"invalid skill slugs or unresolved collision");
+    std::filesystem::create_directories(root / "flock-foreign");
+    std::ofstream(root / "flock-foreign" / "SKILL.md") << "foreign";
+    exportFlockSkills(root,bots);
+    const auto read = [](const auto& path) {
+        std::ifstream in(path);
+        return std::string(std::istreambuf_iterator<char>(in),{});
+    };
+    const auto file = root / names.at("A___B.") / "SKILL.md";
+    const auto firstSkill = read(file);
+    check(firstSkill.find("設計レビュー") != firstSkill.npos && firstSkill.find("reviewer") != firstSkill.npos &&
+          firstSkill.find("A___B.") != firstSkill.npos && firstSkill.find("secret settings") == firstSkill.npos,
+          "skill description or stable Bot ID was missing, or config leaked");
+    auto renamed = bots;
+    renamed[0]["name"] = "新しい名前";
+    exportFlockSkills(root,renamed);
+    check(read(file).find("新しい名前") != std::string::npos,"rename did not update the skill");
+    exportFlockSkills(root,Json::array());
+    check(!std::filesystem::exists(file) && std::filesystem::exists(root / "flock" / "SKILL.md") &&
+          read(root / "flock-foreign" / "SKILL.md") == "foreign","cleanup changed an unowned skill");
+}
+
 }
 
 int main() {
@@ -357,7 +433,9 @@ int main() {
     if (!dir) return 1;
     const std::filesystem::path path(dir);
     try {
-        pairingAndRecovery(path / "pairing.sqlite3");
+        originMatching();
+        skillExport(path / "skills");
+        invocationAndRecovery(path / "invocation.sqlite3");
         coordinate(path / "coordination.sqlite3");
         concurrentHumanAndBudget(path / "human-policy.sqlite3");
         dispatchHistoryCoverage(path);

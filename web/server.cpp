@@ -217,7 +217,7 @@ public:
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionHandoffRoutes(server_,callbacks_);
+        web::sessionHandoffRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);
@@ -372,7 +372,7 @@ private:
         }
         if (req.path == "/mcp/flock") {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
-            else if (req.method != "POST") {
+            else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow","POST");
                 error(res,405,"method_not_allowed");
             }

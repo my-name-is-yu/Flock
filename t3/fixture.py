@@ -2,6 +2,11 @@
 import base64
 import hashlib
 import json
+import os
+from pathlib import Path
+import re
+import selectors
+import socket
 import signal
 import subprocess
 import sys
@@ -449,6 +454,26 @@ class Fixture(BaseHTTPRequestHandler):
         if thread == "pinned-worker":
             rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
                     {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
+        if is_root and args["view"] == "activity" and state.get("stockInvocation"):
+            mode = state["stockInvocation"]
+            summary["activeRunId"] = None if mode == "finished" else "root-run"
+            arguments = state["stockArguments"]
+            tool_name = "mcp__flock__invoke_flock_bot" if mode == "claude" else "flock.invoke_flock_bot"
+            body = json.dumps({"toolName": tool_name, "input": arguments}, ensure_ascii=False)
+            source = "other" if mode == "wrong-thread" else "human"
+            item = self.item(source, 7, "old-run" if mode == "old-run" else "root-run",
+                             "dynamic_tool", body, status="running") | {"itemId": "invocation"}
+            if mode == "inherited":
+                item["visibility"] = "inherited"
+            if args.get("itemId") is None or args["itemId"] == item["itemId"]:
+                offset = args.get("textOffset", 0)
+                bounded = body[offset:offset + args["maxCharsPerItem"]]
+                item["text"] = bounded
+                item["textTruncated"] = offset + len(bounded) < len(body)
+                item["nextTextOffset"] = offset + len(bounded) if item["textTruncated"] else None
+                rows = [item]
+            else:
+                rows = []
         if args.get("beforePosition") is not None:
             rows = [row for row in rows if row["position"] < args["beforePosition"]]
         else:
@@ -537,6 +562,110 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
+def test_connection_setup(server, flock, temp):
+    directory = Path(temp)
+    state = directory / "flock"
+    codex_config = directory / "config.toml"
+    claude_skills = directory / "claude-skills"
+    codex_skills = directory / "codex-skills"
+    claude_state = directory / "claude-state"
+    claude = directory / "claude"
+    claude.write_text("""#!/bin/sh
+case "$2" in
+    add)
+        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "--transport" ] &&
+        [ "$6" = "http" ] && [ "$7" = "flock" ] && [ "$9" = "--header" ] || exit 2
+        printf '%s\n%s\n' "$8" "${10}" > "$FIXTURE_CLAUDE_STATE" ;;
+    remove)
+        [ "$3" = "--scope" ] && [ "$4" = "user" ] && [ "$5" = "flock" ] || exit 2
+        rm "$FIXTURE_CLAUDE_STATE" ;;
+    get) test -f "$FIXTURE_CLAUDE_STATE" ;;
+    *) exit 2 ;;
+esac
+""")
+    claude.chmod(0o700)
+    env = dict(os.environ, FLOCK_CODEX_CONFIG=str(codex_config), FLOCK_CLAUDE_CLI=str(claude),
+               FLOCK_CODEX_CLI="/usr/bin/true", FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills),
+               FLOCK_CODEX_SKILLS_DIR=str(codex_skills), FIXTURE_CLAUDE_STATE=str(claude_state))
+    env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
+    codex_config.write_text(original)
+    profile = state / "bots" / "reviewer"
+    profile.mkdir(parents=True)
+    (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+    command = [flock, "--home", str(state)]
+
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", 0))
+        port = choose_port.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+
+    def connect(mode, flags):
+        with subprocess.Popen(command + ["t3", "connect", "env-1", server.origin + "/mcp",
+                                         "--mode", mode, *flags], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "T3 connect did not display the OAuth URL"
+                    assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
+                authorization = process.stderr.readline().strip()
+                request = urllib.request.Request(server.origin + "/fixture",
+                    data=json.dumps({"authorization": authorization}).encode(),
+                    headers={"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+                output, errors = process.communicate(timeout=8)
+                assert process.returncode == 0, errors
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        details = json.loads(output)
+        assert details["mode"] == mode and details["port"] == port
+        assert details["configuredProviders"] == ["codex", "claude"]
+        codex = codex_config.read_text()
+        assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
+        assert codex_config.stat().st_mode & 0o777 == 0o600
+        token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
+        assert token not in output and token not in errors
+        assert claude_state.read_text().splitlines() == [endpoint, "Authorization: Bearer " + token]
+        assert token.encode() not in (state / "flock.sqlite3").read_bytes()
+        for root in [claude_skills, codex_skills]:
+            assert (root / "flock" / "SKILL.md").is_file()
+            skill = (root / "flock-reviewer" / "SKILL.md").read_text()
+            assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
+        return token
+
+    old = connect("full", ["--port", str(port)])
+    token = connect("consult", [])
+    assert token != old
+
+    def ping(value):
+        request = urllib.request.Request(endpoint, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                    headers={"Content-Type":"application/json", "Authorization":"Bearer " + value})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as result:
+                return result.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    with subprocess.Popen(command + ["run"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(daemon.stdout, selectors.EVENT_READ)
+                assert selector.select(8), "Flock did not listen on the saved port"
+                assert daemon.stdout.readline().rstrip().endswith(f":{port}")
+            assert ping(old) == 401 and ping(token) == 200
+            subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 401
+            assert codex_config.read_text() == original and not claude_state.exists()
+        finally:
+            daemon.terminate()
+            daemon.wait(timeout=8)
+
+
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
@@ -566,6 +695,9 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif sys.argv[2:] == ["connection-setup"]:
+            test_connection_setup(server, sys.argv[1], temp)
             code = 0
         else:
             code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode

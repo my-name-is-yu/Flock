@@ -18,7 +18,7 @@ Json workQuestion(const Json& task, const SecretRedactor& scrub) {
     const auto& wait = task.at("wait");
     if (task.at("state") != "waiting" || !wait.is_object() || field(wait,"reason") != "user_question")
         return nullptr;
-    return {{"waitId",wait.at("id")},{"text",redactPairingCodes(scrub.text(field(wait,"text")))}};
+    return {{"waitId",wait.at("id")},{"text",redactT3Tokens(scrub.text(field(wait,"text")))}};
 }
 
 bool unresolved(State state) {
@@ -163,7 +163,7 @@ SessionHandoffView SessionHandoff::answer(const Person& person, Id channel, Id g
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     db.authorizeParticipation(person,channel);
-    const auto cleaned = redactPairingCodes(db.sharedRedactor().text(text));
+    const auto cleaned = redactT3Tokens(db.sharedRedactor().text(text));
     if (trimSessionQuestionText(cleaned).empty()) throw Conflict("The answer is empty");
     auto row = db.query(R"SQL(
 SELECT d.answer_text FROM session_decisions d JOIN session_controls s ON s.channel_id=d.channel_id
@@ -202,7 +202,7 @@ AND (d.generation=c.generation OR (d.generation<c.generation AND EXISTS (
     const auto task = db.load(binding.number(0));
     const auto question = workQuestion(task,db.sharedRedactor());
     if (question.is_null() || question.at("waitId") != wait) throw Conflict("This work question is unavailable");
-    const auto cleaned = redactPairingCodes(db.sharedRedactor().text(text));
+    const auto cleaned = redactT3Tokens(db.sharedRedactor().text(text));
     db.operate(person,TaskTarget::from(task,wait),"answer",{{"text",cleaned}});
     tx.commit();
     return view(person,channel);
@@ -216,7 +216,7 @@ SessionHandoffView SessionHandoff::view(const Person& person, Id channel) const 
     const auto& returnChannel = channelOf(participation);
     const auto& origin = returnChannel.origin;
     const auto scrub = db.sharedRedactor();
-    const auto clean = [&](std::string_view text) { return redactPairingCodes(scrub.text(text)); };
+    const auto clean = [&](std::string_view text) { return redactT3Tokens(scrub.text(text)); };
     auto row = db.query("SELECT state,generation,event_cursor FROM session_controls WHERE channel_id=?",{channel});
     if (!row.next()) throw Conflict("Unknown Session handoff");
     SessionHandoffView result;
@@ -362,11 +362,11 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
             return;
         }
         const auto scrub = db.sharedRedactor();
-        notes.soul = redactPairingCodes(scrub.text(notes.soul));
-        notes.memory = redactPairingCodes(scrub.text(notes.memory));
+        notes.soul = redactT3Tokens(scrub.text(notes.soul));
+        notes.memory = redactT3Tokens(scrub.text(notes.memory));
         const ModelInput input{
             {{"botId",origin.botId},{"request","Reply once to the paired Session's request."}},
-            {{"kind","session_consultation"},{"request",redactPairingCodes(scrub.text(permit.channel.request))}},
+            {{"kind","session_consultation"},{"request",redactT3Tokens(scrub.text(permit.channel.request))}},
             Json::array(),std::move(notes),{"reply"},{},Json::array(),routing.config
         };
         const auto turn = db.callModel(origin.botId,model,input,attempt);
@@ -491,7 +491,7 @@ ORDER BY j.id LIMIT 1
     if (!page || page->target != target || page->cursor < current.eventCursor) return current;
     if (page->authGeneration != auth) return freezeAs(person,channel,"stopped");
     const auto scrub = db.sharedRedactor();
-    auto clean = [&](std::string_view text) { return redactPairingCodes(scrub.text(text)); };
+    auto clean = [&](std::string_view text) { return redactT3Tokens(scrub.text(text)); };
     Json events = Json::array();
     std::string lastEvent;
     for (const auto& event : page->events) {
@@ -533,10 +533,8 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
                         {"purpose",clean(field(assignment,"purpose"))},
                         {"commit",clean(commit)},{"status",clean(status)}});
     }
-    const auto peerScope = Scope::workDelegate(target.environmentId,target.threadId);
     if (runtime_ && runtime_->specialistBudgetRemaining(channel)>=2 && peers_ &&
-        current.permission->allowDelegation && !awaitingSpecialist &&
-        store_.access().permits(bot,peerScope,true)) {
+        current.permission->allowDelegation && !awaitingSpecialist) {
         for (const auto& peer : peers_(bot)) {
             const auto& settings = peer.intake;
             if (validBotRole(peer.role) && settings.environmentId == target.environmentId &&

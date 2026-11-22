@@ -1,5 +1,6 @@
 #include "session_handoff_routes.hpp"
 #include "access_routes.hpp"
+#include "flock/skill_export.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -8,9 +9,8 @@ namespace flockv0::web {
 namespace {
 constexpr std::size_t maxPayload = 64 * 1024;
 constexpr std::size_t maxRequestText = 8192;
-constexpr std::size_t maxPairingCode = 128;
-constexpr std::size_t maxRequestId = 128;
-constexpr std::string_view requestTool = "request_flock_bot";
+constexpr std::string_view invokeTool = "invoke_flock_bot";
+constexpr std::string_view listTool = "list_flock_bots";
 constexpr std::string_view mcpProtocol = "2025-11-25";
 
 struct InvalidHandoffInput {};
@@ -82,7 +82,6 @@ Json handoffView(const SessionHandoffView& handoff) {
 
 template<class Action>
 void withHandoff(const WebCallbacks& callbacks, const httplib::Request& req, httplib::Response& res, Action action) {
-    if (!callbacks.authenticate) return reply(res,401,{{"error","identity_required"}});
     const auto actor = person(callbacks,req);
     if (actor.id.empty()) return reply(res,401,{{"error","identity_required"}});
     if (!callbacks.sessionHandoffs) return reply(res,503,{{"error","handoff_unavailable"}});
@@ -111,28 +110,48 @@ Json toolContent(std::string_view text) {
     return Json::array({{{"type","text"},{"text",text}}});
 }
 
-Json toolDefinition() {
-    return {{"name",requestTool},
-            {"description","Submit one request using a code the person created in Flock. Flock delivers the result to the paired T3 Thread. No polling is needed."},
-            {"inputSchema",{
-                {"type","object"},{"additionalProperties",false},
-                {"required",{"pairingCode","requestId","text"}},
-                {"properties",{
-                    {"pairingCode",{{"type","string"},{"minLength",1},{"maxLength",maxPairingCode},
-                                    {"description","Short-lived code from the authenticated Flock pairing screen."}}},
-                    {"requestId",{{"type","string"},{"minLength",1},{"maxLength",maxRequestId},{"pattern","^[A-Za-z0-9._:-]+$"},
-                                  {"description","Unique request ID. Retry with the same exact arguments."}}},
-                    {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText},
-                             {"description","The request for the paired Bot."}}}
-                }}
-            }}};
+Json toolDefinitions() {
+    const Json text{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}};
+    return Json::array({
+        {{"name",listTool},{"description","List the Flock Bots you can invoke."},
+         {"annotations",{{"readOnlyHint",true}}},
+         {"inputSchema",{{"type","object"},{"additionalProperties",false},{"properties",Json::object()}}}},
+        {{"name",invokeTool},
+         {"description","Get threadId from currentThreadId in t3_thread_list. Use a fresh random requestId per logical request and retry with identical arguments. Use consult for one reply (default) or coordinate with a goal for ongoing work. Flock delivers replies to this same Thread. No polling is needed."},
+         {"inputSchema",{{"type","object"},{"additionalProperties",false},
+             {"required",{"threadId","botId","requestId","text"}},
+             {"properties",{
+                 {"threadId",{{"type","string"},{"minLength",1},{"maxLength",1024}}},
+                 {"botId",{{"type","string"},{"minLength",1},{"maxLength",128}}},
+                 {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}},
+                 {"text",text},{"mode",{{"type","string"},{"enum",{"consult","coordinate"}},{"default","consult"}}},
+                 {"goal",text}
+             }}
+         }}}
+    });
+}
+
+bool containsBot(const Json& bots, std::string_view id) {
+    return std::ranges::any_of(bots,[&](const Json& bot) { return bot.value("id",Json(nullptr)) == id; });
 }
 
 bool supportedProtocol(std::string_view value) {
     return value == mcpProtocol || value == "2025-06-18";
 }
 
-void mcpRequest(const WebCallbacks& callbacks, const httplib::Request& req, httplib::Response& res) {
+void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Request& req, httplib::Response& res) {
+    const auto authorization = req.get_header_value("Authorization");
+    const auto connection = req.get_header_value_count("Authorization") == 1 && authorization.starts_with("Bearer ")
+        ? T3Connections(store).authenticate(std::string_view(authorization).substr(7)) : std::nullopt;
+    if (!connection) {
+        res.set_header("WWW-Authenticate","Bearer realm=\"Flock\"");
+        return rpcError(res,401,nullptr,-32001,"A valid Flock connection bearer token is required");
+    }
+    if (req.method != "POST") {
+        res.status = 405;
+        res.set_header("Allow","POST");
+        return;
+    }
     if (!req.params.empty()) return rpcError(res,400,nullptr,-32600,"Unexpected URL parameters");
     if (req.body.size() > maxPayload) return rpcError(res,413,nullptr,-32600,"Request too large");
     const auto mediaType = req.get_header_value("Content-Type");
@@ -169,35 +188,60 @@ void mcpRequest(const WebCallbacks& callbacks, const httplib::Request& req, http
                                  {"capabilities",{{"tools",Json::object()}}}});
     }
     if (method == "ping") return rpcResult(res,*id,Json::object());
-    if (method == "tools/list") return rpcResult(res,*id,{{"tools",Json::array({toolDefinition()})}});
+    if (method == "tools/list") return rpcResult(res,*id,{{"tools",toolDefinitions()}});
     if (method != "tools/call") return rpcError(res,200,*id,-32601,"Method not found");
-    if (params.value("name",Json(nullptr)) != requestTool)
-        return rpcError(res,200,*id,-32602,"Unknown tool");
+    const auto tool = params.value("name",Json(nullptr));
+    const auto arguments = params.value("arguments",Json::object());
+    if (tool != listTool && tool != invokeTool) return rpcError(res,200,*id,-32602,"Unknown tool");
 
     try {
-        const auto args = params.find("arguments");
-        if (args == params.end() || !args->is_object() || args->size() != 3) throw InvalidHandoffInput{};
-        const auto requestId = identifier(*args,"requestId",maxRequestId);
-        if (requestId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != requestId.npos)
-            throw InvalidHandoffInput{};
-        const auto ack = callbacks.sessionHandoffs->intake(identifier(*args,"pairingCode",maxPairingCode),
-            requestId,requestText(*args,"text"));
+        auto& handoff = *callbacks.sessionHandoffs;
+        if (tool == listTool) {
+            if (!arguments.is_object() || !arguments.empty()) throw InvalidHandoffInput{};
+            const auto actor = handoff.person(*connection);
+            if (!actor) throw Conflict("Flock person is unavailable");
+            const auto bots = callbacks.bots();
+            const auto names = flockSkillNames(bots);
+            auto rows = Json::array();
+            for (const auto& bot : bots) {
+                const auto botId = bot.value("id",std::string{});
+                if (!store.access().permitsPerson(*actor,botId,Role::decide)) continue;
+                rows.push_back({{"id",botId},{"name",bot.value("name",botId)},
+                                {"role",bot.value("role",std::string("custom"))},{"skill",names.at(botId)}});
+            }
+            const Json data{{"bots",std::move(rows)}};
+            return rpcResult(res,*id,{{"structuredContent",data},{"content",toolContent(data.dump())}});
+        }
+        const auto ack = handoff.invoke(*connection,arguments,[&](std::string_view bot) {
+            return containsBot(callbacks.bots(),bot);
+        });
         const auto data = Json{{"channelId",ack.channel},{"requestId",ack.requestId}};
         return rpcResult(res,*id,{{"structuredContent",data},
-            {"content",toolContent("Request " + ack.requestId + " accepted. Flock will send any reply to the paired Thread.")}});
+            {"content",toolContent("Request " + ack.requestId + " accepted. Flock will send any reply to this same Thread. No polling is needed.")}});
     } catch (const InvalidHandoffInput&) {
-        rpcError(res,200,*id,-32602,"Supply pairingCode, requestId and text");
-    } catch (const Conflict&) {
-        rpcResult(res,*id,{{"isError",true},{"content",toolContent("Flock could not accept this pairing or request.")}});
+        rpcError(res,200,*id,-32602,"Invalid tool arguments");
+    } catch (const Conflict& error) {
+        rpcResult(res,*id,{{"isError",true},{"content",toolContent(error.what())}});
     } catch (const std::exception&) {
-        rpcError(res,200,*id,-32603,"Flock could not record the request");
+        rpcError(res,200,*id,-32603,"Flock could not process the request");
     }
 }
 }
 
-void sessionHandoffRoutes(httplib::Server& server, const WebCallbacks& callbacks) {
-    server.Post("/mcp/flock",[&callbacks](const httplib::Request& req, httplib::Response& res) {
-        mcpRequest(callbacks,req,res);
+void sessionHandoffRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
+    const auto mcp = [&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
+        mcpRequest(store,callbacks,req,res);
+    };
+    server.Post("/mcp/flock",mcp);
+    server.Get("/mcp/flock",mcp);
+    server.Delete("/mcp/flock",mcp);
+    server.Get("/api/t3-connections",[&store,&callbacks](const httplib::Request& req, httplib::Response& res) {
+        const auto actor = person(callbacks,req);
+        if (actor.id.empty()) return reply(res,401,{{"error","identity_required"}});
+        auto list = Json::array();
+        for (const auto& connection : T3Connections(store).list(actor.id))
+            list.push_back({{"environmentId",connection.environmentId},{"mode",t3ConnectionModeName(connection.mode)}});
+        reply(res,200,list);
     });
     server.Get("/api/session-handoffs",[&callbacks](const httplib::Request& req, httplib::Response& res) {
         withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {
@@ -208,30 +252,6 @@ void sessionHandoffRoutes(httplib::Server& server, const WebCallbacks& callbacks
                                 {"mode",view.coordination ? "coordinate" : "consult"},{"state",view.state}});
             }
             reply(res,200,list);
-        });
-    });
-    server.Post("/api/session-handoffs/pair",[&callbacks](const httplib::Request& req, httplib::Response& res) {
-        withHandoff(callbacks,req,res,[&](SessionHandoff& handoff, const Person& actor) {
-            const auto body = Json::parse(req.body,nullptr,false);
-            if (!body.is_object()) throw InvalidHandoffInput{};
-            const auto mode = identifier(body,"mode",10);
-            const auto target = body.find("target");
-            if (target == body.end() || !target->is_object() || target->size() != 3) throw InvalidHandoffInput{};
-            const ThreadTarget destination{identifier(*target,"environmentId"),identifier(*target,"projectId"),
-                                           identifier(*target,"threadId")};
-            const auto bot = identifier(body,"botId");
-            std::optional<CoordinationRequest> permission;
-            if (mode == "coordinate") {
-                const auto delegate = body.find("allowDelegation");
-                if (body.size() != 5 || delegate == body.end() || !delegate->is_boolean()) throw InvalidHandoffInput{};
-                permission = CoordinationRequest{requestText(body,"goal"),delegate->get<bool>()};
-            } else if (mode != "consult" || body.size() != 3) throw InvalidHandoffInput{};
-            const auto bots = callbacks.bots();
-            if (!std::ranges::any_of(bots,[&](const auto& entry) {
-                return entry.is_object() && entry.value("id",Json(nullptr)) == bot;
-            })) throw Conflict("Unknown Bot");
-            const auto ticket = handoff.pair(actor,destination,bot,permission);
-            reply(res,201,{{"code",ticket.code},{"expiresAt",ticket.expiresAt}});
         });
     });
     server.Get(R"(/api/session-handoffs/([0-9]+))",[&callbacks](const httplib::Request& req, httplib::Response& res) {

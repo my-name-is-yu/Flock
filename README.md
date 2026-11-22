@@ -58,11 +58,18 @@ Optional `modelCallLimit` sets the initial allowance per request (20 by default)
 ```sh
 build/app/flock model login
 build/app/flock model models
-build/app/flock t3 login <environment-id> <MCP-URL>
+build/app/flock t3 connect <environment-id> <MCP-URL>
 build/app/flock run
 ```
 
 Approve each OAuth connection in your browser. In ChatGPT, authorize Flock to use your plan. In T3, choose permissions that cover Flock's Session settings. Open the Web UI at the local URL printed by the CLI. The running runtime continues to handle scheduled requests and monitor Sessions after you close the conversation.
+
+In a T3 Thread, ask for a Bot by name or select `/skill:flock-<bot>` or
+`$flock-<bot>` in the provider's skill menu. Flock replies in that Thread.
+The default connection permits one-off consultation and ongoing coordination.
+Choose `--mode consult` at setup to allow only one-off replies, or
+`--port PORT` to change the saved loopback port.
+See [Session handoffs](web/README.md#session-handoffs) for connection details.
 
 Use the Bot's message box in the Web UI to send a new request, ask for progress, add instructions, or ask the Bot to stop something. You never need task numbers: refer to a request by what you asked for. If the Bot cannot tell which request you mean, it asks in the conversation, often with suggested replies you can tap. Additional instructions for an active task are saved for its next safe point, or the Bot can pass a note to the running Session right away. Asking the Bot to implement a completed result starts a new task linked to that result.
 
