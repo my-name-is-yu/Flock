@@ -25,7 +25,6 @@ struct BotChange {
 struct BotChangePending : Conflict {
     BotChangePending() : Conflict("Approved Bot change still needs to be applied") {}
 };
-using ApplyBotChange = std::function<void(const BotChange&)>;
 
 class Access {
 public:
@@ -53,6 +52,12 @@ public:
                    const std::function<void(std::string_view)>& adapter) const;
 private:
     explicit Access(Store::Impl& db) : db_(db) {}
+    void decideGrant(const Person&, std::string_view bot, Id request, bool approve);
+    void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
+    std::pair<BotChange,std::string> authorizedBotChange(
+        const Person&, std::string_view bot, Id request, bool approve, const ApplyBotChange&);
+    void decideBotChange(const Person&, std::string_view bot, Id request, bool approve, const BotChange&);
+    void applyApprovedBotChange(const Person&, std::string_view bot, Id request, const ApplyBotChange&);
     void addGrant(const Person&, std::string_view bot, const Scope&);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& scope);
     bool holds(const Person&, const Scope&) const;

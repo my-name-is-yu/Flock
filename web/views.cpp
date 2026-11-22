@@ -346,7 +346,7 @@ Json sessions(Store& store, std::string_view bot, Id before) {
 
 Json taskDetail(const Json& task, const Json& latestResult) {
     auto result = taskSummary(task);
-    copyFields(result,task,{"doneWhen","intent"});
+    copyFields(result,task,{"doneWhen","intent","blockerReason"});
     result["result"] = latestResult.is_null() ? Json(nullptr) : eventView(latestResult);
     auto& revisions = result["revisions"] = Json::array();
     if (task.contains("revisions") && task["revisions"].is_array()) {

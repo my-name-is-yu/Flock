@@ -2,6 +2,7 @@
 #include "embedded_assets.hpp"
 #include "views.hpp"
 #include "access_routes.hpp"
+#include "board_inbox_routes.hpp"
 
 #include <httplib.h>
 
@@ -272,6 +273,7 @@ public:
             error(res,404,"settings_not_found");
         });
         web::accessRoutes(server_,store_,callbacks_);
+        web::boardInboxRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });

@@ -64,6 +64,7 @@ SELECT ?,coalesce(max(number),0)+1,?,?,? FROM task_revisions WHERE task_id=?
 )SQL", {task["id"],intent,doneWhen,source ? Json(source) : Json(nullptr),task["id"]});
     const auto revision = last();
     task["currentRevision"] = revision;
+    task.erase("blockerReason");
     task["intent"] = intent;
     task["doneWhen"] = doneWhen;
     journal(task["id"],"task_revision",{{"revisionId",revision},{"sourceMessageId",source}});

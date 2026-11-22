@@ -156,6 +156,7 @@ WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'c
         migrateAccess();
         migrateConversation();
         migrateModelBudget();
+        migrateBoardInbox();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
              " WHERE kind='bot_message'");
     } catch (...) { sqlite3_close(db); throw; }
@@ -358,7 +359,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
         requestCancellation(task);
         return;
     }
-    if (task["state"] != "waiting" || wait.is_null() || wait["id"] != waitId)
+    if (task["state"] != "waiting" || wait.is_null() || wait["id"] != waitId || task.value("replanning",false))
         throw Conflict("Waiting item is no longer current");
     const auto reason = field(wait,"reason");
     std::string next = "deciding";
