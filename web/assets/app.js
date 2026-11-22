@@ -157,9 +157,10 @@ function clearSubmission(bot, id) {
 
 function dismissReply(bot) {
   const reply = replies.get(bot);
+  if (!reply) return;
   replies.delete(bot);
   const pending = pendingFor(bot);
-  savePending(bot, pending.map((entry) => entry.payload.replyToMessageId === reply?.messageId
+  savePending(bot, pending.map((entry) => entry.payload.replyToMessageId === reply.messageId
     ? { ...entry, dismissed: true } : entry));
 }
 
@@ -202,14 +203,14 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0,
+    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false, generation: 0, refreshing: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0, generation: 0 } : null } : null;
   if (botId) {
     const pending = pendingFor(botId);
     const ordinary = pending.findLast((entry) => !entry.reply);
     const reply = pending.findLast((entry) => entry.reply && !entry.dismissed);
     if (ordinary && !drafts.has(botId)) drafts.set(botId, ordinary.payload.text);
-    if (reply && !replies.has(botId)) replies.set(botId, reply.reply);
+    if (reply && !replies.has(botId)) replies.set(botId, { ...reply.reply });
   }
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
@@ -544,7 +545,7 @@ function renderActivity() {
       return row;
     });
     for (const turn of paused) {
-      const row = activityRow('button', 'wait-row', turn.text, turn?.label ?? 'Pending request', 'waiting');
+      const row = activityRow('button', 'wait-row', turn.text, turn.label ?? 'Pending request', 'waiting');
       row.type = 'button';
       row.title = turn.text;
       row.addEventListener('click', () => {
@@ -1081,8 +1082,12 @@ function renderComposer() {
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', retry ? 'Retry submission' : reply ? 'Send reply' : 'Send message');
   elements.send.title = `${reply ? 'Reply' : 'Send'} (${sendKey}+Enter)`;
-  elements.notice.textContent = notice?.isError ? notice.text :
-    (closedReply ? (retry ? 'This question is closed. Retry to check receipt of your reply.' : 'This question is closed. You can still copy your reply.') : notice?.text ?? '');
+  let noticeText = notice?.text ?? '';
+  if (closedReply && !notice?.isError) {
+    noticeText = retry ? 'This question is closed. Retry to check receipt of your reply.'
+      : 'This question is closed. You can still copy your reply.';
+  }
+  elements.notice.textContent = noticeText;
   elements.notice.classList.toggle('error', !!notice?.isError);
   elements.notice.classList.toggle('fading', !closedReply && !!notice?.fading);
   scheduleNoticeFade(context, notice);
@@ -1549,6 +1554,7 @@ async function refreshPeerConversation(context, scroll) {
 }
 async function refreshView(context, scroll) {
   const generation = ++context.generation;
+  context.refreshing = true;
   const peerRefresh = context.dm && refreshPeerConversation(context, scroll);
   try {
     const latest = await api(botQuery('view', context.id));
@@ -1570,6 +1576,7 @@ async function refreshView(context, scroll) {
     else setConnection('offline');
   } finally {
     await peerRefresh;
+    if (generation === context.generation) context.refreshing = false;
   }
 }
 async function refreshBots() {
@@ -1667,7 +1674,7 @@ async function submit(event) {
   const clientMessageId = matchingSubmission(context.id, text, replyToMessageId)?.clientMessageId ?? crypto.randomUUID();
   const payload = { botId: context.id, clientMessageId, text };
   if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  rememberSubmission(context.id, { payload, reply });
+  rememberSubmission(context.id, { payload, reply: reply && { ...reply } });
   sendingMessages.add(context.id);
   setNotice(context, 'Sending message…');
   try {
@@ -1781,7 +1788,7 @@ document.addEventListener('keydown', (event) => {
 function refresh() {
   if (document.hidden) return;
   void refreshBots();
-  if (view) void refreshView(view);
+  if (view && !view.refreshing) void refreshView(view);
 }
 render();
 refresh();

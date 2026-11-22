@@ -6,7 +6,6 @@
 #include <httplib.h>
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <charconv>
 #include <limits>
@@ -112,18 +111,20 @@ struct ParsedProfile {
     std::optional<AvatarImage> image;
 };
 
-ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImageForUpload) {
+ParsedProfile parseBotProfile(const Json& body, bool creating) {
     const auto name = botProfileName(body.value("name",Json()));
     if (!name) throw InputError("invalid_name");
     Json profile = {{"name",*name}};
-    if (allowRole && body.contains("role")) {
+    if (creating && body.contains("role")) {
         if (!avatar::validRole(body["role"])) throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
     const auto avatarIt = body.find("avatar");
     // Updates may omit the avatar to rename without touching the stored appearance.
-    if (avatarIt == body.end() && !allowRole) return {std::move(profile),std::nullopt};
-    if (avatarIt == body.end() || !avatarIt->is_object()) throw InputError("invalid_avatar");
+    if (avatarIt == body.end()) {
+        if (creating) throw InputError("invalid_avatar");
+        return {std::move(profile),std::nullopt};
+    }
     const auto& source = *avatarIt;
     profile["avatar"] = avatar::appearance(source);
     if (profile["avatar"].is_null()) throw InputError("invalid_avatar");
@@ -135,7 +136,7 @@ ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImag
             const auto* format = avatar::imageFormat(bytes);
             if (!format) throw InputError("invalid_image");
             image = AvatarImage{std::string(format->contentType),std::move(bytes)};
-        } else if (requireImageForUpload) throw InputError("invalid_image");
+        } else if (creating) throw InputError("invalid_image");
     }
     return {std::move(profile),std::move(image)};
 }
@@ -318,11 +319,11 @@ private:
             if (update) {
                 const auto botId = requiredText(body,"botId",1024);
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
-                auto parsed = parseBotProfile(body,false,false);
+                auto parsed = parseBotProfile(body,false);
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 return json(res,200,web::botSettings(saved));
             }
-            auto parsed = parseBotProfile(body,true,true);
+            auto parsed = parseBotProfile(body,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
             return json(res,201,web::botSettings(created));
         } catch (const InputError& e) { error(res,400,e.what()); }

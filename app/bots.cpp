@@ -174,18 +174,16 @@ void removeReplacedAvatarFile(const std::filesystem::path& directory, const Json
     std::filesystem::remove(directory / format->filename,ignore);
 }
 
-Json prepareAvatar(const Json& profile, const std::filesystem::path& botDir, const Json& existingAvatar,
-                   const std::optional<AvatarImage>& image, std::string& keepFile, std::string& writeFile,
-                   std::string_view& writeBytes) {
-    auto result = avatar::appearance(profile.value("avatar",Json()));
+Json prepareAvatar(const Json& source, const std::filesystem::path& botDir, const Json& existingAvatar,
+                   const std::optional<AvatarImage>& image) {
+    auto result = avatar::appearance(source);
     if (result.is_null()) throw Conflict("Invalid avatar");
     if (result["kind"] != "upload") return result;
 
-    const auto* format = image ? avatar::imageFormat(image->bytes) : nullptr;
+    const avatar::ImageFormat* format;
     if (image) {
+        format = avatar::imageFormat(image->bytes);
         if (!format) throw Conflict("Choose a PNG, JPEG, WebP or GIF up to 5 MiB");
-        writeFile = format->filename;
-        writeBytes = image->bytes;
     } else {
         const auto existing = resolveImage(botDir,existingAvatar);
         if (!existing) throw Conflict("Uploaded image is required");
@@ -193,7 +191,6 @@ Json prepareAvatar(const Json& profile, const std::filesystem::path& botDir, con
         if (!result.contains("filename") && existingAvatar.contains("filename"))
             result["filename"] = existingAvatar["filename"];
     }
-    keepFile = format->filename;
     result["file"] = format->filename;
     if (result.contains("filename")) {
         auto filename = result["filename"].is_string() ? sanitizeFilename(result["filename"].get_ref<const std::string&>()) :
@@ -467,9 +464,7 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) 
             throw Conflict("Unsupported bot role");
         role = profile["role"].get<std::string>();
     }
-    std::string keepFile, writeFile;
-    std::string_view writeBytes;
-    const auto avatar = prepareAvatar(profile,{},Json{},image,keepFile,writeFile,writeBytes);
+    const auto avatar = prepareAvatar(profile.value("avatar",Json()),{},Json{},image);
 
     std::lock_guard lock(mutex_);
     std::filesystem::create_directories(directory_);
@@ -480,7 +475,8 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) 
     const auto botDir = directory_ / id;
     std::filesystem::create_directories(botDir);
     try {
-        if (!writeFile.empty()) writeAtomic(botDir / writeFile,writeBytes);
+        if (const auto* format = storedFormat(avatar); image && format)
+            writeAtomic(botDir / format->filename,image->bytes);
         Json config = {{"name",name},{"role",role},{"avatar",avatar}};
         writeAtomic(botDir / "config.json",config.dump(2,' ',false,Json::error_handler_t::replace) + "\n");
         const auto starter = roleStarterSoul(role);
@@ -503,22 +499,21 @@ Json Bots::updateProfile(std::string_view id, const Json& profile, const std::op
     auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
 
-    std::string keepFile, writeFile;
-    std::string_view writeBytes;
     const auto existingAvatar = config.contains("avatar") ? config["avatar"] : Json{};
     const bool changeAvatar = profile.contains("avatar");
     config["name"] = name;
     if (changeAvatar)
-        config["avatar"] = prepareAvatar(profile,botDir,existingAvatar,image,keepFile,writeFile,writeBytes);
+        config["avatar"] = prepareAvatar(profile["avatar"],botDir,existingAvatar,image);
 
     // Check the size the readers accept before anything on disk changes.
     auto text = config.dump(2,' ',false,Json::error_handler_t::replace) + "\n";
     if (text.size() > maxConfigBytes) text = config.dump(-1,' ',false,Json::error_handler_t::replace) + "\n";
     if (text.size() > maxConfigBytes) throw Conflict("Bot config.json would exceed its size limit");
 
-    if (!writeFile.empty()) writeAtomic(botDir / writeFile,writeBytes);
+    const auto* format = changeAvatar ? storedFormat(config["avatar"]) : nullptr;
+    if (image && format) writeAtomic(botDir / format->filename,image->bytes);
     writeAtomic(file,text);
-    if (changeAvatar) removeReplacedAvatarFile(botDir,existingAvatar,keepFile);
+    if (changeAvatar) removeReplacedAvatarFile(botDir,existingAvatar,format ? format->filename : std::string_view{});
     return cardLocked(id);
 }
 

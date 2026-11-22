@@ -16,22 +16,24 @@ private:
             const auto& turn = in.event.at("turn");
             if (!turn.empty()) {
                 const auto& last = turn.back();
-                const bool ok = last.at("result").value("ok",false);
+                const auto& result = last.at("result");
                 const auto tool = last.value("tool","");
-                std::string text = !ok ? "The demo could not apply that request."
-                    : tool == "answer_task_question" ? "I passed your answer to the task."
-                    : tool == "read_result" ? "The demo result records successful completion of simulated work. "
-                                              "It contains no implementation details."
-                    : "I queued your request.";
+                const char* text = "I queued your request.";
+                if (!result.value("ok",false)) text = "The demo could not apply that request.";
+                else if (tool == "answer_task_question") text = "I passed your answer to the task.";
+                else if (tool == "read_result") {
+                    text = result.value("kind","") == "cancelled" ? "The demo request was stopped."
+                        : "The demo result records successful completion of simulated work. "
+                          "It contains no implementation details.";
+                }
                 return {"reply",{{"text",text}},"The fixed demo reports what it did."};
             }
             const auto& reply = in.event.at("replyTo");
             const auto text = in.event.value("text","");
             const auto kind = reply.is_object() ? reply.value("kind","") : "";
-            if (kind == "task_question" && !question_.empty() && reply.value("text","") == bounded(question_,1000) &&
-                reply.value("current",false)) {
+            if (kind == "task_question" && reply.value("current",false)) {
                 return {"answer_task_question",{{"taskId",reply["taskId"]},{"waitId",reply["waitId"]},
-                    {"text",text}},"The user replied to the configured demo question."};
+                    {"text",text}},"The user replied to the open task question."};
             }
             if (kind == "result" && text == "Explain this result")
                 return {"read_result",{{"messageId",reply["messageId"]}},"The user requested a demo result explanation."};

@@ -116,10 +116,10 @@ public:
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
 };
 
-// Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 // Operations available for a task's current wait.
 Json waitOperations(const Json& task);
 
+// Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Store {
 public:
     explicit Store(std::filesystem::path database);

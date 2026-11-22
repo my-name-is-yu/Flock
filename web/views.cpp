@@ -1,7 +1,6 @@
 #include "views.hpp"
 #include "flock/bot_profile.hpp"
 
-#include <array>
 #include <charconv>
 #include <map>
 #include <set>
@@ -347,7 +346,6 @@ Json botList(Store& store, const Json& bots) {
     }
     return result;
 }
-
 
 Json conversation(Store& store, std::string_view bot, Id before) {
     return historyPage(store.conversation(bot,before,conversationSize + 1));

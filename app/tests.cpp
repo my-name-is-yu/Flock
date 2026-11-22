@@ -681,21 +681,36 @@ void fixedDemoRequiresExplicitIntent() {
     check(store.tasks("demo").size() == 1 && plain.at("text") == greeting.at("text") &&
           other.at("actions").empty() && explanation.at("text") != plain.at("text"),
           "demo result explanation did not require intent and a result anchor");
+
+    const auto stoppedTask = store.submit(intake);
+    store.operate(stoppedTask,0,"cancel");
+    const auto stopped = store.history(stoppedTask).back();
+    check(stopped.at("kind") == "cancelled","fixture did not record a cancellation");
+    const auto stoppedExplanation = send("explain-stopped","Explain this result",stopped.at("id"));
+    check(stoppedExplanation.at("text") == "The demo request was stopped.",
+          "the fixed demo misreported a stopped request");
 }
 
-void fixedDemoAnswersAnAnchoredQuestion() {
+void fixedDemoAnswersAnOpenQuestionAfterRestart() {
     Sandbox fixture;
-    Store store(fixture.path / "state.db");
-    const auto demo = makeDemoModel("Which dataset should I use?");
     const auto t3 = makeDemoT3();
-    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    const auto notes = [](auto) { return BotNotes{}; };
     const Intake intake{"demo","Measure the result","local","project"};
-    const auto task = store.submit(intake);
-    for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
-    check(store.task(task).at("wait").at("text") == "Which dataset should I use?",
-          "the explicit demo question was not used");
-    const auto question = store.task(task).at("wait").at("messageId").get<Id>();
+    Id task, question;
+    {
+        Store store(fixture.path / "state.db");
+        const auto demo = makeDemoModel("Which dataset should I use?");
+        Runtime runtime(store,*demo,*t3,notes);
+        task = store.submit(intake);
+        for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
+        const auto wait = store.task(task).at("wait");
+        check(wait.at("text") == "Which dataset should I use?","the explicit demo question was not used");
+        question = wait.at("messageId");
+    }
 
+    Store store(fixture.path / "state.db");
+    const auto demo = makeDemoModel();
+    Runtime runtime(store,*demo,*t3,notes);
     store.receive(intake,"dataset-answer","Use the release dataset",question);
     runtime.runConversations();
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
@@ -935,7 +950,7 @@ int main(int argc, char** argv) {
         responseContract();
         acceptanceRunner();
         fixedDemoWithUserCriteriaAndContinuation();
-        fixedDemoAnswersAnAnchoredQuestion();
+        fixedDemoAnswersAnOpenQuestionAfterRestart();
         fixedDemoRequiresExplicitIntent();
         botProfilesAndAvatars();
         const auto executable = argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path(argv[0]).parent_path() / "flock";
