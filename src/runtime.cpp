@@ -38,12 +38,9 @@ std::string pendingText(const Json& task, const Json& item) {
     if (!item.contains("environmentId") || (!item.contains("intent") && !item.contains("doneWhen"))) return text;
     const auto destination = task.value("pendingEnvironmentId",field(task,"environmentId"));
     const auto supersededQuote = [&] {
-        const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
-        return "Apply the work directions in this earlier message. The authoritative current task intent is \"" +
-               taskIntent(task) + "\" and supersedes any intent in the quote. The authoritative current completion "
-               "criteria are \"" + criteria + "\" and supersede any criteria in the quote. The authoritative "
-               "current execution destination is \"" + destination + "\" and supersedes any destination in the quote.\n" +
-               text;
+        return "Apply the work directions in this earlier message. The current Task intent and Completion criteria "
+               "in this prompt are authoritative. The current execution destination is \"" + destination +
+               "\" and supersedes any destination in the quote.\n" + text;
     };
     if (!matchesWorkRevision(task,item)) return supersededQuote();
     if (item.at("environmentId") == destination) return text;
