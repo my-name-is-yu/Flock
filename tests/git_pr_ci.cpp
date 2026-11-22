@@ -659,7 +659,10 @@ void boundedTaskReadAndForeignReference() {
     Directory directory;
     Store store(directory.path/"state.db");
     auto host = std::make_shared<FakeHost>();
-    host->result = {{"items",std::vector<std::string>(30,std::string(1500,'"'))},{"nextPage",2}};
+    Json page = Json::array();
+    for (int number = 1; number <= 30; ++number)
+        page.push_back({{"number",number},{"title",std::string(800,'"')},{"body",std::string(1500,'"')}});
+    host->result = {{"items",std::move(page)},{"nextPage",2}};
     Script script;
     Sessions sessions;
     grant(store,"owner","environment","sandbox","launch");
@@ -679,6 +682,10 @@ void boundedTaskReadAndForeignReference() {
             saved = recent.back().at("readId");
             check(result.at("ok") == true && result.at("truncated") == true && result.dump().size() <= 24576 &&
                   result.at("data").at("nextPage") == 2,"oversized Git read lost its bound or pagination");
+            const auto& items = result.at("data").at("items");
+            check(items.size() == 30,"bounded Git result omitted items from the page");
+            for (int number = 1; number <= 30; ++number)
+                check(items.at(number-1).at("number") == number,"bounded Git result lost a page item's identifier");
         } else check(result.at("ok") == false && !recent.back().contains("target"),"another task opened a saved read");
         return {"complete",{{"report","Checked the Git read"}}, {}};
     };

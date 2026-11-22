@@ -5,6 +5,7 @@
 #include <cctype>
 #include <limits>
 #include <map>
+#include <set>
 
 namespace flockv0 {
 namespace {
@@ -155,12 +156,26 @@ Json boundedReadResult(std::string_view tool, const Json& result) {
     if (encoded.size() <= gitReadResultLimit) return Json::parse(encoded);
     if (tool == "git_read_ci_logs")
         return {{"ok",true},{"data",{{"text",bounded(field(result.at("data"),"text"),4000)},{"truncated",true}}}};
-    auto data = Json{{"excerpt",bounded(encoded,4096)}};
-    if (result.contains("data") && result.at("data").contains("nextPage")) {
-        const auto& nextPage = result.at("data").at("nextPage");
-        if (nextPage.is_number_integer() || nextPage.is_null()) data["nextPage"] = nextPage;
+    if (tool == "git_manage_issue" && result.contains("data")) {
+        const auto& source = result.at("data");
+        const auto items = source.find("items");
+        const auto next = source.find("nextPage");
+        if (items != source.end() && items->is_array() && items->size() <= 30 && next != source.end() &&
+            (next->is_number_integer() || next->is_null())) {
+            auto page = Json::array();
+            for (const auto& item : *items) {
+                const auto number = item.find("number"), id = item.find("id");
+                if (number != item.end() && number->is_number_integer())
+                    page.push_back({{"number",*number},{"title",bounded(field(item,"title"),96)}});
+                else if (id != item.end() && id->is_number_integer())
+                    page.push_back({{"id",*id},{"body",bounded(field(item,"body"),96)}});
+            }
+            // Keep every identifier on the page before offering the next server page.
+            if (page.size() == items->size())
+                return {{"ok",true},{"truncated",true},{"data",{{"items",std::move(page)},{"nextPage",*next}}}};
+        }
     }
-    return {{"ok",result.at("ok")},{"truncated",true},{"data",std::move(data)}};
+    return {{"ok",result.at("ok")},{"truncated",true},{"data",{{"excerpt",bounded(encoded,4096)}}}};
 }
 
 }
@@ -216,7 +231,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
 
     const auto scrub = sharedRedactor();
     const Access access(*this);
-    std::map<Id,Json> projected;
+    std::set<Id> authorized;
     for (const auto& [id,read] : requested) {
         const auto& [source,result] = read;
         if (field(source.args,"host") != host.name()) continue;
@@ -229,18 +244,36 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
                 const auto repo = GitRepository::parse(host.name(),field(source.args,"repo"));
                 if (!repositoryAccess(access,host,context,repo,"read",&source)) continue;
             }
-            projected[id] = {{"sourceTool",source.tool},{"target",scrub.payload(source.args)},
-                             {"result",scrub.payload(result)}};
+            authorized.insert(id);
         } catch (const std::exception&) {
             // An unavailable access check cannot authorize disclosing stored evidence.
         }
     }
+    // A later host permission check can outlast a grant that authorized an earlier result.
+    std::lock_guard lock(mutex);
+    Transaction projection(db,Transaction::Mode::read);
+    const auto localReadGranted = [&](std::string_view repo) {
+        return access.permits(context.botId,{"repository",GitRepository::parse(host.name(),repo).resource(),"read"},true);
+    };
     for (auto& entry : event.at("gitResults")) {
         if (!entry.contains("readId")) continue;
-        const auto found = projected.find(entry.at("readId").get<Id>());
-        if (found != projected.end()) entry.update(found->second);
-        else entry["result"] = {{"ok",false},{"error","Saved Git read is unavailable or access was denied"}};
+        const auto id = entry.at("readId").get<Id>();
+        if (authorized.contains(id)) {
+            const auto& [source,result] = requested.at(id);
+            const bool localAllowed = source.tool == "git_find_repos"
+                ? std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
+                    return localReadGranted(repo.get_ref<const std::string&>());
+                })
+                : localReadGranted(field(source.args,"repo"));
+            if (localAllowed) {
+                entry.update({{"sourceTool",source.tool},{"target",scrub.payload(source.args)},
+                              {"result",scrub.payload(result)}});
+                continue;
+            }
+        }
+        entry["result"] = {{"ok",false},{"error","Saved Git read is unavailable or access was denied"}};
     }
+    projection.commit();
 }
 
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
