@@ -35,9 +35,12 @@ CREATE INDEX IF NOT EXISTS git_pr_history ON git_pr_operations(task_id,host,base
 CREATE TABLE IF NOT EXISTS git_pr_watches(
  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
  task_id INTEGER NOT NULL REFERENCES tasks(id), bot_id TEXT NOT NULL, run TEXT NOT NULL,
- url TEXT NOT NULL, head_sha TEXT NOT NULL, event_cursor INTEGER NOT NULL,
+ url TEXT NOT NULL, event_cursor INTEGER NOT NULL,
  PRIMARY KEY(host,repo,pr_number));
-CREATE INDEX IF NOT EXISTS git_watch_head ON git_pr_watches(host,repo,head_sha);
+CREATE TABLE IF NOT EXISTS git_pr_heads(
+ host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
+ head_sha TEXT NOT NULL, synchronized INTEGER NOT NULL CHECK(synchronized IN (0,1)),
+ PRIMARY KEY(host,repo,pr_number,event_cursor));
 CREATE TABLE IF NOT EXISTS git_mutations(
  invocation TEXT NOT NULL, task_id INTEGER NOT NULL REFERENCES tasks(id), dedupe TEXT, result TEXT,
  PRIMARY KEY(task_id,invocation), UNIQUE(task_id,dedupe));
@@ -48,8 +51,6 @@ CREATE TABLE IF NOT EXISTS git_webhook_deliveries(
  event INTEGER NOT NULL REFERENCES git_webhook_events(id) ON DELETE CASCADE, pr_number INTEGER NOT NULL,
  PRIMARY KEY(event,pr_number));
 CREATE INDEX IF NOT EXISTS git_events_repo ON git_webhook_events(host,repo);
-CREATE INDEX IF NOT EXISTS git_pr_head_events ON git_webhook_events(host,repo,json_extract(data,'$.headSha'))
- WHERE json_extract(data,'$.kind')='pull_request' AND json_extract(data,'$.action')='synchronize';
 CREATE INDEX IF NOT EXISTS journal_pending_git_turn ON journal(conversation_bot_id,id)
  WHERE kind='git_webhook' AND json_extract(data,'$.status') IS NULL;
 )SQL";
@@ -58,10 +59,18 @@ CREATE INDEX IF NOT EXISTS journal_pending_git_turn ON journal(conversation_bot_
 
 bool Store::Impl::watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest& pr) {
     const auto& repo = pr.target.base;
-    exec("INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)"
-         " DO UPDATE SET head_sha=excluded.head_sha WHERE task_id=excluded.task_id AND bot_id=excluded.bot_id",
-         {repo.host,repo.repo,pr.number,task,bot,run,pr.url,pr.headSha,eventCursor});
-    return sqlite3_changes(db) == 1;
+    exec(R"SQL(
+INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
+ DO UPDATE SET url=excluded.url WHERE task_id=excluded.task_id AND bot_id=excluded.bot_id
+)SQL",{repo.host,repo.repo,pr.number,task,bot,run,pr.url,eventCursor});
+    if (sqlite3_changes(db) != 1) return false;
+    if (!pr.headSha.empty()) {
+        exec(R"SQL(
+INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
+ DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
+)SQL",{repo.host,repo.repo,pr.number,eventCursor,pr.headSha});
+    }
+    return true;
 }
 
 Json Store::Impl::openGitPr(GitHost& host, const GitContext& context, const GitOpenPr& input,

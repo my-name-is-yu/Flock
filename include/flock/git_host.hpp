@@ -34,7 +34,6 @@ struct GitContext {
     RunRef run;
 };
 
-// The host definitively rejected the request before applying a mutation.
 struct GitRejected : Conflict { using Conflict::Conflict; };
 
 struct GitLog {
@@ -48,7 +47,6 @@ public:
     virtual std::string_view name() const = 0;
     virtual bool permits(const GitContext&, const GitRepository&, std::string_view operation) const = 0;
     virtual GitPullRequest createPullRequest(const GitContext&, const GitOpenPr&) = 0;
-    // Returns all candidates for the exact tuple, including closed and merged PRs.
     virtual std::vector<GitPullRequest> findPullRequests(const GitContext&, const GitPrTarget&) = 0;
     virtual GitLog readCiLogs(const GitContext&, const GitRepository&, Id jobId, std::size_t maxBytes) = 0;
     virtual Json call(const GitContext&, const GitRepository&, const Decision&) = 0;

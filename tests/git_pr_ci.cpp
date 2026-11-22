@@ -91,6 +91,26 @@ Json persistence(const std::filesystem::path& db, std::string_view operationId) 
     return Json::parse(reinterpret_cast<const char*>(sqlite3_column_text(stmt,0)));
 }
 
+void freshPrReviewSchema() {
+    Directory directory;
+    const auto path = directory.path/"fresh.db";
+    Store store(path);
+    sqlite3* raw = nullptr;
+    check(sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr) == SQLITE_OK,"could not open fresh database");
+    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> connection(raw,sqlite3_close);
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(raw,R"SQL(
+SELECT (SELECT count(*) FROM pragma_table_info('pr_review_items')
+        WHERE name IN ('operation_id','git_key','candidates'))=3
+   AND EXISTS (SELECT 1 FROM pragma_index_list('pr_review_items')
+               WHERE name='pending_pr_reconciliation' AND "unique"=1 AND partial=1)
+   AND (SELECT group_concat(name) FROM pragma_index_info('pending_pr_reconciliation'))='operation_id'
+)SQL",-1,&stmt,nullptr) == SQLITE_OK,"could not query fresh PR review schema");
+    std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> statement(stmt,sqlite3_finalize);
+    check(sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt,0) == 1,
+          "Fresh DB is missing PR review columns or the partial unique reconciliation index");
+}
+
 void runner() {
     Directory directory;
     const auto path = directory.path/"state.db";
@@ -160,6 +180,96 @@ void runner() {
         check(script.notifications == 3 && historyCount(store,sibling,"git_webhook") == 0,
               "A SHA-only CI event woke a task without an unambiguous watch");
     }
+}
+
+void webhookHeadPeriods() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    grant(store,"owner","repository",repoGrant,"pr");
+    grant(store,"owner","repository",repoGrant,"read");
+    const auto first = store.submit(intake());
+    auto args = openArgs();
+    args["taskId"] = first;
+    check(invoke(store,runtime,script,"watch-first","git_open_pr",args).at("prNumber") == 1,"could not create first watch");
+
+    const std::string newSha(40,'b');
+    check(store.receiveGitWebhook({hostName,"original-job",repoName,"ci","completed",{},sha,"Original head",0}),
+          "could not enqueue original job");
+    check(store.receiveGitWebhook({hostName,"early-job",repoName,"ci","completed",{},newSha,"New head",0}),
+          "could not enqueue early job");
+    runtime.runConversations();
+    check(historyCount(store,first,"git_webhook") == 1,"Early job was routed before synchronization");
+    check(store.receiveGitWebhook({hostName,"queued-old-job",repoName,"ci","completed",{},sha,"Queued old job",0}),
+          "could not enqueue a job before synchronization");
+    check(store.receiveGitWebhook({hostName,"first-sync",repoName,"pull_request","synchronize",{1},newSha,"New head",0}),
+          "could not enqueue synchronization");
+
+    const auto second = store.submit(intake());
+    args = openArgs("other-change");
+    args["taskId"] = second;
+    check(invoke(store,runtime,script,"watch-second","git_open_pr",args).at("prNumber") == 2,"could not create second watch");
+    check(historyCount(store,first,"git_webhook") == 4,"The old or early job was lost across synchronization");
+    check(store.receiveGitWebhook({hostName,"reused-head-job",repoName,"ci","completed",{},sha,"Reused head",0}),
+          "could not enqueue job on reused head");
+    runtime.runConversations();
+    check(historyCount(store,first,"git_webhook") == 4 && historyCount(store,second,"git_webhook") == 1,
+          "A superseded head prevented the current watch from receiving a SHA-only job");
+    check(store.receiveGitWebhook({hostName,"return-to-head",repoName,"pull_request","synchronize",{1},sha,"Original head",0}),
+          "could not enqueue return to original head");
+    runtime.runConversations();
+    check(historyCount(store,first,"git_webhook") == 5 && historyCount(store,second,"git_webhook") == 1,
+          "A SHA-only delivery was routed again when another watch moved to the same head");
+}
+
+void reconciliationAfterTaskRevision() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    Store store(path);
+    auto host = std::make_shared<FakeHost>();
+    host->create = FakeHost::Create::lostResponse;
+    Script script;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"pr");
+    const auto task = store.submit(intake());
+    for (int i = 0; i < 4 && store.task(task).value("currentRevision",Id{0}) == 0; ++i) runtime.tick();
+    const auto before = store.task(task);
+    check(before.value("currentRevision",Id{0}) > 0,"task has no initial revision");
+
+    auto args = openArgs();
+    args["taskId"] = task;
+    const auto lost = invoke(store,runtime,script,"lose-pr-response","git_open_pr",args);
+    check(lost.at("status") == "ambiguous","fixture did not create an ambiguous operation");
+    auto extra = host->prs.front();
+    extra.pr.number = 2;
+    extra.pr.url = "https://github.com/org/flock/pull/2";
+    host->prs.push_back(std::move(extra));
+    check(invoke(store,runtime,script,"find-two-prs","git_open_pr",args).at("status") == "ambiguous",
+          "fixture did not leave two verified candidates");
+    const auto initial = store.inbox(localOwner,"owner").at(0);
+    check(initial.at("candidates").size() == 2,"fixture failed to put candidates in the inbox");
+    const auto changed = invoke(store,runtime,script,"revise-task","change_task",
+        {{"taskId",task},{"generation",before.at("generation")},{"revisionId",before.at("currentRevision")},
+         {"instruction","Update the success criteria"},{"doneWhen","Verify the new completion criteria"}});
+    check(changed.at("ok") == true && store.task(task).at("replanning") == true,"fixture did not revise the active task");
+    const auto latest = store.inbox(localOwner,"owner").at(0);
+    check(latest.at("targetRevision") != initial.at("targetRevision") &&
+          latest.at("targetRevision") == store.task(task).at("currentRevision") &&
+          latest.at("targetGeneration") == store.task(task).at("generation") &&
+          latest.at("candidates") == initial.at("candidates"),"Reconciliation lost its current target or verified candidates");
+    try {
+        store.decideInbox(localOwner,target(initial),"reject_pr");
+        throw std::runtime_error("A stale reconciliation decision was accepted after task revision");
+    } catch (const RequestChanged&) {}
+    store.decideInbox(localOwner,target(latest),"link_pr",{{"prNumber",2}});
+    const auto saved = persistence(path,lost.at("operationId").get<std::string>());
+    check(saved.at("status") == "created" && saved.at("prNumber") == 2 && host->createCalls == 1,
+          "The current reconciliation target could not link the original operation");
 }
 
 void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = false, bool wrongCorrelation = false) {
@@ -492,8 +602,11 @@ void schemas() {
 
 int main() {
     try {
+        freshPrReviewSchema();
         schemas();
         runner();
+        webhookHeadPeriods();
+        reconciliationAfterTaskRevision();
         recovery(FakeHost::State::open,false);
         recovery(FakeHost::State::closed,false);
         recovery(FakeHost::State::merged,false);

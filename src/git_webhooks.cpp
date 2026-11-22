@@ -32,9 +32,18 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     scrub.requirePublic({repo.host,repo.repo,event.eventId,event.action,sha});
     const Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
         {"headSha",sha},{"summary",bounded(scrub.text(event.summary),4000)},{"jobId",event.jobId}};
+    Transaction transaction(p_->db);
     p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,event.eventId,repo.repo,data,digest.empty() ? Json(nullptr) : Json(digest)});
-    return sqlite3_changes(p_->db) == 1;
+    if (sqlite3_changes(p_->db) == 0) return false;
+    if (event.kind == "pull_request" && event.action == "synchronize" && !sha.empty()) {
+        p_->exec(R"SQL(
+INSERT INTO git_pr_heads SELECT ?1,?2,value,?3,?4,1 FROM json_each(?5) WHERE true
+ ON CONFLICT(host,repo,pr_number,event_cursor) DO UPDATE SET head_sha=excluded.head_sha,synchronized=1
+)SQL",{repo.host,repo.repo,p_->last(),sha,event.prNumbers});
+    }
+    transaction.commit();
+    return true;
 }
 
 void Store::Impl::gitInboxItem(const Json& task, std::string_view key, std::string_view url,
@@ -64,16 +73,19 @@ WITH matches AS (
         count(*) OVER (PARTITION BY e.id) AS watch_count
  FROM git_webhook_events e JOIN git_pr_watches w ON w.host=e.host AND w.repo=e.repo AND e.id>w.event_cursor
  WHERE EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') p WHERE p.value=w.pr_number)
-    OR (json_array_length(e.data,'$.prNumbers')=0 AND json_extract(e.data,'$.headSha')<>'' AND
-        (w.head_sha=json_extract(e.data,'$.headSha') OR EXISTS (
-         SELECT 1 FROM git_webhook_events head
-         WHERE head.host=w.host AND head.repo=w.repo AND head.id>w.event_cursor AND json_extract(head.data,'$.headSha')=json_extract(e.data,'$.headSha')
-           AND json_extract(head.data,'$.kind')='pull_request' AND json_extract(head.data,'$.action')='synchronize'
-           AND EXISTS (SELECT 1 FROM json_each(head.data,'$.prNumbers') p WHERE p.value=w.pr_number))))
+    OR (json_array_length(e.data,'$.prNumbers')=0 AND json_extract(e.data,'$.headSha') IN (
+        (SELECT h.head_sha FROM git_pr_heads h
+         WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number)
+           AND h.event_cursor BETWEEN w.event_cursor AND e.id-1
+         ORDER BY h.event_cursor DESC LIMIT 1),
+        (SELECT CASE WHEN h.synchronized THEN h.head_sha END FROM git_pr_heads h
+         WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number) AND h.event_cursor>e.id
+         ORDER BY h.event_cursor LIMIT 1)))
 )
 SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches m
 WHERE (explicit_pr OR watch_count=1)
- AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d WHERE d.event=m.id AND d.pr_number=m.pr_number)
+ AND NOT EXISTS (SELECT 1 FROM git_webhook_deliveries d
+                 WHERE d.event=m.id AND (NOT m.explicit_pr OR d.pr_number=m.pr_number))
 ORDER BY id,pr_number LIMIT 100
 )SQL");
     Json deliveries = Json::array();

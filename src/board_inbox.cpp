@@ -253,7 +253,7 @@ SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prom
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
 WHERE t.bot_id=? AND p.status='pending' AND p.target_generation=t.generation
 AND p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-AND NOT coalesce(json_extract(t.data,'$.replanning'),0) ORDER BY p.id DESC
+AND (p.operation_id IS NOT NULL OR NOT coalesce(json_extract(t.data,'$.replanning'),0)) ORDER BY p.id DESC
 )SQL",{id});
         while (reviews.next()) {
             const auto task = reviews.json(7);
@@ -357,7 +357,7 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (review.string(3).empty() != (kind == pr_review)) throw RequestChanged{};
         if (item.waitId || review.number(0) != item.targetRevision || review.number(1) != item.targetGeneration ||
             task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration ||
-            task.value("replanning",false)) throw RequestChanged{};
+            (kind == pr_review && task.value("replanning",false))) throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
         else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
                       {decision == "approve" ? "approved" : "changes_requested",item.itemId});
