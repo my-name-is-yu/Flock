@@ -28,6 +28,51 @@ std::string taskTitle(const Json& task) {
     return title(intent.empty() ? field(task,"request") : intent);
 }
 
+Id storedId(const Json& data, const char* name) {
+    const auto value = data.find(name);
+    return value != data.end() && value->is_number_integer() ? value->get<Id>() : 0;
+}
+
+Id messageAnchor(const auto& store, std::string_view bot, Id message) {
+    if (message <= 0) return 0;
+    auto row = store.query("SELECT id FROM journal WHERE id=? AND conversation_bot_id=?"
+                           " AND kind='conversation_message'",{message,bot});
+    return row.next() ? row.number(0) : 0;
+}
+
+Id taskAnchor(const auto& store, std::string_view bot, Id task, const Json& data) {
+    if (const auto anchor = messageAnchor(store,bot,storedId(data,"sourceMessageId")); anchor > 0) return anchor;
+    auto row = store.query(R"SQL(
+SELECT id FROM journal WHERE task_id=? AND conversation_bot_id IS NULL
+AND kind='request' AND json_extract(data,'$.source') IS NOT 'conversation'
+ORDER BY id LIMIT 1
+)SQL",{task});
+    return row.next() ? row.number(0) : 0;
+}
+
+Id waitAnchor(const auto& store, Id task, Id wait, const Json& data) {
+    if (const auto message = storedId(data,"messageId"); message > 0) {
+        auto row = store.query(R"SQL(
+SELECT id FROM journal WHERE id=? AND task_id=? AND conversation_bot_id IS NULL
+AND kind='waiting' AND json_extract(data,'$.id')=?
+)SQL",{message,task,wait});
+        if (row.next()) return row.number(0);
+    }
+    // Older tasks may keep only the wait ID. Limit the lookup to recent entries for this task.
+    auto row = store.query(R"SQL(
+SELECT id FROM (
+    SELECT id,kind,data,conversation_bot_id FROM journal WHERE task_id=? ORDER BY id DESC LIMIT 128
+)
+WHERE conversation_bot_id IS NULL AND kind='waiting' AND json_extract(data,'$.id')=?
+ORDER BY id DESC LIMIT 1
+)SQL",{task,wait});
+    return row.next() ? row.number(0) : 0;
+}
+
+void addAnchor(Json& view, Id anchor) {
+    if (anchor > 0) view["conversationEventId"] = anchor;
+}
+
 Json publicWait(const Json& wait) {
     if (!wait.is_object()) return nullptr;
     const auto reason = field(wait,"reason");
@@ -166,6 +211,7 @@ WHERE t.bot_id=? ORDER BY t.id DESC
                 {"deadlineAt",due > 0 ? Json(due) : Json(nullptr)},{"updatedAt",rows.number(7)}});
             row["botId"] = id;
             row["botName"] = id;
+            addAnchor(row,taskAnchor(*p_,id,rows.number(0),task));
             if (row["wait"].is_object()) row["wait"]["reason"] = field(task.at("wait"),"reason");
             result.push_back(std::move(row));
         }
@@ -184,17 +230,18 @@ Json Store::inbox(const Person& actor, std::string_view bot) const {
         const auto scrub = p_->redactor(id);
         const bool canDecide = access.permitsPerson(actor,id,Role::decide);
         const bool canAdmin = access.permitsPerson(actor,id,Role::admin);
-        const auto add = [&](const InboxTarget& target, Json view) {
+        const auto add = [&](const InboxTarget& target, Json view, Id anchor = 0) {
             view = scrub.record(std::move(view));
             view.update(key(target));
             view["botName"] = id;
             view["canDecide"] = inboxDecisionRole(target.itemKind) == Role::admin ? canAdmin : canDecide;
+            addAnchor(view,anchor);
             result.push_back(std::move(view));
         };
         const auto addAccess = [&](InboxKind kind, Id requestId, std::string_view label, const std::string& request,
-                                   std::string prompt) {
+                                   std::string prompt, Id message) {
             add({id,kind,requestId,0,0,0,0},{{"requestTitle",request.empty() ? std::string(label) : title(request)},
-                {"request",request},{"prompt",std::move(prompt)}});
+                {"request",request},{"prompt",std::move(prompt)}},messageAnchor(*p_,id,message));
         };
         auto waits = p_->query(R"SQL(
 SELECT t.id,t.generation,t.data,w.id,w.data
@@ -212,42 +259,46 @@ ORDER BY w.id DESC
             const auto view = publicWait(wait);
             add({id,*kind,waitId,waitId,waits.number(0),task.value("currentRevision",Id{0}),waits.number(1)},
                 {{"requestTitle",taskTitle(task)},{"request",task.at("request")},{"prompt",view.at("text")},
-                 {"choices",view.value("choices",Json::array())}});
+                 {"choices",view.value("choices",Json::array())}},
+                waitAnchor(*p_,waits.number(0),waitId,task.value("wait",Json(nullptr))));
         }
         auto turns = p_->query(R"SQL(
-SELECT m.id,m.text,t.pause_id,j.data FROM conversation_turns t
+SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
+FROM conversation_turns t
 JOIN messages m ON m.id=t.message_id JOIN journal j ON j.id=t.pause_id
 WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
 )SQL",{id});
         while (turns.next()) {
             add({id,conversation_model_budget,turns.number(0),turns.number(2),0,0,turns.number(2)},
-                {{"requestTitle",title(turns.string(1))},{"request",turns.string(1)},{"prompt",field(turns.json(3),"text")}});
+                {{"requestTitle",title(turns.string(1))},{"request",turns.string(1)},{"prompt",field(turns.json(3),"text")}},
+                turns.number(4) ? turns.number(2) : 0);
         }
         auto grants = p_->query(R"SQL(
-SELECT g.id,g.op,g.kind,g.resource,m.text FROM grant_requests g
+SELECT g.id,g.op,g.kind,g.resource,m.text,m.id FROM grant_requests g
 LEFT JOIN messages m ON m.id=g.source_message_id AND m.bot_id=g.bot
 WHERE g.bot=? AND g.status='pending' ORDER BY g.id DESC
 )SQL",{id});
         while (grants.next())
             addAccess(grant_request,grants.number(0),"Resource access",grants.string(4),
-                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3));
+                      grants.string(1)+" "+grants.string(2)+" "+grants.string(3),grants.number(5));
         auto inputs = p_->query(R"SQL(
-SELECT p.id,p.name,m.text FROM protected_inputs p
+SELECT p.id,p.name,m.text,m.id FROM protected_inputs p
 LEFT JOIN messages m ON m.id=p.source_message_id AND m.bot_id=p.bot
 WHERE p.bot=? AND p.status='pending'
 AND NOT EXISTS (SELECT 1 FROM protected_inputs filled WHERE filled.name=p.name AND filled.status='fulfilled')
 ORDER BY p.id DESC
 )SQL",{id});
         while (inputs.next())
-            addAccess(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1));
+            addAccess(protected_input,inputs.number(0),"Protected input",inputs.string(2),"Supply a value for "+inputs.string(1),inputs.number(3));
         auto changes = p_->query(R"SQL(
-SELECT c.id,c.operation,c.target,c.name,m.text FROM bot_changes c
+SELECT c.id,c.operation,c.target,c.name,m.text,m.id FROM bot_changes c
 LEFT JOIN messages m ON m.id=c.source_message_id AND m.bot_id=c.bot
 WHERE c.bot=? AND c.status='pending' ORDER BY c.id DESC
 )SQL",{id});
         while (changes.next())
             addAccess(bot_change,changes.number(0),"Bot change",changes.string(4),
-                      (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3));
+                      (changes.string(1) == "create_bot" ? "Create " : "Rename ") + changes.string(2) + " as " + changes.string(3),
+                      changes.number(5));
         auto reviews = p_->query(R"SQL(
 SELECT p.id,p.task_id,p.target_revision,p.target_generation,p.url,p.title,p.prompt,t.data,p.operation_id,p.candidates
 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
