@@ -82,7 +82,8 @@ bool routeContextChanged(Context previous, const Context& current, const Plan& p
         if (const auto* question = std::get_if<Clarify>(&route.action))
             dependencies.insert(question->candidates.begin(),question->candidates.end());
     }
-    if (previous.reply.revisionDraft) dependencies.insert(previous.reply.revisionDraft->target.taskId);
+    if (const auto* question = previous.reply.destinationQuestion(); question && question->revisionDraft)
+        dependencies.insert(question->revisionDraft->target.taskId);
     // The generation also tracks internal updates that don't change routing context.
     for (auto& task : previous.tasks) {
         const auto* refreshed = candidate(current,task.id);
@@ -396,7 +397,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
     if (!clarify) {
         for (const auto& route : routes) {
             if (validate(route)) continue;
-            if (resolving && clarification->operation == "destination" && !clarification->destinationPlan.empty()) {
+            if (resolving && clarification->operation == "destination") {
                 const auto response = ja ? "確認中の依頼を適用できません。元の依頼をもう一度送ってください。"
                                          : "The pending request could not be applied. Send the original request again.";
                 applyRoutes(message,context,Plan{{{text,Respond{response,std::nullopt}}},
@@ -502,8 +503,7 @@ void Store::Impl::applyRoutes(const Message& message, const Context& context, co
         Json{{"status",status}},id});
     exec("INSERT INTO route_decisions(message_id,reply_id,status,data) VALUES(?,?,?,?)",
          {id,reply,replyStatus,Json{{"sequence",sequence},{"inboxWatermark",watermark},
-                                    {"segments",segments},{"candidates",candidates},{"operation",clarificationOperation},
-                                    {"destinationPlan",savingDestinationPlan}}});
+                                    {"segments",segments},{"candidates",candidates},{"operation",clarificationOperation}}});
     for (const auto& candidate : candidates)
         exec("INSERT INTO route_candidates(message_id,task_id) VALUES(?,?)",{id,candidate.at("taskId")});
 }

@@ -516,9 +516,10 @@ Json clarificationData(const Reply& reply) {
                  {"candidates",reply.candidates},{"operation",reply.operation},{"waitsAtIntake",std::move(waits)},
                  {"incompleteWaitsAtIntake",reply.incompleteWaitsAtIntake}};
     if (reply.result) data["result"] = resultData(*reply.result,1024);
-    if (reply.resume) data["resume"] = *reply.resume;
-    if (reply.revisionDraft) {
-        const auto& draft = *reply.revisionDraft;
+    const auto* destination = reply.destinationQuestion();
+    if (destination) data["resume"] = destination->resume;
+    if (destination && destination->revisionDraft) {
+        const auto& draft = *destination->revisionDraft;
         data["revisionDraft"] = {{"taskId",draft.target.taskId},{"generation",draft.target.generation},
                                  {"revisionId",draft.target.revision},{"waitId",draft.target.waitId},
                                  {"intent",draft.intent},{"doneWhen",draft.doneWhen}};
@@ -859,9 +860,13 @@ Id actionTask(const Action& action) {
     }, action);
 }
 
-Plan replayDestinationPlan(std::string_view text, std::string_view destination,
-                           const Reply& reply, const Context& context) {
+Plan replayDestinationPlan(std::string_view text, const Reply& reply, const Context& context) {
     const bool ja = japanese(text);
+    const auto destination = trim(text);
+    if (std::ranges::find(context.environments,destination) == context.environments.end())
+        return single(text,Respond{translate(ja,
+            "Choose a configured destination in the original confirmation.",
+            "元の確認から設定済みの実行先を選んでください。"),std::nullopt});
     const auto supersede = [&](std::string_view en,std::string_view jp) {
         auto plan = single(text,Respond{translate(ja,en,jp),std::nullopt});
         plan.resolution = Resolution{reply.id,Resolution::Kind::superseded};
@@ -874,9 +879,6 @@ Plan replayDestinationPlan(std::string_view text, std::string_view destination,
     for (auto& route : plan.routes) {
         const auto* question = std::get_if<Clarify>(&route.action);
         if (!question) continue;
-        if (!reply.resume && question->source && question->source->state == "cancelled")
-            return supersede("Please resend your request with the destination and say whether to resume the cancelled work.",
-                             "実行先と、中止した作業を再開するかを明記して、依頼をもう一度送ってください。");
         auto instruction = route.segment + "\n\nExecution destination: " + std::string(destination);
         if (!question->revisionDraft) {
             route.action = CreateTask{std::move(instruction),question->source,std::string(destination),question->resume};
@@ -911,14 +913,8 @@ Plan parsePlan(const Json& args, std::string_view text, const Context& context, 
             plan.resolution = Resolution{pending->id, Resolution::Kind::superseded};
         } else {
             require(resolution == "resolved");
-            if (pending->operation == "destination" && !pending->destinationPlan.empty()) {
-                const auto destination = trim(text);
-                if (std::ranges::find(context.environments,destination) == context.environments.end())
-                    return single(text,Respond{translate(japanese(text),
-                        "Choose a configured destination in the original confirmation.",
-                        "元の確認から設定済みの実行先を選んでください。"),std::nullopt});
-                return replayDestinationPlan(text,destination,*pending,context);
-            }
+            if (pending->operation == "destination")
+                return replayDestinationPlan(text,*pending,context);
             require(!trim(pending->originalText).empty());
             resolved = pending;
             plan.resolution = Resolution{pending->id, Resolution::Kind::resolved};
@@ -1027,6 +1023,13 @@ Action answerResult(const DecideModel& model, std::string_view question, Result 
 }
 }
 
+const Clarify* Reply::destinationQuestion() const {
+    for (const auto& route : destinationPlan) {
+        if (const auto* question = std::get_if<Clarify>(&route.action)) return question;
+    }
+    return nullptr;
+}
+
 const Reply* Context::clarification(Id replyId) const {
     if (reply.kind == Reply::Kind::clarification)
         return !replyId || replyId == reply.id ? &reply : nullptr;
@@ -1102,14 +1105,8 @@ std::optional<Plan> shortcut(std::string_view text, const Context& context) {
         plan.resolution = Resolution{reply.id, Resolution::Kind::superseded};
         return plan;
     }
-    if (reply.kind == Reply::Kind::clarification && reply.operation == "destination") {
-        const auto destination = trim(text);
-        if (std::ranges::find(context.environments,destination) == context.environments.end())
-            return single(text,Respond{translate(ja,
-                "Choose a configured destination in the original confirmation.",
-                "元の確認から設定済みの実行先を選んでください。"),std::nullopt});
-        return replayDestinationPlan(text,destination,reply,context);
-    }
+    if (reply.kind == Reply::Kind::clarification && reply.operation == "destination")
+        return replayDestinationPlan(text,reply,context);
     if (reply.kind == Reply::Kind::clarification && context.selection && reply.operation == "cancel_task") {
         const auto* chosen = taskById(context, context.selection);
         if (!chosen || !active(*chosen)) {
