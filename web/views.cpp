@@ -163,6 +163,7 @@ Json eventView(const Json& event) {
     } else if (kind == "wait_closed") copyFields(details,data,{"waitId","resolution"});
     else if (kind == "cancelled") copyFields(details,data,{"request"});
     else if (kind == "user_answer") copyFields(details,data,{"text","waitId","question"});
+    else if (kind == "pr_review_requested") copyFields(details,data,{"itemId","title","text","prUrl"});
     else if (kind == "completed") {
         copyFields(details,data,{"text","reason","doneWhen","revisionId"});
         if (data.contains("source")) {
@@ -225,7 +226,7 @@ void conversationSummary(Json& row, Store& store, std::string_view bot) {
     for (auto event = events.rbegin(); event != events.rend(); ++event) {
         const auto kind = field(*event,"kind");
         const auto& data = event->at("data");
-        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" ||
+        const bool incoming = kind == "report" || kind == "completed" || kind == "conversation_reply" || kind == "pr_review_requested" ||
             (kind == "waiting" && field(data,"reason") == "user_question");
         auto text = kind == "report" ? field(data,"report") : field(data,"text");
         if (kind == "bot_message" && text.empty() && data.contains("forwardedMessage"))

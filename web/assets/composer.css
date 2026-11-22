@@ -1,16 +1,86 @@
-.composer-container { background: var(--canvas); padding: .4rem clamp(1rem, 4vw, 2rem) 1.1rem; width: 100%; min-width: 0; max-width: var(--content-width); margin: 0 auto; }
+.composer-container {
+  position: relative; z-index: 4;
+  background: var(--canvas); padding: .4rem clamp(1rem, 4vw, 2rem) 1.1rem;
+  width: 100%; min-width: 0; max-width: var(--content-width); margin: 0 auto;
+  transition: max-width .2s cubic-bezier(0.2, 0.9, 0.25, 1), background-color .18s ease;
+}
+.main:has(.decision-layer:not([hidden])) > .composer-container {
+  background: transparent;
+  max-width: min(100%, calc(37rem + 2 * clamp(1rem, 4vw, 2rem)));
+}
 .view-only-notice { padding-block: .45rem; color: var(--text-3); font-size: var(--text-sm); text-align: center; }
 .composer {
   --composer-control-size: 2.75rem;
-  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: "reply reply reply" "screenshots screenshots screenshots" "attach message send" "feedback feedback feedback";
-  align-items: end; column-gap: .25rem;
+  display: grid;
   background: var(--raised);
   border: 1px solid color-mix(in srgb, var(--hairline) 70%, transparent);
   border-radius: var(--radius-xl);
-  transition: border-color .15s ease, box-shadow .15s ease;
+  transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease, padding .15s ease;
 }
-.composer:focus-within { border-color: color-mix(in srgb, var(--focus) 45%, var(--hairline)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent); }
+.composer:not(:has(> .decision-reply-context:not([hidden]))):focus-within {
+  border-color: color-mix(in srgb, var(--focus) 45%, var(--hairline));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 14%, transparent);
+}
+
+.composer-box {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "reply reply reply" "screenshots screenshots screenshots" "attach message send" "feedback feedback feedback";
+  align-items: end; column-gap: .25rem;
+  border-radius: inherit;
+}
+
+.composer:has(> .decision-reply-context:not([hidden])) {
+  padding: .3rem;
+  border-radius: 20px;
+  background: light-dark(#f0f0ed, #1b1b1d);
+  border-color: light-dark(rgb(0 0 0 / .09), rgb(255 255 255 / .08));
+  box-shadow: 0 14px 36px light-dark(rgb(0 0 0 / .08), rgb(0 0 0 / .44));
+}
+.composer:has(> .decision-reply-context:not([hidden])) .composer-box {
+  --composer-control-size: 2.45rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "reply reply reply"
+    "message message message"
+    "screenshots screenshots screenshots"
+    "attach feedback send";
+  align-items: center;
+  padding: .2rem .25rem .25rem;
+  border-radius: 15px;
+  background: light-dark(#ffffff, #141416);
+  border: 1px solid light-dark(rgb(0 0 0 / .1), rgb(255 255 255 / .09));
+  transition: border-color .15s ease;
+}
+.composer:has(> .decision-reply-context:not([hidden])) .composer-box:focus-within {
+  border-color: light-dark(rgb(0 0 0 / .22), rgb(255 255 255 / .18));
+}
+.composer:has(> .decision-reply-context:not([hidden])) textarea {
+  min-height: 2.9rem;
+  padding: .65rem .75rem .35rem;
+}
+.composer:has(> .decision-reply-context:not([hidden])) .attach-screenshots {
+  background: transparent; color: var(--text-2);
+}
+.composer:has(> .decision-reply-context:not([hidden])) .attach-screenshots:hover:not(:disabled):not([aria-disabled="true"]) {
+  background: var(--hover); color: var(--text);
+}
+.composer:has(> .decision-reply-context:not([hidden])) .send:not(:disabled) {
+  background: light-dark(#18181b, #f3f3f4);
+  color: light-dark(#ffffff, #121212);
+}
+.composer:has(> .decision-reply-context:not([hidden])) .send:hover:not(:disabled) {
+  background: light-dark(#2c2c30, #ffffff);
+}
+
+.decision-reply-context {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .38rem .75rem .52rem;
+  color: var(--text-2);
+}
+.decision-reply-mark { width: 1rem; height: 1rem; flex: none; color: var(--text-3); }
+.decision-reply-context .reply-target { font-size: .82rem; color: var(--text-2); }
+.decision-reply-context #decision-reply-label { color: var(--text-2); font-weight: 500; }
+.decision-reply-context #decision-reply-target { color: var(--text); font-weight: 500; unicode-bidi: isolate; }
 
 .reply-context {
   grid-area: reply; display: flex; align-items: center; gap: .5rem;
@@ -68,6 +138,7 @@
 .composer-toolbar { display: contents; }
 .composer-toolbar > .notice { grid-area: feedback; }
 .composer-toolbar > .notice:not(:empty) { padding: 0 .95rem .65rem; }
+.composer:has(> .decision-reply-context:not([hidden])) .composer-toolbar > .notice:not(:empty) { padding: 0 .4rem; }
 .notice { min-width: 0; color: var(--text-2); font-size: var(--text-xs); line-height: 1.4; overflow-wrap: anywhere; transition: opacity .4s ease; }
 .notice.error { color: var(--danger); }
 .notice.fading { opacity: 0; }
@@ -115,13 +186,13 @@
       max-height: calc(100cqh - var(--header-height));
       padding-block: .25rem;
     }
-    .composer {
+    .composer-box {
       min-height: 0;
       grid-template-rows: auto auto minmax(calc(var(--composer-control-size) + .3rem), auto) auto;
     }
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .composer, .notice, .send { transition: none; }
+  .composer-container, .composer, .composer-box, .notice, .send { transition: none; }
   .composer[aria-busy="true"] .send::after { animation: none; border-right-color: currentColor; opacity: .5; }
 }

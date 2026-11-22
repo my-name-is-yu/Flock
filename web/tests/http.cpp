@@ -742,14 +742,44 @@ void eventStream(const std::filesystem::path& path) {
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     unsigned changes = 0;
+    Id releaseTask = 0;
+    Json botsBeforeApproval;
     readChanges(stream,"/api/events?bot=release",[&](const Json& change) {
-        if (changes == 3) {
-            check(change == Json{{"list",true}},"an unrelated Bot invalidated the selected view");
-            return false;
+        if (changes >= 3) {
+            if (changes == 3) {
+                check(change == Json{{"list",true}},"another Bot invalidated the selected view");
+                const auto task = cli.task(releaseTask);
+                cli.requestPrReview(releaseTask,task.value("currentRevision",Id{0}),task.at("generation"),
+                                    "https://example.test/pull/1","Review the draft","Is this ready?");
+            } else if (changes == 4) {
+                check(change == Json{{"list",true},{"bot","release"}},"the PR review source did not invalidate its conversation");
+                const auto items = browser.get("/api/inbox?bot=release").at("items");
+                check(items.size() == 1 && items.at(0).at("itemKind") == "pr_review",
+                      "the update did not expose the pending PR review");
+                const auto events = browser.get("/api/view?bot=release").at("events");
+                check(std::ranges::any_of(events,[&](const auto& event) {
+                    return event.at("id") == items.at(0).at("conversationEventId") &&
+                        event.at("kind") == "pr_review_requested" &&
+                        event.at("data") == Json{{"itemId",items.at(0).at("itemId")},{"title","Review the draft"},
+                            {"text","Is this ready?"},{"prUrl","https://example.test/pull/1"}};
+                }),"the PR review did not have an exact reply source in the Web view");
+                botsBeforeApproval = browser.get("/api/bots");
+                auto approve = items.at(0);
+                approve["decision"] = "approve";
+                browser.post("/api/inbox/decide",approve);
+            } else {
+                check(change == Json{{"list",true}},"an inbox-only approval invalidated the selected view");
+                check(browser.get("/api/bots") == botsBeforeApproval &&
+                      browser.get("/api/inbox?bot=release").at("items").empty(),
+                      "the Inbox-only invalidation did not remove the approved review");
+                return false;
+            }
+            ++changes;
+            return true;
         }
         check(change == Json{{"list",true},{"bot","release"}},"unexpected SSE invalidation scope or payload");
         if (changes == 0) {
-            cli.submit(web.intake("release","CLI write"));
+            releaseTask = cli.submit(web.intake("release","CLI write"));
         } else if (changes == 1) {
             tick(runtime,3);
         } else {

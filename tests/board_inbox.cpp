@@ -65,11 +65,16 @@ struct Database {
 struct Script : Model {
     Id managed = 0;
     bool failConversation = false;
+    Json reviewContext;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();
+            if (prompt == "Which checks ran?") {
+                reviewContext = event.at("replyTo");
+                return {"reply",{{"text","The smoke checks ran."}},"Answer the review question"};
+            }
             if (failConversation && prompt == "Pause this conversation")
                 return {"find_tasks",Json::object(),"Use the final available call"};
             if (event.at("turn").empty() && prompt != "Pause this conversation") {
@@ -229,9 +234,11 @@ void exercise(const std::filesystem::path& path) {
     db.exec("UPDATE tasks SET data=json_remove(data,'$.wait.messageId') WHERE id="+std::to_string(question));
     check(row(store.inbox(reader),"itemKind","user_question") == readerQuestion,
           "a legacy wait did not resolve to its waiting event");
-    check(!row(inbox,"itemKind","model_budget").contains("conversationEventId") &&
-          !row(inbox,"itemKind","pr_review").contains("conversationEventId"),
+    check(!row(inbox,"itemKind","model_budget").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
+    const auto reviewEvent = row(store.conversation("report"),"id",row(inbox,"itemKind","pr_review").at("conversationEventId"));
+    check(reviewEvent.at("kind") == "pr_review_requested" && reviewEvent.at("data").at("itemId") == review,
+          "PR review did not point to its own conversation event");
     const auto paused = row(inbox,"itemKind","conversation_model_budget");
     check(paused.at("conversationEventId") == paused.at("waitId") &&
           row(store.conversation("review"),"id",paused.at("conversationEventId")).at("kind") == "conversation_reply",
@@ -407,6 +414,40 @@ void chatDecision(const std::filesystem::path& path) {
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,item,"answer",{{"text","Draft"}}); },
                                   "the Inbox applied an answer after chat decided the wait");
 }
+
+void reviewReply(const std::filesystem::path& path) {
+    Store store(path);
+    const auto routing = intake("report","Prepare the report","review");
+    const auto task = store.submit(routing);
+    const auto first = store.requestPrReview(task,0,0,prUrl,"Review the report","Check the report");
+    const auto second = store.requestPrReview(task,0,0,prUrl,"Review the source","Check the source");
+    const auto items = store.inbox(owner,"report");
+    const auto firstAnchor = row(items,"itemId",first).at("conversationEventId");
+    const auto secondAnchor = row(items,"itemId",second).at("conversationEventId");
+    check(firstAnchor != secondAnchor,"two PR reviews of the same task shared a reply target");
+
+    Database db(path);
+    db.exec("DELETE FROM journal WHERE id="+secondAnchor.dump());
+    Store migrated(path);
+    Store restarted(path);
+    const auto review = row(migrated.inbox(owner,"report"),"itemId",second);
+    const auto anchor = review.at("conversationEventId");
+    check(anchor != firstAnchor && row(restarted.inbox(owner,"report"),"itemId",second) == review &&
+          db.exec("SELECT count(*) FROM journal WHERE kind='pr_review_requested'") == 2,
+          "inbox did not backfill exactly one source for a legacy pending PR review");
+
+    Script script;
+    Sessions sessions;
+    Runtime runtime(restarted,script,sessions,[](std::string_view) { return std::string{}; });
+    const auto message = restarted.receive(owner,routing,"review-reply","Which checks ran?",anchor).at("messageId");
+    runtime.runConversations();
+    const auto line = row(restarted.conversation("report"),"id",message);
+    check(line.at("data").at("replyToMessageId") == anchor &&
+          script.reviewContext == Json{{"messageId",anchor},{"kind","pr_review"},{"taskId",task},{"itemId",second},
+              {"title","Review the source"},{"text","Check the source"},{"prUrl",prUrl}} &&
+          restarted.inbox(owner,"report").size() == 2 && restarted.decisionHistory(owner).empty(),
+          "reply did not carry the exact pending PR context to the Bot");
+}
 }
 
 int main() {
@@ -416,6 +457,7 @@ int main() {
         exercise(path);
         protectedInputSource(directory.path/"protected-input.db");
         chatDecision(directory.path/"chat.db");
+        reviewReply(directory.path/"review-reply.db");
         Store restarted(path);
         const auto history = restarted.decisionHistory(alice);
         const auto approval = row(history,"itemKind","extra_run");

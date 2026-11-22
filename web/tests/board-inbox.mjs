@@ -7,196 +7,214 @@ import { pathToFileURL } from 'node:url';
 async function exercise(mountBoardInbox) {
   const byId = (id) => document.getElementById(id);
   const check = (value, message) => { if (!value) throw new Error(message); };
-  const settled = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
-  const dialog = byId('board-inbox');
-  const bots = byId('work-view-bot');
-  const refresh = byId('work-view-refresh');
-  const cards = byId('work-view-items');
-  const message = byId('work-view-message');
-  const text = '<img data-user-content> branch?';
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const button = (label) => [...item.querySelectorAll('button')].find((control) => control.textContent === label);
+  const trigger = byId('needs-you');
+  const panel = byId('decision-panel');
+  const layer = byId('decision-layer');
+  const previous = byId('decision-previous');
+  const next = byId('decision-next');
+  const item = byId('decision-item');
+  const message = byId('decision-message');
+  const conversation = byId('conversation');
+  const editor = byId('message');
+  byId('profile-identity').hidden = false;
+  byId('composer-container').hidden = false;
+
+  const prompt = '<img data-user-content> branch?';
   const target = { botId: 'release', itemKind: 'user_question', itemId: 2, waitId: 2, taskId: 1,
     targetRevision: 3, targetGeneration: 4 };
   const question = { ...target, botName: 'Release', requestTitle: 'Draft notes', request: 'Draft notes for main',
-    prompt: text, choices: ['main', 'stable'], canDecide: true, conversationEventId: 18 };
+    prompt, choices: ['main', 'stable'], canDecide: true, conversationEventId: 18 };
   const revised = { ...question, itemId: 5, waitId: 5, targetRevision: 6, targetGeneration: 7,
     prompt: 'Which release branch should we use?', choices: ['main', 'release'] };
-  const secret = { ...question, itemKind: 'protected_input', itemId: 3, requestTitle: 'Protected input' };
+  const secret = { ...question, itemKind: 'protected_input', itemId: 3, requestTitle: 'Protected input',
+    prompt: 'Supply a value', waitId: 0, taskId: 0, targetRevision: 0, targetGeneration: 0 };
   const review = { ...question, itemKind: 'pr_review', itemId: 4, canDecide: false,
-    prTitle: 'Review link', prUrl: 'data:text/plain,ignored' };
+    requestTitle: 'Review a change', prompt: 'Review requested', prTitle: 'Review link', prUrl: 'data:text/plain,ignored' };
   const docs = { ...question, botId: 'docs', botName: 'Docs', itemId: 6, waitId: 6, taskId: 2,
     requestTitle: 'Publish docs', request: 'Publish docs', prompt: 'Which guide?', choices: [] };
   const nextDocs = { ...docs, itemId: 7, waitId: 7, targetGeneration: 5,
     prompt: 'Which examples, and how many?', choices: ['Quickstart', { options: ['1', '2'] }] };
+
   const calls = [];
   const sources = [];
   let questions = [question, docs, secret, review];
-  let recordDocs;
-  const answer = () => cards.querySelector('textarea');
-  const choices = () => cards.querySelector('.question-choice-form');
+  let finishDocs;
+  const choices = () => item.querySelector('.question-choice-form');
   const selected = () => choices().querySelector('input:checked')?.value;
   const sendChoice = () => choices().querySelector('button');
-  const type = (input, value) => {
-    input.value = value;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-  const filter = (bot) => {
-    bots.value = bot;
-    bots.dispatchEvent(new Event('change'));
-  };
-  mountBoardInbox(async (path, data) => {
-    calls.push([path, data]);
-    if (path === 'bots') return [{ id: 'release', name: 'Release' }, { id: 'docs', name: 'Docs' }];
-    if (path === 'inbox/decide') {
-      if (data.waitId === docs.waitId) {
-        await new Promise((resolve) => { recordDocs = resolve; });
-        questions = questions.filter((item) => item !== docs);
+  const submissions = () => calls.filter(([path]) => path === 'inbox/decide').map(([, data]) => data);
+  const board = mountBoardInbox({
+    async api(path, data) {
+      calls.push([path, data]);
+      if (path === 'inbox/decide') {
+        if (data.waitId === docs.waitId) {
+          await new Promise((resolve) => { finishDocs = resolve; });
+          questions = questions.filter((entry) => entry !== docs);
+        } else if (data.waitId === question.waitId) {
+          questions = [revised];
+          throw new Error('request_changed');
+        } else {
+          questions = questions.filter(({ itemId }) => itemId !== data.itemId);
+        }
         return { accepted: true };
       }
-      if (data.waitId === question.waitId) {
-        questions = [revised];
-        throw new Error('request_changed');
-      }
-      if (data.waitId === nextDocs.waitId) {
-        questions = questions.filter((item) => item !== nextDocs);
-        return { accepted: true };
-      }
-      questions = [];
-      return { accepted: true };
-    }
-    if (path === 'inbox/history') return { decisions: [] };
-    const bot = new URLSearchParams(path.split('?')[1]).get('bot');
-    return { items: questions.filter((item) => !bot || item.botId === bot) };
-  }, (bot, eventId, close) => {
-    const button = document.createElement('button');
-    button.textContent = 'Show in conversation';
-    button.addEventListener('click', () => { sources.push([bot.id, eventId]); close(); });
-    return button;
+      if (path.startsWith('inbox/history')) return { decisions: [] };
+      if (path !== 'inbox') throw new Error('Unexpected route ' + path);
+      return { items: questions };
+    },
+    sourceAction(entry, close) {
+      if (!entry.conversationEventId) return null;
+      const source = document.createElement('button');
+      source.type = 'button';
+      source.textContent = 'Show in conversation';
+      source.addEventListener('click', () => { sources.push([entry.botId, entry.conversationEventId]); close(); });
+      return source;
+    },
+    onChange() {},
+    onAccepted() {},
+    canCompose: () => true,
+    focusComposer: () => editor.focus(),
   });
+  const open = async (bot, viewer = 'viewer') => {
+    board.setContext(bot, viewer);
+    board.open(trigger);
+    await settled();
+  };
+  const browse = async (control) => { control.click(); await settled(); };
 
-  check(!dialog.open && message.getAttribute('role') === 'status', 'Missing closed dialog or live status');
-  check(!document.querySelector('[data-work-view="board"]') && !byId('work-view-status'),
-    'The sidebar still offers the Task board');
-  document.querySelector('[data-work-view="inbox"]').click();
-  await settled();
-  check(dialog.open && byId(dialog.getAttribute('aria-labelledby')).textContent === 'Decision inbox',
-    'The inbox lost its accessible title');
-  check(cards.textContent.includes(text) && !cards.querySelector('img,a'), 'User text or an unsafe URL entered the DOM');
-  check(!cards.lastElementChild.querySelector('form') && cards.lastElementChild.textContent.includes('View only'),
-    'A view-only item showed decision controls');
-  const password = cards.querySelector('input[type=password]');
-  check(password?.labels[0].textContent === 'Protected value', 'The protected value is not a labeled password field');
-  const release = cards.firstElementChild;
-  check(choices().querySelector('legend').textContent === text && sendChoice().disabled &&
-    answer().form.hidden && !selected(), 'The structured question did not start with a labeled, unselected radio group');
-  release.querySelector('button').click();
-  await settled();
-  check(!dialog.open && sources.length === 1 && sources[0][0] === 'release' && sources[0][1] === 18,
-    'Show in conversation did not preserve the question source');
-  document.querySelector('[data-work-view="inbox"]').click();
-  await settled();
+  board.setContext('release', 'viewer');
+  await board.refresh();
+  check(layer.hidden && !conversation.inert && !trigger.hidden && message.getAttribute('role') === 'status',
+    'The decision layer must start closed with a visible pending count and status region');
+  check(!document.querySelector('[data-work-view]') && board.count('release') === 3 && board.count('docs') === 1,
+    'Pending counts did not stay scoped to each Bot');
+  await browse(trigger);
+  check(board.isOpen() && !layer.hidden && conversation.inert && !editor.closest('[inert]') &&
+    trigger.getAttribute('aria-expanded') === 'true' && byId(panel.getAttribute('aria-labelledby')).textContent === 'Needs you',
+    'The layer did not open inside the conversation with an accessible title and usable composer');
+  check(item.textContent.includes(prompt) && !item.textContent.includes(docs.prompt) && !item.querySelector('img,a') &&
+    previous.disabled && !next.disabled, 'The first card displayed another Bot, unsafe markup, or invalid navigation');
+  check(choices().querySelector('legend').textContent === prompt && sendChoice().disabled && !selected(),
+    'The structured question did not start with a labeled, unselected radio group');
+
+  await browse(button('Show in conversation'));
+  check(layer.hidden && !conversation.inert && sources.length === 1 && sources[0][0] === 'release' && sources[0][1] === 18,
+    'The source shortcut lost the current question event or left the layer open');
+  await browse(trigger);
   const main = choices().querySelector('input');
   main.click();
-  check(selected() === 'main' && !sendChoice().disabled && !answer().value &&
-    !calls.some(([path]) => path === 'inbox/decide'), 'Choosing a radio edited the written draft or sent a decision');
+  check(selected() === 'main' && !sendChoice().disabled && !board.composer()?.text && !submissions().length,
+    'Choosing an option edited the written answer or sent the decision');
   check(!main.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })),
     'Enter on a radio did not suppress implicit submission');
-  refresh.click();
-  await settled();
-  check(selected() === 'main' && answer().form.hidden, 'Refresh lost the selected answer or opened the editor');
-  const write = cards.querySelector('.question-reply');
+  await board.refresh();
+  check(selected() === 'main', 'Refresh lost the selected answer');
+
+  const write = [...item.querySelectorAll('button')].find((control) => /^Write /.test(control.textContent));
+  check(write, 'The structured question lacked a route to write an answer');
   write.click();
-  check(!answer().form.hidden && document.activeElement === answer() && answer().labels[0].textContent === 'Answer' &&
-    write.textContent === 'Write a reply' && selected() === 'main', 'Write a reply did not focus the separate answer editor');
+  check(document.activeElement === editor && board.composer()?.item.itemId === question.itemId && selected() === 'main',
+    'Writing an answer did not focus the separate answer composer');
   const draft = 'Use main after the smoke tests pass.';
-  type(answer(), draft);
-  type(cards.querySelector('input[type=password]'), 'fixture secret');
-  filter('docs');
-  await settled();
-  check(answer().value === '', 'The Release draft appeared on the Docs card');
-  type(answer(), 'Publish the release checklist.');
-  byId('work-view-close').click();
-  await settled();
-  document.querySelector('[data-work-view="inbox"]').click();
-  await settled();
-  check(answer().value === draft && !answer().form.hidden && selected() === 'main' &&
-    cards.querySelectorAll('textarea')[1].value === 'Publish the release checklist.',
-    'Filtering and reopening lost the answer drafts');
-  check(cards.querySelector('input[type=password]').value === '', 'The draft retained a protected value');
+  board.edit(draft);
+  await browse(next);
+  const password = item.querySelector('input[type=password]');
+  check(password?.labels[0].textContent === 'Protected value' && !board.composer(),
+    'The protected input used the conversation composer instead of a labeled password field');
+  password.value = 'fixture secret';
+  password.dispatchEvent(new Event('input', { bubbles: true }));
+  await browse(next);
+  check(item.textContent.includes('View only') && !item.querySelector('form,a') && next.disabled && !previous.disabled,
+    'A view-only card showed decision controls, an unsafe link, or invalid navigation');
+  await browse(previous);
+  check(item.querySelector('input[type=password]')?.value === '', 'The view retained a protected value after leaving its card');
+  await browse(previous);
+  check(board.composer()?.text === draft && selected() === 'main', 'Cycling decisions lost a written or selected answer');
 
-  cards.querySelectorAll('textarea')[1].form.querySelector('button[type=submit]').click();
-  refresh.click();
+  await open('docs');
+  check(board.composer()?.text === '' && !choices() && next.disabled && previous.disabled,
+    'Switching to Docs inherited the prior answer or navigation');
+  board.edit('Publish the release checklist.');
+  const pendingAnswer = board.submitAnswer();
   await settled();
-  check(cards.querySelectorAll('textarea')[1].form.querySelector('button[type=submit]').disabled,
-    'Refreshing made an in-flight answer submit again');
-  answer().focus();
-  answer().setSelectionRange(4, 8);
-  recordDocs();
+  await board.refresh();
+  check(board.composer()?.busy && submissions().length === 1 && typeof finishDocs === 'function',
+    'Refresh made an in-flight answer submittable again');
+  await open('release');
+  editor.focus();
+  check(board.composer()?.text === draft, 'The Docs draft replaced the Release draft');
+  finishDocs();
+  await pendingAnswer;
   await settled();
-  check(answer().value === draft && selected() === 'main' && !cards.textContent.includes(docs.prompt) &&
-    message.textContent.includes('Decision saved'),
-    'Saving the Docs answer lost the Release draft or left Docs pending');
-  check(document.activeElement === answer() && answer().selectionStart === 4 && answer().selectionEnd === 8,
-    'Saving the Docs answer moved focus or selection out of the Release editor');
+  check(board.count('docs') === 0 && board.count('release') === 3 && board.composer()?.text === draft &&
+    selected() === 'main' && document.activeElement === editor,
+    'Finishing a different Bot’s answer changed this card, focus, or draft');
+
   questions = [question, nextDocs, secret, review];
-  refresh.click();
+  await board.refresh();
+  await open('docs');
+  check(board.composer()?.text === '' && !choices(), 'A heterogeneous question lost its written answer route or inherited a decided draft');
+  board.edit('Publish two Quickstart examples.');
+  await board.submitAnswer();
   await settled();
-  const mixed = cards.children[1];
-  check(mixed.querySelector('textarea').value === '' && !mixed.querySelector('form').hidden &&
-    !mixed.querySelector('input[type=radio]'), 'A heterogeneous question lost its free-text route or inherited the old draft');
-  type(mixed.querySelector('textarea'), 'Publish two Quickstart examples.');
-  mixed.querySelector('button[type=submit]').click();
-  await settled();
-  const mixedAnswer = calls.filter(([path]) => path === 'inbox/decide').at(-1)[1];
+  const mixedAnswer = submissions().at(-1);
   check(mixedAnswer.waitId === nextDocs.waitId && mixedAnswer.data.text === 'Publish two Quickstart examples.' &&
-    !mixed.isConnected && answer().value === draft, 'The heterogeneous question could not send a written answer');
+    layer.hidden && trigger.hidden && !conversation.inert, 'The last decision did not close the layer and restore the conversation');
 
-  let send = answer().form.querySelector('button[type=submit]');
-  send.focus();
-  send.click();
+  await open('release');
+  check(board.composer()?.text === draft, 'Reopening the card lost its saved draft');
+  await board.submitAnswer();
   await settled();
-  const payload = calls.filter(([route]) => route === 'inbox/decide').at(-1)[1];
+  const payload = submissions().at(-1);
   check(Object.entries(target).every(([field, value]) => payload[field] === value) && payload.data.text === draft,
-    'Decision submission changed the target or answer');
-  send = answer().form.querySelector('button[type=submit]');
-  check(cards.textContent.includes(revised.prompt) && cards.textContent.includes('The question changed') && send.disabled &&
-    !selected() && sendChoice().disabled,
-    'The updated question did not require review before reusing the draft');
-  check(document.activeElement === answer() && answer().value === draft && !answer().disabled,
-    'The changed request lost the draft or editor focus');
-  const reuse = [...answer().form.querySelectorAll('button')].find(({ textContent }) => textContent === 'Use draft for this question');
-  check(reuse && send.disabled, 'An unchanged old draft must still be reviewed');
-  const choice = choices().querySelector('input[value=release]');
-  choice.click();
-  check(!sendChoice().disabled && send.disabled && reuse.isConnected && answer().value === draft,
-    'A fresh choice was blocked by or wrongly confirmed the old written draft');
+    'Submitting the written answer changed its exact target or text');
+  check(item.textContent.includes(revised.prompt) && board.composer()?.blocked && board.composer()?.text === draft &&
+    !selected() && sendChoice().disabled, 'A revised question did not block reuse of the old drafts');
+  const attempts = submissions().length;
+  await board.submitAnswer();
+  check(submissions().length === attempts, 'A stale written answer was submitted before it was reviewed');
+  const reuse = button('Use draft for this question');
+  check(reuse, 'A revised question lacked a way to review its saved draft');
+  choices().querySelector('input[value=release]').click();
+  check(!sendChoice().disabled && board.composer()?.blocked && reuse.isConnected,
+    'A fresh choice confirmed the stale written draft or was blocked by it');
   reuse.click();
-  check(!send.disabled && !reuse.isConnected && answer().value === draft && document.activeElement === answer(),
+  check(!board.composer()?.blocked && board.composer()?.text === draft && document.activeElement === editor,
     'Explicitly reusing the draft did not restore the written answer');
   sendChoice().click();
   await settled();
-  const accepted = calls.filter(([route]) => route === 'inbox/decide').at(-1)[1];
-  check(Object.keys(target).every((field) => accepted[field] === revised[field]) && accepted.data.text === 'release',
-    'The selected answer did not use the updated decision target');
-  check(!cards.children.length && message.textContent.includes('Decision saved'), 'Decided question stayed in the Inbox');
-  questions = [{ ...revised, itemId: 9, waitId: 9, targetGeneration: 8 }];
-  refresh.click();
-  await settled();
-  check(!selected() && answer().form.hidden && !answer().value, 'A recorded answer left drafts in the next question');
-  byId('work-view-history').click();
-  await settled();
-  check(message.textContent === 'No recorded decisions.' && byId('work-view-title').textContent === 'Recent decisions',
-    'The history view lost its accessible title or empty state');
-  filter('release');
-  await settled();
-  check(calls.at(-1)[0] === 'inbox/history?bot=release', 'The Bot filter did not narrow the request');
-}
+  const accepted = submissions().at(-1);
+  check(Object.keys(target).every((field) => accepted[field] === revised[field]) && accepted.data.text === 'release' &&
+    layer.hidden && board.count('release') === 0, 'The selected answer used the wrong target or stayed pending');
 
+  questions = [{ ...revised, itemId: 9, waitId: 9, targetGeneration: 8 }];
+  await board.refresh();
+  await browse(trigger);
+  check(board.composer()?.text === '' && !selected(), 'A recorded answer carried old drafts to a later question');
+  board.edit('A private draft');
+  board.setContext('release', 'someone else');
+  await board.refresh();
+  await browse(trigger);
+  check(board.composer()?.text === '', 'A previous viewer’s draft appeared for a different viewer');
+
+  board.close();
+  board.openHistory(trigger);
+  await settled();
+  check(!layer.hidden && byId(panel.getAttribute('aria-labelledby')).textContent === 'Recent decisions' &&
+    message.textContent.includes('No recorded decisions') && !board.composer(),
+    'The Bot’s decision history lost its scoped title or empty state');
+  check(calls.some(([path]) => path === 'inbox/history?bot=release'), 'Recent decisions did not request this Bot’s history');
+  byId('decision-close').click();
+  check(layer.hidden && !conversation.inert, 'The close action left the conversation disabled');
+}
 const assets = new URL('../assets/', import.meta.url);
 const read = (name) => readFileSync(new URL(name, assets), 'utf8');
 const directory = mkdtempSync(join(tmpdir(), 'flock-board-inbox-dom-'));
 try {
   const html = read('index.html').replace(/<link\b[^>]*>/g, '').replace('<script type="module" src="/app.js"></script>', `
-    <style>${read('style.css')}${read('dialog.css')}${read('conversation.css')}${read('board-inbox.css')}</style>
+    <style>${read('style.css')}${read('sidebar.css')}${read('conversation.css')}${read('composer.css')}${read('dialog.css')}${read('board-inbox.css')}</style>
     <script type="module">
       import { mountBoardInbox } from ${JSON.stringify(new URL('board-inbox.js', assets).href)};
       try {

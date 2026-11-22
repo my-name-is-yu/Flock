@@ -19,7 +19,7 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
     const pending = new Map(Object.entries(saved?.pending ?? {}));
     const suggestions = new Set(Array.isArray(saved?.suggestions) ? saved.suggestions : []);
     let reply = replyTarget(saved?.reply) ? saved.reply : null;
-    const slot = () => String(reply?.messageId ?? 0);
+    const slot = (target = reply) => String(target?.messageId ?? 0);
     function persist() {
       if (person === undefined) return false;
       const selected = reply && texts.has(slot()) ? { kind: reply.kind, messageId: reply.messageId } : null;
@@ -61,14 +61,15 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
         reply = null;
         persist();
       },
-      edit(text) {
-        suggestions.delete(slot());
-        if (text) texts.set(slot(), text);
-        else texts.delete(slot());
+      edit(text, target = reply) {
+        const anchor = slot(target);
+        suggestions.delete(anchor);
+        if (text) texts.set(anchor, text);
+        else texts.delete(anchor);
         persist();
       },
-      prepareSend() {
-        const anchor = slot();
+      prepareSend(target = reply) {
+        const anchor = slot(target);
         const text = textAt(anchor);
         const previous = pending.get(anchor);
         const clientMessageId = previous?.text === text && typeof previous.clientMessageId === 'string'
@@ -77,7 +78,7 @@ export function createComposerDraftStore(storage = () => sessionStorage) {
         suggestions.delete(anchor);
         persist();
         const payload = { botId, clientMessageId, text };
-        if (reply) payload.replyToMessageId = reply.messageId;
+        if (target) payload.replyToMessageId = target.messageId;
         return payload;
       },
       settleSend(payload, received) {

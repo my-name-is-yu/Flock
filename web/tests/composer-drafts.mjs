@@ -100,3 +100,23 @@ test('keeps drafts and exact retries usable while the browser blocks storage', (
   assert.equal(drafts('ops', null).text, 'Local draft');
   assert.deepEqual(composer.prepareSend(), payload);
 });
+
+test('uses a temporary reply target without replacing the selected conversation draft', () => {
+  const storage = new SessionStorage();
+  const load = () => createComposerDraftStore(() => storage)('ops', 'alice');
+  const review = { kind: 'message', messageId: 44 };
+  const composer = load();
+  composer.edit('Ordinary message');
+  composer.openReply(question);
+  composer.edit('Answer in progress');
+  composer.edit('Review direction', review);
+  const submitted = composer.prepareSend(review);
+  assert.equal(submitted.replyToMessageId, review.messageId);
+  assert.equal(submitted.text, 'Review direction');
+  assert.equal(composer.reply, question);
+  assert.deepEqual(load().prepareSend(review), submitted);
+  composer.settleSend(submitted, true);
+  assert.equal(load().textAt(review.messageId), '');
+  assert.equal(load().text, 'Answer in progress');
+  assert.equal(load().textAt(0), 'Ordinary message');
+});
