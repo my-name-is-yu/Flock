@@ -14,7 +14,7 @@ const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
-  'profile-name', 'profile-status', 'profile-heading', 'profile-placeholder', 'conversation', 'older',
+  'profile-name', 'profile-status', 'profile-identity', 'profile-placeholder', 'conversation', 'older',
   'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
   'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'attach-screenshots', 'screenshot-input', 'screenshot-previews',
@@ -564,7 +564,8 @@ function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
   const profile = elements.profile;
-  elements['profile-heading'].hidden = !bot || !!dm;
+  const identity = elements['profile-identity'];
+  identity.hidden = !bot || !!dm;
   elements['profile-placeholder'].hidden = !!bot || !!dm;
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
@@ -607,13 +608,18 @@ function renderHeader() {
   profileMotion = motion;
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
+  const showStatus = offline || presence !== 'idle';
+  const settingsLabel = `${bot.name} settings`;
+  const name = elements['profile-name'];
   profile.dataset.presence = presence;
-  profile.dataset.state = offline ? 'offline' : presence;
-  profile.title = `${bot.name} settings`;
-  profile.setAttribute('aria-label', profile.title);
-  elements['profile-name'].textContent = bot.name;
-  elements['profile-status'].textContent = status;
-  elements['profile-status'].hidden = !offline && presence === 'idle';
+  identity.dataset.state = offline ? 'offline' : presence;
+  profile.setAttribute('aria-label', settingsLabel);
+  name.textContent = bot.name;
+  name.title = settingsLabel;
+  elements['profile-status'].textContent = showStatus ? status : '';
+  elements['profile-status'].hidden = !showStatus;
+  if (showStatus) profile.setAttribute('aria-describedby', 'profile-status');
+  else profile.removeAttribute('aria-describedby');
 }
 
 function activityRow(tag, className, title, status, statusClass) {
