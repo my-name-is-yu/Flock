@@ -15,7 +15,7 @@ const Json& resourceOperations() {
         {"service",{"read","use","manage"}},{"repository",{"read","write","pr","review","issues"}},
         {"secret",{"use"}},{"session",{"read"}},{"mcp_server",{"discover","invoke","read_resource"}},
         {"environment",{"inspect","configure","launch"}},{"shared_memory",{"read","write"}},
-        {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"bot_admin",{"create_bot","rename_bot"}}};
+        {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"skill",{"list","read"}},{"attachment",{"inspect"}},{"bot_admin",{"create_bot","rename_bot"}}};
     return catalog;
 }
 
@@ -64,7 +64,7 @@ bool Scope::valid() const {
 
 Access Store::access() { return Access(*p_); }
 
-void Store::Impl::migrateAccess() {
+void Store::Impl::initializeAccessSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS person_bot_grants(bot TEXT,person TEXT,role INTEGER,PRIMARY KEY(bot,person));
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS bot_changes(id INTEGER PRIMARY KEY,bot TEXT,operation
  request_key TEXT UNIQUE NOT NULL,status TEXT DEFAULT 'pending',source_message_id INTEGER REFERENCES messages(id));
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Access migration failed");
+    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
 }
 
 bool Access::permits(std::string_view bot, const Scope& s, bool upstream) const {
@@ -169,6 +169,11 @@ void Access::personGrant(const Person& actor, std::string_view bot, std::string_
     tx.commit();
 }
 
+bool Access::permitsPersonScope(const Person& actor, const Scope& scope) const {
+    std::lock_guard lock(db_.mutex);
+    return identifier(actor.id) && scope.valid() && holds(actor,scope);
+}
+
 bool Access::holds(const Person& actor, const Scope& scope) const {
     return actor.adminRoot || db_.query("SELECT 1 FROM person_resource_grants WHERE person=? AND kind=? AND resource=? AND op=?",
                                         {actor.id,scope.kind,scope.resource,scope.operation}).next();
@@ -180,10 +185,7 @@ void Access::personScope(const Person& root, std::string_view person, const Scop
     Transaction tx(db_.db);
 
     if (!root.adminRoot || !identifier(root.id) || !identifier(person) || !scope.valid()) throw Conflict("Root capability required");
-    auto files = db_.query("SELECT file FROM protected_inputs WHERE status='fulfilled'");
-    std::vector<std::string> values;
-    while (files.next()) values.push_back(db_.secrets.read({files.string(0)}));
-    SecretRedactor(std::move(values)).requirePublic({root.id,person,scope.resource});
+    db_.sharedRedactor().requirePublic({root.id,person,scope.resource});
     if (revoke) db_.exec("DELETE FROM person_resource_grants WHERE person=? AND kind=? AND resource=? AND op=?",
                          {person,scope.kind,scope.resource,scope.operation});
     else db_.exec("INSERT OR IGNORE INTO person_resource_grants VALUES(?,?,?,?)",{person,scope.kind,scope.resource,scope.operation});

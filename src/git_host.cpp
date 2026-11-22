@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -145,7 +146,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     {
         std::lock_guard lock(mutex);
         if (taskId) {
-            const auto task = ownTask(taskId,bot);
+            const auto task = load(taskId);
+            if (field(task,"botId") != bot) throw Conflict("No task with this ID");
             if (generation && task.at("generation") != *generation) throw RequestChanged{};
             if (op != "read" && (task.at("state") == "cancelled" || task.at("state") == "cancelling"))
                 throw Conflict("The task is cancelled");
@@ -154,7 +156,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             const auto active = task.value("activeRun",Json(nullptr));
             context.run = runRef(active.is_null() ? task.value("lastRun",Json(nullptr)) : active);
         }
-        gitRedactor().requirePublic(args);
+        sharedRedactor().requirePublic(args);
     }
     const Access access(*this);
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
@@ -180,7 +182,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             }
             repos.push_back(candidate.repo);
         }
-        return gitRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated}},
+        return sharedRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated}},
                                     SecretRedactor::Fields::external);
     }
     const auto repo = GitRepository::parse(hostId,field(args,"repo"));
@@ -204,7 +206,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     }
     if (op == "read") {
         try {
-            const auto scrub = gitRedactor();
+            const auto scrub = sharedRedactor();
             if (decision.tool == "git_read_ci_logs") {
                 const auto maxBytes = args.value("maxBytes",std::size_t{8192});
                 const auto log = host.readCiLogs(context,repo,args.at("jobId"),maxBytes);
@@ -213,9 +215,9 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
                 const auto excerpt = bounded(utf8,maxBytes);
                 return {{"ok",true},{"data",{{"text",excerpt},{"truncated",log.truncated || excerpt.size() < utf8.size()}}}};
             }
-            return {{"ok",true},{"data",scrub.payload(host.call(context,repo,decision),gitResultTextLimit)}};
+            return {{"ok",true},{"data",scrub.payload(host.call(context,repo,decision),false,gitResultTextLimit)}};
         } catch (const std::exception& error) {
-            return {{"ok",false},{"error",gitRedactor().text(error.what())}};
+            return {{"ok",false},{"error",sharedRedactor().text(error.what())}};
         }
     }
 
@@ -245,7 +247,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             eventCursor = events.number(0);
         }
         exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)",{taskId,key,dedupe});
-        journal(taskId,"git_mutation",gitRedactor().record(gitJournal(context,decision.tool,repo,
+        journal(taskId,"git_mutation",sharedRedactor().record(gitJournal(context,decision.tool,repo,
             {{"status","pending"},{"target",audit}})));
         tx.commit();
     }
@@ -258,8 +260,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     }
     std::lock_guard lock(mutex);
     Transaction tx(db);
-    const auto scrub = gitRedactor();
-    if (result.value("ok",false)) result["data"] = scrub.payload(result.at("data"),gitResultTextLimit);
+    const auto scrub = sharedRedactor();
+    if (result.value("ok",false)) result["data"] = scrub.payload(result.at("data"),false,gitResultTextLimit);
     else result["error"] = scrub.text(field(result,"error"));
     if (result.value("ok",false) && (watchPr || decision.tool == "git_submit_review")) {
         const auto pr = args.at("prNumber").get<Id>();
@@ -279,5 +281,27 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     journal(taskId,"git_mutation",scrub.record(gitJournal(context,decision.tool,repo,{{"target",audit},{"outcome",result}})));
     tx.commit();
     return result;
+}
+
+Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, int step, const Decision& decision) {
+    try {
+        if (!host || !message.channelScope.empty()) throw Conflict("Git tools are available in Flock Web with a connected Git host");
+        auto call = decision;
+        if (message.routing.contains("gitEvent")) {
+            const auto& webhook = message.routing.at("gitEvent");
+            const auto owner = webhook.at("taskId").get<Id>();
+            if ((call.args.contains("taskId") && call.args.at("taskId") != owner) ||
+                field(call.args,"host") != field(webhook,"host") || field(call.args,"repo") != field(webhook,"repo") ||
+                (call.tool == "git_pr_status" && call.args.at("prNumber") != webhook.at("prNumber")) ||
+                (call.tool == "git_commit_status" && field(call.args,"sha") != field(webhook,"headSha")) ||
+                (call.tool == "git_read_ci_logs" && call.args.at("jobId") != webhook.at("jobId")))
+                throw Conflict("Git notification tools must use the watched target");
+            call.args["taskId"] = owner;
+        }
+        return gitTool(*host,message.bot,0,message.routing,call,
+                       "turn/" + std::to_string(message.id) + "/" + std::to_string(step));
+    } catch (const std::exception& error) {
+        return {{"ok",false},{"error",sharedRedactor().text(error.what())}};
+    }
 }
 }

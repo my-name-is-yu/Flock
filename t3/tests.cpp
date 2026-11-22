@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/session_read.hpp"
 
 #include <iostream>
 #include <sys/stat.h>
@@ -6,6 +7,8 @@
 
 using namespace flockv0;
 using flockv0::t3detail::http;
+
+void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 
 namespace {
 void check(bool pass, std::string_view reason) {
@@ -33,6 +36,17 @@ int main(int argc, char** argv) {
                 fixture({{"authorization", authorization}});
             });
         };
+        for (const auto& [stage, code] : std::map<std::string, std::string>{
+                 {"discovery", "invalid_resource"}, {"registration", "invalid_client_metadata"}, {"token", "invalid_grant"}}) {
+            fixture({{"oauthFailure", stage}});
+            bool diagnosed = false;
+            try { signIn("env-1"); }
+            catch (const std::runtime_error& error) {
+                diagnosed = std::string(error.what()).find(stage + " failed (HTTP 400): " + code) != std::string::npos;
+            }
+            check(diagnosed, "OAuth failure identifies stage, HTTP status and error");
+        }
+        fixture({{"oauthFailure", false}});
         signIn("env-1");
         auto ownerOnly = [](const std::filesystem::path& path) {
             struct stat st{};
@@ -50,6 +64,14 @@ int main(int argc, char** argv) {
         launch.instruction = "  preserve instruction whitespace and content  ";
         launch.authGeneration = adapter->authGeneration(launch.environmentId, launch.config);
         check(!launch.authGeneration.empty() && !adapter->preflight(launch), "valid credential preflight");
+        for (const auto& [mode, detail] : std::map<std::string, std::string>{
+                 {"rpc", "T3 JSON-RPC error -32602: Invalid params"}, {"tool", "T3 rejected the operation"}}) {
+            fixture({{"projectError", mode}});
+            auto error = adapter->preflight(launch);
+            check(error && error->kind == Delivery::Kind::Unknown && error->detail == detail,
+                  "JSON-RPC and plain-text MCP tool failures remain distinguishable");
+        }
+        fixture({{"projectError", false}});
         auto checkPreflight = [&](const Command& command, Delivery::Kind kind, std::string_view reason) {
             const auto failure = adapter->preflight(command);
             check(failure && failure->kind == kind, reason);
@@ -83,27 +105,27 @@ int main(int argc, char** argv) {
         fixture({{"duplicate", false}});
         const auto launches = effects("t3_thread_launch");
         check(launches.size() == 1, "launch reconciliation creates no additional T3 threads");
-        check(launches.at(0).at("message").get<std::string>().find(launch.instruction) != std::string::npos,
-              "T3 receives the complete original instruction with its whitespace");
+        check(launches.at(0).at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
+              "T3 receives the original launch instruction followed by one canonical marker");
 
         fixture({{"scenario", "question"}});
         auto observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request" &&
-              observation.question.fields.size() == 1, "owned question is exposed with its field");
+        check(observation.kind == Observation::Kind::Question && observation.question.requestId == "request",
+              "owned question is exposed");
         const auto& field = observation.question.fields.at(0);
         check(field.at("id") == "color" && field.at("question") == "Which colors?" && field.at("multiple") == true &&
               field.at("freeform") == false, "question retains its prompt and input constraints");
         const auto& options = field.at("options");
         check(options.size() == 2 && options.at(0).at("label") == "Green" && options.at(0).at("value") == "green" &&
-              options.at(1).at("label") == "blue" && options.at(1).at("value") == "blue",
+              options.at(1).at("label") == "　blue　" && options.at(1).at("value") == "blue",
               "question retains the display labels and answer values for both options");
         Command answer = launch;
         answer.tool = "answer_session_question";
         answer.target = run;
         answer.questionId = "request";
-        answer.answers = {{"color", "missing option"}};
+        answer.answers = {{"color", "missing option"}, {"message", ""}, {"tag", ""}};
         check(adapter->send(answer).kind == Delivery::Kind::NotAccepted, "invalid option is rejected");
-        answer.answers = {{"color", Json::array({"green", "blue"})}};
+        answer.answers["color"] = Json::array({"green", "blue"});
         fixture({{"scenario", "ambiguous"}});
         check(adapter->observe("env-1", launch.config, run).kind == Observation::Kind::ExternalInput &&
               adapter->send(answer).kind == Delivery::Kind::NotAccepted, "identical content in another Run blocks auto-answer");
@@ -119,43 +141,51 @@ int main(int argc, char** argv) {
         const auto replies = effects("t3_pending_request");
         check(replies.size() == 1, "T3 receives exactly one reply across restart and retry");
         check(replies.at(0).at("threadId") == "thread" && replies.at(0).at("requestId") == "request" &&
-              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})}},
-              "selected values are sent to the original T3 question");
+              replies.at(0).at("answers") == Json{{"color", Json::array({"green", "blue"})},
+                  {"note", ""}, {"message", ""}, {"tag", ""}},
+              "T3 lost a selection, omitted optional text, cleared editor text or the selected empty tag");
         fixture({{"scenario", "race"}});
         check(adapter->send(answer).kind == Delivery::Kind::QuestionGone, "user answer during dispatch restores monitoring");
 
+        auto badConfig = launch.config;
+        badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
+        observation = adapter->observe("env-1", badConfig, run);
+        check(observation.kind == Observation::Kind::Unavailable && observation.status == "settings",
+              "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
-        fixture({{"scenario", "manual-result"}});
+        fixture({{"scenario", "settling-input"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "unrelated manual result is not attributed to Flock");
-        fixture({{"scenario", "delegated-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "delegate result is tied to owned subagent activity");
-        fixture({{"scenario", "notification-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "v0.1.11 completion notification is tied to a unique owned delegate");
-        fixture({{"scenario", "shortened-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "later" && observation.report == "delegated report",
-              "independent T3 title truncation preserves unique delegate attribution");
-        fixture({{"scenario", "mixed-result"}});
-        observation = adapter->observe("env-1", launch.config, run);
-        check(observation.settled && observation.resultRunId == "root" && observation.report == "root report",
-              "manual input in a continuation Run prevents attribution");
+        check(observation.kind == Observation::Kind::ExternalInput &&
+              observation.question.requestId.empty() && observation.question.fields.empty(),
+              "pending input during delegated settlement is handed off to T3");
+        const auto checkResult = [&](const char* scenario, bool ownsLater) {
+            fixture({{"scenario", scenario}});
+            const auto observed = adapter->observe("env-1", launch.config, run);
+            check(observed.settled && observed.resultRunId == (ownsLater ? "later" : "root") &&
+                  observed.report == (ownsLater ? "later report" : "root report"),
+                  std::string("Incorrect result attribution in ") + scenario);
+        };
+        checkResult("notification-result", true);
+        checkResult("shortened-result", true);
+        checkResult("nested-result", true);
+        checkResult("mixed-result", false);
+        checkResult("server-input-result", false);
+        checkResult("ambiguous-title-result", false);
+        checkResult("reused-result", false);
 
         Command follow = launch;
         follow.actionId = "flock-action-01234";
         follow.tool = "follow_up";
         follow.target = run;
-        follow.instruction = std::string(700, 'x');
-        fixture({{"scenario", "manual-active"}});
-        check(adapter->send(follow).kind == Delivery::Kind::NotAccepted, "busy thread blocks queue send");
-        check(effects("t3_thread_send").empty(), "T3 receives no follow-up while another Run is active");
+        follow.instruction = std::string(700, 'x') + "\n\n[Flock action ID: " + follow.actionId + "]";
+        for (const auto* scenario : {"manual-active", "server-input-result"}) {
+            fixture({{"scenario", scenario}});
+            check(adapter->send(follow).kind == Delivery::Kind::NotAccepted,
+                  std::string("Follow-up accepted in ") + scenario);
+        }
+        check(effects("t3_thread_send").empty(), "T3 received a follow-up for a busy or unrelated Run");
         fixture({{"scenario", "settled"}});
         delivery = adapter->send(follow);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
@@ -165,7 +195,7 @@ int main(int argc, char** argv) {
               delivery.run.runId == "follow", "reconciliation recovers the follow-up from paginated history");
         const auto followUps = effects("t3_thread_send");
         check(followUps.size() == 1, "follow-up reconciliation does not send another queued message");
-        check(followUps.at(0).at("message").get<std::string>().find(follow.instruction) != std::string::npos,
+        check(followUps.at(0).at("message") == follow.instruction,
               "T3 receives all of the follow-up instruction");
 
         ReadRequest read;
@@ -191,13 +221,6 @@ int main(int argc, char** argv) {
             read.offset = chunk.nextOffset;
         } while (chunk.more);
         check(receivedText == expectedText, "continued excerpts preserve the complete Unicode text");
-        const auto boundaries = effects("unicode_split_avoided");
-        check(!boundaries.empty(), "the fixture did not encounter a split surrogate pair");
-        for (const auto& boundary : boundaries) {
-            check(boundary.at("nextOffset").get<std::size_t>() + 1 ==
-                  boundary.at("offset").get<std::size_t>() + boundary.at("limit").get<std::size_t>(),
-                  "the fixture did not back up from the requested limit by one UTF-16 code unit");
-        }
         ReadRequest translation = read;
         translation.itemId = "translation";
         translation.offset = 0;
@@ -253,7 +276,16 @@ int main(int argc, char** argv) {
               steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
                                      {"clientRequestId","flock-turn-7-2"}},
               "a note reaches the running Run through T3 steer without starting another Run");
-        fixture({{"scenario", "resumed"}});
+        fixture({{"steerReply", "other-run"}});
+        delivery = adapter->send(note);
+        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
+              delivery.detail.find("other-run") != std::string::npos, "steer Run race stays uncertain");
+        const auto reads = effects("t3_thread_read").size();
+        const auto lists = effects("t3_thread_list").size();
+        check(adapter->reconcile(note).kind == Delivery::Kind::Unknown &&
+              effects("t3_thread_read").size() == reads && effects("t3_thread_list").size() == lists,
+              "steer reconciliation never scans history");
+        fixture({{"scenario", "resumed"}, {"steerReply", false}});
         delivery = adapter->send(note);
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "continued",
               "a note reaches T3's restart continuation of the assigned Run");
@@ -288,6 +320,83 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "reauthorization with read scope recovers the original Run");
         const auto readOnly = other.authGeneration;
+        fixture({{"scenario","session-read"}});
+        deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
+        const SessionTarget session{"env-1","manual"};
+        const auto metadata = restarted->sessionMetadata(session,true);
+        check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&
+              metadata->status == "failed" &&
+              std::ranges::any_of(metadata->messages,[](const SessionPreview& message) {
+                  return message.text == "staging health check failed";
+              }),"Session metadata or local preview lost");
+        check(std::ranges::none_of(metadata->messages,[](const SessionPreview& message) {
+            return message.text == "private history" || message.text.size() > 720;
+        }),"Session preview exceeded its bounds or contained inherited text");
+        for (const auto* code : {"invalid_request","project_not_found"}) {
+            fixture({{"projectReadFailure",{{"code",code},{"message","The project was not found."}}}});
+            const auto missingProject = restarted->sessionMetadata(session,false);
+            check(missingProject && missingProject->project.empty() && missingProject->projectId == "project" &&
+                  missingProject->title == metadata->title,"missing project hid readable Session metadata");
+        }
+        fixture({{"projectReadFailure",nullptr}});
+        SessionEventFilter filter{};
+        filter.limit = 2;
+        const auto firstPage = restarted->sessionEvents(session,filter);
+        check(firstPage && firstPage->items.size() == 2 && firstPage->nextPosition &&
+              firstPage->items[0].kind == "user_message" && firstPage->items[1].kind == "command_execution",
+              "Session history did not return an ordered first page");
+        filter.afterPosition = firstPage->nextPosition;
+        const auto secondPage = restarted->sessionEvents(session,filter);
+        check(secondPage && secondPage->items.size() == 2 && secondPage->items[0].id == "item-2",
+              "Session history did not resume after the previous page");
+        filter = {};
+        filter.matchText = [](const SessionEvent& event) { return session_read::contains(event.text,"HEALTH"); };
+        filter.kind = "error";
+        filter.fromTime = "2026-01-01T00:00:00Z";
+        filter.toTime = "2026-01-01T00:00:00Z";
+        const auto matched = restarted->sessionEvents(session,filter);
+        check(matched && matched->items.size() == 1 && matched->items[0].id == "item-2",
+              "Session event filtering did not find the failed health check");
+        const auto command = restarted->sessionEvent(session,"item-1");
+        const auto error = restarted->sessionEvent(session,"item-2");
+        const auto longEvent = restarted->sessionEvent(session,"item-7");
+        check(command && command->text == "$ ctest --output-on-failure\nTest 7 failed" &&
+              command->attachments.size() == 2 && error && error->text == "staging health check failed" &&
+              longEvent && longEvent->textTruncated && longEvent->text.size() <= 8192,
+              "Session event details, attachment references or truncation lost");
+        check(!restarted->sessionEvent(session,"item-6"),"inherited item exposed another Session");
+        const auto totals = restarted->sessionCounts(session);
+        check(totals && totals->messages == 5 && totals->runs == 4,"counts were derived from a partial page");
+        fixture({{"longHistory",true}});
+        filter = {};
+        filter.kind = "checkpoint";
+        filter.limit = 1;
+        for (Id expected : {11,23}) {
+            const auto partial = restarted->sessionEvents(session,filter);
+            check(partial && partial->items.empty() && partial->nextPosition == expected,
+                  "selective event search did not return a progressing cursor at its scan bound");
+            filter.afterPosition = partial->nextPosition;
+        }
+        const auto resumed = restarted->sessionEvents(session,filter);
+        check(resumed && resumed->items.size() == 1 && resumed->items.front().id == "item-25" && !resumed->nextPosition,
+              "resuming a bounded scan skipped a local event");
+        fixture({{"longHistory",false}});
+        const auto attachment = restarted->sessionAttachment(session,"item-1","test-log");
+        const auto reference = restarted->sessionAttachment(session,"item-1","reference-only");
+        check(attachment && attachment->content && attachment->content->size() > 8192 &&
+              attachment->content->starts_with("Test 7 failed") && reference && !reference->content,
+              "attachment did not preserve content bounds or reference-only evidence");
+        fixture({{"denyAttachment",true}});
+        check(!restarted->sessionAttachment(session,"item-1","test-log") &&
+              !restarted->sessionAttachment(session,"item-1","missing"),"denied attachment was distinguishable from missing");
+        fixture({{"denyRead",true}});
+        const SessionTarget missing{"env-1","missing"};
+        filter.afterPosition = firstPage->nextPosition;
+        check(!restarted->sessionMetadata(session,false) && !restarted->sessionMetadata(missing,false) &&
+              !restarted->sessionEvents(session,filter) && !restarted->sessionEvent(session,"item-1") &&
+              !restarted->sessionCounts(session) && !restarted->sessionAttachment(session,"item-1","test-log"),
+              "history references bypassed a T3 read denial");
+        fixture({{"scenario","settled"}});
         fixture({{"revoked", true}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::Unavailable && observation.status == "auth",

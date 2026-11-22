@@ -21,7 +21,7 @@ bool terminalPrOperation(std::string_view status) {
 }
 }
 
-void Store::Impl::migrateGit() {
+void Store::Impl::initializeGitSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS git_pr_operations(
  operation_id TEXT PRIMARY KEY NOT NULL, host TEXT NOT NULL, base_repo TEXT NOT NULL,
@@ -51,8 +51,6 @@ CREATE TABLE IF NOT EXISTS git_webhook_deliveries(
  event INTEGER NOT NULL REFERENCES git_webhook_events(id) ON DELETE CASCADE, pr_number INTEGER NOT NULL,
  PRIMARY KEY(event,pr_number));
 CREATE INDEX IF NOT EXISTS git_events_repo ON git_webhook_events(host,repo);
-CREATE INDEX IF NOT EXISTS journal_pending_git_turn ON journal(conversation_bot_id,id)
- WHERE kind='git_webhook' AND json_extract(data,'$.status') IS NULL;
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
 }
@@ -95,7 +93,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
                  "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
                  {request.operationId,base.host,base.repo,baseRef,head.repo,headRef,context.taskId,context.botId,
                   runJson(context.run),intent});
-            journal(context.taskId,"git_mutation",gitRedactor().record(
+            journal(context.taskId,"git_mutation",sharedRedactor().record(
                 gitJournal(context,"git_open_pr",base,prResult(request.operationId,"pending"))));
         } else {
             if (operation.number(1) != context.taskId || operation.string(2) != context.botId)
@@ -131,7 +129,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
 
     const auto run = saved.json(3);
     const auto task = load(context.taskId);
-    const auto scrub = gitRedactor();
+    const auto scrub = sharedRedactor();
     std::string_view state = rejected ? "failed" : "ambiguous";
     Id number = 0;
     std::string url;
@@ -220,7 +218,7 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     exec("UPDATE git_pr_operations SET status=?,pr_number=?,url=? WHERE operation_id=?",
          {status,link ? Json(number) : Json(nullptr),link ? Json(url) : Json(nullptr),operation});
     exec("UPDATE pr_review_items SET status=? WHERE id=?",{link ? "linked" : "rejected",item.itemId});
-    journal(item.taskId,"git_mutation",gitRedactor().record(
+    journal(item.taskId,"git_mutation",sharedRedactor().record(
         gitJournal(context,"git_open_pr",base,prResult(operation,status,number,url))));
 }
 }

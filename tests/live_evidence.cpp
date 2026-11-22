@@ -71,8 +71,9 @@ void evaluate(T3& t3, Model& model, const Recording& recording, std::string_view
     Json trials = Json::array();
     Decision chosen;
     for (int turn = 0; turn < 4; ++turn) {
-        chosen = model.decide(input);
-        trials.push_back({{"tool",chosen.tool},{"reason",chosen.reason},{"usage",chosen.usage},
+        const auto modelTurn = model.decide(input);
+        chosen = modelTurn.calls.at(0);
+        trials.push_back({{"tool",chosen.tool},{"reason",chosen.reason},{"usage",modelTurn.usage},
                           {"inputBytes",(input.task.dump()+input.event.dump()+input.evidence.dump()).size()}});
         if (chosen.tool != "session_read") break;
         const auto& locator = recording.event.at("buildOutput");

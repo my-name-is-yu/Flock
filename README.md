@@ -2,9 +2,11 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
+Flock reopens databases that use the current SQLite schema. Older development schemas are unsupported. Use a new state directory with `--home` to try the current build alongside an older database.
+
 ## Build
 
-You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, and OpenSSL. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
+You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, OpenSSL, libpng 1.6 or later, and libjpeg. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.
 
 ```sh
 cmake -S . -B build
@@ -43,7 +45,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
 }
 ```
 
-In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` for assumptions that carry across tasks. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
+In the same directory, use `SOUL.md` for the Bot's role and decision criteria and `MEMORY.md` to seed its versioned private memory. Set `session.model` and `session.providerInstanceId` to select the Session's model and provider. Use `session.workspaceStrategy` to specify its workspace.
 
 Optional `conversationEnvironments` entries map names used in requests such as “Run the measurement on the cloud Mac” to T3 environments with access to the same `projectId`. Each target environment needs its own T3 connection and execution permissions. Use a configured name or canonical ID. If an alias matches a canonical ID, that spelling selects the canonical ID. The Bot asks in the conversation when the destination is unclear.
 
@@ -125,3 +127,73 @@ across all states. If its identity remains unresolved, the Decision Inbox shows
 a reconciliation item. Link a verified candidate or reject the operation.
 A definitive host rejection allows a fresh request. For a replacement after a
 confirmed PR closes, ask the Bot to open a new PR explicitly.
+
+### Slack, iMessage, and local machines
+
+Set `FLOCK_CHANNEL_BRIDGES_FILE` to a host-controlled JSON file before starting
+`flock run`. Each channel workspace points to a provider bridge on
+`127.0.0.1` and links provider sender IDs to Flock identities and Bots.
+
+```json
+{
+  "slack": {
+    "T123": {
+      "bridgePort": 3410,
+      "credentialEnv": "SLACK_BRIDGE_KEY",
+      "senders": {"U123": {"personId": "alice", "botId": "release"}}
+    }
+  },
+  "imessage": {
+    "messages-on-mac": {
+      "bridgePort": 3411,
+      "credentialEnv": "IMESSAGE_BRIDGE_KEY",
+      "senders": {"linked-sender": {"personId": "alice", "botId": "release"}}
+    }
+  },
+  "artifactBaseUrl": "https://previews.example.com",
+  "localMachines": {"laptop": "alice"},
+  "sessionBridgeCredentialEnv": "FLOCK_SESSION_BRIDGE_KEY"
+}
+```
+
+Use a separate random bearer credential of at least 32 characters for each
+workspace. Configure Flock Web identities and grant each linked person the
+Bot's `decide` role. Grant the Bot `use` and `read` on the `service` resource
+identified by `["slack","T123"]` or `["imessage","messages-on-mac"]`.
+
+The provider bridge authenticates native events and retrieves attachment
+bytes. It sends normalized JSON with `workspaceId`, `threadRef`,
+`externalMessageId`, `senderId`, `text`, and optional `attachments` to
+`POST /api/channels/slack/events` or `POST /api/channels/imessage/events`.
+Each attachment has `name`, `mimeType`, and `contentBase64`. Use the workspace
+bearer credential. Keep the same external message and thread identifiers for
+retries. A Slack thread reference must identify both the channel and the thread.
+
+Flock calls the bridge's `POST /deliver` with `idempotencyKey`, `origin`,
+`operation`, and `payload`. `POST /reconcile` receives the same key and
+origin. The bridge persists the delivery identity and returns JSON with
+`state` set to `accepted`, `unknown`, `not_sent`, or `rejected`.
+Include the provider's `externalMessageId` for an accepted post. Return
+`not_sent` only with definitive evidence that a send has no provider effect.
+This allows Flock to retry with the same key. The bridge should apply
+`suggestions` from the reply payload using the channel's available controls
+or plain text. When a user selects a posted suggestion, including a task
+question choice, send its label as `text` and the post's provider message ID
+as `replyToExternalMessageId`. Reuse the target and choice event ID on retries.
+
+To publish HTML artifacts in a channel, set an HTTPS `artifactBaseUrl`
+and proxy only its artifact preview path to Flock. Published links contain
+random access tokens, honor current workspace permission, and serve sandboxed HTML.
+
+Local machine entries name the Flock host and its owner. The owner can review
+requests under **Bot access settings → Local machine connections**. Open
+approval links in a browser on the Flock host, where Web listens on loopback. Each
+approval lists exact absolute paths for `read_file` or `list_directory`
+within one active Session. A trusted Session bridge authenticates the caller
+and sends its verified `environmentId`, `threadId` and `runId` with
+`machineId`, `operation` and `path` to loopback
+`POST /api/channels/local-operations`. The request uses a separate bearer
+credential from `sessionBridgeCredentialEnv`, held by the bridge. C++ adapters
+can use `Store::runLocalMachineOperation` with the same authenticated Run.
+The host opens paths without following symlinks. Reusable execution
+environments are configured through Bot settings.

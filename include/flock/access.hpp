@@ -1,5 +1,6 @@
 #pragma once
 #include "flock/core.hpp"
+#include <compare>
 
 namespace flockv0 {
 bool validBotId(std::string_view);
@@ -10,7 +11,8 @@ enum class GrantChange { grant, revoke };
 enum class Role { view = 1, decide, admin };
 struct Person {
     std::string id;
-    bool adminRoot = false; // Assigned by the trusted host, never deserialized from a request.
+    bool adminRoot = false;
+    auto operator<=>(const Person&) const = default;
 };
 inline const Person localOwner{"local-owner",true};
 struct Scope {
@@ -37,6 +39,7 @@ public:
     Json redactSecrets(std::string_view bot, const Json& view) const;
     void requireWebIdentity();
     bool requiresIdentity() const;
+    bool permitsPersonScope(const Person&, const Scope&) const;
     bool permitsPerson(const Person&, std::string_view bot, Role) const;
     void personGrant(const Person&, std::string_view bot, std::string_view recipient, Role, GrantChange);
     void personScope(const Person& root, std::string_view person, const Scope&, GrantChange);

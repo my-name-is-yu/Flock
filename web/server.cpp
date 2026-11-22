@@ -1,16 +1,16 @@
 #include "flock/web.hpp"
+#include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
 #include "access_routes.hpp"
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
+#include "channel_routes.hpp"
 
 #include <httplib.h>
 
 #include <algorithm>
-#include <array>
-#include <cctype>
 #include <charconv>
 #include <limits>
 #include <map>
@@ -19,25 +19,13 @@
 
 namespace flockv0 {
 namespace {
+using web::ChangeFeed;
 using httplib::Request;
 using httplib::Response;
 using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t maxStandardPayload = 128 * 1024;
-constexpr std::size_t maxAvatarImageBytes = 5 * 1024 * 1024;
 constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
-constexpr std::array<std::string_view,7> allowedShapes = {
-    "mug", "sprout", "controller", "lightbulb", "chat", "watering-can", "barbell"
-};
-constexpr std::array<std::string_view,8> allowedIcons = {
-    "star", "orbit", "zap", "compass", "feather", "hexagon", "telescope", "sparkles"
-};
-constexpr std::array<std::string_view,4> allowedRoles = {
-    "reviewer", "builder", "researcher", "custom"
-};
-constexpr std::array<std::string_view,4> allowedImageTypes = {
-    "image/png", "image/jpeg", "image/webp", "image/gif"
-};
 enum class Mutation { Message, Request, Operation };
 
 void json(Response& res, int status, const Json& body) {
@@ -86,18 +74,6 @@ const Json* botById(const Json& bots, std::string_view id) {
     return bot == bots.end() ? nullptr : &*bot;
 }
 
-template <std::size_t N>
-bool inList(const std::array<std::string_view,N>& list, std::string_view value) {
-    return std::find(list.begin(),list.end(),value) != list.end();
-}
-
-bool validHexColor(std::string_view color) {
-    if ((color.size() != 4 && color.size() != 7) || color[0] != '#') return false;
-    return std::all_of(color.begin() + 1,color.end(),[](unsigned char ch) {
-        return std::isxdigit(ch) != 0;
-    });
-}
-
 int base64Digit(unsigned char ch) {
     if (ch >= 'A' && ch <= 'Z') return ch - 'A';
     if (ch >= 'a' && ch <= 'z') return ch - 'a' + 26;
@@ -135,59 +111,24 @@ std::string decodeBase64(std::string_view input, std::size_t maxBytes) {
     return out;
 }
 
-std::string detectImageType(std::string_view bytes) {
-    if (bytes.size() < 8 || bytes.size() > maxAvatarImageBytes) throw InputError("invalid_image");
-    const auto byte = [&](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
-    if (byte(0) == 0x89 && byte(1) == 'P' && byte(2) == 'N' && byte(3) == 'G' &&
-        byte(4) == 0x0D && byte(5) == 0x0A && byte(6) == 0x1A && byte(7) == 0x0A)
-        return "image/png";
-    if (byte(0) == 0xFF && byte(1) == 0xD8 && byte(2) == 0xFF) return "image/jpeg";
-    if (bytes.starts_with("GIF87a") || bytes.starts_with("GIF89a")) return "image/gif";
-    if (bytes.size() >= 12 && bytes.substr(0,4) == "RIFF" && bytes.substr(8,4) == "WEBP")
-        return "image/webp";
-    throw InputError("invalid_image");
-}
-
 struct ParsedProfile {
     Json profile;
     std::optional<AvatarImage> image;
 };
 
-ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImageForUpload) {
-    const auto rawName = body.find("name");
-    if (rawName == body.end() || !rawName->is_string()) throw InputError("invalid_name");
-    std::string name;
-    try { name = botName(rawName->get_ref<const std::string&>()); }
-    catch (const Conflict&) { throw InputError("invalid_name"); }
-    Json profile = {{"name",name}};
-    if (allowRole && body.contains("role")) {
-        if (!body["role"].is_string() || !inList(allowedRoles,body["role"].get_ref<const std::string&>()))
+ParsedProfile parseBotProfile(const Json& body, bool creating) {
+    Json profile = {{"name",validatedBotName(body)}};
+    if (creating && body.contains("role")) {
+        if (!body["role"].is_string() || !validBotRole(body["role"].get_ref<const std::string&>()))
             throw InputError("invalid_role");
         profile["role"] = body["role"];
     }
-    const auto avatarIt = body.find("avatar");
     // Updates may omit the avatar to rename without touching the stored appearance.
-    if (avatarIt == body.end() && !allowRole) return {std::move(profile),std::nullopt};
-    if (avatarIt == body.end() || !avatarIt->is_object()) throw InputError("invalid_avatar");
-    const auto& source = *avatarIt;
-    const auto kind = web::field(source,"kind");
-    std::string color = "#69c9ac";
-    if (source.contains("color")) {
-        if (!source["color"].is_string() || !validHexColor(source["color"].get_ref<const std::string&>()))
-            throw InputError("invalid_avatar");
-        color = source["color"].get<std::string>();
-    }
+    if (!creating && !body.contains("avatar")) return {std::move(profile),std::nullopt};
+    auto avatar = validatedAvatarStyle(body);
     std::optional<AvatarImage> image;
-    if (kind == "shape") {
-        const auto example = web::field(source,"example");
-        if (!inList(allowedShapes,example)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","shape"},{"example",example},{"color",color}};
-    } else if (kind == "icon") {
-        const auto icon = web::field(source,"icon");
-        if (!inList(allowedIcons,icon)) throw InputError("invalid_avatar");
-        profile["avatar"] = {{"kind","icon"},{"icon",icon},{"color",color}};
-    } else if (kind == "upload") {
-        Json avatar = {{"kind","upload"},{"color",color}};
+    if (avatar["kind"] == "upload") {
+        const auto& source = body.at("avatar");
         if (source.contains("filename")) {
             if (!source["filename"].is_string() || source["filename"].get_ref<const std::string&>().size() > 256)
                 throw InputError("invalid_avatar");
@@ -195,16 +136,12 @@ ParsedProfile parseBotProfile(const Json& body, bool allowRole, bool requireImag
         }
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
-            auto bytes = decodeBase64(source["imageData"].get_ref<const std::string&>(),maxAvatarImageBytes);
-            auto type = detectImageType(bytes);
-            image = AvatarImage{std::move(type),std::move(bytes)};
-        } else if (requireImageForUpload) {
+            image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),AvatarImage::maxBytes));
+        } else if (creating) {
             throw InputError("invalid_image");
         }
-        profile["avatar"] = std::move(avatar);
-    } else {
-        throw InputError("invalid_avatar");
     }
+    profile["avatar"] = std::move(avatar);
     return {std::move(profile),std::move(image)};
 }
 
@@ -230,10 +167,25 @@ Json operationData(const Json& body, std::string_view operation) {
     return Json::object();
 }
 
+bool localApprovalNavigation(const Request& req) {
+    if (req.method != "GET" || req.has_header("Origin") ||
+        req.get_header_value("Sec-Fetch-Site") != "cross-site" ||
+        req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
+        req.get_header_value("Sec-Fetch-Dest") != "document") return false;
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    if (!path.starts_with(prefix)) return false;
+    path.remove_prefix(prefix.size());
+    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+}
+
 class LoopbackServer final : public WebServer {
 public:
     LoopbackServer(Store& store, unsigned port, WebCallbacks callbacks)
-        : store_(store), callbacks_(std::move(callbacks)) {
+        : store_(store), callbacks_(std::move(callbacks)),
+          changes_(store,[this](const ChangeFeed::Scope& scope) {
+              return std::visit([&](const auto& target) { return snapshot(scope.person,target); },scope.target);
+          }) {
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         if (callbacks_.authenticate) store_.access().requireWebIdentity();
@@ -276,22 +228,24 @@ public:
             error(res,404,"settings_not_found");
         });
         web::accessRoutes(server_,store_,callbacks_);
+        web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
+        web::channelRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             json(res,200,botList(web::person(callbacks_,req)));
         });
+        server_.Get("/api/events",[this](const Request& req, Response& res) { changes(req,res); });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
             if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
             if (!callbacks_.botAvatar) return error(res,404,"avatar_not_found");
             const auto image = callbacks_.botAvatar(id);
-            if (!image || !inList(allowedImageTypes,image->contentType) || image->bytes.empty())
-                return error(res,404,"avatar_not_found");
-            res.set_content(image->bytes.data(),image->bytes.size(),image->contentType);
+            if (!image) return error(res,404,"avatar_not_found");
+            res.set_content(image->bytes().data(),image->bytes().size(),std::string(image->format().contentType));
         });
-        for (const auto path : {"/api/view","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
@@ -308,9 +262,24 @@ public:
                     }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
+                    if (req.path == "/api/compactions" || req.path == "/api/workflows") {
+                        const auto items = req.path == "/api/compactions" ? store_.compactions(id,before) : store_.workflows(id,before);
+                        return json(res,200,store_.access().redactSecrets(id,items));
+                    }
                     if (req.path == "/api/view") {
-                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot));
+                        const auto changesAfter = req.has_param("changesAfter")
+                            ? std::optional{queryId(req,"changesAfter",true)} : std::nullopt;
+                        const auto sessionsAfter = req.has_param("sessionsAfter")
+                            ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
+                        const auto changes = store_.conversationChangesSince(changesAfter,id);
+                        const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
+                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr));
                         view["bot"]["id"] = id;
+                        view["historyCursor"] = changes.through;
+                        view["changedMessageIds"] = Json::array();
+                        if (const auto changed = changes.messages.find(id); changed != changes.messages.end())
+                            view["changedMessageIds"] = changed->second;
+                        view["sessionCursor"] = sessionThrough;
                         json(res,200,view);
                     } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before)));
                     else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
@@ -342,12 +311,54 @@ public:
     }
 
     ~LoopbackServer() override {
+        changes_.stop();
         server_.stop();
         worker_.join();
+        store_.setWebOrigin({});
     }
     unsigned port() const override { return port_; }
 
 private:
+    void changes(const Request& req, Response& res) {
+        const auto bot = req.get_param_value("bot");
+        const auto peer = req.get_param_value("peer");
+        if (req.get_param_value_count("bot") > 1 || req.get_param_value_count("peer") > 1 ||
+            bot.size() > 1024 || peer.size() > 1024 ||
+            (req.has_param("bot") && bot.empty()) ||
+            (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
+            return error(res,400,"invalid_subscription");
+        const auto person = web::person(callbacks_,req);
+        auto access = store_.access();
+        if ((!bot.empty() && !access.permitsPerson(person,bot,Role::view)) ||
+            (!peer.empty() && !access.permitsPerson(person,peer,Role::view)))
+            return error(res,403,"access_denied");
+        ChangeFeed::Target target = ChangeFeed::BotList{};
+        if (!peer.empty()) target = ChangeFeed::DirectMessage{bot,peer};
+        else if (!bot.empty()) target = ChangeFeed::BotView{bot};
+        auto subscription = changes_.subscribe({person,std::move(target)});
+        if (!subscription) return error(res,503,"event_stream_unavailable");
+        auto cursor = std::make_shared<web::ChangeFeed::Cursor>(std::move(*subscription));
+        res.set_chunked_content_provider("text/event-stream",
+            [this,cursor](std::size_t offset, httplib::DataSink& sink) {
+                if (!sink.is_writable()) return false;
+                if (offset == 0) {
+                    constexpr std::string_view ready = "retry: 2500\nevent: ready\ndata: {}\n\n";
+                    return sink.write(ready.data(),ready.size());
+                }
+                const auto update = changes_.next(*cursor);
+                if (!update) {
+                    sink.done();
+                    return true;
+                }
+                if (!sink.is_writable()) return false;
+                const auto event = update->empty()
+                    ? std::string("event: ping\ndata: {}\n\n")
+                    : "event: change\ndata: " + update->dump(-1,' ',false,Json::error_handler_t::replace) + "\n\n";
+                return sink.write(event.data(),event.size());
+            },
+            [this,cursor](bool) { changes_.release(*cursor); });
+    }
+
     HandlerResult guard(const Request& req, Response& res) const {
         const auto portSuffix = port_ == 80 ? std::string{} : ":" + std::to_string(port_);
         const auto host = req.get_header_value("Host");
@@ -356,25 +367,38 @@ private:
             error(res,403,"invalid_host");
             return HandlerResult::Handled;
         }
+        if ((req.method == "GET" || req.method == "HEAD") && web::artifactPreview(req.path))
+            return HandlerResult::Unhandled;
         const auto origin = req.get_header_value("Origin");
         const auto origins = req.get_header_value_count("Origin");
         const auto fetchSite = req.get_header_value("Sec-Fetch-Site");
         const bool sameOrigin = origins == 1 && origin == "http://" + host;
         if ((origins != 0 && !sameOrigin) || (req.has_header("Sec-Fetch-Site") &&
-            (req.get_header_value_count("Sec-Fetch-Site") != 1 || (fetchSite != "same-origin" && fetchSite != "none")))) {
+            (req.get_header_value_count("Sec-Fetch-Site") != 1 ||
+             (fetchSite != "same-origin" && fetchSite != "none" && !localApprovalNavigation(req))))) {
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
-        if (req.method == "POST" && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
+        if (!origins && !req.has_header("Sec-Fetch-Site") && req.method == "POST" && req.path.starts_with("/api/git/webhooks/")) return HandlerResult::Unhandled;
+        if (req.method == "POST" && web::bridgeEndpoint(req.path)) {
+            if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
+            else if (req.get_header_value_count("Content-Type") != 1 ||
+                     req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
+            else return HandlerResult::Unhandled;
+            return HandlerResult::Handled;
+        }
         if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
             res.set_header("WWW-Authenticate","Basic realm=\"Flock\"");
             error(res,401,"identity_required");
             return HandlerResult::Handled;
         }
         if (req.method == "GET" || req.method == "HEAD") return HandlerResult::Unhandled;
-        if (req.method != "POST") error(res,405,"method_not_allowed");
-        else if (!sameOrigin || req.get_header_value_count("X-Flock-Action") != 1 ||
+        const bool deleting = req.method == "DELETE" && req.path == "/api/schedules";
+        const bool machine = req.path.starts_with("/api/webhooks/") && origins == 0 && !req.has_header("Sec-Fetch-Site");
+        if (req.method != "POST" && !deleting) error(res,405,"method_not_allowed");
+        else if ((!sameOrigin && !machine) || req.get_header_value_count("X-Flock-Action") != 1 ||
                  req.get_header_value("X-Flock-Action") != "1") error(res,403,"invalid_origin");
+        else if (deleting) return HandlerResult::Unhandled;
         else if (req.get_header_value_count("Content-Type") != 1 ||
                  req.get_header_value("Content-Type") != "application/json") error(res,415,"expected_json");
         else if (req.path != "/api/bots" && req.path != "/api/bots/profile") {
@@ -404,17 +428,20 @@ private:
                 const auto botId = requiredText(body,"botId",1024);
                 if (!store_.access().permitsPerson(web::person(callbacks_,req),botId,Role::admin)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
-                auto parsed = parseBotProfile(body,false,false);
+                auto parsed = parseBotProfile(body,false);
                 if (store_.access().redactSecrets(botId,parsed.profile) != parsed.profile)
                     return error(res,400,"invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
+                changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));
             }
             if (!web::person(callbacks_,req).adminRoot) return error(res,403,"access_denied");
-            auto parsed = parseBotProfile(body,true,true);
+            auto parsed = parseBotProfile(body,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
+            changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
+        catch (const BotProfileError& e) { error(res,400,e.code); }
         catch (const Conflict&) { error(res,400,"invalid_bot_profile"); }
     }
 
@@ -444,24 +471,52 @@ private:
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
+    bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
+        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        return store_.hasPeerExchange(bot,peer);
+    }
+
+    Json snapshot(const Person& person, const ChangeFeed::BotList&) const { return botList(person); }
+
+    Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
+        if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
+        const auto bot = findBot(view.bot);
+        if (bot.is_null()) return nullptr;
+        return store_.access().redactSecrets(view.bot,web::botView(store_,bot));
+    }
+
+    Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
+        auto access = store_.access();
+        if (!access.permitsPerson(person,dm.bot,Role::view) ||
+            !access.permitsPerson(person,dm.peer,Role::view)) return nullptr;
+        const auto known = bots();
+        if (!botById(known,dm.bot) || !canReadPeer(dm.bot,dm.peer,botById(known,dm.peer) != nullptr))
+            return nullptr;
+        return access.redactSecrets(dm.peer,access.redactSecrets(dm.bot,web::peerConversation(store_,dm.bot,dm.peer,0)));
+    }
+
     Json botList(const Person& person) const {
         auto visible = bots();
-        visible.erase(std::remove_if(visible.begin(),visible.end(),[&](const auto& bot) {
-            return !store_.access().permitsPerson(person,web::field(bot,"id"),Role::view);
+        auto access = store_.access();
+        visible.erase(std::remove_if(visible.begin(),visible.end(),[&](const Json& bot) {
+            return !access.permitsPerson(person,web::field(bot,"id"),Role::view);
         }),visible.end());
         auto list = web::botList(store_,visible);
+        if (list.empty()) return list;
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
-        std::map<std::string,std::set<std::string>> connections;
+        auto pairs = store_.peerExchangePairs();
         for (const auto& id : known) {
             for (const auto& entry : peers(id)) {
                 const auto& peer = entry.intake.botId;
-                if (id == peer || !known.contains(peer)) continue;
-                connections[id].insert(peer);
-                connections[peer].insert(id);
+                if (known.contains(peer)) pairs.emplace_back(id,peer);
             }
-            for (const auto& peer : store_.peerPartners(id))
-                if (id != peer && store_.access().permitsPerson(person,peer,Role::view)) connections[id].insert(peer);
+        }
+        std::map<std::string,std::set<std::string>> connections;
+        for (const auto& [sender,recipient] : pairs) {
+            if (sender == recipient) continue;
+            if (known.contains(sender) && access.permitsPerson(person,recipient,Role::view)) connections[sender].insert(recipient);
+            if (known.contains(recipient) && access.permitsPerson(person,sender,Role::view)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");
@@ -480,11 +535,8 @@ private:
         if (!store_.access().permitsPerson(web::person(callbacks_,req),peer,Role::view))
             return error(res,403,"access_denied");
         const bool configured = botById(known,peer) != nullptr;
-        if (!configured || (!grantsPeer(bot,peer) && !grantsPeer(peer,bot))) {
-            const auto partners = store_.peerPartners(bot);
-            if (std::ranges::find(partners,peer) == partners.end())
-                return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
-        }
+        if (!canReadPeer(bot,peer,configured))
+            return configured ? error(res,403,"peer_not_allowed") : error(res,404,"peer_not_found");
         const auto history = store_.access().redactSecrets(bot,web::peerConversation(store_,bot,peer,before));
         json(res,200,store_.access().redactSecrets(peer,history));
     }
@@ -496,15 +548,16 @@ private:
         try {
             const auto bot = requiredText(body,"botId",1024);
             const auto actor = web::person(callbacks_,req);
+            if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
+            if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
             if (mutation != Mutation::Operation) {
-                if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
-                if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
                 const auto message = mutation == Mutation::Message;
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
+                const auto attachments = body.value("attachments",Json::array());
                 if (message) {
-                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo);
+                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
                     if (previous) return json(res,201,*previous);
                 }
                 Intake intake;
@@ -515,15 +568,16 @@ private:
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                intake.scheduleId.clear();
-                intake.scheduledAt = 0;
-                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo));
+                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo,attachments));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
-            const auto data = operationData(body,operation);
+            auto data = operationData(body,operation);
+            const auto task = store_.task(id);
+            if (web::field(task,"botId") != bot) return error(res,404,"task_not_found");
+            if (operation == "reconcile") data = reconciliationData(task,wait,std::move(data),callbacks_.intake);
             store_.operate(actor,{bot,id,wait,bodyId(body,"targetRevision",0),bodyId(body,"targetGeneration",0)},operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
@@ -538,6 +592,7 @@ private:
 
     Store& store_;
     WebCallbacks callbacks_;
+    web::ChangeFeed changes_;
     httplib::Server server_;
     std::thread worker_;
     unsigned port_ = 0;
@@ -545,6 +600,8 @@ private:
 } // namespace
 
 std::unique_ptr<WebServer> startWeb(Store& store, unsigned port, WebCallbacks callbacks) {
-    return std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    auto server = std::make_unique<LoopbackServer>(store,port,std::move(callbacks));
+    store.setWebOrigin("http://" + std::string(loopback) + ":" + std::to_string(server->port()));
+    return server;
 }
 } // namespace flockv0

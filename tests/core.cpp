@@ -17,7 +17,8 @@ void tickUntil(Runtime& runtime, const auto& satisfied, std::string_view failure
 
 struct FixedModel : Model {
     int calls = 0;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         ++calls;
         if (input.event["kind"] == "intake") return {"delegate",{{"instruction","Check main"},{"doneWhen","Provide a report on main"}},"The request specifies main"};
         if (input.event["kind"] == "question")
@@ -62,7 +63,7 @@ int main() {
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
-        auto notes = [](std::string_view) { return BotNotes{"Check the branch",""}; };
+        auto notes = [](std::string_view) { return std::string("Check the branch"); };
         Id id;
         {
             Store store(db);

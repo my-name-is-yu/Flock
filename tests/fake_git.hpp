@@ -113,7 +113,7 @@ private:
 
 inline Intake intake(std::string bot = "owner", std::string project = "project") {
     return {std::move(bot),"Ship the tested change","sandbox",std::move(project),
-            {{"modelProvider","chatgpt"},{"model","fixture"}}, {},0};
+            {{"modelProvider","chatgpt"},{"model","fixture"}}};
 }
 
 inline void grant(Store& store, std::string_view bot, std::string kind, std::string resource, std::string op) {

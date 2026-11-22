@@ -18,11 +18,12 @@ public:
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override {
         auto request = app::responseRequest(input);
         auto next = choose(input);
         next.args["reason"] = "Use the verified fixture evidence";
-        const Json call{{"type","function_call"},{"name",next.tool},{"arguments",next.args.dump()}};
+        const Json call{{"type","function_call"},{"namespace","flock"},{"status","completed"},
+                        {"name",next.tool},{"arguments",next.args.dump()}};
         return app::responseDecision(Json::array({call}),request);
     }
 
@@ -30,15 +31,15 @@ private:
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "intake")
-            return {"delegate",{{"instruction","Push change"},{"doneWhen","Open a PR for the pushed branch"}}, {},{}};
+            return {"delegate",{{"instruction","Push change"},{"doneWhen","Open a PR for the pushed branch"}}, {}};
         if (event.at("kind") == "result") {
             const auto steps = event.value("gitResults",Json::array());
-            if (openAfterSession && steps.empty()) return {"git_open_pr",openArgs(),{},{}};
+            if (openAfterSession && steps.empty()) return {"git_open_pr",openArgs(),{}};
             if (!steps.empty()) {
                 results["session-pr"] = steps.at(0).at("result");
                 check(results["session-pr"].value("ok",false),"task PR open failed: " + results["session-pr"].dump());
             }
-            return {"complete",{{"report","Change prepared and checked"}},{},{}};
+            return {"complete",{{"report","Change prepared and checked"}},{}};
         }
         const auto& steps = event.at("turn");
         if (event.contains("gitEvent")) {
@@ -52,24 +53,24 @@ private:
                 check(std::ranges::find(input.tools,"git_open_pr") == input.tools.end(),"Webhook supplied mutation tools");
                 if (gitEvent.at("jobId") == 81)
                     return {"git_read_ci_logs",{{"host",gitEvent.at("host")},{"repo",gitEvent.at("repo")},
-                        {"jobId",gitEvent.at("jobId")},{"maxBytes",32}},{},{}};
-                return {"reply",{{"text","Git notification received."}},{},{}};
+                        {"jobId",gitEvent.at("jobId")},{"maxBytes",32}},{}};
+                return {"reply",{{"text","Git notification received."}},{}};
             }
             results["log"] = steps.at(0).at("result");
             const auto& log = results.at("log").at("data");
             check(log.at("truncated") == true && log.at("text").get<std::string>().size() == 32,
                   "CI excerpt is not explicitly bounded");
-            return {"reply",{{"text","CI failed. " + log.at("text").get<std::string>()}},{},{}};
+            return {"reply",{{"text","CI failed. " + log.at("text").get<std::string>()}},{}};
         }
         const auto name = event.at("text").get<std::string>();
         if (steps.empty()) return calls.at(name);
         results[name] = steps.at(0).at("result");
-        return {"reply",{{"text","Git tool result recorded"}},{},{}};
+        return {"reply",{{"text","Git tool result recorded"}},{}};
     }
 };
 
 Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::string tool, Json args) {
-    model.calls.insert_or_assign(id,Decision{std::move(tool),std::move(args),{},{}});
+    model.calls.insert_or_assign(id,Decision{std::move(tool),std::move(args),{}});
     store.receive(localOwner,intake(),id,id);
     runtime.runConversations();
     if (!model.results.contains(id)) throw std::runtime_error("No result for " + id);
@@ -127,7 +128,7 @@ void runner() {
         grant(store,"owner","repository",repoGrant,"read");
         task = store.submit(intake());
         other = store.submit(intake("other","other-project"));
-        Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(store.task(task).at("state") == "completed" && host->createCalls == 1,"Session-to-PR flow did not complete: " + store.history(task).dump());
         check(script.results.at("session-pr").at("prNumber") == 1,"task did not receive the PR number");
@@ -141,7 +142,7 @@ void runner() {
     {
         Store store(path);
         const auto otherHistory = store.history(other);
-        Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         check(!store.receiveGitWebhook({hostName,"ci-before-restart","org/other","ci","completed",{2},sha,"changed duplicate",81}),
               "same host and delivery ID inserted twice");
         check(store.receiveGitWebhook({hostName,"wrong-pr",repoName,"ci","completed",{2},sha,"wrong PR",81}),
@@ -188,7 +189,7 @@ void webhookHeadPeriods() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     grant(store,"owner","repository",repoGrant,"pr");
     grant(store,"owner","repository",repoGrant,"read");
     const auto first = store.submit(intake());
@@ -233,7 +234,7 @@ void reconciliationAfterTaskRevision() {
     host->create = FakeHost::Create::lostResponse;
     Script script;
     Sessions sessions;
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     grant(store,"owner","environment","sandbox","launch");
     grant(store,"owner","repository",repoGrant,"pr");
     const auto task = store.submit(intake());
@@ -287,7 +288,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
         Store store(path);
         task = store.submit(intake());
         grant(store,"owner","repository",repoGrant,"pr");
-        Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         host->inspect = [&](const GitContext& context, const GitOpenPr& request) {
             operationId = request.operationId;
             const auto pending = persistence(path,operationId);
@@ -324,7 +325,7 @@ void recovery(FakeHost::State state, bool losesRequest, bool multipleMatches = f
     }
     {
         Store store(path);
-        Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
         auto args = openArgs();
         args["taskId"] = task;
         const auto recovered = invoke(store,runtime,script,"retry","git_open_pr",args);
@@ -378,7 +379,7 @@ void accessAndActions() {
     Sessions sessions;
     const auto task = store.submit(intake());
     const auto other = store.submit(intake("other"));
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     const std::vector<std::pair<std::string,Json>> commands{
         {"git_repo_info",Json::object()}, {"git_open_pr",openArgs()}, {"git_update_pr",{{"prNumber",1},{"title","Changed"}}},
         {"git_pr_status",{{"prNumber",1}}}, {"git_commit_status",{{"sha",sha}}},
@@ -455,7 +456,7 @@ void newAttempts() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     grant(store,"owner","repository",repoGrant,"pr");
     const auto originalTask = store.submit(intake());
     auto args = openArgs();
@@ -490,7 +491,7 @@ void redaction() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
     store.protectGitCredential(credential);
@@ -535,7 +536,7 @@ void notificationBudgetAndRevocation() {
     auto host = std::make_shared<FakeHost>();
     Script script;
     Sessions sessions;
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
     grant(store,"owner","repository",repoGrant,"read");
     grant(store,"owner","repository",repoGrant,"pr");
     auto limited = intake();

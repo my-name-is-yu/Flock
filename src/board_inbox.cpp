@@ -82,7 +82,7 @@ Role inboxDecisionRole(InboxKind kind) {
     return kind == grant_request || kind == protected_input || kind == bot_change ? Role::admin : Role::decide;
 }
 
-void Store::Impl::migrateBoardInbox() {
+void Store::Impl::initializeBoardInboxSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS pr_review_items(
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -397,7 +397,7 @@ Id Store::Impl::insertPrReview(const Json& task, std::string_view url, std::stri
         url.find_first_of(" \t\r\n") != url.npos || url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
         prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
-    const auto scrub = gitKey.empty() && operationId.empty() ? redactor(field(task,"botId")) : gitRedactor();
+    const auto scrub = gitKey.empty() && operationId.empty() ? redactor(field(task,"botId")) : sharedRedactor();
     scrub.requirePublic({url,candidates});
     exec("INSERT INTO pr_review_items(task_id,target_revision,target_generation,url,title,prompt,git_key,operation_id,candidates)"
          " VALUES(?,?,?,?,?,?,?,?,?)",

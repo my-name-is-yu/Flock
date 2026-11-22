@@ -4,6 +4,8 @@ The executable serves the embedded UI on its IPv4 loopback listener. The Web UI 
 
 The composer sends `botId`, `clientMessageId` and `text` to `POST /api/messages`. Selecting a question or prior result also sends `replyToMessageId`. The receipt identifies the saved message. Retrying the same payload returns the same receipt, and reusing the key with different content returns HTTP 409. The Bot handles each message in a turn and replies in the conversation, listing any work it started or changed. Tapping one of a task question's choices answers that question directly through `POST /api/operations` without a conversation turn; a written reply to the question goes through the Bot. The CLI `submit` command and `POST /api/requests` each create an explicit new Task.
 
+The first `GET /api/view?bot=...` returns a page of Session tasks. Pass its `sessionCursor` as `sessionsAfter` on the next view request to receive the groups that recorded a new Run. Each returned group includes its full list of Sessions. To continue paging backwards, pass the last page’s `sessionsBefore` to `GET /api/sessions?bot=...&before=...`.
+
 ## Dependencies
 
 - [cpp-httplib v0.67.0](https://github.com/yhirose/cpp-httplib/tree/v0.67.0) is pinned by release and SHA-256 in CMake.
@@ -35,3 +37,44 @@ for the resource operation to approve it. Approving a Bot change applies the
 saved name to the exact target ID. Creation requires a root identity. Rename
 requires admin access to the requesting and target Bots. If the profile write
 fails after approval, use **Apply approved change** to retry.
+
+`POST /api/messages` optionally accepts an `attachments` array with up to four
+objects containing `name`, `mimeType` and `dataBase64`. Supported types are
+`image/png`, `image/jpeg`, `audio/wav` and `audio/mpeg`. Each file is limited
+to 64 KiB and the attachment array to 98,000 JSON bytes. Grant
+`attachment/<botId>/inspect` to let the Bot inspect media in its conversation.
+An image-capable ChatGPT model receives authorized image contents. Audio
+inspection returns file properties and WAV format and duration.
+
+## Memory and automation
+
+Use `GET /api/memory?bot=ID` for private memory. Add `docId` for a shared
+document, for example `team%2Fstaging.md`. `GET /api/memory/history` accepts the
+same parameters. Use `before` to page through revisions and `proposalsBefore`
+to page through proposals. Use `revisionId` for the complete before and after
+text or `proposalId` for a single proposal.
+
+Post to `/api/memory/propose`, `/api/memory/apply`, or `/api/memory/revert` with
+`botId`, optional `docId`, and the current `baseVersion`. A proposal takes
+`content` and `rationale`. Apply takes either `content` or `proposalId`.
+A revert takes `revisionId` and creates a new revision. Post `proposalId` with
+the same Bot and document identifiers to `/api/memory/reject` to dismiss a
+pending proposal. Shared documents require the corresponding person scope
+unless the caller is the local owner or a root identity.
+
+Use `GET /api/schedules?bot=ID` with an optional `before` cursor. Create with
+`POST /api/schedules` and `botId`, `kind`, and `request`. A `schedule` takes
+`cron` and `timezone`. A `reminder` takes a future `fireAt` in Unix seconds, `timezone`,
+and optional `label`. A `trigger` takes `source` and an optional object
+`eventFilter` whose top-level fields must match the event exactly. Cancel with
+`DELETE /api/schedules?bot=ID&id=AUTOMATION_ID` and the usual origin and
+`X-Flock-Action: 1` headers.
+
+For a webhook, post JSON with `externalEventId` and an `event` object to
+`/api/webhooks/SOURCE` with `X-Flock-Action: 1`. Machine clients can omit
+`Origin`. With configured identities, the sender needs an authorization header
+and decide access to each Bot that should receive the event. Flock deduplicates
+each Bot's delivery by source and event ID. Retries return the authorized task
+receipts. Flock checks the saved source and request for protected values at
+delivery. The queued task records the trigger ID, firing time, and redacted
+source and event payload. The external event ID is used for deduplication.

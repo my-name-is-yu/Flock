@@ -15,7 +15,8 @@ class PeerModel final : public Model {
 public:
     int received = 0;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         const auto& kind = input.event.at("kind");
         const auto& bot = input.task.at("botId");
         if (bot == "release" && kind == "intake")
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
             check(pending.at("state") == "sending" && pending.at("runs").empty(),
                   "the accepted launch must still be unconfirmed when recovery starts");
         }
-        Runtime runtime(store,model,*adapter,[](std::string_view) { return BotNotes{}; },options);
+        Runtime runtime(store,model,*adapter,{},options);
         for (int tick = 0; tick < 20; ++tick) runtime.tick();
         check(phase == "recover","T3 sent back a response before the Runtime was killed");
 

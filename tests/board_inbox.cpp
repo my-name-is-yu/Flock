@@ -65,7 +65,8 @@ struct Database {
 struct Script : Model {
     Id managed = 0;
     bool failConversation = false;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();
@@ -127,7 +128,7 @@ struct Sessions : T3 {
 };
 
 Intake intake(std::string bot, std::string text, std::string project, Json config = Json::object()) {
-    return {std::move(bot),std::move(text),"sandbox",std::move(project),std::move(config),{},0};
+    return {std::move(bot),std::move(text),"sandbox",std::move(project),std::move(config)};
 }
 
 Json row(const Json& rows, std::string_view key, const Json& value) {
@@ -173,8 +174,8 @@ void exercise(const std::filesystem::path& path) {
     sessions.questionProject = "question";
     RuntimeOptions options;
     options.clock = [&] { return now; };
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; },options);
-    for (int step = 0; step < 6; ++step) runtime.tick();
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options);
+    for (int step = 0; step < 12; ++step) runtime.tick();
     check(store.task(unknown).at("wait").at("reason") == "unknown_delivery","fixture did not pause on delivery");
 
     db.pause(changed,"budget");
@@ -182,9 +183,11 @@ void exercise(const std::filesystem::path& path) {
     db.pause(model,"model_budget");
     db.pause(hidden,"model_budget");
     const auto due = store.task(deadlineTask).at("deadline").get<Id>();
+    check(due > now,"fixture did not launch the Run with a deadline");
     now = due;
-    runtime.tick();
-    check(store.task(deadlineTask).at("wait").at("reason") == "deadline","fixture did not reach its deadline");
+    for (int step = 0; step < 4 && store.task(deadlineTask).at("wait").is_null(); ++step) runtime.tick();
+    const auto deadlineWait = store.task(deadlineTask).at("wait");
+    check(deadlineWait.is_object() && deadlineWait.at("reason") == "deadline","fixture did not reach its deadline");
 
     const auto report = store.task(question);
     const auto review = store.requestPrReview(question,report.at("currentRevision"),report.at("generation"),
@@ -314,9 +317,13 @@ void exercise(const std::filesystem::path& path) {
     runtime.runConversations();
     for (const auto& remaining : store.inbox(alice,"report"))
         check(remaining.at("itemKind") != "user_question","withdrawn question remained in the Inbox");
-    check(store.task(question).at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
+    const auto withdrawn = store.task(question);
+    const auto& sessionQuestionTarget = withdrawn.at("question").at("target");
+    check(withdrawn.at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
           row(store.history(question),"kind","question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
           "withdraw action did not close and journal the question");
+    check(sessionQuestionTarget.at("waitId").is_null() && sessionQuestionTarget.at("eventId") == withdrawn.at("eventId") &&
+          withdrawn.at("eventId") != report.at("eventId"),"withdraw left the active Session question on the old event");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,withdrawing,"answer",{{"text","Final"}}); },
                                   "withdrawn question accepted an answer");
 
@@ -371,7 +378,7 @@ void chatDecision(const std::filesystem::path& path) {
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
-    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; });
     for (int step = 0; step < 6; ++step) runtime.tick();
     script.managed = taskId;
     store.receive(alice,routing,"report-blocker","The question is blocking");

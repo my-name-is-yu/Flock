@@ -31,24 +31,25 @@ std::string sign(std::string_view body) {
 class Bot final : public Model {
 public:
     unsigned received = 0;
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "intake")
-            return {"delegate",{{"instruction","Push the change"},{"doneWhen","Open a pull request"}},"Implement the change",{}};
+            return {"delegate",{{"instruction","Push the change"},{"doneWhen","Open a pull request"}},"Implement the change"};
         if (event.at("kind") == "result") {
-            if (!event.contains("gitResults")) return {"git_open_pr",openArgs(),"Publish the Session change",{}};
-            return {"complete",{{"report","Opened pull request"}},"Report the published PR",{}};
+            if (!event.contains("gitResults")) return {"git_open_pr",openArgs(),"Publish the Session change"};
+            return {"complete",{{"report","Opened pull request"}},"Report the published PR"};
         }
         const auto& delivery = event.at("gitEvent");
         if (event.at("turn").empty()) {
             ++received;
             if (delivery.at("jobId") == 81) return {"git_read_ci_logs",
                 {{"host",delivery.at("host")},{"repo",delivery.at("repo")},{"jobId",81},{"maxBytes",32}},
-                "Inspect the failed job",{}};
-            return {"reply",{{"text","Review received"}},"Relay a notification",{}};
+                "Inspect the failed job"};
+            return {"reply",{{"text","Review received"}},"Relay a notification"};
         }
         const auto& log = event.at("turn").at(0).at("result").at("data");
-        return {"reply",{{"text","CI failed. " + log.at("text").get<std::string>()}},"Report the exact CI failure",{}};
+        return {"reply",{{"text","CI failed. " + log.at("text").get<std::string>()}},"Report the exact CI failure"};
     }
 };
 
@@ -84,7 +85,7 @@ void run() {
         grant(store,"owner","repository",repoGrant,"pr");
         grant(store,"owner","repository",repoGrant,"read");
         task = store.submit(intake());
-        Runtime runtime(store,model,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+        Runtime runtime(store,model,sessions,[](std::string_view) { return std::string{}; },options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();
         check(store.task(task).at("state") == "completed" && host->createCalls == 1,"initial watch was not recorded");
     }
@@ -108,7 +109,7 @@ void run() {
     check(post(client,"check_run","foreign-repo",unrelatedCheck,202).at("status") == "ignored",
           "PR number from another repository was routed to this watch");
     check(historyCount(store,task,"git_webhook") == 0,"HTTP intake delivered a webhook");
-    Runtime runtime(store,model,sessions,[](std::string_view) { return BotNotes{}; },options(host));
+    Runtime runtime(store,model,sessions,[](std::string_view) { return std::string{}; },options(host));
     runtime.runConversations();
     check(model.received == 1 && host->logCalls == 1 &&
           store.history(task).dump().find("CI failed. linker: missing symbol") != std::string::npos,

@@ -57,7 +57,8 @@ struct FixedModel : Model {
     Id comparisonResult = 0;
     std::size_t summarySourceSize = 0;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event["kind"] == "conversation_turn") return converse(input);
         if (input.event["kind"] == "intake")
             return {"delegate",{{"instruction","Read the working notes"},{"doneWhen","Summarize user-facing changes"}},"The request needs a working report"};
@@ -160,10 +161,9 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [] {
             return Json::array({
                 {{"id","release"},{"name","Release"},{"soul","利用者向けのリリースノートをまとめる。"},
-                    {"cron",Json::array({{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},
-                        {"request","前日の変更を確認する"},{"token",privateValue}}})},
+                    {"cron",Json::array()},
                     {"avatar",{{"example","mug"},{"color","#982fff"},{"secret",privateValue}}},{"token",privateValue}},
-                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()},{"avatar","sprout"}},
+                {{"id","triage"},{"name","Triage"},{"soul","報告された問題を整理する。"},{"cron",Json::array()}},
                 {{"id","settings"},{"name","Settings"},{"soul","設定エラーの確認"}},
                 {{"id","broken"},{"name","Broken"}},
             });
@@ -171,7 +171,7 @@ WebCallbacks callbacks(const std::atomic_bool* intakeDisabled = nullptr) {
         [intakeDisabled](std::string_view bot, std::string_view request) -> Intake {
             if (bot == "broken" || (intakeDisabled && intakeDisabled->load())) throw std::runtime_error(privateValue);
             return {std::string(bot),std::string(request),bot == "triage" ? "linked env" : "local-env",
-                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}, {}, 0};
+                std::string(bot),{{"token",privateValue},{"runTimeoutSeconds",1800}}};
         }
     };
 }
@@ -222,13 +222,63 @@ Json conversationReply(const Json& page, Id messageId) {
     return result;
 }
 
+void inspectors(const std::filesystem::path& path) {
+    struct InspectorModel : Model {
+        const std::string credential = "credential-protected-after-inspector-write";
+        Id boundary = 0;
+        ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+        Decision choose(const ModelInput& input) {
+            if (input.event.at("turn").empty() && input.event.at("text")=="Summarize")
+                return {"compact_conversation",{{"endMessageId",boundary},{"summary","Preserve the release notes "+credential}},"Summarize earlier work"};
+            if (input.event.at("turn").empty() && input.event.at("text")=="Release")
+                return {"start_workflow",{{"request","Prepare a release "+credential}},"Use a separate verifier"};
+            return {"reply",{{"text","Recorded"}},"Acknowledge the request"};
+        }
+    } model;
+    Store store(path);
+    FixedT3 t3;
+    Runtime runtime(store,model,t3,[](auto){return std::string{};});
+    const auto routing = callbacks().intake("release","");
+    auto server = startWeb(store,0,callbacks());
+    Browser browser(*server);
+    model.boundary = store.receive({"fixture",true},routing,"a","Original release instructions").at("messageId");
+    store.receive({"fixture",true},routing,"b","Summarize");
+    store.receive({"fixture",true},routing,"c","Release");
+    runtime.runConversations();
+    auto access = store.access();
+    access.submitSecret({"fixture",true},"release",access.requestSecret("release",{"inspector-token"}),model.credential);
+    const auto summaries = browser.get("/api/compactions?bot=release");
+    const auto workflows = browser.get("/api/workflows?bot=release");
+    const auto view = browser.get("/api/view?bot=release");
+    check(summaries.size()==1 && summaries[0]["endMessageId"]==model.boundary &&
+          summaries[0]["summary"]=="Preserve the release notes [redacted]" && view.at("compactions")==summaries,
+          "summary or its covered range missing from the inspector");
+    check(workflows.size()==1 && workflows[0]["request"]=="Prepare a release [redacted]" &&
+          workflows[0]["stages"].size()==2 && view.at("workflows")==workflows,
+          "workflow stages missing from the Bot view");
+    check(browser.get("/api/compactions?bot=triage").empty() && browser.get("/api/workflows?bot=triage").empty(),
+          "inspectors mixed Bot histories");
+    const auto audit = browser.get("/api/conversation?bot=release");
+    check(audit.dump().find("Original release instructions")!=std::string::npos,
+          "summary removed the original message from the HTTP audit history");
+    bool linked = false;
+    for (const auto& event : audit.at("events")) {
+        const auto& data = event.at("data");
+        if (!data.contains("actions")) continue;
+        for (const auto& action : data.at("actions"))
+            if (action.at("tool")=="start_workflow" && action.at("workflowId")==workflows[0]["workflowId"])
+                linked = data.at("status")=="working";
+    }
+    check(linked,"workflow start was missing from the conversation reply");
+}
+
 void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
     Store store(path);
     for (auto env : {"local-env","backup-env"})
         store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     auto config = callbacks();
     const auto configuredIntake = config.intake;
     config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
@@ -267,7 +317,7 @@ void conversationEntry(const std::filesystem::path& path) {
     FixedT3 t3;
     store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     std::atomic_bool disableIntake = false;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     auto server = startWeb(store,0,callbacks(&disableIntake));
     Browser browser(*server);
     const auto taskId = browser.request("release",comparisonRequest);
@@ -291,6 +341,8 @@ void conversationEntry(const std::filesystem::path& path) {
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
     const auto messageId = receipt.at("messageId").get<Id>();
+    const auto cursor = browser.get("/api/view?bot=release").at("historyCursor").get<Id>();
+    const auto since = "&changesAfter=" + std::to_string(cursor);
     check(receipt["status"] == "received" && messageId > 0,"conversation receipt was missing");
     check(model.turns == 0 && store.tasks().size() == 1,"HTTP intake ran the model before returning its receipt");
     disableIntake = true;
@@ -304,7 +356,10 @@ void conversationEntry(const std::filesystem::path& path) {
     browser.post("/api/messages",{{"botId","release"},{"text","追加確認"}},400);
 
     tick(runtime,3);
-    const auto page = browser.get("/api/view?bot=release");
+    const auto page = browser.get("/api/view?bot=release" + since);
+    check(page.at("changedMessageIds") == Json::array({messageId}) &&
+          browser.get("/api/view?bot=triage" + since).at("changedMessageIds").empty(),
+          "a processed message was not invalidated exclusively for its own Bot");
     unsigned questions = 0, answers = 0;
     for (const auto& event : page.at("events")) {
         if (event["kind"] == "conversation_message") {
@@ -412,7 +467,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     Json original;
     struct ForwardingModel final : Model {
         std::function<Decision(const ModelInput&)> script;
-        Decision decide(const ModelInput& input) override { return script(input); }
+        ModelTurn decide(const ModelInput& input) override { return {{script(input)}}; }
     } model;
     model.script = [&](const ModelInput& input) -> Decision {
         const auto kind = input.event.at("kind");
@@ -453,7 +508,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
     web.peers = peers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },RuntimeOptions{.peers=peers});
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
@@ -491,8 +546,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
           forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == original &&
           answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
-          !forwarded.contains("initiator") && !answered.contains("recipient") && !answered.contains("forwardedMessage") &&
-          t3.launches == 0,"the exchange did not preserve the forward, its Bot authors, or the reply");
+          !answered.contains("forwardedMessage") && t3.launches == 0,
+          "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
         return row.contains("taskId") || row.contains("taskBotId") || row.at("data").contains("evidence");
     }),"the DM exposed task or evidence details");
@@ -532,15 +587,15 @@ void approvedProfiles(const std::filesystem::path& directory) {
 }
 
 void chatGPTConversation(const std::filesystem::path& home) {
-    Store store(home / "conversation.sqlite");
+    const app::Bots bots(home / "bots");
+    Store store(home / "conversation.sqlite",[&](std::string_view bot) { return bots.initialMemory(bot); });
     for (auto env : {"local-env","backup-env"})
         store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     app::ChatGPTModel model(home / "credentials" / "chatgpt");
-    const app::Bots bots(home / "bots");
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = [&](std::string_view bot) { return bots.peers(bot); };
-    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.notes(bot); },options);
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.soul(bot); },options);
     const auto server = startWeb(store,0,{
         [&] { return bots.cards(); },
         [&](std::string_view bot,std::string_view request) { return bots.get(bot).intake(request); },
@@ -649,6 +704,43 @@ void chatGPTConversation(const std::filesystem::path& home) {
 }
 #endif
 
+void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
+    Store store(path);
+    auto cb = callbacks();
+    cb.bots = [] {
+        return Json::array({{{"id","release"},{"name","Release"}},
+                            {{"id","staging-triage"},{"name","Staging"},{"soul","Check staging"}}});
+    };
+    cb.authenticate = [](std::string_view auth) {
+        if (auth == "Bearer fixture-owner") return Person{"owner",true};
+        if (auth == "Bearer fixture-alice") return Person{"alice"};
+        return Person{};
+    };
+    cb.updateBot = [](std::string_view id, const Json& profile, const std::optional<AvatarImage>&) {
+        return Json{{"id",id},{"name",profile.at("name")}};
+    };
+    const Person owner{"owner",true};
+    auto access = store.access();
+    access.personGrant(owner,"staging-triage","alice",Role::view,GrantChange::grant);
+    const auto request = access.requestSecret("release",{"fixture-token"});
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    access.resourceGrant(owner,"staging-triage",{"secret","fixture-token","use"},GrantChange::grant);
+    const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
+    check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
+
+    browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto bots = browser.get("/api/bots");
+    check(bots.size()==1 && bots.at(0).at("id")=="staging-triage","secret redaction hid or renamed an authorized Bot");
+    const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
+    check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
+          "Bot view must preserve its ID and redact display text");
+    browser.get("/api/conversation?bot=staging-triage");
+    Browser::checked(browser.client.Get("/api/view?bot=release"),403);
+}
+
 void approveModelCallBeforeTask(const std::filesystem::path& path) {
     Store webStore(path);
     webStore.access().resourceGrant({"fixture",true},"release",{"environment","local-env","launch"},GrantChange::grant);
@@ -656,7 +748,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     FixedModel model;
     FixedT3 t3;
     const auto start = [&] {
-        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     };
     auto runtime = start();
     auto webCallbacks = callbacks();
@@ -713,6 +805,81 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
           "approval did not resume the unfinished turn from its saved steps");
 }
 
+void memoryAutomationEndpoints(const std::filesystem::path& path) {
+    Store store(path,[](auto) { return "Initial convention"; });
+    auto cb = callbacks();
+    cb.clock = [] { return Seconds{2'000'000'000}; };
+    cb.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer owner") return Person{"owner",true};
+        if (credential == "Bearer reader") return Person{"reader",false};
+        return Person{};
+    };
+    store.access().personGrant({"owner",true},"release","reader",Role::view,GrantChange::grant);
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    Browser::checked(browser.client.Get("/api/memory?bot=release"),401);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web memory seed missing");
+    const auto proposal = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",0},
+        {"content","New convention"},{"rationale","Use staging"}}).at("proposalId");
+    const auto revision = browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},
+        {"proposalId",proposal}}).at("revisionId").get<Id>();
+    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",0},{"content","Stale"}},409);
+    const auto detail = browser.get("/api/memory/history?bot=release&revisionId=" + std::to_string(revision));
+    check(detail.at("previousContent") == "Initial convention" && detail.at("newContent") == "New convention",
+          "Web revision did not expose the diff");
+    browser.post("/api/memory/revert",{{"botId","release"},{"baseVersion",1},{"revisionId",revision}});
+    check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web revert failed");
+    const auto pending = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
+        {"content","Pending convention"},{"rationale","Original proposal"}}).at("proposalId");
+    for (int i = 0; i < 20; ++i) {
+        const auto newer = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
+            {"content","Newer convention"},{"rationale","Subsequent proposal"}}).at("proposalId");
+        browser.post("/api/memory/reject",{{"botId","release"},{"proposalId",newer}});
+    }
+    const auto firstPage = browser.get("/api/memory/history?bot=release");
+    const auto older = browser.get("/api/memory/history?bot=release&proposalsBefore=" +
+        std::to_string(firstPage.at("proposalsBefore").get<Id>())).at("proposals");
+    check(firstPage.at("proposals").size() == 20 && older.at(0).at("id") == pending &&
+          older.at(0).at("status") == "pending","Newer proposals hid a pending proposal");
+
+    const auto reminder = browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},
+        {"request","Check staging"},{"timezone","Asia/Tokyo"},{"fireAt",2'000'000'010}},201).at("id").get<Id>();
+    browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},{"request","Check staging"},
+        {"timezone","Asia/Tokyo"},{"fireAt",2'000'000'000}},409);
+    const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
+    Browser::checked(browser.client.Delete(cancelPath),403);
+    check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",
+          "Web schedule cancellation failed");
+    const auto trigger = browser.post("/api/schedules",{{"botId","release"},{"kind","trigger"},{"source","deploy"},
+        {"eventFilter",{{"branch","main"}}},{"request","Check the deployment"}},201).at("id");
+    check(browser.get("/api/schedules?bot=release").at("automations").size() == 2,"Web automation list incomplete");
+
+    const auto webhook = [&](std::string id, std::string branch) {
+        return Json{{"externalEventId",id},{"event",{{"branch",branch}}}}.dump();
+    };
+    Browser::checked(browser.client.Post("/api/webhooks/deploy",webhook("event-1","main"),"application/json"),403);
+    const httplib::Headers headers{{"X-Flock-Action","1"}};
+    const auto send = [&](const std::string& payload) {
+        return Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,payload,"application/json"),202);
+    };
+    check(send(webhook("skip","test")).at("tasks").empty(),"Webhook filter did not match exactly");
+    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+    Browser::checked(browser.client.Post("/api/webhooks/deploy",headers,webhook("event-1","main"),"application/json"),403);
+    browser.post("/api/memory/apply",{{"botId","release"},{"baseVersion",2},{"content","Unauthorized"}},403);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    const auto accepted = send(webhook("event-1","main")), replayed = send(webhook("event-1","main"));
+    check(accepted.at("duplicate") == false && replayed.at("duplicate") == true &&
+          accepted.at("tasks").size() == 1 && replayed.at("tasks") == accepted.at("tasks") && store.tasks().size() == 1,
+          "Webhook redelivery enqueued another task");
+    store.fireDueAutomations(cb.clock()+60);
+    check(store.tasks().size() == 1,"Canceled reminder fired after its due time");
+    const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
+    check(request.at("trigger").at("source") == "deploy" && request.at("trigger").at("triggerId") == trigger &&
+          !request.at("trigger").contains("externalEventId"),
+          "Web conversation lost webhook provenance");
+}
+
 }
 
 int main(int argc,char** argv) {
@@ -728,11 +895,14 @@ int main(int argc,char** argv) {
 #ifdef FLOCK_TEST_CHATGPT
         approvedProfiles(directory.path / "profile-approvals");
 #endif
+        inspectors(directory.path / "inspectors.db");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
         botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。");
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
+        secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
+        memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

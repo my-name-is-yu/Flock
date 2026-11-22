@@ -28,7 +28,7 @@ struct Fixture {
 
     std::filesystem::path database() const { return dir / "state.db"; }
     static Intake bot(std::string id = "alpha", std::string project = "project") {
-        return {std::move(id),"","env",std::move(project),Json::object(),{},0};
+        return {std::move(id),"","env",std::move(project),Json::object()};
     }
     void sql(const std::string& statement) const {
         sqlite3* raw = nullptr;
@@ -76,7 +76,8 @@ struct ScriptedModel : Model {
     std::function<Decision(const ModelInput&)> conversation;
     std::vector<ModelInput> turns;
 
-    Decision decide(const ModelInput& input) override {
+    ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
+    Decision choose(const ModelInput& input) {
         if (input.event.value("kind","") == "conversation_turn") {
             turns.push_back(input);
             return conversation(input);
@@ -108,7 +109,7 @@ struct SimulatedT3 : T3 {
 struct RuntimeFixture {
     ScriptedModel model;
     SimulatedT3 t3;
-    std::function<BotNotes(std::string_view)> notes = [](std::string_view) { return BotNotes{}; };
+    Runtime::SoulLoader notes = [](std::string_view) { return std::string{}; };
     Runtime runtime;
 
     explicit RuntimeFixture(Store& store)
@@ -184,7 +185,7 @@ void savedDecisionIsAppliedWithoutAnotherModelCall() {
     const auto id = std::to_string(message);
     fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
-                ",1,'{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}')");
+                ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
     RuntimeFixture execution(store);
     unsigned calls = 0;
     execution.model.conversation = [&](const ModelInput& input) {
@@ -210,7 +211,8 @@ void sessionNoteIsNotResentAfterARestart() {
                          {"actionId","flock-turn-" + mid + "-1"}};
     fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
-                Json{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},{"reason","Saved"}}.dump() +
+                Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
+                              {"reason","Saved"}}}).dump() +
                 "','" + effect.dump() + "')");
     Json seen;
     execution.model.conversation = [&](const ModelInput& input) {
@@ -274,7 +276,7 @@ void notesFailureEndsTheTurnWithoutWork() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    execution.notes = [](std::string_view) -> BotNotes { throw std::runtime_error("SOUL.md is unreadable"); };
+    execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
     execution.model.conversation = [](const ModelInput&) -> Decision {
         throw std::runtime_error("The model was called without notes");
     };

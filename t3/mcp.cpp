@@ -42,7 +42,9 @@ size_t receiveHeader(char* data, size_t size, size_t count, void* context) noexc
         if (end != std::string_view::npos) {
             auto key = std::string(line.substr(0, end));
             std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return std::tolower(c); });
-            headers[std::move(key)] = trim(line.substr(end + 1));
+            if (key == "www-authenticate" && headers.contains(key))
+                headers[key] += ", " + trim(line.substr(end + 1));
+            else headers[key] = trim(line.substr(end + 1));
         }
     } catch (...) { return 0; }
     return line.size();
@@ -76,9 +78,15 @@ Json rpcResponse(const HttpResponse& response, unsigned id) {
             }
         }
     }
-    if (str(message, "jsonrpc") != "2.0" || !message.contains("id") || message["id"] != id ||
-        !message.contains("result") || !message["result"].is_object() || message.contains("error"))
+    if (str(message, "jsonrpc") != "2.0" || !message.contains("id") || message["id"] != id)
         invalidResponse();
+    if (message.contains("error")) {
+        const auto& error = message["error"];
+        if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() ||
+            !error.contains("message") || !error["message"].is_string()) invalidResponse();
+        throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + str(error, "message"));
+    }
+    if (!message.contains("result") || !message["result"].is_object()) invalidResponse();
     return std::move(message["result"]);
 }
 }
@@ -190,12 +198,10 @@ HttpResponse http(const std::string& url, std::string_view method, const Headers
 Client::Client(Credential credential) : credential_(std::move(credential)), headers_{
     {"Authorization", "Bearer " + credential_.token}, {"Accept", "application/json, text/event-stream"},
     {"Content-Type", "application/json"}} {
-    constexpr auto version = "2025-06-18";
     try {
-        const auto result = rpc("initialize", {{"protocolVersion", version}, {"capabilities", Json::object()},
-                                              {"clientInfo", {{"name", "Flock"}, {"version", "0.1.0"}}}});
-        if (str(result, "protocolVersion") != version) invalidResponse();
-        headers_["MCP-Protocol-Version"] = version;
+        const auto result = rpc("initialize", initializeParams());
+        if (str(result, "protocolVersion") != ProtocolVersion) invalidResponse();
+        headers_["MCP-Protocol-Version"] = ProtocolVersion;
         request("POST", Json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump());
     } catch (...) {
         if (headers_.contains("Mcp-Session-Id")) {
@@ -230,25 +236,66 @@ Json Client::rpc(std::string_view method, const Json& arguments) {
     return rpcResponse(request("POST", body), id);
 }
 
+// T3 v0.1.11 uses a shared invalid_request code for several distinct outcomes.
+static Failure toolFailure(const Json& payload) {
+    const auto& error = payload.contains("error") && payload["error"].is_object() ? payload["error"] : payload;
+    const auto code = str(error, "code");
+    const auto message = str(error, "message");
+    if (code == "capability_denied" || code == "thread_credential_required" ||
+        code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
+        return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
+    if (code == "thread_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
+        (code == "invalid_request" && message == "The thread was not found."))
+        return Failure(Failure::Kind::Tool, "T3 history was not found", Failure::Reason::HistoryNotFound);
+    if (code == "project_not_found" || (code == "invalid_request" && message == "The project was not found."))
+        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
+                       Failure::Reason::ProjectNotFound);
+    if (code == "model_unavailable" || code == "provider_unavailable" ||
+        (code == "invalid_request" && (message.starts_with("Pass modelSelection:") ||
+         message.find("No thread was created.") != std::string::npos)))
+        return Failure(Failure::Kind::Settings, "T3 rejected the project, model, or workspace settings",
+                       Failure::Reason::WorkSettings);
+    if (code == "invalid_request" && (message == "The pending user-input request was not found." ||
+        message == "The user-input request was already answered." ||
+        message.starts_with("The user-input request is no longer pending (")))
+        return Failure(Failure::Kind::Tool, message, Failure::Reason::QuestionGone);
+    return Failure(Failure::Kind::Tool, "T3 rejected the operation");
+}
+
 Json Client::call(std::string_view tool, Json arguments) {
     auto response = rpc("tools/call", {{"name", tool}, {"arguments", std::move(arguments)}});
+    if (response.contains("isError") && !response["isError"].is_boolean()) invalidResponse();
     const bool isError = response.value("isError", false);
     Json data = response.value("structuredContent", Json());
     if (data.is_null()) {
         const auto content = response.find("content");
         if (content != response.end() && content->is_array() && content->size() == 1 &&
-            str(content->front(), "type") == "text") data = parse(str(content->front(), "text"));
+            str(content->front(), "type") == "text")
+            data = Json::parse(str(content->front(), "text"), nullptr, false);
     }
-    if (data.contains("error") && data["error"].is_object()) data = Json(data["error"]);
-    const auto code = str(data, "code");
-    if (isError || !code.empty()) {
-        const bool denied = code == "capability_denied" || code == "thread_credential_required" ||
-                            code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied";
-        throw Failure(denied ? Failure::Kind::Auth : Failure::Kind::Tool,
-                      denied ? "T3 OAuth approval does not allow this operation or mode" : "T3 rejected the operation",
-                      code, str(data, "message"));
-    }
+    if (isError) throw toolFailure(data);
     if (!data.is_object()) invalidResponse();
     return data;
+}
+
+Json readThread(Client& client, std::string_view threadId, std::string_view view, unsigned limit, int chars,
+                Json args, int runLimit) {
+    args.update(Json{{"threadId",threadId},{"view",view},{"limit",limit},{"maxCharsPerItem",chars},{"runLimit",runLimit}});
+    auto page = client.call("t3_thread_read",std::move(args));
+    if (str(member(page,"thread"),"threadId") != threadId || array(page,"items").size() > limit)
+        invalidResponse();
+    return page;
+}
+
+void advancePosition(const Json& item, Id& after) {
+    const auto next = position(member(item,"position"));
+    if (next <= after) invalidResponse();
+    after = next;
+}
+
+bool moreHistory(const Json& page, Id after, Id start) {
+    if (!boolean(page,"hasMore")) return false;
+    if (after <= start || position(member(page,"nextPosition")) != after) invalidResponse();
+    return true;
 }
 }
