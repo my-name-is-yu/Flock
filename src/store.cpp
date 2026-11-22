@@ -479,6 +479,23 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
     return submit(item,peerTask ? std::string_view{"peer"} : std::string_view{},sourceMessageId,source);
 }
 
+Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeResolver& intake) {
+    const auto& wait = task.at("wait");
+    const auto& pending = task.at("pendingAction");
+    if (!wait.is_object() || wait.at("id") != waitId || wait.at("reason") != "settings" ||
+        (!pending.is_null() && pending.at("phase") != "ready")) return target;
+
+    const auto current = intake(task.at("botId").get_ref<const std::string&>(),
+                                task.at("request").get_ref<const std::string&>());
+    const auto& environment = task.at("environmentId");
+    const auto destinations = current.config.value("conversationEnvironments",Json::object());
+    if (task.at("projectId") != current.projectId ||
+        (environment != current.environmentId && std::ranges::find(destinations,environment) == destinations.end()))
+        throw Conflict("The project route changed. Cancel this task and submit a new request.");
+    target["session"] = current.config.value("session",Json::object());
+    return target;
+}
+
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
