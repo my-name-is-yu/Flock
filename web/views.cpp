@@ -359,13 +359,19 @@ Json conversation(Store& store, std::string_view bot, Id before) {
     return result;
 }
 
-Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before) {
-    const auto events = store.peerConversation(bot,peer,before,conversationSize + 1);
-    const bool more = events.size() > conversationSize;
+Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor) {
+    const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
+    const auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1);
+    const bool more = events.size() > olderSize;
     Json result = {{"messages",Json::array()},{"hasOlder",more}};
     auto& page = result["messages"];
     for (auto event = events.begin() + (more ? 1 : 0); event != events.end(); ++event)
         page.push_back(eventView(*event));
+    if (anchor) {
+        result["anchorId"] = anchor;
+        for (const auto& event : store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor))
+            page.push_back(eventView(event));
+    }
     return result;
 }
 

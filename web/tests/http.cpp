@@ -385,6 +385,74 @@ void peerConversation(const std::filesystem::path& path) {
     }
 }
 
+void peerConversationAnchor(const std::filesystem::path& path) {
+    Store store(path);
+    PeerModel model;
+    FixedT3 t3;
+    RuntimeOptions options;
+    options.peers = fixturePeers;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    for (int i = 0; i < 36; ++i) {
+        store.submit({"release","Check release criteria","local-env","release"});
+        tick(runtime,8);
+    }
+
+    auto web = callbacks();
+    web.peers = [](std::string_view bot) {
+        auto peers = fixturePeers(bot);
+        if (bot == "release") peers.push_back({"Settings",{"settings","","local-env","settings"}});
+        return peers;
+    };
+    web.authenticate = [](std::string_view credential) {
+        return credential == "Bearer reader" ? Person{"reader"} : Person{};
+    };
+    const Person owner{"fixture",true};
+    auto access = store.access();
+    access.personGrant(owner,"release","reader",Role::view,GrantChange::grant);
+    access.personGrant(owner,"settings","reader",Role::view,GrantChange::grant);
+    const auto server = startWeb(store,0,web);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization","Bearer reader"}});
+
+    const auto recipient = store.conversation("triage",0,200);
+    const auto sender = store.peerConversation("release","triage",0,200);
+    check(sender.size() == 72,"historical DM fixture did not span multiple pages");
+    const auto& target = sender.at(24);
+    const auto targetId = target.at("id").get<Id>();
+    const auto copy = std::ranges::find_if(recipient,[&](const Json& event) {
+        return event.at("kind") == "bot_message" &&
+            event.at("data").at("messageId") == target.at("data").at("messageId");
+    });
+    check(copy != recipient.end() && copy->at("id") != targetId,"fixture has no recipient copy of the anchor");
+
+    const std::string primary = "/api/peer-conversation?bot=release&peer=triage";
+    const std::string reverse = "/api/peer-conversation?bot=triage&peer=release";
+    const auto anchor = "&anchor=" + std::to_string(targetId);
+    Browser::checked(browser.client.Get(primary + anchor),403);
+    access.personGrant(owner,"triage","reader",Role::view,GrantChange::grant);
+
+    const auto latest = browser.get(primary);
+    check(latest.at("messages").front().at("id").get<Id>() > targetId,"fixture anchor appeared in the latest page");
+    const auto page = browser.get(primary + anchor);
+    const auto& messages = page.at("messages");
+    check(page.at("anchorId") == targetId && page.at("hasOlder") == true && messages.size() == 36 &&
+        messages.at(18).at("id") == targetId &&
+        messages.at(19).at("data").at("replyTo") == messages.at(18).at("data").at("messageId"),
+        "the bounded historical page missed the precise message or its reply");
+    for (std::size_t i = 0; i < messages.size(); ++i)
+        check(messages.at(i).at("id") == sender.at(i + 6).at("id"),"historical pages skipped or reordered messages");
+    const auto reverseAnchor = "&anchor=" + std::to_string(copy->at("id").get<Id>());
+    check(browser.get(reverse + reverseAnchor) == page,"the recipient anchor did not resolve to the same shared DM page");
+    const auto before = "&before=" + std::to_string(messages.front().at("id").get<Id>());
+    const auto older = browser.get(primary + before);
+    check(older.at("messages").size() == 6 && older.at("hasOlder") == false,
+        "earlier pagination repeated or skipped messages around the anchor");
+    Browser::checked(browser.client.Get(primary + anchor + before),400);
+    Browser::checked(browser.client.Get(primary + "&anchor=-1"),400);
+    check(Browser::checked(browser.client.Get("/api/peer-conversation?bot=release&peer=settings" + anchor),404)
+        == Json{{"error","peer_message_not_found"}},"a different readable pair resolved the anchor");
+}
+
 void exercise(const std::filesystem::path& path) {
     Store store(path);
     Store cli(path);
@@ -975,6 +1043,7 @@ int main() {
         peerEventStream(directory.path / "peer-events.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
+        peerConversationAnchor(directory.path / "peer-conversation-anchor.db");
         accessEndpoints(directory.path / "access.db");
         boardInboxEndpoints(directory.path / "board-inbox.db");
         channelEndpoints(directory.path / "channels.db");

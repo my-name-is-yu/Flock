@@ -783,22 +783,40 @@ ORDER BY page.id DESC LIMIT ?)SQL",
     return result;
 }
 
-Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit) const {
+Json Store::peerConversation(std::string_view bot, std::string_view peer, Id before, unsigned limit, Id from) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query(R"SQL(
+    const auto sql = std::string(R"SQL(
 SELECT j.id,j.task_id,j.time,j.kind,j.data
 FROM peer_exchanges p JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
 JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
   -- Unary + removes TEXT affinity so SQLite can use the exchange ID in the JSON expression index.
   AND json_extract(j.data,'$.exchangeId') = +p.id
 WHERE ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
-  AND (?3=0 OR j.id<?3)
-ORDER BY j.id DESC LIMIT ?4
-)SQL",{bot,peer,before,std::clamp(limit,1u,200u)});
+)SQL") + (from ? " AND j.id>=?3 ORDER BY j.id ASC LIMIT ?4"
+               : " AND (?3=0 OR j.id<?3) ORDER BY j.id DESC LIMIT ?4");
+    auto rows = p_->query(sql.c_str(),{bot,peer,from ? from : before,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
-    std::reverse(result.begin(),result.end());
+    if (!from) std::reverse(result.begin(),result.end());
     return result;
+}
+
+Id Store::peerMessageAnchor(std::string_view bot, std::string_view peer, Id event) const {
+    std::lock_guard lock(p_->mutex);
+    // Each participant has a journal row. The shared DM displays the sender task's copy.
+    auto row = p_->query(R"SQL(
+SELECT j.id
+FROM journal source
+JOIN peer_exchanges p ON p.id=json_extract(source.data,'$.exchangeId')
+JOIN tasks sender ON sender.id=p.sender_task JOIN tasks recipient ON recipient.id=p.recipient_task
+JOIN journal j ON j.task_id=p.sender_task AND j.kind='bot_message'
+  AND json_extract(j.data,'$.exchangeId')=+p.id
+  AND json_extract(j.data,'$.messageId')=json_extract(source.data,'$.messageId')
+WHERE source.id=?3 AND source.kind='bot_message' AND source.task_id IN (p.sender_task,p.recipient_task)
+  AND ((sender.bot_id=?1 AND recipient.bot_id=?2) OR (sender.bot_id=?2 AND recipient.bot_id=?1))
+LIMIT 1
+)SQL",{bot,peer,event});
+    return row.next() ? row.number(0) : 0;
 }
 
 std::vector<std::pair<std::string,std::string>> Store::peerExchangePairs() const {
