@@ -15,7 +15,6 @@ using Position = Id;
 using Clock = std::chrono::steady_clock;
 constexpr int ExcerptChars = 2730; // T3 uses UTF-16 offsets. 2730 code units occupy at most 8190 UTF-8 bytes.
 constexpr int PageSize = 30;
-constexpr auto ThreadRead = "t3_thread_read";
 constexpr auto PendingRequest = "t3_pending_request";
 
 struct Scan {
@@ -63,12 +62,6 @@ Position readCursor(const std::string& text) {
     if (error != std::errc() || end != text.data() + text.size() || parsed < 0 || parsed > maxHistoryPosition)
         throw Failure(Failure::Kind::Settings, "Invalid T3 history cursor");
     return parsed;
-}
-
-const Json& detail(const Json& response, const std::string& threadId) {
-    const auto& thread = member(response, "thread");
-    if (str(thread, "threadId") != threadId) invalidResponse();
-    return thread;
 }
 
 Json threadHead(Client& client, const std::string& threadId, int runLimit = 1) {
@@ -438,7 +431,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
     for (const auto& threadId : threads) {
         scan.step();
         const auto head = threadHead(client, threadId);
-        const auto& thread = detail(head, threadId);
+        const auto& thread = head.at("thread");
         if (str(thread, "projectId") != command.projectId ||
             (launch && (str(thread, "createdBy") != "agent" || str(thread, "creationSource") != "mcp"))) continue;
         walkThreadHistoryForward(client, scan, threadId, "messages", 600, -1, [&](const Json& item) {
@@ -472,12 +465,10 @@ Delivery reconcileWork(Client& client, const Command& command) {
 struct Report { std::string text, itemId; bool truncated = false; };
 Report readReport(Client& client, const RunRef& run, std::string_view view, std::string_view type) {
     Scan scan;
-    Position before = 9007199254740991;
+    Position before = maxHistoryPosition;
     for (;;) {
         scan.step();
-        const auto page = client.call(ThreadRead, {{"threadId", run.threadId}, {"view", view}, {"limit", PageSize},
-            {"runLimit", 1}, {"maxCharsPerItem", ExcerptChars}, {"beforePosition", before}});
-        detail(page, run.threadId);
+        const auto page = readThread(client,run.threadId,view,PageSize,ExcerptChars,{{"beforePosition",before}});
         const auto& items = array(page, "items");
         for (auto it = items.rbegin(); it != items.rend(); ++it) {
             if (!fromRun(*it, run) || str(*it, "type") != type || str(*it, "text").empty()) continue;
@@ -545,7 +536,7 @@ bool followUpReady(Client& client, const Command& command) {
     if (boolean(settled, "timedOut") || !terminal(str(settled, "status")) || resultRun.empty() ||
         !ownsResult(client, command.target, effective, resultRun)) return false;
     const auto response = threadHead(client, command.target.threadId);
-    const auto& info = detail(response, command.target.threadId);
+    const auto& info = response.at("thread");
     if (str(info, "projectId") != command.projectId || !member(info, "activeRunId").is_null() ||
         boolean(info, "archived") || position(member(info, "pendingRequestCount")) != 0 ||
         (str(info, "latestRunId") != effective && str(info, "latestRunId") != resultRun)) return false;
@@ -554,7 +545,7 @@ bool followUpReady(Client& client, const Command& command) {
     if (!array(queue, "items").empty()) return false;
     // Recheck after reading the queue. T3 v0.1.11 has no atomic expected-Run predicate on send.
     const auto checked = threadHead(client, command.target.threadId);
-    const auto& current = detail(checked, command.target.threadId);
+    const auto& current = checked.at("thread");
     return member(current, "activeRunId").is_null() && !boolean(current, "archived") &&
         str(current, "latestRunId") == str(info, "latestRunId") && position(member(current, "pendingRequestCount")) == 0;
 }
@@ -563,7 +554,7 @@ Delivery steer(Client& client, const Command& command, bool& invoked) {
     const auto current = wait(client, command.target, false, 1);
     const auto effective = str(current, "runId");
     const auto head = threadHead(client, command.target.threadId);
-    const auto& info = detail(head, command.target.threadId);
+    const auto& info = head.at("thread");
     if (!active(str(current, "status")) || str(info, "projectId") != command.projectId || boolean(info, "archived") ||
         member(info, "activeRunId") != Json(effective))
         return {Outcome::NotAccepted, {}, "The assigned Run is no longer running", true};
@@ -732,7 +723,7 @@ public:
             }
             if (!finished && !active(status)) invalidResponse();
             const auto head = threadHead(client, run.threadId);
-            const auto& thread = detail(head, run.threadId);
+            const auto& thread = head.at("thread");
             const auto count = position(member(thread, "pendingRequestCount"));
             if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
             if (!finished && count == 1) {

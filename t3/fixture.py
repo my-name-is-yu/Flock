@@ -255,6 +255,11 @@ class Fixture(BaseHTTPRequestHandler):
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
+        if scenario == "paged-report":
+            rows[1]["text"] = "x" * 7000 + "end of report"
+            rows.extend(self.item(thread_id, i, "other", "assistant_message", "unrelated report") for i in range(2, 5))
+            if "itemId" in args and state.get("changeReportDuringRead"):
+                rows[1]["updatedAt"] = "2026-11-22T00:00:01.000Z"
         if scenario.endswith("-result"):
             self.result_history(thread_id, scenario, recent, rows)
         if scenario in ("question", "ambiguous", "race"):

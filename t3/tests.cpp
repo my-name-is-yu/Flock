@@ -196,6 +196,17 @@ int main(int argc, char** argv) {
         checkResult("ambiguous-title-result", false);
         checkResult("reused-result", false);
 
+        fixture({{"scenario", "paged-report"}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::Finished && observation.settled && !observation.truncated &&
+              observation.itemId == "item-1" && observation.report == std::string(7000, 'x') + "end of report",
+              "Report reads older pages for the assigned Run and joins text continuations");
+        fixture({{"changeReportDuringRead", true}});
+        observation = adapter->observe("env-1", launch.config, run);
+        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.report.empty() &&
+              observation.evidence == RunEvidence::Availability::ReportUnavailable,
+              "Report rejects changes during text continuation without erasing settlement");
+        fixture({{"changeReportDuringRead", false}});
         using Availability = RunEvidence::Availability;
         for (const auto* scenario : {"settled", "notification-result"}) {
             const bool later = std::string_view(scenario) == "notification-result";
