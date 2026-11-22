@@ -257,7 +257,8 @@ WHERE bot_id=? AND scope_key=? AND external_id=? AND reply_id IS NOT NULL LIMIT 
     }
     auto text = field(event,"text");
     if (!conversation_storage::hasText(text) && !files.empty()) text = "Photo or file attached.";
-    return receive({sender->personId,false},sender->botId,origin.key(),text,replyTo,&message,[&] { return routing(sender->botId,text); });
+    return receive({sender->personId,false},sender->botId,origin.key(),text,replyTo,conversation::PrincipalSource::channel,
+                   &message,[&] { return routing(sender->botId,text); });
 }
 
 void Store::Impl::saveChannelMessage(Id id, std::string_view bot, const VerifiedChannelMessage& message, bool replay) {
@@ -555,10 +556,10 @@ bool Store::Impl::channelDeliveryDue() const {
                                      " AND next_attempt<=? LIMIT 1",{unixTime()}).next();
 }
 
-void Store::Impl::deliverChannels() {
+void Store::Impl::deliverChannels(std::stop_token shutdown) {
     std::unique_lock deliveryLock(deliveryMutex,std::try_to_lock);
     if (!deliveryLock.owns_lock()) return;
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 20 && !shutdown.stop_requested(); ++i) {
         std::shared_ptr<ChannelTransport> transport;
         ChannelOrigin origin{};
         std::string key, operation, state, bot;
@@ -566,6 +567,7 @@ void Store::Impl::deliverChannels() {
         {
             std::lock_guard lock(mutex);
             Transaction tx(db);
+            if (shutdown.stop_requested()) return;
             auto row = query(R"SQL(
 SELECT d.id,d.operation,d.payload,d.state,c.origin,c.sender_id,c.person_id,m.bot_id,d.source_id
 FROM channel_deliveries d JOIN channel_messages c ON c.message_id=d.source_id JOIN messages m ON m.id=c.message_id

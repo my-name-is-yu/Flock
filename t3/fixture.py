@@ -26,8 +26,12 @@ class Fixture(BaseHTTPRequestHandler):
         for key, item in headers.items():
             for header_value in item if isinstance(item, list) else [item]:
                 self.send_header(key.replace("_", "-"), header_value)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Deadline tests deliberately disconnect before a delayed reply.
+            pass
 
     def do_GET(self):
         origin = self.server.origin
@@ -154,13 +158,17 @@ class Fixture(BaseHTTPRequestHandler):
             {"id": "tag", "header": "Tag", "question": "Which tag?", "allowCustomAnswer": False,
              "options": [{"label": "Submit empty value", "value": "", "description": ""}]},
         ]
-        if (name in ("t3_thread_read", "t3_thread_list", "t3_thread_launch", "t3_thread_send", "t3_thread_interrupt") or
+        if (name in ("t3_project_read", "t3_thread_read", "t3_thread_list", "t3_thread_launch",
+                     "t3_thread_send", "t3_thread_interrupt") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
         if name == "t3_environment_read":
             return {"environmentId": "env-1", "serverVersion": "0.1.11"}
         if name == "t3_project_read":
+            if args["projectId"] == "slow-search-project":
+                time.sleep(4)
+                return {"id": "slow-search-project", "title": "Release Pipeline"}
             assert args["projectId"] == "project"
             failure = state.get("projectReadFailure")
             if failure is not None:
@@ -168,14 +176,11 @@ class Fixture(BaseHTTPRequestHandler):
             return {"id": "project", "code": "project-code", "title": "Release Pipeline", "defaultModelSelection": None}
         if name == "t3_thread_launch":
             assert args["projectId"] == "project"
-            assert "modelSelection" not in args and "workspaceStrategy" not in args
+            assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
             if self.server.peer_recovery:
                 state["launches"].append(args["clientRequestId"])
                 assert len(state["launches"]) == 1, "Runtime sent a second launch"
                 assert "Verify the fixture" in args["message"]
-            else:
-                assert args["clientRequestId"] == "flock-action-0123"
-                assert args["message"].count("[Flock action") == 1
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
@@ -251,6 +256,20 @@ class Fixture(BaseHTTPRequestHandler):
             rows.append(self.item(thread_id, 6, "later", "user_input_request", json.dumps(questions)))
         if "followup" in state:
             rows.append(self.item(thread_id, 7, "follow", "user_message", state["followup"], source="mcp"))
+        if scenario == "sparse-session-search":
+            if thread_id in state.get("missingSearchThreads", []):
+                return {"_tag": "OrchestratorMcpFailure", "code": "thread_not_found",
+                        "message": "The thread was not found."}
+            title = state["searchTitles"].get(thread_id, "Background investigation")
+            summary |= {"title": title, "status": "failed", "createdAt": "2026-11-21T01:00:00Z",
+                        "updatedAt": "2026-11-21T13:00:00Z"}
+            delay = state.get("searchReadDelays", {}).get(thread_id, 0)
+            if thread_id == state.get("slowSearchThread"):
+                delay = 1.6
+                summary["projectId"] = "slow-search-project"
+            if delay:
+                time.sleep(delay)
+            rows = [self.item(thread_id, 0, "root", "user_message", "Check the logs", source="web")]
         if scenario == "session-read":
             failure = state.get("threadReadErrors", {}).get(thread_id)
             if failure is not None:

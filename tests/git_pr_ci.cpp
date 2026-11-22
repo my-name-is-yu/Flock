@@ -5,6 +5,7 @@
 #include <iostream>
 #include <map>
 #include <sqlite3.h>
+#include <sys/wait.h>
 
 using namespace git_fixture;
 
@@ -18,6 +19,7 @@ public:
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
     std::function<Decision(const ModelInput&)> rawNotification;
+    std::function<Decision(const ModelInput&)> onTaskResult;
 
     ModelTurn decide(const ModelInput& input) override {
         if (rawNotification && input.event.contains("gitEvent")) return {{rawNotification(input)}};
@@ -35,6 +37,7 @@ private:
         if (event.at("kind") == "intake")
             return {"delegate",{{"instruction","Push change"},{"doneWhen","Open a PR for the pushed branch"}}, {}};
         if (event.at("kind") == "result") {
+            if (onTaskResult) return onTaskResult(input);
             const auto steps = event.value("gitResults",Json::array());
             if (openAfterSession && steps.empty()) return {"git_open_pr",openArgs(),{}};
             if (!steps.empty()) {
@@ -241,6 +244,38 @@ void webhookHeadPeriods() {
           "A SHA-only delivery was routed again when another watch moved to the same head");
 }
 
+void webhookDeliveryResumesAfterAnIdlePoll() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    Store store(path), receiver(path);
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    script.openAfterSession = true;
+    Sessions sessions;
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"pr");
+    grant(store,"owner","repository",repoGrant,"read");
+    const auto task = store.submit(intake());
+    host->inspect = [&](const GitContext&,const GitOpenPr&) {
+        check(store.receiveGitWebhook({hostName,"early-ci",repoName,"ci","completed",{},sha,"Early head",0}),
+              "Could not receive a webhook while the PR was opening");
+        runtime.runConversations();
+        check(historyCount(store,task,"git_webhook") == 0,"An unwatched event was delivered");
+    };
+    for (int i = 0; i < 8; ++i) runtime.tick();
+    check(historyCount(store,task,"git_webhook") == 1,"A new watch did not receive the previously unmatched event");
+    runtime.runConversations();
+
+    constexpr unsigned queued = 101;
+    for (unsigned i = 0; i < queued; ++i)
+        check(receiver.receiveGitWebhook({hostName,"queued-" + std::to_string(i),repoName,"ci","completed",{1},
+                                        sha,"Queued job",0}),"Could not receive a webhook on another connection");
+    for (int i = 0; i < 3; ++i) runtime.runConversations();
+    check(historyCount(store,task,"git_webhook") == queued + 1,
+          "Delivery lost or repeated events across connections or batches");
+}
+
 void reconciliationAfterTaskRevision() {
     Directory directory;
     const auto path = directory.path/"state.db";
@@ -444,6 +479,16 @@ void accessAndActions() {
         const auto result = invoke(store,runtime,script,name,tool,argsFor(args,repoName));
         check(result.at("ok") == true,"granted action failed: " + tool + " " + result.dump());
     }
+    for (auto [label,args] : std::vector<std::pair<std::string,Json>>{
+            {"create",{{"action","create"},{"title","Requires a task"}}},
+            {"update",{{"action","update"},{"issueNumber",2},{"state","open"}}}}) {
+        args.update({{"host",hostName},{"repo",repoName}});
+        const auto calls = host->hostCalls;
+        check(invoke(store,runtime,script,"missing-task-" + label,"git_manage_issue",args).at("ok") == false &&
+              host->hostCalls == calls,"conversation issue mutation ran without a task");
+    }
+    check(invoke(store,runtime,script,"read-without-task","git_manage_issue",{{"host",hostName},{"repo",repoName},
+          {"action","read"},{"issueNumber",2}}).at("ok") == true,"conversation issue read required a task");
     const auto duplicate = invoke(store,runtime,script,"retry-comment-create","git_comment",
                                   argsFor({{"target","pr"},{"number",1},{"body","Initial"}},repoName));
     check(duplicate.at("data").at("id") == 101 && host->comments == 1,"repeated comment creation posted a duplicate");
@@ -495,6 +540,207 @@ void newAttempts() {
     args["taskId"] = store.submit(intake());
     const auto next = invoke(store,runtime,script,"replacement-pr","git_open_pr",args);
     check(next.at("prNumber") == 2 && host->createCalls == 3,"Branch pair was locked after the previous task's PR merged");
+}
+
+void taskMutationAttempts() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"pr");
+    grant(store,"owner","repository",repoGrant,"issues");
+    const auto task = store.submit(intake());
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    const std::vector<std::string> states{"closed","open","closed"};
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        const auto previous = input.event.value("gitResults",Json::array());
+        if (previous.empty()) return {"git_open_pr",openArgs(),{}};
+        if (previous.back().at("tool") == "git_manage_issue") {
+            check(previous.back().at("result").at("ok") == true,"task issue mutation did not use implicit task identity");
+            return {"complete",{{"report","PR is closed"}}, {}};
+        }
+        if (previous.size() > 1) {
+            const auto& result = previous.back().at("result");
+            check(result.at("ok") == true && result.at("data").at("state") == states.at(previous.size()-2),
+                  "task did not receive its own PR update result");
+        }
+        if (previous.size() <= states.size()) return {"git_update_pr",{{"host",hostName},{"repo",repoName},
+            {"prNumber",1},{"state",states.at(previous.size()-1)}},{}};
+        return {"git_manage_issue",{{"host",hostName},{"repo",repoName},{"action","create"},{"title","Follow-up"}}, {}};
+    };
+    for (int i = 0; i < 14 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
+    check(store.task(task).at("state") == "completed" && host->prStateUpdates == states &&
+          host->prs.at(0).state == FakeHost::State::closed,"separate decisions on one event did not all update the PR");
+}
+
+void taskMutationRestart() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    const auto effects = directory.path/"host-effects";
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    Id task;
+    {
+        Store store(path);
+        grant(store,"owner","environment","sandbox","launch");
+        grant(store,"owner","repository",repoGrant,"pr");
+        task = store.submit(intake());
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+        auto args = openArgs();
+        args["taskId"] = task;
+        check(invoke(store,runtime,script,"fixture-pr","git_open_pr",args).at("ok") == true,"fixture PR did not open");
+    }
+    const auto writeEffect = [&](std::string_view state) { std::ofstream(effects,std::ios::app) << state << '\n'; };
+    const auto child = fork();
+    check(child >= 0,"could not start the crash fixture");
+    if (child == 0) {
+        host->onPrStateUpdate = [&](std::string_view state) { writeEffect(state); _exit(73); };
+        script.onTaskResult = [](const ModelInput&) -> Decision {
+            return {"git_update_pr",{{"host",hostName},{"repo",repoName},{"prNumber",1},{"state","closed"}}, {}};
+        };
+        Store store(path);
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+        for (int i = 0; i < 10; ++i) runtime.tick();
+        _exit(1);
+    }
+    int status = 0;
+    check(waitpid(child,&status,0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 73,
+          "fixture did not crash after dispatching the saved decision");
+    host->onPrStateUpdate = writeEffect;
+    int calls = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        ++calls;
+        const auto& result = input.event.at("gitResults").back().at("result");
+        check(result.at("ok") == false && result.at("status") == "unknown","interrupted mutation did not retain unknown outcome");
+        return {"complete",{{"report","PR update outcome unknown"}}, {}};
+    };
+    Store store(path);
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    for (int i = 0; i < 5 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
+    std::ifstream log(effects);
+    const std::string actions((std::istreambuf_iterator<char>(log)),{});
+    check(store.task(task).at("state") == "completed" && calls == 1 && actions == "closed\n",
+          "restart repeated inference or dispatched the saved Git mutation twice");
+}
+
+void taskReadRecovery() {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    auto host = std::make_shared<FakeHost>();
+    const std::string secret = "fixture-private-git-log-value";
+    for (Id job = 81; job <= 85; ++job)
+        host->jobLogs.emplace(job,GitLog{"job " + std::to_string(job) + " " + secret.substr(0,12),true});
+    Script script;
+    Sessions sessions;
+    Id task;
+    {
+        Store store(path);
+        store.protectGitCredential(secret);
+        grant(store,"owner","environment","sandbox","launch");
+        grant(store,"owner","repository",repoGrant,"read");
+        task = store.submit(intake());
+        script.onTaskResult = [&](const ModelInput&) -> Decision {
+            return {"git_read_ci_logs",{{"host","GITHUB.COM"},{"repo","ORG/FLOCK"},
+                {"jobId",81+host->logCalls},{"maxBytes",32}}, {}};
+        };
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+        for (int i = 0; i < 14 && host->logCalls < 5; ++i) runtime.tick();
+        check(host->logCalls == 5,"fixture did not read five jobs");
+    }
+    Store store(path);
+    const auto grantRead = [&](GrantChange change) {
+        store.access().resourceGrant(localOwner,"owner",{"repository",repoGrant,"read"},change);
+    };
+    int phase = 0;
+    Id saved = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        const auto& event = input.event;
+        const auto& recent = event.at("gitResults");
+        if (phase == 0) {
+            check(recent.size() == 4 && recent.front().at("target").at("jobId") == 82,
+                  "first Git read did not leave the recent projection");
+            check(event.at("gitReadRefs").size() == 5,"saved references were lost on restart");
+            saved = event.at("gitReadRefs").front().get<Id>();
+        } else if (phase == 1) {
+            const auto& replay = recent.back();
+            check(replay.at("readId") == saved && replay.at("sourceTool") == "git_read_ci_logs" &&
+                  replay.at("target") == Json{{"host",hostName},{"repo",repoName},{"jobId",81},{"maxBytes",32}} &&
+                  replay.at("result").at("data") == Json{{"text","job 81 [redacted]"},{"truncated",true}},
+                  "reopened database did not recover the original authorized, redacted read");
+            grantRead(GrantChange::revoke);
+        } else {
+            check(std::ranges::all_of(recent,[](const Json& entry) {
+                return !entry.contains("target") && entry.at("result").at("ok") == false;
+            }),"revoked read access leaked previous Git evidence");
+            if (phase == 2) {
+                grantRead(GrantChange::grant);
+                host->upstreamPermitted = false;
+            } else return {"complete",{{"report","Checked historical job evidence and revocation"}}, {}};
+        }
+        ++phase;
+        return {"git_read_result",{{"host",hostName},{"readId",saved}}, {}};
+    };
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
+    check(store.task(task).at("state") == "completed" && phase == 3 && host->logCalls == 5,
+          "recovery did not use saved snapshots through both access checks");
+}
+
+void boundedTaskReadAndForeignReference(bool comments) {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Json page = Json::array();
+    for (int number = 1; number <= 30; ++number) {
+        if (comments)
+            page.push_back({{"id",number},{"author","reviewer-" + std::to_string(number)},{"body",std::string(1500,'\1')}});
+        else page.push_back({{"number",number},{"title",std::string(800,'"')},{"body",std::string(1500,'"')}});
+    }
+    host->result = {{"items",std::move(page)},{"nextPage",2}};
+    Script script;
+    Sessions sessions;
+    grant(store,"owner","environment","sandbox","launch");
+    grant(store,"owner","repository",repoGrant,"read");
+    const auto first = store.submit(intake());
+    Id saved = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        const bool owner = input.task.at("id") == first;
+        const auto recent = input.event.value("gitResults",Json::array());
+        if (recent.empty()) {
+            if (owner) {
+                Json args{{"host",hostName},{"repo",repoName},{"action",comments ? "list_comments" : "list"}};
+                if (comments) args["issueNumber"] = 42;
+                return {"git_manage_issue",std::move(args),{}};
+            }
+            check(saved > 0 && !input.event.contains("gitReadRefs"),"another task discovered the saved reference");
+            return {"git_read_result",{{"host",hostName},{"readId",saved}}, {}};
+        }
+        const auto& result = recent.back().at("result");
+        if (owner) {
+            saved = recent.back().at("readId");
+            check(result.at("ok") == true && result.at("truncated") == true && result.dump().size() <= 24576 &&
+                  result.at("data").at("nextPage") == 2,"oversized Git read lost its bound or pagination");
+            const auto& items = result.at("data").at("items");
+            check(items.size() == 30,"bounded Git result omitted items from the page");
+            for (int number = 1; number <= 30; ++number) {
+                const auto& item = items.at(number-1);
+                check(item.at(comments ? "id" : "number") == number,"bounded Git result lost a page item's identifier");
+                if (comments)
+                    check(item.at("author") == "reviewer-" + std::to_string(number),"bounded Git result lost a comment author");
+            }
+        } else check(result.at("ok") == false && !recent.back().contains("target"),"another task opened a saved read");
+        return {"complete",{{"report","Checked the Git read"}}, {}};
+    };
+    Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+    for (int i = 0; i < 10 && store.task(first).at("state") != "completed"; ++i) runtime.tick();
+    check(store.task(first).at("state") == "completed","bounded read did not reach the task");
+    const auto other = store.submit(intake("owner","other-project"));
+    for (int i = 0; i < 10 && store.task(other).at("state") != "completed"; ++i) runtime.tick();
+    check(store.task(other).at("state") == "completed" && host->hostCalls == 1,
+          "task-scoped Git lookup reached the wrong repository read");
 }
 
 void redaction() {
@@ -645,6 +891,21 @@ void schemas() {
             check(schema.at("properties").at("commentId").at("type") == "integer" &&
                   schema.at("properties").at("target").at("enum") == Json::array({"pr","issue"}),"incorrect comment schema");
         }
+        if (function.at("name") == "git_manage_issue") {
+            for (const auto* action : {"list","read","list_comments","create","update"}) {
+                const auto& conditions = schema.at("oneOf");
+                const auto matching = [&](const Json& branch) {
+                    const auto& actions = branch.at("properties").at("action").at("enum");
+                    return std::ranges::find(actions,action) != actions.end();
+                };
+                check(std::ranges::count_if(conditions,matching) == 1,"issue schema action did not match exactly one branch");
+                const auto branch = std::ranges::find_if(conditions,matching);
+                const auto required = branch->value("required",Json::array());
+                const bool mutates = std::string_view(action) == "create" || std::string_view(action) == "update";
+                check((std::ranges::find(required,"taskId") != required.end()) == mutates,
+                      "issue schema requires taskId for the wrong actions");
+            }
+        }
     }
 }
 }
@@ -655,6 +916,7 @@ int main() {
         schemas();
         runner();
         webhookHeadPeriods();
+        webhookDeliveryResumesAfterAnIdlePoll();
         reconciliationAfterTaskRevision();
         recovery(FakeHost::State::open,false);
         recovery(FakeHost::State::closed,false);
@@ -664,6 +926,11 @@ int main() {
         recovery(FakeHost::State::open,false,false,true);
         accessAndActions();
         newAttempts();
+        taskMutationAttempts();
+        taskMutationRestart();
+        taskReadRecovery();
+        boundedTaskReadAndForeignReference(false);
+        boundedTaskReadAndForeignReference(true);
         redaction();
         notificationCannotControlASession();
         notificationBudgetAndRevocation();

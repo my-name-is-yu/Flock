@@ -97,7 +97,7 @@ void notesAndRoutingOnRestart() {
         check(t3.commands[0].config["session"]["model"] == "child-model" &&
               t3.commands[0].config["session"]["providerInstanceId"] == "child-provider" &&
               t3.commands[0].config["session"]["runtimeMode"] == "auto" &&
-              t3.commands[0].config["session"]["workspaceStrategy"]["branch"] == "main" &&
+              t3.commands[0].config["session"]["workspaceStrategy"]["baseRef"] == "origin/main" &&
               t3.commands[0].config["runTimeoutSeconds"] == 999,"child settings and timeout must survive intake");
     }
 

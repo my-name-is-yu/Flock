@@ -49,7 +49,7 @@ struct SessionEffect {
 }
 
 bool Store::Impl::runSessionEffect(const conversation::Message& message, int step, const Decision& decision,
-                                   bool offered, bool hasWebEvidence, T3& t3) {
+                                   bool offered, bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
     const auto id = message.id;
     const auto fail = [&](const ToolError& error) {
         auto failure = error.details;
@@ -79,6 +79,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(message)) { transaction.commit(); return false; }
         auto saved = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? "
                            "AND result IS NULL AND effect IS NOT NULL",{id,step});
@@ -131,6 +132,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
         if (!authorizeTurn(message)) { transaction.commit(); return false; }
         try { admit(effect->taskId,effect->generation,effect->run); }
         catch (const ToolError& error) {
@@ -158,7 +160,10 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         return false;
     if (outcome.value("ok",false)) {
         Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect->run)}};
-        if (control == SessionControl::Steer) entry["text"] = effect->command.instruction;
+        if (control == SessionControl::Steer) {
+            entry["text"] = effect->command.instruction;
+            entry["revisionId"] = effect->run.value("revisionId",Json(nullptr));
+        }
         journal(effect->taskId,control == SessionControl::Steer ? "instruction_steered" : "interrupt_requested",entry);
     }
     saveTurnResults(id,step,Json::array({outcome}));
@@ -230,6 +235,15 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto environment = verifiedEnvironment(task,routing,change->environment);
+        const bool destinationChanged = !environment.empty() &&
+            environment != task.value("pendingEnvironmentId",field(task,"environmentId"));
+        if (destinationChanged) {
+            const auto id = task.at("id").get<Id>();
+            const auto peer = peerExchange(id);
+            if (peer && peer->recipient == id && peer->kind == "work" &&
+                peerWorkRouteWouldCycle(peer->sender,environment,field(task,"projectId")))
+                throw Conflict("This destination would make project queues wait for one another");
+        }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
         if (criteriaChanged || intentChanged) {
@@ -240,11 +254,12 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
                     task["requestedDoneWhen"] = done;
                     task["criteriaSourceMessageId"] = messageId;
                 }
+                journal(task.at("id"),"task_contract_changed",{{"messageId",messageId}});
             }
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
         }
-        if (!environment.empty() && environment != task.value("pendingEnvironmentId",field(task,"environmentId"))) {
+        if (destinationChanged) {
             task["pendingEnvironmentId"] = environment;
             conflicting = true;
         }

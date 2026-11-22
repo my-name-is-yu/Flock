@@ -2611,6 +2611,7 @@ new ResizeObserver(updateFindOverlap).observe(findPanel);
 const decisions = mountBoardInbox({
   api,
   sourceAction: cardSourceAction,
+  onRefreshError: retrySync,
   canCompose: () => !!view?.composer && !view.dm && responseViewers.get(view.data) === sidebarViewer,
   canDismiss: () => !menu && !conversationActions.open && !workspace.classList.contains('nav-open'),
   focusComposer() {

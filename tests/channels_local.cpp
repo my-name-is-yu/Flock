@@ -45,7 +45,7 @@ struct SessionAdapter final : T3 {
         return observeRun ? observeRun(run) : Observation{};
     }
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
-    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool) override {
+    std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
         evidenceReads.push_back(target);
         return SessionMetadata{target.threadId,"Project","project","running",{},{},{},false};
     }
@@ -467,7 +467,8 @@ void sessionEvidence(const std::filesystem::path& database) {
     for (int i = 0; i < 4; ++i) runtime.tick();
     check(t3.launches == 1,"Expected a Session in the originating thread");
 
-    Json ref, result;
+    Json ref, result, scanCursor;
+    const Json sparseQuery{{"query","No such investigation"}};
     model.decideNext = [&](const ModelInput& input) -> Decision {
         const auto& steps = input.event.at("turn");
         if (!steps.empty()) {
@@ -476,6 +477,13 @@ void sessionEvidence(const std::filesystem::path& database) {
         }
         if (input.event.at("text") == "Count events")
             return {"flock_session_events",{{"sessionRef",ref},{"operation","counts"}},{}};
+        if (input.event.at("text") == "Search for a missing investigation")
+            return {"flock_session_search",sparseQuery,{}};
+        if (input.event.at("text") == "Continue search") {
+            auto args = sparseQuery;
+            args["cursor"] = scanCursor;
+            return {"flock_session_search",std::move(args),{}};
+        }
         if (input.event.at("text") == "Read memory") {
             check(std::ranges::find(input.tools,"read_memory") == input.tools.end() &&
                   std::ranges::find(input.tools,"create_schedule") == input.tools.end(),
@@ -503,6 +511,17 @@ void sessionEvidence(const std::filesystem::path& database) {
           "A Session reference bypassed channel scope");
     check(call("private-origin","memory","Read memory").at("ok") == false,
           "An unlisted tool could access Bot-wide memory in a channel thread");
+
+    for (int i = 0; i < 64; ++i)
+        store.access().resourceGrant(root,"release",Scope::sessionRead("env","background-"+std::to_string(i)),
+                                     GrantChange::grant);
+    store.receive(owner,intake("release",""),"web-search","Search for a missing investigation");
+    runtime.runConversations();
+    scanCursor = result.at("nextCursor");
+    check(result.at("sessions").empty() && scanCursor.is_string(),"Web search did not produce an empty continuation");
+    t3.evidenceReads.clear();
+    check(call("private-origin","resume-web-search","Continue search").at("ok") == false && t3.evidenceReads.empty(),
+          "A Web search cursor crossed into a channel thread");
 }
 
 void taskQuestionChoices(const std::filesystem::path& database) {
