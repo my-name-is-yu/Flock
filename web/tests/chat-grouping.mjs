@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { messagePlacement } from '../assets/chat-grouping.mjs';
+import { messagePlacement, peerMessagePlacement } from '../assets/chat-grouping.mjs';
 
 const localTime = (hour, minute, second = 0) => new Date(2026, 1, 15, hour, minute, second).getTime() / 1000;
 const message = (time, kind = 'conversation_message', taskId = 0, data = {}) => ({ time, kind, taskId, data });
@@ -33,3 +33,17 @@ const question = message(localTime(10, 0), 'waiting', 4, { id: 2 });
 const answer = message(shortlyAfter, 'user_answer', 4, { waitId: 2 });
 assert.equal(messagePlacement(question, answer, null).taskStart, false);
 assert.equal(messagePlacement(question, answer, null).afterQuestion, true);
+
+const peer = (event, fromBotId = 'release') => ({ ...event, data: { fromBotId } });
+assert.deepEqual(peerMessagePlacement(peer(first), peer(second), peer(later)), {
+  groupStart: false, groupEnd: true, timeBreak: false,
+});
+assert.deepEqual(peerMessagePlacement(peer(first), peer(second, 'triage'), peer(later, 'triage')), {
+  groupStart: true, groupEnd: true, timeBreak: false,
+});
+assert.deepEqual(peerMessagePlacement(peer(second), peer(later, 'triage'), null), {
+  groupStart: true, groupEnd: true, timeBreak: true,
+});
+assert.deepEqual(peerMessagePlacement(peer(lastNight), peer(midnight), null), {
+  groupStart: true, groupEnd: true, timeBreak: false,
+});

@@ -106,8 +106,8 @@
 .msg-avatar { border-radius: var(--radius-sm); }
 .bubble { min-width: 0; max-width: min(100%, 36rem); padding: .6rem .95rem; border-radius: var(--radius-xl); background: var(--raised); }
 .msg.user .bubble { background: var(--user-bubble); color: #fff; }
-.event-message.bot:not(.group-start) .bubble { border-start-start-radius: var(--radius-sm); }
-.event-message.bot.group-continues .bubble { border-end-start-radius: var(--radius-sm); }
+.event-message:is(.bot, .peer-dm-message):not(.group-start) .bubble { border-start-start-radius: var(--radius-sm); }
+.event-message:is(.bot, .peer-dm-message).group-continues .bubble { border-end-start-radius: var(--radius-sm); }
 .event-message.user:not(.group-start) .bubble { border-start-end-radius: var(--radius-sm); }
 .event-message.user.group-continues .bubble { border-end-end-radius: var(--radius-sm); }
 @supports (color: light-dark(red, blue)) and (color: oklch(from red .5 min(c, .15) h)) {
@@ -133,7 +133,7 @@
 .msg-actions .msg-time, .event-message > .msg-time {
   opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem;
 }
-.event-message.bot > .msg-time { margin-inline-start: var(--avatar-col); }
+.event-message:is(.bot, .peer-dm-message) > .msg-time { margin-inline-start: var(--avatar-col); }
 .msg-action { width: 1.85rem; height: 1.85rem; color: var(--text-3); }
 .msg-action svg { width: 1rem; height: 1rem; }
 
@@ -216,6 +216,7 @@
 }
 @media (hover: none) {
   .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { opacity: 0; }
+  .peer-dm-message:not(:focus-visible, :has(> .msg-time)) .peer-forward-meta .msg-time { opacity: 0; }
 }
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
@@ -229,20 +230,18 @@
 .peer-exchange-avatar { width: 1.25rem; height: 1.25rem; }
 .peer-dm-message .msg-meta { flex-wrap: wrap; min-width: 0; }
 .peer-dm-message .msg-name { overflow-wrap: anywhere; }
-.peer-dm-message .msg-time { opacity: 1; }
-.peer-forward-content {
-  display: grid; justify-self: end; justify-items: end; gap: .35rem; min-width: 0; max-width: min(100%, 36rem);
-}
-.peer-forward-content + .msg-meta { margin-top: .4rem; }
-.peer-forward-content .bubble { max-width: 100%; }
 .peer-forward-meta {
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .35rem; padding-inline: .6rem;
-  text-align: right;
-  color: var(--text-2); font-size: var(--text-xs); overflow-wrap: anywhere;
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
+  color: var(--text-2); font-size: var(--text-xs);
 }
 .peer-forward-meta .glyph svg { width: .85rem; height: .85rem; }
 .peer-forward-meta .msg-time { color: var(--text-3); }
-.peer-forwarded-message { border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--canvas); }
+.peer-dm-message:has(> .msg-time) .peer-forward-meta .msg-time { opacity: 1; }
+.peer-forwarded-message {
+  margin: 0; padding: .4rem .6rem; border-inline-start: 2px solid var(--hairline);
+  border-radius: var(--radius-sm); background: var(--canvas);
+}
+.peer-forwarded-message + .event-text { margin-block-start: .45rem; }
 .peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }
 .peer-exchange { min-width: 0; max-width: 42rem; margin-top: .8rem; }
 .peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--text-2); cursor: pointer; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }

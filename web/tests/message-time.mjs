@@ -12,6 +12,7 @@ function fixtures() {
   window.matchMedia = (query) => query === '(hover: none)' ? window.noHoverFixture : nativeMatchMedia(query);
   window.EventSource = undefined;
   const bot = { id: 'release', name: 'Release' };
+  const peer = { id: 'triage', name: 'Triage' };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'First message' } },
@@ -27,10 +28,22 @@ function fixtures() {
     } });
     document.dispatchEvent(new Event('visibilitychange'));
   };
-  window.fetch = async (path) => Response.json(path === '/api/bots' ? [bot] : {
-    bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [],
-    canDecide: true, composerPerson: null,
-  });
+  const dm = (id, seconds, fromBotId, data) => ({ id, time: time + seconds, kind: 'bot_message', data: { fromBotId, ...data } });
+  const older = dm(8, 0, 'release', { text: 'Earlier release message' });
+  const peerEvents = [
+    dm(9, 60, 'release', { text: 'Release starts the exchange' }),
+    dm(10, 90, 'release', { forwardedMessage: { text: 'Forwarded source only', time: time - 60 } }),
+    dm(11, 100, 'triage', { text: 'Triage replies' }),
+    dm(12, 1000, 'triage', { text: 'Triage resumes after a break' }),
+    dm(13, 12 * 3600, 'triage', { text: 'Triage follows up tomorrow' }),
+  ];
+  window.fetch = async (path) => {
+    if (path === '/api/bots') return Response.json([bot, peer]);
+    if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
+      ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
+    return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [],
+      canDecide: true, composerPerson: null });
+  };
 }
 
 async function exercise() {
@@ -121,6 +134,42 @@ async function exercise() {
   window.noHoverFixture.dispatchEvent(new Event('change'));
   tap(document.querySelector('#event-1 .event-text'));
   check(!shown().length, 'The tap timestamp remained enabled with hover support');
+
+  window.noHoverFixture.matches = true;
+  window.noHoverFixture.dispatchEvent(new Event('change'));
+  history.pushState(null, '', '?bot=release&peer=triage');
+  window.dispatchEvent(new PopStateEvent('popstate'));
+  for (let attempt = 0; attempt < 20 && !document.getElementById('event-13'); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  const [release, forwarded, triage] = document.querySelectorAll('.peer-dm-message');
+  const senders = () => [...document.querySelectorAll('.peer-dm-message > .msg-meta:not(.sr-only) .msg-name')]
+    .map(name => name.textContent).join(',');
+  const eventTime = row => row.querySelector('.msg-actions > time');
+  check(senders() === 'Release,Triage,Triage,Triage' && forwarded.querySelector('.msg-avatar'),
+    'The read-only DM did not group by sender, gap, and local day');
+  check(document.querySelectorAll('.day:not(.chat-time-break)').length === 2 &&
+    document.querySelectorAll('.chat-time-break').length === 1 && document.getElementById('composer-container').hidden,
+    'The read-only DM lost a centered separator or exposed the composer');
+  check(release.tabIndex === 0 && release.querySelectorAll('time').length === 1 && eventTime(release).dateTime,
+    'The peer message did not expose a focusable semantic timestamp');
+
+  const forwardedTime = eventTime(forwarded);
+  const source = forwarded.querySelector('.peer-forwarded-message');
+  const sourceTime = source.querySelector('time');
+  tap(source.querySelector('.event-text'));
+  check(shown()[0] === forwardedTime && source.contains(sourceTime) && sourceTime.dateTime !== forwardedTime.dateTime,
+    'Tapping a forwarded-only message did not reveal its own timestamp while preserving the source timestamp');
+  tap(triage.querySelector('.event-text'));
+  check(shown().length === 1 && shown()[0].parentElement === triage && eventTime(forwarded) === forwardedTime,
+    'The peer message timestamp did not move back when another one was opened');
+  tap(triage.querySelector('.event-text'));
+  check(!shown().length, 'Tapping the open peer message did not close its timestamp');
+
+  document.getElementById('older').click();
+  for (let attempt = 0; attempt < 20 && !document.getElementById('event-8'); attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(document.getElementById('event-9') === release && release.querySelector('.msg-meta').classList.contains('sr-only') &&
+    senders() === 'Release,Triage,Triage,Triage', 'Prepending peer history replaced the loaded row or repeated its sender label');
 }
 
 const assets = new URL('../assets/', import.meta.url);
