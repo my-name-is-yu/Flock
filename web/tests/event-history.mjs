@@ -56,7 +56,9 @@ const oldMessage = { id: 2, kind: 'conversation_message', data: { status: 'needs
 const budgetReply = { id: 4, kind: 'conversation_reply', data: { replyToMessageId: 2, route: 'model_budget', status: 'needs_you' } };
 const loaded = { events: new Map([oldMessage, budgetReply, ...page([90, 91, 100], 90).events].map(e => [e.id, e])),
   olderBefore: 2, newestEvent: 100 };
-const latestAfterApproval = { ...page([100, 101], 100), changedMessageIds: [91, 92] };
+await refreshEventHistory(loaded, page([100], 100), noPage, current);
+assert.deepEqual(loaded.events.get(4), budgetReply);
+const latestAfterApproval = { ...page([100, 101], 100), changedMessageIds: [2, 4, 91, 92] };
 const corrected = { ...oldMessage, data: { status: 'received' } };
 const resolved = { ...budgetReply, data: { replyToMessageId: 2, status: 'done' } };
 const delivered = { id: 91, kind: 'conversation_message', data: { deliveredToT3: true } };

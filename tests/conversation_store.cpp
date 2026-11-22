@@ -178,12 +178,44 @@ void retryAcrossConnections() {
     check(calls == 2 && restarted.tasks("alpha").size() == 1,"The retry ran an applied message again");
 }
 
+void upgradesUnstartedConversationInput() {
+    Fixture fixture;
+    Id pending, legacyDone, running;
+    {
+        Store store(fixture.database());
+        pending = receive(store,"unstarted","First");
+        legacyDone = receive(store,"legacy-done","Already handled");
+        running = receive(store,"running","Second");
+    }
+    fixture.sql("DELETE FROM conversation_turns WHERE message_id IN (" + std::to_string(pending) + "," +
+                std::to_string(legacyDone) + ")");
+    fixture.sql("UPDATE journal SET data='{\"status\":\"done\"}' WHERE id=" + std::to_string(legacyDone));
+    fixture.sql("UPDATE journal SET data='{\"status\":\"needs_you\"}' WHERE id=" + std::to_string(running));
+    fixture.sql("CREATE INDEX journal_pending_turn ON journal(conversation_bot_id,id)"
+                " WHERE kind IN ('conversation_message','git_webhook') AND json_extract(data,'$.status') IS NULL");
+
+    Store reopened(fixture.database());
+    const auto initial = reopened.conversation("alpha");
+    check(initial.at(0).at("data").at("status") == "received" &&
+          initial.at(1).at("data").at("status") == "done" &&
+          initial.at(2).at("data").at("status") == "received",
+          "The upgrade lost legacy history or preferred stale journal status to a running turn");
+    RuntimeFixture execution(reopened);
+    auto messages = Json::array();
+    execution.model.conversation = [&](const ModelInput& input) {
+        messages.push_back(input.event.at("text"));
+        return say("Handled.");
+    };
+    execution.runtime.runConversations();
+    check(messages == Json::array({"First","Second"}) && reply(reopened,legacyDone).is_null(),
+          "The upgrade skipped or reordered pending input, or reran handled legacy input");
+}
+
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
     Fixture fixture;
     Store store(fixture.database());
     const auto message = receive(store,"saved-decision","Write a release note");
     const auto id = std::to_string(message);
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + id + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision) VALUES(" + id +
                 ",1,'[{\"tool\":\"start_task\",\"args\":{\"request\":\"Write a release note\"},\"reason\":\"Saved\"}]')");
     RuntimeFixture execution(store);
@@ -209,7 +241,6 @@ void sessionNoteIsNotResentAfterARestart() {
     const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
                          {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
                          {"actionId","flock-turn-" + mid + "-1"}};
-    fixture.sql("INSERT INTO conversation_turns(message_id,status) VALUES(" + mid + ",'running')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + ",1,'" +
                 Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
                               {"reason","Saved"}}}).dump() +
@@ -453,6 +484,7 @@ void replyTargetsReachTheTurn() {
 int main() {
     try {
         retryAcrossConnections();
+        upgradesUnstartedConversationInput();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         transientFailureResumesAfterTheLastFinishedStep();
         sessionNoteIsNotResentAfterARestart();

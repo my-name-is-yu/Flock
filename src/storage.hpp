@@ -183,7 +183,7 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&, const BotTools&, GitHost*);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
-    bool turnPending(Id messageId) const;
+    bool isNextTurn(Id messageId) const;
     bool authorizeTurn(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;

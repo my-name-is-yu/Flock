@@ -414,11 +414,17 @@ Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> aft
     ConversationChanges changes{newest.number(0),{}};
     if (!after || *after >= changes.through) return changes;
     auto rows = p_->query(R"SQL(
-SELECT DISTINCT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
+SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId') ELSE json_extract(j.data,'$.messageId') END
-WHERE j.id>? AND j.id<=? AND (?='' OR m.bot_id=?)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_steered','instruction_delivered')
-)SQL",{*after,changes.through,bot,bot});
+WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
+  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_steered','instruction_delivered',
+                 'conversation_budget_approved')
+UNION
+SELECT j.conversation_bot_id,json_extract(j.data,'$.waitMessageId') FROM journal j
+WHERE j.id>?1 AND j.id<=?2 AND j.kind='conversation_budget_approved'
+  AND (?3='' OR j.conversation_bot_id=?3)
+ORDER BY 1,2
+)SQL",{*after,changes.through,bot});
     while (rows.next()) changes.messages[rows.string(0)].push_back(rows.number(1));
     return changes;
 }
@@ -736,8 +742,13 @@ Json journalRow(const Statement& row) {
 }
 Json Store::history(Id taskId, Id after, unsigned limit) const {
     std::lock_guard lock(p_->mutex);
-    auto rows = p_->query("SELECT id,task_id,time,kind,data FROM journal WHERE task_id=? AND id>? ORDER BY id LIMIT ?",
-                          {taskId,after,std::clamp(limit,1u,200u)});
+    auto rows = p_->query(R"SQL(
+SELECT j.id,j.task_id,j.time,j.kind,
+  CASE WHEN input.message_id IS NULL THEN j.data
+       ELSE json_patch(j.data,json_object('status',input.status)) END
+FROM journal j LEFT JOIN conversation_input_status input ON input.message_id=j.id
+WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
+)SQL",{taskId,after,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) result.push_back(journalRow(rows));
     return result;
@@ -775,7 +786,8 @@ SELECT page.id,page.task_id,page.time,page.kind,
   WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
             'replyToMessageId',coalesce(m.reply_to,0),'status',
-            coalesce(json_extract(page.data,'$.status'),'received'),
+            coalesce(CASE WHEN input.message_id IS NULL THEN json_extract(page.data,'$.status')
+                          ELSE input.status END,'received'),
             'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
               WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'deliveredToT3',json(CASE WHEN (
@@ -801,8 +813,10 @@ FROM (
     AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
     AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
       AND json_extract(j.data,'$.recipient') IS NOT 'user'))
-  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=? AND kind<>'git_webhook'
+  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=?
+    AND kind NOT IN ('git_webhook','conversation_budget_approved')
 ) AS page LEFT JOIN messages m ON m.id=page.id
+LEFT JOIN conversation_input_status input ON input.message_id=m.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
 WHERE (?=0 OR page.id<?)

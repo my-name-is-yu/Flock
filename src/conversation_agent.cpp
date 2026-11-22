@@ -71,16 +71,6 @@ std::string effectStatus(const Json& actions) {
 }
 }
 
-bool Store::Impl::turnPending(Id id) const {
-    return query(R"SQL(
-SELECT 1 FROM journal j
-WHERE j.id=? AND j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
-AND NOT EXISTS (
-  SELECT 1 FROM journal prior WHERE prior.conversation_bot_id=j.conversation_bot_id AND prior.id<j.id
-  AND prior.kind IN ('conversation_message','git_webhook') AND json_extract(prior.data,'$.status') IS NULL)
-)SQL",{id}).next();
-}
-
 Message Store::Impl::loadTurnMessage(Id id) const {
     auto row = query(R"SQL(
 SELECT m.reply_to,m.bot_id,m.text,c.scope_key,m.routing,m.person_id,m.person_root FROM messages m
@@ -645,7 +635,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot))
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
-    exec("UPDATE journal SET task_id=?,data=json_set(data,'$.status',?) WHERE id=?",{linked,status,message.id});
+    exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
     exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
          {reply,message.id});
 }
@@ -661,15 +651,13 @@ void Store::Impl::pauseTurn(const Message& message) {
                                : "The model call limit is exhausted. Approve one more model call to continue."}};
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     if (!message.channelScope.empty()) queueChannelReply(message.id,reply,data);
-    exec("UPDATE journal SET data=json_set(data,'$.status','needs_you') WHERE id=?",{message.id});
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
 bool Store::Impl::authorizeTurn(const Message& message) {
-    if (!turnPending(message.id)) return false;
+    if (!isNextTurn(message.id)) return false;
     if (message.routing.contains("gitEvent")) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        exec("UPDATE journal SET data=json_set(data,'$.status','access_revoked') WHERE id=?",{message.id});
         exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
         return false;
     }
@@ -688,10 +676,9 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     Message message;
     {
         std::lock_guard lock(mutex);
-        Transaction transaction(db);
-        if (!turnPending(id)) return true;
+        Transaction transaction(db,Transaction::Mode::read);
+        if (!isNextTurn(id)) return true;
         message = loadTurnMessage(id);
-        exec("INSERT OR IGNORE INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
         transaction.commit();
     }
     const auto webhook = message.routing.value("gitEvent",Json(nullptr));
@@ -796,7 +783,7 @@ LIMIT 1
             std::lock_guard lock(mutex);
             Transaction transaction(db);
             auto saved = Json::array();
-            if (turnPending(id) && !authorizeTurn(message)) { transaction.commit(); return true; }
+            if (isNextTurn(id) && !authorizeTurn(message)) { transaction.commit(); return true; }
             for (const auto& call : calls)
                 saved.push_back({{"tool",call.tool},{"args",call.args},{"reason",call.reason}});
             exec("UPDATE conversation_steps SET decision=? WHERE message_id=? AND step=? AND result IS NULL",{saved,id,step});
@@ -959,7 +946,11 @@ void Store::Impl::approveMessageModelCall(Id message, Id waitMessageId) {
     const auto attempt = reserveExtraModelCall(messageModelBudget(message),toolPending ? "bot_tool" : "conversation_turn",message,0,0);
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});
-    exec("UPDATE journal SET data=json_remove(data,'$.status') WHERE id=?",{message});
     exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
+    exec(R"SQL(
+INSERT INTO journal(time,kind,data,conversation_bot_id)
+SELECT ?,'conversation_budget_approved',json_object('messageId',id,'waitMessageId',?),bot_id
+FROM messages WHERE id=?
+)SQL",{unixTime(),waitMessageId,message});
 }
 }
