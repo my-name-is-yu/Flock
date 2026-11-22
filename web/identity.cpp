@@ -22,6 +22,7 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
     const auto entries=Json::parse(data,nullptr,false);
     if (!entries.is_array()) throw Conflict("Invalid Web identities");
     std::map<std::string,Person,std::less<>> people;
+    std::map<std::string,bool,std::less<>> identities;
     std::vector<std::string> roots;
     for (auto& item:entries) {
         try {
@@ -31,10 +32,18 @@ void configureWebIdentities(Store& store, const std::filesystem::path& path, Web
                 (!credential.starts_with("Basic ") && !credential.starts_with("Bearer ")) ||
                 credential.find_first_of("\r\n")!=credential.npos || !people.emplace(credential,principal).second)
                 throw Conflict("Invalid Web identity");
+            const auto identity = identities.try_emplace(principal.id,true).first;
+            identity->second = identity->second && principal.adminRoot;
             if (principal.adminRoot) roots.push_back(std::move(principal.id));
         } catch (const Json::exception&) { throw Conflict("Invalid Web identity"); }
     }
     store.setRootPeople(std::move(roots));
+    callbacks.resolveIdentity = [identities=std::move(identities)](std::string_view person) -> std::optional<bool> {
+        const auto found = identities.find(person);
+        if (found == identities.end()) return std::nullopt;
+        return found->second;
+    };
+    store.setWebIdentityResolver(callbacks.resolveIdentity);
     callbacks.authenticate = [people=std::move(people)](std::string_view authorization) -> Person {
         auto found=people.find(authorization);
         return found==people.end() ? Person{} : found->second;

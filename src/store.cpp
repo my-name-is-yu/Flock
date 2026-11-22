@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "flock/session_settings.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,8 +12,11 @@
 
 namespace flockv0 {
 namespace {
-[[noreturn]] void sqlError(sqlite3* db) { throw std::runtime_error(sqlite3_errmsg(db)); }
+[[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
 }
+StorageError::StorageError(sqlite3* db)
+    : std::runtime_error(sqlite3_errmsg(db)), code_(sqlite3_errcode(db) & 0xff) {}
+
 Statement::Statement(sqlite3* db, const char* sql, const Json& values) {
     if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) sqlError(db);
     try {
@@ -175,19 +179,6 @@ WITH queue AS (
 SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId') IS NULL OR
              json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
 FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
-CREATE VIEW IF NOT EXISTS project_task_order AS
-SELECT task.id, task.environment_id, task.project_id, task.state,
-       ROW_NUMBER() OVER (
-         PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
-       ) AS position
-FROM tasks task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
-LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=task.environment_id
-  AND sender.project_id=task.project_id AND sender.state NOT IN ('completed','cancelled')
-WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
         initializeAccessSchema();
@@ -224,10 +215,6 @@ void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
     exec("UPDATE tasks SET state=?,generation=?,data=?,environment_id=? WHERE id=?",
          {task["state"], task["generation"], task, task["environmentId"], task["id"]});
-    exec(R"SQL(
-UPDATE pr_review_items SET target_generation=?1,target_revision=?2 WHERE task_id=?3 AND status='pending'
- AND (operation_id IS NOT NULL OR (git_key IS NOT NULL AND target_revision=?2))
-)SQL",{task["generation"],task.value("currentRevision",Id{0}),task["id"]});
 }
 
 namespace {
@@ -283,6 +270,35 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
                       " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
+}
+
+bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
+    // A sender cannot move until its exchange closes. Reserve a recipient's pending destination
+    // while retaining the current dependency until the recipient releases that queue.
+    return query(R"SQL(
+WITH RECURSIVE source(env,project) AS (
+  SELECT environment_id,project_id FROM tasks WHERE id=?1
+), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
+  SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
+         CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
+              THEN json_extract(r.data,'$.pendingEnvironmentId') END,
+         COALESCE(json_extract(r.data,'$.environmentReleased'),0)
+  FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
+  WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
+), dependencies(source_env,source_project,target_env,target_project) AS (
+  SELECT source_env,source_project,current_env,target_project FROM work_routes
+  WHERE NOT released
+  UNION ALL
+  SELECT source_env,source_project,pending_env,target_project FROM work_routes
+  WHERE pending_env IS NOT NULL
+), reachable(env,project) AS (
+  SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
+  UNION
+  SELECT target_env,target_project FROM dependencies JOIN reachable
+    ON source_env=env AND source_project=project
+)
+SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
+)SQL",{sender,environment,project}).next();
 }
 
 bool Store::Impl::replanReady(const Json& task) const {
@@ -401,10 +417,14 @@ Store::Store(std::filesystem::path db, MemorySeed seed)
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 
+Id Store::Impl::dataVersion() const {
+    auto version = query("PRAGMA data_version");
+    return version.next() ? version.number(0) : 0;
+}
+
 std::pair<std::int64_t,std::int64_t> Store::changeStamp() const {
     std::lock_guard lock(p_->mutex);
-    auto version = p_->query("PRAGMA data_version");
-    return {sqlite3_total_changes64(p_->db),version.next() ? version.number(0) : 0};
+    return {sqlite3_total_changes64(p_->db),p_->dataVersion()};
 }
 
 Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> after, std::string_view bot) const {
@@ -559,21 +579,24 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     } else if (operation == "reconcile" && (reason == "unknown_delivery" || reason == "auth" || reason == "settings")) {
         if (data.contains("session")) {
             const auto action = outbox(task);
-            const auto& session = data["session"];
-            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready") || !session.is_object())
+            if (reason != "settings" || (!action.is_null() && action["phase"] != "ready"))
                 throw Conflict("Session settings can only be corrected before an unsent action");
-            for (auto item = session.begin(); item != session.end(); ++item) {
-                if ((item.key() == "workspaceStrategy" && item->is_object()) ||
-                    ((item.key() == "model" || item.key() == "providerInstanceId" || item.key() == "runtimeMode") &&
-                     item->is_string())) continue;
-                throw Conflict("Invalid Session setting");
-            }
-            task["config"]["session"] = session;
+            task["config"]["session"] = normalizeSessionSettings(data["session"]);
         }
         if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
         else {
             const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
+            if (action.at("phase") == "ready" && action.at("tool") == "answer_session_question") {
+                const auto differs = [&](std::string_view key, const std::string& saved) {
+                    const auto hint = field(data,key);
+                    return !hint.empty() && hint != saved;
+                };
+                if (differs("threadId",field(action.at("target"),"threadId")) ||
+                    differs("runId",field(action.at("target"),"runId")) ||
+                    differs("questionId",field(action,"questionId")))
+                    throw Conflict("The supplied T3 question is outside the saved answer destination");
+            }
             auto updated = action;
             updated.erase("phase"); updated.erase("authGeneration");
             updated["candidate"] = {{"threadId",field(data,"threadId")},{"runId",field(data,"runId")}};
@@ -624,7 +647,7 @@ Json Store::Impl::sessionTask(Id id) const {
     auto reports = query(R"SQL(
 SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
        json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
-FROM journal WHERE task_id=? AND kind='report' ORDER BY id
+FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",{id});
     using RunKey = std::tuple<std::string,std::string,std::string>;
     std::map<RunKey,std::string> statuses;
@@ -756,8 +779,41 @@ ORDER BY j.id DESC LIMIT 1
 
 Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
                          std::string_view viewer) const {
+    if (before == std::numeric_limits<Id>::min()) return Json::array();
+    const auto through = before ? before-1 : std::numeric_limits<Id>::max();
     std::lock_guard lock(p_->mutex);
     auto rows = p_->query(R"SQL(
+WITH visible AS NOT MATERIALIZED (
+  SELECT id,task_id,conversation_bot_id FROM journal
+  WHERE id<=?2
+    AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
+         OR (kind='waiting' AND json_extract(data,'$.reason')='user_question'))
+    AND ((conversation_bot_id IS NOT NULL AND kind<>'git_webhook')
+      OR (conversation_bot_id IS NULL
+        AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
+        AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
+        AND (kind!='user_answer' OR json_extract(data,'$.conversation') IS NOT 1)
+        AND (kind!='bot_message' OR (json_extract(data,'$.initiator') IS NOT 'user'
+          AND json_extract(data,'$.recipient') IS NOT 'user'))))
+), bot_page AS (
+  SELECT id FROM visible WHERE conversation_bot_id=?1 ORDER BY id DESC LIMIT ?4
+), page_ids AS MATERIALIZED (
+  -- A row past the page limit within one task cannot reach the combined page.
+  SELECT candidate.value AS id FROM tasks t
+  CROSS JOIN json_each((SELECT json_group_array(id) FROM (
+    SELECT id FROM visible WHERE task_id=t.id AND conversation_bot_id IS NULL
+    ORDER BY id DESC LIMIT ?4
+  ))) candidate
+  WHERE t.bot_id=?1
+  UNION ALL SELECT id FROM bot_page
+  ORDER BY id DESC LIMIT ?4
+), page AS (
+  SELECT j.id,j.task_id,j.time,j.kind,
+    CASE WHEN j.kind='cancelled' AND t.id IS NOT NULL
+         THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data
+  FROM page_ids ids JOIN journal j ON j.id=ids.id
+  LEFT JOIN tasks t ON j.kind='cancelled' AND j.conversation_bot_id IS NULL AND t.id=j.task_id
+)
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
@@ -790,26 +846,11 @@ SELECT page.id,page.task_id,page.time,page.kind,
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'
             ) THEN 'true' ELSE 'false' END))) END
-FROM (
-  SELECT j.id,j.task_id,j.time,j.kind,
-    CASE WHEN j.kind='cancelled' THEN json_set(j.data,'$.request',json_extract(t.data,'$.request')) ELSE j.data END AS data,
-    j.conversation_bot_id
-  FROM journal j JOIN tasks t ON t.id=j.task_id WHERE t.bot_id=?
-    AND j.conversation_bot_id IS NULL
-    AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
-    AND (kind!='request' OR json_extract(j.data,'$.source') IS NOT 'conversation')
-    AND (kind!='user_answer' OR json_extract(j.data,'$.conversation') IS NOT 1)
-    AND (kind!='bot_message' OR (json_extract(j.data,'$.initiator') IS NOT 'user'
-      AND json_extract(j.data,'$.recipient') IS NOT 'user'))
-  UNION ALL SELECT * FROM journal WHERE conversation_bot_id=? AND kind<>'git_webhook'
-) AS page LEFT JOIN messages m ON m.id=page.id
+FROM page LEFT JOIN messages m ON m.id=page.id
 LEFT JOIN waits w ON page.kind='user_answer'
   AND w.id=json_extract(page.data,'$.waitId') AND w.task_id=page.task_id
-WHERE (?=0 OR page.id<?)
-  AND (?=0 OR page.kind IN ('conversation_reply','report','completed','pr_review_requested')
-       OR (page.kind='waiting' AND json_extract(page.data,'$.reason')='user_question'))
-ORDER BY page.id DESC LIMIT ?)SQL",
-        {bot,bot,before,before,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
+ORDER BY page.id DESC)SQL",
+        {bot,through,events == ConversationEvents::incoming ? 1 : 0,std::clamp(limit,1u,200u)});
     Json result = Json::array();
     while (rows.next()) {
         auto event = journalRow(rows);

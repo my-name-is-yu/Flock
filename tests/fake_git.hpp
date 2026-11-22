@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <map>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -44,7 +45,7 @@ public:
         result.settled = true;
         return result;
     }
-    void interrupt(const std::string&, const Json&, const RunRef&) override {}
+    InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }
 };
 
 class FakeHost final : public GitHost {
@@ -60,6 +61,9 @@ public:
     Json result{{"headSha",sha},{"status","ok"}};
     int createCalls = 0, lookupCalls = 0, logCalls = 0, hostCalls = 0, comments = 0, edits = 0;
     std::vector<Entry> prs;
+    std::map<Id,GitLog> jobLogs;
+    std::vector<std::string> prStateUpdates;
+    std::function<void(std::string_view)> onPrStateUpdate;
     std::function<void(const GitContext&, const GitOpenPr&)> inspect;
     std::string_view name() const override { return hostName; }
     bool permits(const GitContext&, const GitRepository&, std::string_view) const override {
@@ -85,13 +89,24 @@ public:
     }
     GitLog readCiLogs(const GitContext&, const GitRepository&, Id job, std::size_t maxBytes) override {
         ++logCalls;
-        check(job == 81,"wrong CI job");
         check(maxBytes == 32,"log byte limit was not passed to the adapter");
+        if (!jobLogs.empty()) return jobLogs.at(job);
+        check(job == 81,"wrong CI job");
         return log;
     }
     Json call(const GitContext&, const GitRepository&, const Decision& decision) override {
         ++hostCalls;
         const auto& args = decision.args;
+        if (decision.tool == "git_update_pr" && args.contains("state")) {
+            auto& pr = prs.at(args.at("prNumber").get<Id>() - 1);
+            const auto state = args.at("state").get<std::string>();
+            pr.state = state == "closed" ? State::closed : State::open;
+            prStateUpdates.push_back(state);
+            if (onPrStateUpdate) onPrStateUpdate(state);
+            auto updated = result;
+            updated["state"] = state;
+            return updated;
+        }
         if (decision.tool == "git_comment") {
             if (rejectComment) throw GitRejected("Comment rejected");
             if (args.contains("commentId")) {

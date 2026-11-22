@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 
 async function exercise(mountBoardInbox) {
   const byId = (id) => document.getElementById(id);
@@ -41,6 +44,8 @@ async function exercise(mountBoardInbox) {
   const sources = [];
   let questions = [question, docs, secret, review];
   let finishDocs;
+  let readInbox;
+  let retries = 0;
   const choices = () => item.querySelector('.question-choice-form');
   const selected = () => choices().querySelector('input:checked')?.value;
   const sendChoice = () => choices().querySelector('button');
@@ -62,6 +67,11 @@ async function exercise(mountBoardInbox) {
       }
       if (path.startsWith('inbox/history')) return { decisions: [] };
       if (path !== 'inbox') throw new Error('Unexpected route ' + path);
+      if (readInbox) {
+        const read = readInbox;
+        readInbox = undefined;
+        return read();
+      }
       return { items: questions };
     },
     sourceAction(entry, close) {
@@ -74,6 +84,7 @@ async function exercise(mountBoardInbox) {
     },
     onChange() {},
     onAccepted() {},
+    onRefreshError() { retries++; },
     canCompose: () => true,
     focusComposer: () => editor.focus(),
   });
@@ -208,29 +219,156 @@ async function exercise(mountBoardInbox) {
   check(calls.some(([path]) => path === 'inbox/history?bot=release'), 'Recent decisions did not request this Bot’s history');
   byId('decision-close').click();
   check(layer.hidden && !conversation.inert, 'The close action left the conversation disabled');
+
+  const denied = (status) => Object.assign(new Error('access_denied'), { status });
+  questions = [revised];
+  for (const [index, error] of [null, new TypeError('Network unavailable'), denied(403)].entries()) {
+    let finishRead;
+    readInbox = () => new Promise((resolve, reject) => {
+      finishRead = () => error ? reject(error) : resolve({ items: [question] });
+    });
+    const previousViewer = board.refresh();
+    board.setContext('release', `viewer-${index}`);
+    await board.refresh();
+    await browse(trigger);
+    finishRead();
+    await previousViewer;
+    check(board.count('release') === 1 && item.textContent.includes(revised.prompt) && retries === 0,
+      'A response from the previous viewer changed the current Inbox or scheduled a retry');
+  }
+  for (const status of [401, 403]) {
+    await board.refresh();
+    board.open(trigger);
+    check(!layer.hidden, 'The pending panel must be open before testing authorization denial');
+    readInbox = async () => { throw denied(status); };
+    await board.refresh();
+    check(board.count('release') === 0 && layer.hidden && trigger.hidden && retries === 0,
+      `HTTP ${status} did not clear the Inbox and close its pending panel`);
+  }
 }
-const assets = new URL('../assets/', import.meta.url);
-const read = (name) => readFileSync(new URL(name, assets), 'utf8');
-const directory = mkdtempSync(join(tmpdir(), 'flock-board-inbox-dom-'));
-try {
-  const html = read('index.html').replace(/<link\b[^>]*>/g, '').replace('<script type="module" src="/app.js"></script>', `
-    <style>${read('style.css')}${read('sidebar.css')}${read('conversation.css')}${read('composer.css')}${read('dialog.css')}${read('board-inbox.css')}</style>
-    <script type="module">
-      import { mountBoardInbox } from ${JSON.stringify(new URL('board-inbox.js', assets).href)};
-      try {
-        await (${exercise})(mountBoardInbox);
-        document.documentElement.dataset.flockResult = 'pass';
-      } catch (error) {
-        document.documentElement.dataset.flockResult = error.message;
+
+function liveFixture() {
+  const bot = { id: 'release', name: 'Release', latestIncomingEventId: 0 };
+  const decision = { botId: bot.id, botName: bot.name, itemKind: 'user_question', itemId: 1, waitId: 1,
+    taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
+  const fixture = window.inboxFixture = { reads: 0, updated: false, failed: false };
+  window.EventSource = class extends EventTarget {
+    constructor(path) {
+      super();
+      this.path = path;
+      fixture.stream = this;
+    }
+    close() { this.closed = true; }
+  };
+  window.fetch = async (path) => {
+    const headers = { 'X-Flock-Viewer': '"viewer"' };
+    if (path === '/api/bots') return Response.json([bot], { headers });
+    if (path.startsWith('/api/view?')) return Response.json({
+      bot, events: [], olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [], historyCursor: 0,
+      sessionCursor: 0, canDecide: true, composerPerson: 'viewer',
+    }, { headers });
+    if (path === '/api/inbox') {
+      fixture.reads++;
+      if (fixture.updated && !fixture.failed) {
+        fixture.failed = true;
+        return Response.json({ error: 'server_error' }, { status: 503 });
       }
-    </script>`);
-  const fixture = join(directory, 'index.html');
-  writeFileSync(fixture, html);
-  const output = execFileSync(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
+      return Response.json({ items: fixture.updated ? [] : [decision] });
+    }
+    throw new Error('Unexpected route ' + path);
+  };
+}
+
+async function exerciseLiveRetry() {
+  const fixture = window.inboxFixture;
+  const trigger = document.getElementById('needs-you');
+  const panel = document.getElementById('decision-layer');
+  async function waitFor(predicate, error) {
+    const deadline = performance.now() + 3500;
+    while (!predicate()) {
+      if (performance.now() >= deadline) throw new Error(error);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  await waitFor(() => !trigger.hidden && fixture.stream?.path === '/api/events?bot=release',
+    'The Inbox did not load on the Bot stream');
+  const stream = fixture.stream;
+  const reads = fixture.reads;
+  stream.dispatchEvent(new Event('ready'));
+  await waitFor(() => fixture.reads > reads, 'The ready stream did not catch up');
+  trigger.click();
+  if (panel.hidden) throw new Error('The Inbox pending panel did not open before the invalidation');
+  fixture.updated = true;
+  stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true}' }));
+  await waitFor(() => fixture.failed, 'The live invalidation did not fetch the Inbox');
+  if (trigger.hidden || panel.hidden) throw new Error('A transient Inbox failure cleared the pending decision');
+  await waitFor(() => trigger.hidden && panel.hidden, 'The Inbox stayed stale with a healthy stream after HTTP 503');
+  if (stream.closed || fixture.stream !== stream) throw new Error('The Inbox recovered by reconnecting its event stream');
+}
+
+const assets = new URL('../assets/', import.meta.url);
+const read = (name) => readFile(new URL(name, assets), 'utf8');
+const index = await read('index.html');
+const withScript = (html, script) => html.replace('<script type="module" src="/app.js"></script>', script);
+const boardPage = async () => withScript(index.replace(/<link\b[^>]*>/g, ''), `
+  <style>${(await Promise.all(['style.css', 'sidebar.css', 'conversation.css', 'composer.css', 'dialog.css',
+    'board-inbox.css'].map(read))).join('')}</style>
+  <script type="module">
+    import { mountBoardInbox } from ${JSON.stringify(new URL('board-inbox.js', assets).href)};
+    try {
+      await (${exercise})(mountBoardInbox);
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error.message;
+    }
+  </script>`);
+const livePage = withScript(index, `
+  <script>(${liveFixture})();</script>
+  <script type="module">
+    import '/app.js';
+    try {
+      await (${exerciseLiveRetry})();
+      document.documentElement.dataset.flockResult = 'pass';
+    } catch (error) {
+      document.documentElement.dataset.flockResult = error.message;
+    }
+  </script>`);
+const contentTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const serveLivePage = () => createServer(async (request, response) => {
+  const { pathname } = new URL(request.url, 'http://localhost');
+  try {
+    if (pathname === '/') {
+      response.setHeader('Content-Type', 'text/html');
+      response.end(livePage);
+    } else {
+      const asset = await read('.' + pathname);
+      response.setHeader('Content-Type', contentTypes[extname(pathname)] ?? 'application/octet-stream');
+      response.end(asset);
+    }
+  } catch {
+    response.writeHead(404).end();
+  }
+});
+const directory = await mkdtemp(join(tmpdir(), 'flock-board-inbox-dom-'));
+const live = process.argv[3] === 'live';
+let server;
+try {
+  let url;
+  if (live) {
+    server = serveLivePage().listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    url = `http://127.0.0.1:${server.address().port}/?bot=release`;
+  } else {
+    const fixture = join(directory, 'index.html');
+    await writeFile(fixture, await boardPage());
+    url = pathToFileURL(fixture).href;
+  }
+  const { stdout } = await promisify(execFile)(process.argv[2], ['--headless', '--disable-gpu', '--no-first-run',
     '--disable-background-networking', '--allow-file-access-from-files', `--user-data-dir=${directory}`,
-    '--virtual-time-budget=3000', '--dump-dom', pathToFileURL(fixture).href], { encoding: 'utf8', timeout: 25000 });
-  const result = output.match(/<html[^>]*data-flock-result="([^"]*)"/);
+    `--virtual-time-budget=${live ? 5000 : 3000}`, '--dump-dom', url], { encoding: 'utf8', timeout: 25000 });
+  const result = stdout.match(/<html[^>]*data-flock-result="([^"]*)"/);
   if (result?.[1] !== 'pass') throw new Error(result?.[1] ?? 'The browser did not finish the DOM checks');
 } finally {
-  rmSync(directory, { recursive: true, force: true });
+  server?.close();
+  await rm(directory, { recursive: true, force: true });
 }
