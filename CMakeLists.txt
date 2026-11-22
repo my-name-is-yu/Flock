@@ -15,7 +15,8 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
-                       src/workflow.cpp src/context_compaction.cpp src/model_budget.cpp src/runtime.cpp
+                       src/workflow.cpp src/context_compaction.cpp src/model_budget.cpp
+                       src/channels.cpp src/local_machine.cpp src/runtime.cpp
                        src/access.cpp src/access_tools.cpp src/secrets.cpp)
 target_include_directories(flock_core PUBLIC include)
 target_sources(flock_core PRIVATE src/bot_profile.cpp)
@@ -34,6 +35,10 @@ if(BUILD_TESTING)
   target_link_libraries(flock_workflow_context PRIVATE flock_core)
   target_compile_options(flock_workflow_context PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME flock_workflow_context COMMAND flock_workflow_context)
+  add_executable(flock_channels_local tests/channels_local.cpp)
+  target_link_libraries(flock_channels_local PRIVATE flock_core)
+  target_compile_options(flock_channels_local PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME flock_channels_local COMMAND flock_channels_local)
   add_executable(flock_access_secrets tests/access_secrets.cpp)
   target_link_libraries(flock_access_secrets PRIVATE flock_core)
   add_test(NAME flock_access_secrets COMMAND flock_access_secrets)

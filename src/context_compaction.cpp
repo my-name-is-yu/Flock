@@ -25,6 +25,20 @@ unsigned char asciiLower(unsigned char value) {
 }
 }
 
+std::size_t conversation_storage::boundExpandedContext(Json& turn) {
+    std::size_t expandedBytes = 0;
+    for (auto step = turn.rbegin(); step != turn.rend(); ++step) {
+        auto& result = step->at("result");
+        if (step->at("tool") != "expand_context" || !result.contains("messages")) continue;
+        const auto bytes = result.dump().size();
+        if (expandedBytes+bytes > expandedContextBytes) {
+            result.erase("messages");
+            result["evidenceOmitted"] = true;
+        } else expandedBytes += bytes;
+    }
+    return expandedBytes;
+}
+
 void Store::Impl::initializeCompactionSchema() {
     Transaction tx(db);
     exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_compactions(
@@ -34,11 +48,22 @@ void Store::Impl::initializeCompactionSchema() {
     exec("CREATE INDEX IF NOT EXISTS compactions_bot ON conversation_compactions(bot_id,id DESC)");
     exec(R"SQL(CREATE VIEW IF NOT EXISTS compactable_messages AS
         SELECT j.id,coalesce(j.conversation_bot_id,t.bot_id) bot_id,j.kind,j.task_id,j.data,
-          coalesce(m.text,json_extract(j.data,'$.report'),json_extract(j.data,'$.text'),'') text
+          CASE j.kind
+            WHEN 'conversation_message' THEN j.id
+            WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId')
+            ELSE json_extract(t.data,'$.sourceMessageId')
+          END source_message_id,
+          CASE j.kind
+            WHEN 'conversation_message' THEN m.text
+            WHEN 'report' THEN json_extract(j.data,'$.report')
+            ELSE json_extract(j.data,'$.text')
+          END text
         FROM journal j LEFT JOIN messages m ON m.id=j.id LEFT JOIN tasks t ON t.id=j.task_id
-        WHERE j.kind IN ('conversation_message','conversation_reply','completed','cancelled','report')
-          OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
-          OR (j.kind='user_answer' AND j.conversation_bot_id IS NULL AND json_extract(j.data,'$.conversation') IS NOT 1))SQL");
+        WHERE (j.conversation_bot_id IS NOT NULL AND j.kind IN ('conversation_message','conversation_reply'))
+          OR (j.conversation_bot_id IS NULL AND (
+            j.kind IN ('completed','cancelled','report')
+            OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
+            OR (j.kind='user_answer' AND json_extract(j.data,'$.conversation') IS NOT 1))))SQL");
     tx.commit();
 }
 
@@ -60,8 +85,8 @@ Json Store::compactions(std::string_view bot, Id before, unsigned limit) const {
     return p_->compactions(bot,before,limit);
 }
 
-Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Json& summaries, std::size_t expandedBytes) const {
-    const auto scrub = redactor(bot);
+Json Store::Impl::conversationHistory(const conversation::Message& message, const Json& summaries, std::size_t expandedBytes) const {
+    const auto scrub = redactor(message.bot);
     std::size_t remaining = 24000 - expandedBytes - 2;
     Json history = Json::array();
     Id boundary = 0;
@@ -74,12 +99,13 @@ Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Jso
         remaining -= summary.dump().size();
     }
     auto rows = query(R"SQL(
-SELECT id,task_id,kind,data,text FROM compactable_messages WHERE bot_id=? AND id>? AND (
-    (kind='conversation_message' AND id<?) OR
-    (kind='conversation_reply' AND json_extract(data,'$.replyToMessageId')<?) OR
-    kind NOT IN ('conversation_message','conversation_reply'))
-ORDER BY id DESC LIMIT 24
-)SQL",{bot,boundary,before,before});
+SELECT entry.id,entry.task_id,entry.kind,entry.data,entry.text FROM compactable_messages entry
+LEFT JOIN channel_messages source ON source.message_id=entry.source_message_id
+WHERE entry.bot_id=? AND entry.id>?
+  AND (entry.kind NOT IN ('conversation_message','conversation_reply') OR entry.source_message_id<?)
+  AND (?='' OR (source.scope_key=? AND entry.kind!='user_answer'))
+ORDER BY entry.id DESC LIMIT 24
+)SQL",{message.bot,boundary,message.id,message.channelScope,message.channelScope});
     while (rows.next()) {
         const auto kind = rows.string(2);
         const bool user = kind=="conversation_message" || kind=="user_answer";
@@ -105,20 +131,20 @@ ORDER BY id DESC LIMIT 24
     return history;
 }
 
-Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::string_view bot,
-                              Id message, int step, const Json& routing) {
+Json Store::Impl::contextTool(std::string_view tool, const Json& args, const conversation::Message& message, int step) {
     if (tool == "continue_fresh_session") {
-        auto task = ownTask(identifier(args,"taskId",true),bot);
+        auto task = ownTask(identifier(args,"taskId",true),message);
         if (terminal(task) || task.at("state") == "cancelling") throw Conflict("Task is closed or stopping");
         const auto instruction = args.contains("instruction") ? conversation_storage::text(args,"instruction",8000,true)
                                                               : "Continue with the same completion criteria.";
         task["newSessionRequired"] = true;
         task["freshContextRequested"] = true;
         task["replanning"] = true;
-        acceptInstruction(task,message,step,instruction,nullptr,routing,nullptr);
+        acceptInstruction(task,message.id,step,instruction,nullptr,message.routing,nullptr);
         return {{"ok",true},{"freshContext",true},{"taskId",task.at("id")},{"effect","replanning"}};
     }
 
+    const auto& bot = message.bot;
     const auto scrub = redactor(bot);
     const auto latest = compactions(bot,0,1);
     const Id boundary = latest.empty() ? 0 : latest.front().at("endMessageId").get<Id>();
@@ -127,7 +153,7 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
         const auto summary = scrub.text(conversation_storage::text(args,"summary",4000,true));
         if (summary.size()>4000 || Json(summary).dump().size()>expandedContextBytes)
             throw Conflict("Escaped summary exceeds the context budget");
-        if (end<boundary || end>=message) throw Conflict("Supply an older boundary covering the previous summary");
+        if (end<boundary || end>=message.id) throw Conflict("Supply an older boundary covering the previous summary");
         auto range = query("SELECT min(id),max(id),count(*) FROM compactable_messages WHERE bot_id=? AND id<=?",{bot,end});
         range.next();
         if (range.number(1)!=end) throw Conflict("Unknown conversation boundary");
@@ -136,7 +162,7 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
         return {{"ok",true},{"compaction",compactions(bot,0,1).front()}};
     }
 
-    Id end = std::min(boundary,message-1);
+    Id end = std::min(boundary,message.id-1);
     if (args.contains("compactionId")) {
         auto row = query("SELECT end_message_id FROM conversation_compactions WHERE bot_id=? AND id=?",{bot,identifier(args,"compactionId",true)});
         if (!row.next()) throw Conflict("Unknown compaction");

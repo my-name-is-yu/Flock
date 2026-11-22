@@ -31,7 +31,7 @@ Id modelCallLimit(const Json& config);
 struct Intake {
     std::string botId, request, environmentId, projectId;
     Json config = Json::object();
-    std::string scheduleId;
+    std::string scheduleId{};
     Seconds scheduledAt = 0;
 };
 using IntakeResolver = std::function<Intake(std::string_view botId, std::string_view request)>;
@@ -55,7 +55,7 @@ struct ModelInput {
     Json evidence = Json::array();
     Json config = Json::object(); // Adapter settings only. Never serialize into the prompt.
     bool needsDoneWhen = false, canForwardUserMessage = false;
-
+    std::vector<std::string> images{};
 };
 struct ModelError : std::runtime_error {
     ModelError(std::string message, bool retryable, Json measurements = Json::object())
@@ -132,6 +132,12 @@ public:
 
 // Store methods use SQLite transactions and may be called through separate CLI/Web connections.
 class Access;
+struct ChannelConnector;
+class LocalMachine;
+enum class ChannelKind;
+struct Person;
+struct ChannelResource;
+struct VerifiedChannelMessage;
 class Store {
 public:
     explicit Store(std::filesystem::path database);
@@ -183,9 +189,25 @@ public:
     };
     // Original messages affected by replies and instruction delivery since a journal cursor.
     ConversationChanges conversationChangesSince(std::optional<Id> after, std::string_view bot = {}) const;
+    void connectChannel(ChannelConnector);
+    void artifactBaseUrl(std::string url);
+    Json receiveChannel(ChannelKind, std::string_view credential, const Json& event, const IntakeResolver& routing);
+    std::optional<ChannelResource> artifact(std::string_view id) const;
+    std::optional<ChannelResource> attachment(const Person&, Id id) const;
+    void setRootPeople(std::vector<std::string> ids);
+    void setWebOrigin(std::string origin);
+    void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
+    Json localConnections(const Person&) const;
+    void decideLocalConnection(const Person&, Id id, bool approve);
+    void disconnectLocalConnection(const Person&, Id id);
+    Json runLocalMachineOperation(std::string_view environment, const RunRef& authenticatedRun,
+                                  std::string_view machineId, std::string_view operation,
+                                  const std::filesystem::path& path);
     const std::filesystem::path& path() const;
 
 private:
+    Json receive(std::string_view botId, std::string_view clientMessageId, std::string_view text,
+                 Id replyToMessageId, const VerifiedChannelMessage*, const std::function<Intake()>&);
     struct Impl;
     std::unique_ptr<Impl> p_;
     friend class Runtime;
@@ -197,7 +219,7 @@ struct RuntimeOptions {
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
-    std::function<std::vector<PeerBot>(std::string_view)> peers;
+    std::function<std::vector<PeerBot>(std::string_view)> peers = {};
 };
 class Runtime {
 public:

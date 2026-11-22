@@ -963,6 +963,26 @@ function eventCard(event, context, place) {
       extras.push(note);
     }
   }
+  for (const file of data.attachments ?? []) {
+    const link = node('a', 'button', file.name);
+    link.href = '/api/channels/attachments/' + encodeURIComponent(file.id);
+    link.download = file.name;
+    if (file.mimeType.startsWith('image/')) {
+      const preview = node('img', 'channel-image');
+      preview.src = link.href;
+      preview.alt = file.name;
+      preview.loading = 'lazy';
+      link.replaceChildren(preview);
+    }
+    extras.push(link);
+  }
+  for (const artifact of data.artifacts ?? []) {
+    const link = node('a', 'button', artifact.title);
+    link.href = '/api/artifacts/' + encodeURIComponent(artifact.id);
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    extras.push(link);
+  }
   if (copy) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);

@@ -5,9 +5,19 @@
 #include <algorithm>
 #include <limits>
 
+namespace flockv0::conversation {
+struct Message {
+    Id id = 0, replyTo = 0;
+    std::string bot, text, channelScope;
+    Json routing;
+    Id questionMessageId = 0, questionTaskId = 0;
+};
+}
+
 namespace flockv0::conversation_storage {
 inline constexpr auto messageSize = 16000;
 inline constexpr std::size_t expandedContextBytes = 8192;
+std::size_t boundExpandedContext(Json& turn);
 
 inline bool hasText(std::string_view value) {
     return value.find_first_not_of(" \r\n\t") != std::string_view::npos;
