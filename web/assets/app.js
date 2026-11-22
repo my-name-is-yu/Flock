@@ -1,20 +1,32 @@
 import { handleComposerEnter } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
-import { refreshEventHistory } from '/event-history.mjs';
+import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
 import { mountBoardInbox } from '/board-inbox.js';
+import { createTimelineRows, placeRows } from '/timeline-rows.js';
+import { replyArrivalId } from '/reply-arrival.mjs';
+import { questionChoiceForm, updateQuestionChoiceForm } from '/question-choices.js';
+import { createComposerDraftStore } from '/composer-drafts.mjs';
 
 const byId = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'navigation', 'pinned', 'bot-list', 'wait-list', 'wait-count', 'session-list', 'more-sessions',
   'connection', 'connection-text', 'new-bot-button', 'open-navigation', 'close-navigation', 'profile', 'profile-avatar',
   'profile-name', 'profile-status', 'profile-placeholder', 'settings-button', 'conversation', 'older',
-  'timeline', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
-  'reply-label', 'compose-label', 'message', 'send', 'notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
+  'timeline', 'jump-to-latest', 'composer-container', 'composer', 'reply-context', 'reply-question', 'cancel-reply',
+  'reply-label', 'compose-label', 'message', 'send', 'notice', 'view-only-notice', 'detail', 'detail-title', 'detail-body', 'close-detail',
   'bot-editor', 'theme-switch', 'bot-activity', 'activity-scope-avatar', 'activity-scope-name',
-  'peer-heading', 'peer-back', 'peer-picker', 'peer-status',
+  'peer-identity', 'peer-heading', 'peer-faces', 'peer-back', 'peer-back-label', 'peer-picker', 'peer-status',
 ].map((id) => [id, byId(id)]));
+const updateTimelineRows = createTimelineRows(elements.timeline, elements.conversation);
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+function animateLiveReply(id) {
+  byId(`event-${id}`)?.querySelector('.bubble')?.animate?.([
+    { opacity: .76, transform: 'translateY(4px)' },
+    { opacity: 1, transform: 'none' },
+  ], { duration: 125, easing: 'cubic-bezier(0.23, 1, 0.32, 1)' });
+}
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -67,20 +79,21 @@ function save(key, value) {
 }
 const savedPins = saved('flock-pins', []);
 const pins = new Set(Array.isArray(savedPins) ? savedPins : []);
-const drafts = new Map();
-const replies = new Map();
+const composerDrafts = createComposerDraftStore();
 const sendingMessages = new Set();
-const pendingMessages = new Map();
 const pendingWaits = new Map();
 const notices = new Map();
 const signatures = new Map();
+const readingPositions = new Map();
 let bots = [];
 let listLoaded = false;
 let view = null;
+let visibilityGeneration = 0;
 let menu = null;
 let detail = null;
 let profileAvatar = null;
 let profileKey = '';
+let profileMotion;
 let scopeAvatar = null;
 let scopeKey = '';
 let connection = 'loading';
@@ -97,21 +110,9 @@ function button(text, className, click) {
   if (click) el.addEventListener('click', click);
   return el;
 }
-customElements.define('flock-avatar', class extends HTMLElement {
-  #handle;
-
-  connectedCallback() {
-    this.#handle = showAvatar(this, this.bot, { still: false });
-  }
-
-  disconnectedCallback() {
-    this.#handle?.destroy();
-  }
-});
-
 function avatar(bot, className = '') {
-  const host = node('flock-avatar', `avatar ${className}`.trim());
-  host.bot = bot;
+  const host = node('span', `avatar ${className}`.trim());
+  showAvatar(host, bot);
   return host;
 }
 function runHref(run) {
@@ -149,6 +150,7 @@ function changed(key, ...values) {
   signatures.set(key, signature);
   return true;
 }
+const responseViewers = new WeakMap();
 async function api(path, body) {
   const init = { credentials: 'same-origin' };
   if (body) Object.assign(init, {
@@ -158,32 +160,16 @@ async function api(path, body) {
   const response = await fetch(`/api/${path}`, init);
   const data = await response.json();
   if (!response.ok) throw Object.assign(new Error(data.error), { status: response.status });
+  const viewer = response.headers.get('X-Flock-Viewer');
+  if (viewer !== null) responseViewers.set(data, viewer);
   return data;
 }
 const botQuery = (path, bot, before) => `${path}?${new URLSearchParams(before ? { bot, before } : { bot })}`;
 const peerQuery = ({ id: bot, peerId: peer }, before) =>
   `peer-conversation?${new URLSearchParams(before ? { bot, peer, before } : { bot, peer })}`;
 const timelineContext = () => view?.dm ?? view;
+const timelineKey = (botId, peerId = null) => JSON.stringify([botId, peerId]);
 const showingComposer = (bot) => view?.id === bot && !view?.dm;
-const messageStorageKey = (bot) => `flock-pending-message:${bot}`;
-
-function pendingMessage(bot) {
-  if (!pendingMessages.has(bot)) {
-    try {
-      const pending = JSON.parse(sessionStorage.getItem(messageStorageKey(bot)));
-      if (pending?.payload?.botId === bot) pendingMessages.set(bot, pending);
-    } catch {}
-  }
-  return pendingMessages.get(bot);
-}
-function rememberMessage(bot, pending) {
-  if (pending) pendingMessages.set(bot, pending);
-  else pendingMessages.delete(bot);
-  try {
-    if (pending) sessionStorage.setItem(messageStorageKey(bot), JSON.stringify(pending));
-    else sessionStorage.removeItem(messageStorageKey(bot));
-  } catch {}
-}
 
 function setConnection(state) {
   if (connection === state) return;
@@ -221,27 +207,25 @@ function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
   if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) { renderBots(); return; }
+  rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
     sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
-  const pending = botId && pendingMessage(botId);
-  if (pending?.reply && !replies.has(botId)) replies.set(botId, pending.reply);
-  else if (pending && !pending.reply && !drafts.has(botId)) drafts.set(botId, pending.payload.text);
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
     if (updateHistory) history.pushState(null, '', url);
     else history.replaceState(null, '', url);
   }
   save('flock-selected-bot', botId);
-  elements.conversation.scrollTop = 0;
   render('bottom');
   const context = view;
   if (context) {
     context.pageRead = Promise.resolve();
-    context.refresh = coalescedRefresh(scroll => readTimeline(context, () => refreshView(context, scroll)));
-    void context.refresh('bottom');
+    context.refresh = coalescedRefresh((scroll, liveGeneration) =>
+      readTimeline(context, () => refreshView(context, scroll, liveGeneration)));
+    void context.refresh(context.data ? undefined : 'bottom');
     if (context.dm) {
       context.dm.refresh = coalescedRefresh(scroll => readTimeline(context.dm, () => refreshPeerConversation(context, scroll)));
       void context.dm.refresh('bottom');
@@ -280,6 +264,8 @@ const activePresence = new Set(['working', 'thinking', 'waiting']);
 const busyPresence = new Set(['working', 'thinking']);
 const sidebar = byId('navigation');
 const sidebarEntries = new Map();
+let readState = new Map();
+let sidebarViewer = null;
 
 let botDraft = null;
 function sidebarBots() {
@@ -375,11 +361,15 @@ function createSidebarEntry(botId) {
   const face = node('span');
   const avatarHost = node('span', 'avatar');
   const pinPresence = node('span');
-  face.append(avatarHost, pinPresence);
+  const pinUnread = node('span', 'unread-dot pin-unread');
+  pinUnread.setAttribute('aria-hidden', 'true');
+  face.append(avatarHost, pinPresence, pinUnread);
 
   const name = node('span', 'bot-name');
   const nameText = node('span', 'bot-name-text');
   const presenceDot = node('span', 'presence-dot');
+  const rowUnread = node('span', 'unread-dot row-unread');
+  rowUnread.setAttribute('aria-hidden', 'true');
   name.append(nameText, presenceDot);
   const preview = node('span', 'bot-preview');
   const dots = node('span', 'working-dots');
@@ -392,7 +382,7 @@ function createSidebarEntry(botId) {
 
   const pinName = node('span', 'pin-name');
   const status = node('span', 'sr-only');
-  select.append(face, text, pinName, status);
+  select.append(rowUnread, face, text, pinName, status);
   const tooltip = node('span', 'pin-tooltip');
   tooltip.setAttribute('aria-hidden', 'true');
   const tooltipName = node('span');
@@ -442,8 +432,13 @@ function createSidebarEntry(botId) {
       dots.hidden = !busyPresence.has(bot.presence);
       pinPresence.hidden = !pinned || !hasPresence;
       pinPresence.className = hasPresence ? `pin-presence ${bot.presence}` : 'pin-presence';
-      status.hidden = !hasPresence;
-      if (hasPresence && previousBot?.presence !== bot.presence) status.textContent = stateLabels[bot.presence];
+      const unread = hasUnread(bot);
+      row.classList.toggle('unread', !!unread);
+      pinUnread.hidden = !pinned || !unread;
+      rowUnread.hidden = pinned || !unread;
+      const label = [unread && 'New reply', hasPresence && stateLabels[bot.presence]].filter(Boolean).join(', ');
+      status.hidden = !label;
+      if (status.textContent !== label) status.textContent = label;
 
       toggle.setAttribute('aria-expanded', expanded);
       if (expanded) {
@@ -497,25 +492,13 @@ function draftRow(draft) {
   return row;
 }
 
-function placeSidebarRows(container, rows) {
-  const wanted = new Set(rows);
-  for (const child of [...container.children]) {
-    if (!wanted.has(child)) child.remove();
-  }
-  let next = container.firstElementChild;
-  for (const row of rows) {
-    if (row === next) next = next.nextElementSibling;
-    else container.insertBefore(row, next);
-  }
-}
-
 function renderBots() {
-  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft)) return;
+  const unreadIds = bots.filter(hasUnread).map((bot) => bot.id);
+  if (!changed('bots', bots, [...pins], menu, view?.id, listLoaded, botDraft, unreadIds)) return;
   const focusedSidebarKey = sidebar.contains(document.activeElement) ? document.activeElement.dataset.focus : null;
   const source = sidebarBots();
   const pinned = pinnedBotsInShortcutOrder(source);
-  const presenceRank = (bot) => (activePresence.has(bot.presence) ? 0 : 1);
-  const unpinnedByPresence = source.filter((bot) => !pins.has(bot.id)).sort((a, b) => presenceRank(a) - presenceRank(b));
+  const unpinned = source.filter((bot) => !pins.has(bot.id));
   const activeIds = new Set(source.map((bot) => bot.id));
   for (const [id, entry] of sidebarEntries) {
     if (!activeIds.has(id)) {
@@ -527,18 +510,43 @@ function renderBots() {
     if (!sidebarEntries.has(id)) sidebarEntries.set(id, createSidebarEntry(id));
   }
   const rowFor = ({ id }) => sidebarEntries.get(id).row;
-  placeSidebarRows(elements.pinned, pinned.map(rowFor));
+  placeRows(elements.pinned, pinned.map(rowFor));
   elements.pinned.hidden = !pinned.length;
   const list = elements['bot-list'];
   list.setAttribute('aria-busy', !listLoaded);
-  const rows = unpinnedByPresence.map(rowFor);
+  const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
   else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
-  placeSidebarRows(list, rows);
+  placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
-  unpinnedByPresence.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
+  unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
   if (focusedSidebarKey && document.activeElement.dataset.focus !== focusedSidebarKey) focusKey(focusedSidebarKey);
+}
+
+function hasUnread(bot) {
+  const state = readState.get(bot.id);
+  return state && state.incoming > state.readThrough;
+}
+
+let readCheckFrame;
+function scheduleReadCheck() {
+  readCheckFrame ??= requestAnimationFrame(() => {
+    readCheckFrame = undefined;
+    if (!view?.data || view.dm || sidebarViewer === null || responseViewers.get(view.data) !== sidebarViewer ||
+        document.hidden || document.querySelector('dialog[open]')) return;
+    const state = readState.get(view.id);
+    if (!state || state.incoming <= state.readThrough) return;
+    const scroller = elements.conversation;
+    if (!scroller.clientHeight) return;
+    const message = byId(`event-${state.incoming}`);
+    if (!message || !elements.timeline.contains(message)) return;
+    const viewport = scroller.getBoundingClientRect();
+    const bounds = message.getBoundingClientRect();
+    if (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom || bounds.bottom > viewport.bottom + 1) return;
+    state.readThrough = state.incoming;
+    renderBots();
+  });
 }
 
 const presenceLabels = { idle: 'Idle', thinking: 'Thinking', working: 'Working', waiting: 'Waiting for input', peer_waiting: 'Waiting for another Bot', stopping: 'Confirming stop', queued: 'Queued' };
@@ -548,7 +556,6 @@ const botPeers = (id) => participant(id).peers ?? [];
 function renderHeader() {
   const bot = view?.data?.bot ?? bots.find((item) => item.id === view?.id);
   const dm = view?.dm;
-  const heading = elements['peer-heading'];
   const profile = elements.profile;
   profile.hidden = !bot || !!dm;
   elements['settings-button'].hidden = !bot || !!dm;
@@ -556,17 +563,13 @@ function renderHeader() {
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
-  elements['peer-back'].setAttribute('aria-label', bot ? `Back to ${bot.name}` : 'Back to Bot');
-  heading.hidden = !dm;
+  elements['peer-identity'].hidden = !dm;
   if (dm) {
+    elements['peer-back-label'].textContent = `Back to ${bot?.name ?? dm.id}`;
     const pair = [dm.id, dm.peerId].sort().map(participant);
-    const label = pair.map(({ name }) => name).join(' & ');
     if (changed('peer-heading', pair.map(({ id, name, avatar }) => [id, name, avatar]))) {
-      const faces = node('span', 'peer-faces');
-      faces.setAttribute('aria-hidden', 'true');
-      faces.append(...pair.map((bot) => avatar(bot, 'peer-face')));
-      heading.replaceChildren(faces, node('span', 'profile-pill peer-title', label));
-      heading.title = label;
+      elements['peer-faces'].replaceChildren(...pair.map((bot) => avatar(bot)));
+      elements['peer-heading'].textContent = pair.map(({ name }) => name).join(' & ');
     }
   }
   const nextScopeKey = bot ? JSON.stringify([bot.id, bot.name, bot.avatar]) : '';
@@ -584,13 +587,18 @@ function renderHeader() {
     return;
   }
   const presence = view?.data?.presence ?? 'idle';
+  const motion = presenceMotion(presence);
+  const look = { state: motion, followPointer: motion === 'idle' };
   const key = JSON.stringify([bot.id, bot.avatar]);
   if (key !== profileKey) {
     profileAvatar?.destroy();
-    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, followPointer: true });
+    profileAvatar = showAvatar(elements['profile-avatar'], bot, { still: false, ...look });
     profileKey = key;
     elements.conversation.style.setProperty('--bot-accent', accentColor(bot));
+  } else if (profileMotion !== motion) {
+    profileAvatar?.update(look);
   }
+  profileMotion = motion;
   const offline = connection === 'offline';
   const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
   profile.dataset.presence = presence;
@@ -599,6 +607,7 @@ function renderHeader() {
   profile.setAttribute('aria-label', `${bot.name} settings`);
   elements['profile-name'].textContent = bot.name;
   elements['profile-status'].textContent = status;
+  elements['profile-status'].hidden = !offline && presence === 'idle';
 }
 
 function activityRow(tag, className, title, status, statusClass) {
@@ -609,9 +618,9 @@ function activityRow(tag, className, title, status, statusClass) {
   row.append(heading, line);
   return row;
 }
-function sessionRow(task, session, status, live) {
+function sessionRow(task, session, status, tone = '') {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, live ? 'live' : '');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, tone);
   row.title = [task.request, task.createdAt ? `Started ${fullTime.format(task.createdAt * 1000)}` : ''].filter(Boolean).join(' · ');
   if (link) {
     row.href = link;
@@ -692,7 +701,7 @@ function renderActivity() {
     }
     elements['wait-list'].replaceChildren(...rows);
     if (loading) elements['wait-list'].append(...skeletonRows(1));
-    else if (!rows.length) elements['wait-list'].append(node('p', 'activity-empty', 'Nothing waiting for input'));
+    elements['wait-list'].closest('section').hidden = !loading && !rows.length;
   }
   const groups = [...(view?.loadedSessions.values() ?? [])].filter(task => task.id >= view.sessionsBefore);
   const active = data?.activeSessions ?? [];
@@ -707,12 +716,13 @@ function renderActivity() {
     const identity = key(run.taskId, run);
     if (activeKeys.has(identity)) continue;
     activeKeys.add(identity);
-    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state, true));
+    live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
+      run.state === 'waiting' ? 'waiting' : 'live'));
   }
   const ended = [];
   for (const task of groups.sort((a, b) => b.id - a.id)) {
     for (const session of task.sessions) {
-      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended', false));
+      if (!activeKeys.has(key(task.id, session))) ended.push(sessionRow(task, session, 'Ended'));
     }
   }
   const rows = [];
@@ -730,15 +740,14 @@ function renderActivity() {
   list.setAttribute('aria-busy', loading);
   list.replaceChildren(...rows);
   if (loading) list.append(...skeletonRows(2));
-  else if (!rows.length) list.append(node('p', 'activity-empty', 'No sessions yet'));
+  list.closest('section').hidden = !loading && !rows.length && more.hidden;
 }
 
 function beginReply(target, text = '') {
-  if (!target.messageId || sendingMessages.has(view.id)) return;
+  const composer = view?.composer;
+  if (!target.messageId || !composer || sendingMessages.has(composer)) return;
   if (view.dm) selectBot(view.id);
-  const current = replies.get(view.id);
-  if (current?.closed && current.text.trim()) drafts.set(view.id, current.text);
-  if (current?.messageId !== target.messageId || text) replies.set(view.id, { ...target, text });
+  composer.openReply(target, text);
   closeDetail();
   renderComposer();
   elements.message.focus();
@@ -760,6 +769,7 @@ function icon(name, className = 'glyph') {
 }
 function iconButton(name, label, click) {
   const control = button(null, 'icon-button msg-action', click);
+  control.dataset.timelineAction = name;
   control.setAttribute('aria-label', label);
   control.title = label;
   control.append(icon(name));
@@ -778,15 +788,28 @@ async function copyMessage(control, text) {
     }, 1600);
   } catch { if (view) setNotice(view, 'Could not copy the text.', true); }
 }
+const questionKey = (task) => JSON.stringify([task.id, task.wait.id, task.currentRevision ?? 0, task.generation]);
+
 function questionActions(context, task, { dialog = false } = {}) {
   const target = { kind: 'wait', messageId: task.wait.messageId, summary: waitText(task.wait) };
   const actions = node('div', dialog ? 'wait-primary' : 'event-actions question-actions');
-  for (const choice of task.wait.choices ?? []) {
-    const option = button(choice, dialog ? 'dialog-button' : 'button', () => {
-      if (view?.id === context.id) void operate(context, task, 'answer', { text: choice });
-    });
-    option.disabled = pendingWaits.has(task.wait.id);
-    actions.append(option);
+  const choices = task.wait.choices ?? [];
+  if (choices.length) {
+    const key = questionKey(task);
+    const selections = context.questionChoices ??= new Map();
+    actions.append(questionChoiceForm({
+      key, prompt: target.summary, choices, dialog, answer: selections.get(key), busy: pendingWaits.has(task.wait.id),
+      select(answer) {
+        selections.set(key, answer);
+        for (const form of document.querySelectorAll('.question-choice-form')) {
+          if (form.dataset.questionKey === key) updateQuestionChoiceForm(form, answer, pendingWaits.has(task.wait.id));
+        }
+      },
+      submit(answer) {
+        const current = view === context && context.data?.waits.find((item) => item.wait.id === task.wait.id);
+        if (current && questionKey(current) === key) void operate(context, current, 'answer', { text: answer });
+      },
+    }));
   }
   const reply = button('Write a reply', dialog ? 'dialog-button quiet' : 'text-button', () => {
     if (view?.id === context.id) beginReply(target);
@@ -794,6 +817,11 @@ function questionActions(context, task, { dialog = false } = {}) {
   reply.disabled = pendingWaits.has(task.wait.id);
   actions.append(reply);
   return actions;
+}
+function readOnlyChoices(choices) {
+  const options = node('ul', 'read-only-choices');
+  for (const choice of choices) options.append(node('li', null, choice));
+  return options;
 }
 function pausedActions(turn) {
   const actions = node('div', 'event-actions');
@@ -827,12 +855,13 @@ function eventTime(event, extra) {
   const timestamp = new Date(event.time * 1000);
   const time = node('time', 'msg-time', clock.format(timestamp));
   time.dateTime = timestamp.toISOString();
-  time.title = [event.taskId ? `#${event.taskId}` : null, fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
+  time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
 function sourceAction(source, label = 'Open source') {
-  return button(label, 'text-button', async () => {
-    const target = byId(`event-${source.messageId}`);
+  const control = button(label, 'text-button', async () => {
+    const match = byId(`event-${source.messageId}`);
+    const target = match?.closest('article') ?? match;
     if (target) {
       closeDetail();
       target.focus();
@@ -853,17 +882,20 @@ function sourceAction(source, label = 'Open source') {
     }
     renderDetail();
   });
+  control.dataset.timelineAction = `source:${source.messageId}`;
+  return control;
 }
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
   link.className = 'run-link';
+  link.dataset.timelineAction = `run:${link.href}`;
   link.title = 'Open in T3';
   link.setAttribute('aria-label', 'Open in T3');
   link.replaceChildren(icon('open'));
   return link;
 }
-function eventCard(event, context, place) {
+function eventCard(event, context, place, report) {
   const data = event.data;
   const bot = context.bot;
   const side = messageSide(event);
@@ -878,6 +910,12 @@ function eventCard(event, context, place) {
   const row = node('article', `msg ${side}`);
   row.id = `event-${event.id}`;
   row.tabIndex = -1;
+  if (report) {
+    const anchor = node('span');
+    anchor.id = `event-${report.id}`;
+    anchor.hidden = true;
+    row.append(anchor);
+  }
   row.classList.toggle('group-start', place.groupStart);
   row.classList.toggle('task-start', place.taskStart);
   const trigger = event.kind === 'request' ? data.trigger : null;
@@ -895,7 +933,7 @@ function eventCard(event, context, place) {
   row.append(meta);
 
   const line = node('div', 'msg-line');
-  if (side === 'bot') line.append(place.groupEnd && bot ? avatar(bot, 'msg-avatar') : node('span', 'msg-avatar-space'));
+  if (side === 'bot') line.append(node('span', 'msg-avatar-space'));
   const bubble = node('div', 'bubble');
   const text = node('p', 'event-text');
   const actions = node('div', 'msg-actions');
@@ -914,7 +952,9 @@ function eventCard(event, context, place) {
     text.textContent = copy;
     bubble.append(text);
     if (data.decisionReason) bubble.append(reasonText(data.decisionReason));
-    if (pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
+    const choices = pendingWait?.wait.choices ?? data.choices;
+    if (!context.canDecide && choices?.length) bubble.append(readOnlyChoices(choices));
+    if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
@@ -923,13 +963,21 @@ function eventCard(event, context, place) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
       extras.push(resolution);
+      if (data.reason === 'user_question' && view.composer?.textAt(event.id)) {
+        extras.push(button('View reply draft', 'text-button', () => beginReply({
+          kind: 'wait', messageId: event.id, summary: copy,
+        })));
+      }
     }
   } else if (event.kind === 'conversation_reply') {
     text.textContent = data.text;
     bubble.append(text);
     const paused = context.paused.get(data.messageId);
-    if (paused) extras.push(pausedActions(paused));
-    else if (data.suggestions?.length) extras.push(suggestionActions(event));
+    if (paused && context.canDecide) extras.push(pausedActions(paused));
+    else if (data.suggestions?.length) {
+      if (context.canDecide) extras.push(suggestionActions(event));
+      else bubble.append(readOnlyChoices(data.suggestions));
+    }
     if (!paused) replyTarget = ['Reply to this message', { kind: 'message', messageId: event.id, summary: data.text }];
   } else if (event.kind === 'report') {
     copy = data.report || 'The session submitted a report.';
@@ -999,19 +1047,24 @@ function eventCard(event, context, place) {
     const control = iconButton('copy', 'Copy text', () => void copyMessage(control, copy));
     actions.append(control);
   }
-  if (pendingWait?.wait.reason === 'user_question') {
+  if (context.canDecide && pendingWait?.wait.reason === 'user_question') {
     const reply = iconButton('reply', 'Write a reply', () => beginReply({ kind: 'wait', messageId: pendingWait.wait.messageId, summary: waitText(pendingWait.wait) }));
     reply.disabled = pendingWaits.has(pendingWait.wait.id);
     actions.append(reply);
   }
 
-  if (replyTarget) {
+  if (context.canDecide && replyTarget) {
     const [label, target] = replyTarget;
     actions.append(iconButton('reply', label, () => beginReply(target)));
   }
   line.append(bubble, actions);
   row.append(line, ...extras);
   return row;
+}
+function syncTimelineAvatar(row, show, bot) {
+  const current = row.querySelector('.msg-line')?.firstElementChild;
+  if (show && current?.classList.contains('msg-avatar-space')) current.replaceWith(avatar(bot, 'msg-avatar'));
+  else if (!show && current?.classList.contains('msg-avatar')) current.replaceWith(node('span', 'msg-avatar-space'));
 }
 function workingLine(data) {
   const row = node('div', 'msg bot working group-start');
@@ -1036,57 +1089,60 @@ function dayLabel(seconds) {
   return days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(seconds * 1000);
 }
 
-function peerExchangeLink(messages, activeBot) {
-  const first = messages[0];
-  const { fromBotId, toBotId } = first.data;
-  const peer = participant(fromBotId === activeBot ? toBotId : fromBotId);
-  const count = messages.length === 1 ? '1 message' : `${messages.length} messages`;
+function peerExchangeLink(peer, messageCount, activeBot, firstMessageId) {
+  const count = messageCount === 1 ? '1 message' : `${messageCount} messages`;
   const link = peerLink(activeBot, peer.id, null, 'peer-exchange-link');
   link.append(avatar(peer, 'peer-exchange-avatar'), node('span', null, `${count} with ${peer.name}`));
-  link.dataset.peerFocus = first.id;
+  link.dataset.peerFocus = firstMessageId;
   return link;
 }
 
-function peerThread(events, dm) {
-  const fragment = document.createDocumentFragment();
+function peerThread(events, dm, keep) {
   if (!events.length) {
-    const empty = node('div', 'empty-state');
     const title = dm.error ? 'DM unavailable' : dm.newestEvent == null ? 'Loading…' : 'No messages yet';
-    empty.append(node('h2', null, title));
-    if (dm.error) empty.append(node('p', null, dm.error));
-    fragment.append(empty);
+    return [keep('empty', [title, dm.error], () => {
+      const empty = node('div', 'empty-state');
+      empty.append(node('h2', null, title));
+      if (dm.error) empty.append(node('p', null, dm.error));
+      return empty;
+    })];
   }
+  const rows = [];
   let day = '';
   for (const event of events) {
     const nextDay = dayLabel(event.time);
     if (nextDay !== day) {
-      fragment.append(node('p', 'day', nextDay));
+      rows.push(keep(`day-${event.id}`, nextDay, () => node('p', 'day', nextDay)));
       day = nextDay;
     }
-    const { fromBotId, text, forwardedMessage } = event.data;
-    const from = participant(fromBotId);
-    const row = node('article', 'msg group-start peer-dm-message');
-    if (forwardedMessage) {
-      const content = node('div', 'peer-forward-content');
-      const label = node('div', 'peer-forward-meta');
-      label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
-      const card = node('div', 'bubble peer-forwarded-message');
-      card.append(node('p', 'event-text', forwardedMessage.text));
-      content.append(label, card);
-      row.append(content);
-    }
-    if (text || !forwardedMessage) {
-      const metadata = node('div', 'msg-meta');
-      metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
-      const line = node('div', 'msg-line');
-      const bubble = node('div', 'bubble');
-      bubble.append(node('p', 'event-text', text));
-      line.append(avatar(from, 'msg-avatar'), bubble);
-      row.append(metadata, line);
-    }
-    fragment.append(row);
+    const from = participant(event.data.fromBotId);
+    rows.push(keep(`event-${event.id}`, [event, from.name, from.avatar], () => peerMessage(event, from)));
   }
-  return fragment;
+  return rows;
+}
+function peerMessage(event, from) {
+  const { text, forwardedMessage } = event.data;
+  const row = node('article', 'msg group-start peer-dm-message');
+  row.id = `event-${event.id}`;
+  if (forwardedMessage) {
+    const content = node('div', 'peer-forward-content');
+    const label = node('div', 'peer-forward-meta');
+    label.append(icon('forward'), node('span', null, `Forwarded by ${from.name}`), eventTime(forwardedMessage));
+    const card = node('div', 'bubble peer-forwarded-message');
+    card.append(node('p', 'event-text', forwardedMessage.text));
+    content.append(label, card);
+    row.append(content);
+  }
+  if (text || !forwardedMessage) {
+    const metadata = node('div', 'msg-meta');
+    metadata.append(node('span', 'msg-name', from.name), eventTime({ time: event.time }));
+    const line = node('div', 'msg-line');
+    const bubble = node('div', 'bubble');
+    bubble.append(node('p', 'event-text', text));
+    line.append(avatar(from, 'msg-avatar'), bubble);
+    row.append(metadata, line);
+  }
+  return row;
 }
 
 function timelineScrollPosition() {
@@ -1096,7 +1152,49 @@ function timelineScrollPosition() {
   return { height, top, atBottom: height - top - scroller.clientHeight < 65 };
 }
 
-function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
+function rememberReadingPosition() {
+  const context = timelineContext();
+  if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
+  const { top, atBottom } = timelineScrollPosition();
+  if (atBottom) return;
+  const viewportTop = elements.conversation.getBoundingClientRect().top;
+  const anchors = elements.timeline.querySelectorAll(':scope > [id], :scope > [data-peer-focus]');
+  const anchor = [...anchors].find((row) => row.getBoundingClientRect().bottom > viewportTop);
+  const { events, olderBefore, newestEvent } = context;
+  readingPositions.set(timelineKey(context.id, context.peerId), {
+    // Retain loaded pages so an older message is available when its conversation reopens.
+    history: { events, olderBefore, newestEvent, historyCursor: context.data?.historyCursor },
+    top,
+    anchorId: anchor?.id,
+    peerFocus: anchor?.dataset.peerFocus,
+    offset: anchor ? anchor.getBoundingClientRect().top - viewportTop : 0,
+  });
+}
+
+function restoreReadingPosition(position) {
+  const scroller = elements.conversation;
+  const anchor = position.anchorId ? byId(position.anchorId) :
+    [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((row) => row.dataset.peerFocus === position.peerFocus);
+  scroller.scrollTop = anchor ? scroller.scrollTop + anchor.getBoundingClientRect().top -
+    scroller.getBoundingClientRect().top - position.offset : position.top;
+}
+
+function eventHistoryForRefresh(context) {
+  // Reopen saved pages only after a successful read of the current conversation.
+  if (context.newestEvent != null) return context;
+  const cached = readingPositions.get(timelineKey(context.id, context.peerId));
+  return cached ? { ...cached.history } : context;
+}
+
+function updateJumpToLatest() {
+  const control = elements['jump-to-latest'];
+  const hidden = timelineScrollPosition().atBottom;
+  if (control.hidden === hidden) return;
+  if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
+  control.hidden = hidden;
+}
+
+function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition(), liveAfterId) {
   const older = elements.older;
   const data = view?.data;
   const context = timelineContext();
@@ -1109,82 +1207,117 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   peerStatus.hidden = !olderFailed;
   peerStatus.textContent = olderFailed ? 'Could not load earlier messages.' : '';
   const scroller = elements.conversation;
-  const focused = elements.timeline.contains(document.activeElement) ? document.activeElement : null;
-  const focusedLink = focused?.dataset.peerFocus;
+  const key = context?.newestEvent != null && timelineKey(context.id, context.peerId);
+  const position = key && readingPositions.get(key);
   const moveScroll = () => {
-    if (focusedLink) {
-      const link = [...elements.timeline.querySelectorAll('[data-peer-focus]')].find((item) => item.dataset.peerFocus === focusedLink);
-      link?.focus({ preventScroll: true });
-    }
     if (scroll === 'older') scroller.scrollTop = previousScroll.top + scroller.scrollHeight - previousScroll.height;
-    else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
+    else if (position) {
+      // The restored offset already includes the returning composer's height.
+      composerHeight = elements['composer-container'].offsetHeight;
+      restoreReadingPosition(position);
+      readingPositions.delete(key);
+    } else if (scroll === 'bottom' || previousScroll.atBottom) scroller.scrollTop = scroller.scrollHeight;
     else scroller.scrollTop = previousScroll.top;
+    updateJumpToLatest();
   };
   if (view?.dm) {
     const dm = view.dm;
     const participants = [participant(dm.id), participant(dm.peerId)].map(({ id, name, avatar }) => [id, name, avatar]);
     if (!changed('timeline', dm.id, dm.peerId, events, dm.newestEvent, dm.error, participants, dayFormat.format(Date.now()))) return;
     scroller.setAttribute('aria-label', 'Bot DM history');
-    elements.timeline.replaceChildren(peerThread(events, dm));
+    updateTimelineRows(dm, (keep) => peerThread(events, dm, keep));
     moveScroll();
     return;
   }
-  if (!changed('timeline', view?.id, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
-  scroller.setAttribute('aria-label', 'Conversation history');
+  if (changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) {
+    scroller.setAttribute('aria-label', 'Conversation history');
+    updateTimelineRows(context, (keep) => conversationRows(data, events, keep));
+    moveScroll();
+  }
+  const canAnimate = liveAfterId != null && scroll === 'auto' && previousScroll.atBottom && !document.hidden &&
+    !reducedMotion.matches && !document.querySelector('dialog[open]');
+  if (canAnimate) {
+    const id = replyArrivalId(events, liveAfterId);
+    if (id != null) animateLiveReply(id);
+  }
+}
+
+function conversationRows(data, events, keep) {
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    canDecide: data?.canDecide === true,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
     closed: new Map(events.filter((event) => event.kind === 'wait_closed').map((event) => [event.data.waitId, event.data.resolution])),
   };
-  const shown = events.filter((event) => event.kind !== 'wait_closed');
-  const fragment = document.createDocumentFragment();
+  const bot = timeline.bot;
+  const botVersion = JSON.stringify([bot?.id, bot?.name, bot?.avatar]);
+  const shown = timelineMessages(events, dayLabel);
+  const rows = [];
   let peerMessages = [];
   const appendPeerMessages = () => {
     if (!peerMessages.length) return;
-    fragment.append(peerExchangeLink(peerMessages, view.id));
+    const [first] = peerMessages;
+    const { fromBotId, toBotId } = first.data;
+    const peer = participant(fromBotId === view.id ? toBotId : fromBotId);
+    const count = peerMessages.length;
+    rows.push(keep(`peer-${first.id}`, [peer.id, peer.name, peer.avatar, count],
+      () => peerExchangeLink(peer, count, view.id, first.id)));
     peerMessages = [];
   };
   let day = '';
   let previous = null;
-  shown.forEach((event, index) => {
+  shown.forEach(({ event, report }, index) => {
     const eventDay = dayLabel(event.time);
     if (eventDay !== day || event.kind !== 'bot_message' || peerMessages[0]?.data.exchangeId !== event.data.exchangeId) appendPeerMessages();
     if (eventDay !== day) {
-      fragment.append(node('p', 'day', eventDay));
+      rows.push(keep(`day-${event.id}`, eventDay, () => node('p', 'day', eventDay)));
       day = eventDay;
       previous = null;
     }
     if (event.kind === 'bot_message') { peerMessages.push(event); previous = null; return; }
     const side = messageSide(event);
-    const next = shown[index + 1];
+    const next = shown[index + 1]?.event;
     const place = {
       groupStart: previous?.side !== side,
       groupEnd: !next || next.kind === 'bot_message' || messageSide(next) !== side || dayLabel(next.time) !== day,
       taskStart: previous?.taskId !== event.taskId,
       afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
     };
-    fragment.append(eventCard(event, timeline, place));
+    const wait = event.kind === 'waiting' ? timeline.waits.get(event.data.id) : null;
+    const paused = event.kind === 'conversation_reply' ? timeline.paused.get(event.data.messageId) : null;
+    const blocker = ['request', 'conversation_message'].includes(event.kind) ? timeline.queued.get(event.taskId)?.blockedBy : null;
+    const blockedOwner = blocker && bots.find((item) => item.id === blocker.botId)?.name;
+    const row = keep(`event-${event.id}`,
+      [event, report, botVersion, timeline.canDecide, place.groupStart, place.taskStart, place.afterQuestion, wait,
+        event.kind === 'waiting' ? timeline.closed.get(event.data.id) : null,
+        wait && pendingWaits.has(wait.wait.id), paused, paused && pendingWaits.has(`message/${paused.messageId}`), blocker, blockedOwner,
+        event.kind === 'waiting' && !!view.composer?.textAt(event.id)],
+      () => eventCard(event, timeline, place, report));
+    if (side === 'bot') syncTimelineAvatar(row, place.groupEnd && bot, bot);
+    rows.push(row);
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
   appendPeerMessages();
-  if (!fragment.childElementCount) {
-    const empty = node('div', 'empty-state');
-    if (data?.bot) empty.append(avatar(data.bot));
+  if (!rows.length) {
     const loaded = !!data || (!view && listLoaded);
-    empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
-    if (data) empty.append(node('p', null, 'Send a message to start the conversation.'));
-    else if (loaded && !bots.length) {
-      empty.append(node('p', null, 'Create a Bot to get started.'));
-      empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
-    }
-    fragment.append(empty);
+    rows.push(keep('empty', [!!data, loaded, !bots.length, botVersion], () => {
+      const empty = node('div', 'empty-state');
+      if (data?.bot) empty.append(avatar(data.bot));
+      empty.append(node('h2', null, loaded ? (data ? data.bot.name : 'No Bots') : 'Loading…'));
+      if (!data && loaded && !bots.length) {
+        empty.append(node('p', null, 'Create a Bot to get started.'));
+        empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+      }
+      return empty;
+    }));
   }
-  if (data && (data.presence === 'working' || data.presence === 'thinking')) fragment.append(workingLine(data));
-  elements.timeline.replaceChildren(fragment);
-  moveScroll();
+  if (data && (data.presence === 'working' || data.presence === 'thinking')) {
+    rows.push(keep('working', [botVersion, data.presence, data.activeSessions?.[0]?.request], () => workingLine(data)));
+  }
+  return rows;
 }
 
 function setNotice(context, text, isError = false) {
@@ -1193,9 +1326,12 @@ function setNotice(context, text, isError = false) {
 }
 const replyLabels = { wait: 'Reply to a question', message: 'Reply to a message', result: 'Reply to a result' };
 const composerLimit = (reply) => reply?.kind === 'wait' ? 8000 : 16000;
+const closedQuestion = (context, reply) => reply?.kind === 'wait' &&
+  !context.data.waits.some((task) => task.wait.messageId === reply.messageId);
+let composition = null;
 function scheduleNoticeFade(context, notice) {
   const bot = context.id;
-  if (!notice || notice.isError || notice.timer || sendingMessages.has(bot) || [...pendingWaits.values()].includes(bot)) return;
+  if (!notice || notice.isError || notice.timer || sendingMessages.has(context.composer) || [...pendingWaits.values()].includes(bot)) return;
   notice.timer = setTimeout(() => {
     notice.timer = null;
     if (notices.get(bot) !== notice || !showingComposer(bot)) return;
@@ -1216,27 +1352,38 @@ function fitMessage() {
 }
 function renderComposer() {
   const context = view;
-  const available = context?.data && !context.dm;
+  const available = !!context?.composer && !context.dm;
+  const canDecide = available && context.data?.canDecide === true;
   elements['composer-container'].hidden = !available;
-  if (!available) return;
-  const reply = replies.get(context.id);
+  elements.composer.hidden = !canDecide;
+  elements['view-only-notice'].hidden = !available || canDecide;
+  if (!canDecide) {
+    composition = null;
+    elements.message.value = '';
+    return;
+  }
+  const { composer } = context;
+  const reply = composer.reply;
+  if (composition && (composition.composer !== composer || composition.anchor !== reply?.messageId)) composition = null;
   const notice = notices.get(context.id);
-  const body = reply ? reply.text : drafts.get(context.id) ?? '';
-  const busy = sendingMessages.has(context.id);
-  const closedReply = reply?.closed === true;
+  const body = composer.text;
+  const busy = sendingMessages.has(composer);
+  const closedReply = closedQuestion(context, reply);
+  const source = reply && context.events.get(reply.messageId)?.data;
+  const summary = reply?.summary ?? (source && (reply.kind === 'wait' ? waitText(source) : source.report ?? source.text));
   elements['reply-context'].hidden = !reply;
   elements['reply-label'].textContent = reply ? replyLabels[reply.kind] : '';
-  elements['reply-question'].textContent = reply?.summary ?? '';
+  elements['reply-question'].textContent = reply ? summary ?? 'Earlier message' : '';
   elements['compose-label'].textContent = reply ? replyLabels[reply.kind] : 'Message';
   elements['cancel-reply'].disabled = busy;
   elements.message.placeholder = reply ? 'Write a reply' : `Message ${context.data.bot.name}`;
-  if (elements.message.value !== body) {
+  if (!composition && elements.message.value !== body) {
     elements.message.value = body;
     fitMessage();
   }
   elements.message.readOnly = busy || closedReply;
   elements.composer.setAttribute('aria-busy', String(busy));
-  elements.send.disabled = busy || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
+  elements.send.disabled = busy || !!composition || closedReply || !body.trim() || byteLength(body) > composerLimit(reply);
   elements.composer.classList.toggle('can-send', !elements.send.disabled);
   elements.send.setAttribute('aria-label', reply ? 'Send reply' : 'Send message');
   elements.send.title = reply ? 'Reply' : 'Send';
@@ -1250,7 +1397,7 @@ function renderComposer() {
 const detailNav = byId('detail-nav');
 const settingsSections = {
   general: ['General', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>'],
-  cron: ['Configured recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
+  cron: ['Recurring requests', '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/></svg>'],
 };
 const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9.5 6.5 5.5 5.5-5.5 5.5"/></svg>';
 let detailAvatar = null;
@@ -1428,7 +1575,6 @@ const botEditor = createBotEditor(elements['bot-editor'], {
 function openNewBot(origin = elements['new-bot-button']) {
   reopenSettingsOnClose = false;
   closeMenu(false);
-  openNavigation(false, false);
   closeDetail();
   botEditor.openCreate({ bots, origin });
 }
@@ -1453,14 +1599,22 @@ function generalContent(bot) {
     note.setAttribute('role', 'status');
     hero.append(note);
   }
+  const rows = node('div', 'settings-card settings-rows');
+  if (!bot.soul) rows.append(settingsRow('Role', 'None'));
+  rows.append(bot.cron.length
+    ? settingsRow('Recurring requests', String(bot.cron.length), () => selectSection('cron', true))
+    : settingsRow('Recurring requests', 'None'));
+  const access = document.createElement('a');
+  access.className = 'settings-row';
+  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
+  access.append(node('span', 'settings-row-label', 'Access and credentials'));
+  access.insertAdjacentHTML('beforeend', chevron);
+  rows.append(access);
+  if (!bot.soul) return [hero, rows];
   const role = node('section', 'settings-card');
   role.setAttribute('aria-label', 'Role');
-  role.append(bot.soul ? node('p', 'settings-soul', bot.soul) : node('p', 'settings-empty', 'No role configured.'));
-  const schedules = node('div', 'settings-card settings-rows');
-  schedules.append(bot.cron.length
-    ? settingsRow('Configured recurring requests', `${bot.cron.length} entries`, () => selectSection('cron', true))
-    : settingsRow('Configured recurring requests', 'None'));
-  return [hero, role, schedules];
+  role.append(node('p', 'settings-soul', bot.soul));
+  return [hero, role, rows];
 }
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
@@ -1478,12 +1632,10 @@ function cronContent(bot) {
   return [list];
 }
 function settingsContent(bot, section = 'general') {
-  elements['detail-title'].textContent = settingsSections[section][0];
+  // Without recurring requests there are no section tabs, so "General" would name nothing.
+  elements['detail-title'].textContent = section === 'general' && !bot.cron.length ? 'Settings' : settingsSections[section][0];
   if (section === 'cron') return cronContent(bot);
-  const access = document.createElement('a');
-  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
-  access.textContent = 'Manage access and credentials';
-  return [...generalContent(bot), access];
+  return generalContent(bot);
 }
 function waitForm(label, fields, submit, id) {
   const form = node('form', 'wait-form');
@@ -1511,6 +1663,7 @@ function localDateTime(timestamp) {
 }
 function waitContent(context, task) {
   const wait = task.wait;
+  const canDecide = context.data.canDecide === true;
   elements['detail-title'].textContent = waitLabel(wait.reason);
   const request = node('blockquote', 'wait-request');
   request.append(node('p', 'wait-request-text', task.request));
@@ -1518,15 +1671,23 @@ function waitContent(context, task) {
   const reason = node('div', 'wait-reason');
   reason.append(node('p', 'wait-text', waitText(wait)));
   if (wait.decisionReason) reason.append(node('p', 'wait-why', wait.decisionReason));
+  if (wait.reason === 'deadline' && task.deadline)
+    reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
   const content = [request, reason];
   const actions = node('div', 'wait-actions');
   const primary = node('div', 'wait-primary');
   const perform = (operation, fields) => void operate(context, task, operation, fields);
   const action = (label, operation) => button(label, 'dialog-button primary', () => perform(operation));
-  const runLink = linkToRun(wait.run, wait.reason === 't3_input' ? 'Approve in T3' : 'Open in T3');
+  const approveInT3 = canDecide && wait.reason === 't3_input';
+  const runLink = linkToRun(wait.run, approveInT3 ? 'Approve in T3' : 'Open in T3');
   if (runLink) {
-    runLink.className = wait.reason === 't3_input' ? 'dialog-button primary' : 'dialog-button quiet';
+    runLink.className = approveInT3 ? 'dialog-button primary' : 'dialog-button quiet';
     primary.append(runLink);
+  }
+  if (!canDecide) {
+    if (wait.choices?.length) reason.append(readOnlyChoices(wait.choices));
+    if (runLink) content.push(primary);
+    return content;
   }
   if (wait.reason === 'user_question') {
     primary.append(questionActions(context, task, { dialog: true }));
@@ -1534,7 +1695,6 @@ function waitContent(context, task) {
   else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
   else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
   else if (wait.reason === 'deadline') {
-    if (task.deadline) reason.append(node('p', 'wait-why', `Current deadline · ${fullTime.format(task.deadline * 1000)}`));
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
@@ -1627,10 +1787,10 @@ function renderDetail() {
   }
   if (detail.kind === 'paused') {
     const turn = view.data.pausedConversations.find((item) => item.messageId === detail.messageId);
-    if (changed('detail', detail, turn, [...pendingWaits])) {
+    if (changed('detail', detail, turn, view.data.canDecide, [...pendingWaits])) {
       elements['detail-title'].textContent = waitLabel('model_budget');
       elements['detail-body'].replaceChildren(node('p', 'prose', turn?.text ?? 'This request has closed.'));
-      if (turn) elements['detail-body'].append(pausedActions(turn));
+      if (turn && view.data.canDecide === true) elements['detail-body'].append(pausedActions(turn));
     }
     return;
   }
@@ -1643,16 +1803,22 @@ function renderDetail() {
     return;
   }
   if (changed('detail', detail, task)) replaceDetail(() => waitContent(view, task));
-  for (const control of elements['detail-body'].querySelectorAll('button, input')) control.disabled = pendingWaits.has(task.wait.id);
+  const busy = pendingWaits.has(task.wait.id);
+  for (const control of elements['detail-body'].querySelectorAll('button, input')) {
+    if (!control.closest('.question-choice-form')) control.disabled = busy;
+  }
+  const choiceForm = elements['detail-body'].querySelector('.question-choice-form');
+  if (choiceForm) updateQuestionChoiceForm(choiceForm, view.questionChoices?.get(questionKey(task)), busy);
 }
-function render(scroll) {
+function render(scroll, liveAfterId) {
   renderBots();
   renderHeader();
   renderActivity();
   const previousScroll = timelineScrollPosition();
   renderComposer();
-  renderTimeline(scroll, previousScroll);
+  renderTimeline(scroll, previousScroll, liveAfterId);
   renderDetail();
+  scheduleReadCheck();
 }
 
 function mergeSessionTasks(context, tasks) {
@@ -1663,17 +1829,21 @@ function mergeSessionTasks(context, tasks) {
 }
 
 function mergeLatest(context, latest) {
+  if (context.data?.canDecide !== latest.canDecide) {
+    signatures.delete('timeline');
+    signatures.delete('detail');
+  }
   if (!context.data) context.sessionsBefore = latest.sessionsBefore;
   mergeSessionTasks(context, latest.sessionTasks);
   context.data = latest;
-  const reply = replies.get(context.id);
-  if (!reply || sendingMessages.has(context.id)) return;
-  if (reply.kind === 'wait' && !latest.waits.some((task) => task.wait.messageId === reply.messageId)) {
-    if (reply.text.trim()) reply.closed = true;
-    else {
-      replies.delete(context.id);
-      setNotice(context, 'That question is no longer open, so your reply was not sent.');
-    }
+  if (context.questionChoices?.size) {
+    const current = new Set(latest.waits.map(questionKey));
+    for (const key of context.questionChoices.keys()) if (!current.has(key)) context.questionChoices.delete(key);
+  }
+  const composer = context.composer = composerDrafts(context.id, latest.composerPerson);
+  if (!sendingMessages.has(composer) && closedQuestion(context, composer.reply) && !composer.text) {
+    composer.closeReply();
+    setNotice(context, 'That question is no longer open, so your reply was not sent.');
   }
 }
 async function conversationPage(timeline, before) {
@@ -1688,8 +1858,11 @@ async function refreshPeerConversation(context, scroll) {
   const readPage = before => conversationPage(dm, before);
   try {
     const latest = await readPage();
-    await refreshEventHistory(dm, latest, readPage, isCurrent);
     if (!isCurrent()) return;
+    const eventHistory = eventHistoryForRefresh(dm);
+    await refreshEventHistory(eventHistory, latest, readPage, isCurrent);
+    if (!isCurrent()) return;
+    if (eventHistory !== dm) Object.assign(dm, eventHistory);
     dm.error = null;
   } catch (error) {
     if (!isCurrent()) return;
@@ -1698,22 +1871,30 @@ async function refreshPeerConversation(context, scroll) {
   }
   renderTimeline(scroll);
 }
-async function refreshView(context, scroll) {
-  if (context !== view) return;
-  const isCurrent = () => context === view;
+async function refreshView(context, scroll, liveGeneration) {
+  const isCurrent = () => context === view &&
+    (liveGeneration == null || (liveGeneration === visibilityGeneration && !document.hidden));
+  if (!isCurrent()) return;
+  const liveAfterId = liveGeneration == null ? undefined : context.newestEvent;
   try {
     const params = new URLSearchParams({ bot: context.id });
-    if (context.data) {
-      params.set('changesAfter', context.data.historyCursor);
-      params.set('sessionsAfter', context.data.sessionCursor);
-    }
+    const eventHistory = eventHistoryForRefresh(context);
+    const historyCursor = context.data?.historyCursor ?? eventHistory.historyCursor;
+    if (historyCursor != null) params.set('changesAfter', historyCursor);
+    if (context.data) params.set('sessionsAfter', context.data.sessionCursor);
     const latest = await api(`view?${params}`);
-    await refreshEventHistory(context, latest, before => conversationPage(context, before), isCurrent);
     if (!isCurrent()) return;
+    await refreshEventHistory(eventHistory, latest, before => conversationPage(context, before), isCurrent);
+    if (!isCurrent()) return;
+    if (eventHistory !== context) Object.assign(context, eventHistory);
     mergeLatest(context, latest);
     setConnection('ready');
   } catch (error) {
     if (!isCurrent()) return;
+    if ([401, 403, 404].includes(error.status)) {
+      context.composer = null;
+      renderComposer();
+    }
     if (error.status === 404) void refreshBots();
     else {
       setConnection('offline');
@@ -1721,7 +1902,7 @@ async function refreshView(context, scroll) {
     }
     return;
   }
-  render(scroll);
+  render(scroll, liveAfterId);
   if (context.openSettingsOnLoad) {
     context.openSettingsOnLoad = null;
     openSettingsFromMenu(context.id);
@@ -1730,7 +1911,18 @@ async function refreshView(context, scroll) {
 const refreshBots = coalescedRefresh(async () => {
   try {
     const latest = await api('bots');
-    bots = latest;
+    const viewer = responseViewers.get(latest) ?? null;
+    const previous = viewer === sidebarViewer ? readState : null;
+    sidebarViewer = viewer;
+    readState = new Map();
+    // The first successful list sets a baseline for existing conversations in this tab.
+    bots = latest.map(({ latestIncomingEventId: incoming, ...bot }) => {
+      if (viewer !== null) {
+        const readThrough = previous?.get(bot.id)?.readThrough ?? incoming;
+        readState.set(bot.id, { incoming, readThrough });
+      }
+      return bot;
+    });
     listLoaded = true;
     setConnection('ready');
     if (!bots.some((bot) => bot.id === view?.id)) selectLocation();
@@ -1796,7 +1988,7 @@ async function operate(context, task, operation, fields = {}) {
     targetRevision: task.currentRevision ?? 0, targetGeneration: task.generation, ...fields });
 }
 async function submitOperation(context, key, payload) {
-  if (!context || pendingWaits.has(key)) return;
+  if (context?.data?.canDecide !== true || pendingWaits.has(key)) return;
   const isOpen = () => view === context && (payload.itemKind
     ? detail?.kind === 'paused' && detail.messageId === payload.waitId
     : detail?.waitId === payload.waitId);
@@ -1821,33 +2013,25 @@ async function submitOperation(context, key, payload) {
 }
 async function submit(event) {
   event.preventDefault();
+  if (view?.data?.canDecide !== true) return;
   const context = view;
-  if (!context?.data || context.dm || elements.send.disabled) return;
-  const reply = replies.get(context.id);
-  const text = reply ? reply.text : drafts.get(context.id);
-  const replyToMessageId = reply?.messageId;
-  const previous = pendingMessage(context.id)?.payload;
-  const clientMessageId = previous?.text === text && previous.replyToMessageId === replyToMessageId
-    ? previous.clientMessageId : crypto.randomUUID();
-  const payload = { botId: context.id, clientMessageId, text };
-  if (replyToMessageId) payload.replyToMessageId = replyToMessageId;
-  rememberMessage(context.id, { payload, reply });
-  sendingMessages.add(context.id);
+  if (!context?.composer || context.dm || elements.send.disabled) return;
+  const { composer } = context;
+  const payload = composer.prepareSend();
+  sendingMessages.add(composer);
   setNotice(context, 'Sending message…');
   try {
     await api('messages', payload);
-    rememberMessage(context.id, null);
-    if (reply) replies.delete(context.id);
-    else drafts.delete(context.id);
+    composer.settleSend(payload, true);
     setNotice(context, 'Message received.');
     if (showingComposer(context.id)) elements.conversation.scrollTop = elements.conversation.scrollHeight;
     if (!liveUpdates.live) await Promise.all([refreshBots(), showingComposer(context.id) && view.refresh('bottom')]);
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) rememberMessage(context.id, null);
+    if (error.status >= 400 && error.status < 500) composer.settleSend(payload, false);
     setNotice(context, errors[error.message] ?? 'Flock could not confirm receipt. You can resend the same message.', true);
   }
   finally {
-    sendingMessages.delete(context.id);
+    sendingMessages.delete(composer);
     if (showingComposer(context.id)) renderComposer();
   }
 }
@@ -1878,27 +2062,50 @@ elements.detail.addEventListener('close', () => {
   settingsReturnFocus = null;
 });
 elements.older.addEventListener('click', loadOlder);
+elements.conversation.addEventListener('scroll', updateJumpToLatest, { passive: true });
+new ResizeObserver(updateJumpToLatest).observe(elements.conversation);
+elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
+  if (event.button === 0) event.preventDefault();
+});
+elements['jump-to-latest'].addEventListener('click', () => {
+  const scroller = elements.conversation;
+  scroller.scrollTop = scroller.scrollHeight;
+  updateJumpToLatest();
+});
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
 elements['cancel-reply'].addEventListener('click', () => {
-  replies.delete(view.id);
+  view.composer.closeReply();
   renderComposer();
   elements.message.focus();
 });
-elements.message.addEventListener('input', () => {
-  if (!view || view.dm) return;
-  const reply = replies.get(view.id);
-  if (reply) reply.text = elements.message.value;
-  else drafts.set(view.id, elements.message.value);
+function updateDraft() {
+  if (!view?.composer || view.dm || elements.message.readOnly) return;
+  view.composer.edit(elements.message.value);
   fitMessage();
   notices.delete(view.id);
-  const limit = composerLimit(reply);
+  const limit = composerLimit(view.composer.reply);
   if (byteLength(elements.message.value) > limit) setNotice(view, `Messages can be up to ${limit.toLocaleString('en')} bytes.`, true);
   else renderComposer();
+}
+elements.message.addEventListener('compositionstart', () => {
+  if (!view?.composer || view.dm || elements.message.readOnly) return;
+  composition = { composer: view.composer, anchor: view.composer.reply?.messageId };
+  renderComposer();
+});
+elements.message.addEventListener('compositionend', () => {
+  if (!composition) return;
+  composition = null;
+  if (elements.message.readOnly) renderComposer();
+  else updateDraft();
+});
+elements.message.addEventListener('input', (event) => {
+  if (composition || event.isComposing) fitMessage();
+  else updateDraft();
 });
 // Safari reports the composition-committing Enter with keyCode 229 and isComposing false.
 elements.composer.addEventListener('keydown', (event) => {
-  if (event.isComposing || event.keyCode === 229) return;
+  if (composition || event.isComposing || event.keyCode === 229) return;
   if (event.target === elements.message) handleComposerEnter(event, elements.send);
   if (event.key === 'Escape' && !elements['reply-context'].hidden) {
     event.preventDefault();
@@ -1938,10 +2145,10 @@ document.addEventListener('keydown', (event) => {
 
 let syncRetry;
 function retrySync() {
-  if (!document.hidden) syncRetry ??= setTimeout(syncAll, 2500);
+  if (!document.hidden) syncRetry ??= setTimeout(catchUp, 2500);
 }
 
-function syncAll() {
+function catchUp() {
   clearTimeout(syncRetry);
   syncRetry = null;
   if (document.hidden) return;
@@ -1950,9 +2157,10 @@ function syncAll() {
   void view?.dm?.refresh();
 }
 
-const liveUpdates = createLiveUpdates(syncAll, (change) => {
+const liveUpdates = createLiveUpdates(catchUp, (change) => {
+  if (document.hidden) return;
   if (change.list === true) void refreshBots();
-  if (view && change.bot === view.id) void view.refresh();
+  if (view && change.bot === view.id) void view.refresh(undefined, liveUpdates.live ? visibilityGeneration : null);
   const dm = view?.dm;
   if (dm && change.dm?.bot === dm.id && change.dm.peer === dm.peerId) void dm.refresh();
 });
@@ -1970,13 +2178,22 @@ function subscribeToView() {
 
 function resumeUpdates() {
   subscribeToView();
-  syncAll();
+  catchUp();
 }
 
+elements.conversation.addEventListener('scroll', scheduleReadCheck, { passive: true });
+new ResizeObserver(scheduleReadCheck).observe(elements.conversation);
+document.addEventListener('close', scheduleReadCheck, true);
 render();
 resumeUpdates();
-document.addEventListener('visibilitychange', resumeUpdates);
-window.addEventListener('pagehide', () => liveUpdates.use(null));
+document.addEventListener('visibilitychange', () => {
+  visibilityGeneration++;
+  resumeUpdates();
+});
+window.addEventListener('pagehide', () => {
+  visibilityGeneration++;
+  liveUpdates.use(null);
+});
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 

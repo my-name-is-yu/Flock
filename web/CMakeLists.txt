@@ -37,7 +37,9 @@ if(BUILD_TESTING)
   if(FLOCK_NODE_EXECUTABLE AND FLOCK_CHROME_EXECUTABLE)
     add_test(NAME flock_web_board_inbox_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/board-inbox.mjs" "${FLOCK_CHROME_EXECUTABLE}")
-    set_tests_properties(flock_web_board_inbox_dom PROPERTIES TIMEOUT 30)
+    add_test(NAME flock_web_question_choices_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/question-choices.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+    set_tests_properties(flock_web_board_inbox_dom flock_web_question_choices_dom PROPERTIES TIMEOUT 30)
   endif()
   add_executable(flock_web_tests tests/http.cpp tests/board_inbox.cpp tests/channels_local.cpp)
   target_include_directories(flock_web_tests SYSTEM PRIVATE "${flock_httplib_SOURCE_DIR}")
@@ -48,8 +50,15 @@ if(BUILD_TESTING)
   target_link_libraries(flock_web_conversation_tests PRIVATE flock_web Threads::Threads)
   add_test(NAME flock_web_conversation COMMAND flock_web_conversation_tests)
   if(FLOCK_NODE_EXECUTABLE)
+    add_test(NAME flock_web_composer_drafts
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" --test "${CMAKE_CURRENT_SOURCE_DIR}/tests/composer-drafts.mjs")
     add_test(NAME flock_web_event_history
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/event-history.mjs")
+    if(FLOCK_CHROME_EXECUTABLE)
+      add_test(NAME flock_web_timeline_rows_dom COMMAND "${FLOCK_NODE_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/timeline-rows.mjs" "${FLOCK_CHROME_EXECUTABLE}")
+      set_tests_properties(flock_web_timeline_rows_dom PROPERTIES TIMEOUT 30)
+    endif()
     if(TARGET flock_app_support)
       target_include_directories(flock_web_conversation_tests PRIVATE "${PROJECT_SOURCE_DIR}/app")
       target_link_libraries(flock_web_conversation_tests PRIVATE flock_app_support)
