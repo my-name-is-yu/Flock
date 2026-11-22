@@ -2,6 +2,8 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
+Flock reopens databases that use the current SQLite schema. Older development schemas are unsupported. Use a new state directory with `--home` to try the current build alongside an older database.
+
 ## Build
 
 You need a C++20 compiler, CMake 3.24 or later, and development libraries for SQLite 3.35 or later, libcurl, and OpenSSL. Connecting to a live model requires Node.js 22 or later. Connection tests use Python 3.

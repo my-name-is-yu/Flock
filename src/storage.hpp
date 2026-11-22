@@ -20,13 +20,18 @@ private:
 };
 std::string field(const Json&, std::string_view);
 bool terminal(const Json&);
+Json questionTarget(const Json&);
 std::string actionId();
+std::string taskIntent(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
+
+enum class RequestJournal { record, skip };
 
 struct PeerExchange {
     std::string id, kind, phase, lastMessage;
     Id sender = 0, recipient = 0;
+    bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
 struct TaskChange { std::string intent, doneWhen, environment; };
@@ -60,7 +65,7 @@ struct Store::Impl {
     mutable std::recursive_mutex mutex;
     SecretStore secrets{path.parent_path()};
     class SessionEvidence;
-    void migrateAccess();
+    void initializeAccessSchema();
     Json sessionReadTool(std::string_view bot, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, Json& steps, T3&);
     SecretRedactor redactor(std::string_view bot) const;
@@ -75,6 +80,7 @@ struct Store::Impl {
     Id last() const { return sqlite3_last_insert_rowid(db); }
     Json load(Id) const;
     Json taskDetails(Id, bool includeBlocker) const;
+    void addTaskDetails(Json&) const;
     Json queueBlocker(Id) const;
     void migrateConversation();
     void migrateModelBudget();
@@ -87,7 +93,10 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit) const;
     bool runTurn(Id messageId, Model&, T3&, const Runtime::NotesLoader&);
     Json prepareSessionEffect(const conversation::Message&, int step, const Decision&);
-    std::optional<conversation::Message> turnMessage(Id messageId) const;
+    bool turnPending(Id messageId) const;
+    conversation::Message loadTurnMessage(Id messageId) const;
+    const char* questionAnswerError(const Json& task, const conversation::Message&) const;
+    Json taskState(const Json& task, const conversation::Message&) const;
     Json turnInput(const conversation::Message&, int step) const;
     Json applyTurnTool(const conversation::Message&, int step, const Decision&);
     void finishTurn(const conversation::Message&, std::string text, const Json& suggestions, std::string_view route);
@@ -101,12 +110,11 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
-    Id submit(const Intake&, std::string_view peerKind = {}, Id sourceMessageId = 0,
-              const Json& source = nullptr);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source);
-    Id submit(const Intake&, Id sourceMessageId, const Json& source, bool peerTask);
+    Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
+              RequestJournal requestJournal = RequestJournal::record);
     void operate(Id, Id, std::string_view, const Json&, bool fromConversation = false);
     std::optional<PeerExchange> peerExchange(Id) const;
+    bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&);
     Id journal(Id, std::string_view kind, const Json&);
