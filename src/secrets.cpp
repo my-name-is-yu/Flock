@@ -178,16 +178,28 @@ static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, s
 void Store::protectGitCredential(std::string value) {
     if (value.empty()) return;
     std::lock_guard lock(p_->mutex);
+    if (std::ranges::find(p_->gitCredentials,value) != p_->gitCredentials.end()) return;
+    auto epoch = p_->query("SELECT random()");
+    epoch.next();
     p_->gitCredentials.push_back(std::move(value));
+    p_->gitRedactionEpoch = epoch.number(0);
 }
 
-SecretRedactor Store::Impl::redactor(std::string_view bot) const {
+SecretRedactor Store::Impl::redactor(std::string_view bot, Json* revision) const {
     std::lock_guard lock(mutex);
-    return readRedactor(query(R"SQL(
-SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
+    auto rows = query(R"SQL(
+SELECT file,id FROM protected_inputs p WHERE p.status='fulfilled'
  AND (p.bot=? OR EXISTS (SELECT 1 FROM grant_audit_log a WHERE a.bot=? AND a.action IN ('approve','grant')
       AND json_extract(a.scope,'$.resourceKind')='secret' AND json_extract(a.scope,'$.resourceId')=p.name))
-)SQL",{bot,bot}),secrets,gitCredentials);
+ ORDER BY id
+)SQL",{bot,bot});
+    auto values = gitCredentials;
+    if (revision) *revision = Json::array({gitRedactionEpoch});
+    while (rows.next()) {
+        values.push_back(secrets.read({rows.string(0)}));
+        if (revision) revision->push_back(rows.number(1));
+    }
+    return SecretRedactor(std::move(values));
 }
 
 SecretRedactor Store::Impl::sharedRedactor() const {
