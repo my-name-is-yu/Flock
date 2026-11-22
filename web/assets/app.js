@@ -831,7 +831,8 @@ function eventTime(event, extra) {
 }
 function sourceAction(source, label = 'Open source') {
   return button(label, 'text-button', async () => {
-    const target = byId(`event-${source.messageId}`)?.closest('article');
+    const match = byId(`event-${source.messageId}`);
+    const target = match?.closest('article') ?? match;
     if (target) {
       closeDetail();
       target.focus();
@@ -880,7 +881,7 @@ function eventCard(event, context, place, report) {
   if (report) {
     const anchor = node('span');
     anchor.id = `event-${report.id}`;
-    anchor.setAttribute('aria-hidden', 'true');
+    anchor.hidden = true;
     row.append(anchor);
   }
   row.classList.toggle('group-start', place.groupStart);
@@ -1012,11 +1013,7 @@ function eventCard(event, context, place, report) {
 
   if (replyTarget) {
     const [label, target] = replyTarget;
-    actions.append(iconButton('reply', report ? 'Reply to Bot completion' : label, () => beginReply(target)));
-  }
-  if (report) {
-    actions.append(iconButton('reply', 'Reply to Session report', () =>
-      beginReply({ kind: 'result', messageId: report.id, summary: report.data.report })));
+    actions.append(iconButton('reply', label, () => beginReply(target)));
   }
   line.append(bubble, actions);
   row.append(line, ...extras);
