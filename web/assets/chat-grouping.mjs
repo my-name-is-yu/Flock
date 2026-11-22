@@ -3,6 +3,8 @@ const groupGapSeconds = 15 * 60;
 function messageSide(event) {
   if (event.kind === 'cancelled') return 'system';
   if (event.kind === 'bot_message') return 'peer';
+  if (event.kind === 'conversation_message' && event.data.channel?.channelKind)
+    return event.data.channel.fromViewer === true ? 'user' : 'external';
   return ['conversation_message', 'user_answer'].includes(event.kind) || (event.kind === 'request' && event.data.source !== 'automation') ? 'user' : 'bot';
 }
 
