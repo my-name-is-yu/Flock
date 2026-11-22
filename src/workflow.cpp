@@ -76,7 +76,7 @@ bool closed(std::string_view status) {
 }
 }
 
-void Store::Impl::migrateWorkflow() {
+void Store::Impl::initializeWorkflowSchema() {
     Transaction tx(db);
     exec(R"SQL(CREATE TABLE IF NOT EXISTS workflows(id INTEGER PRIMARY KEY,bot_id TEXT NOT NULL,
         routing TEXT NOT NULL,request TEXT NOT NULL,message_id INTEGER NOT NULL REFERENCES messages,stop_requested INTEGER NOT NULL DEFAULT 0))SQL");

@@ -19,7 +19,7 @@ std::string boundedJsonText(std::string_view text, std::size_t limit, std::size_
 }
 }
 
-void Store::Impl::migrateCompaction() {
+void Store::Impl::initializeCompactionSchema() {
     Transaction tx(db);
     exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_compactions(
         id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, start_message_id INTEGER NOT NULL REFERENCES journal(id),
@@ -31,7 +31,8 @@ void Store::Impl::migrateCompaction() {
           coalesce(m.text,json_extract(j.data,'$.report'),json_extract(j.data,'$.text'),'') text
         FROM journal j LEFT JOIN messages m ON m.id=j.id LEFT JOIN tasks t ON t.id=j.task_id
         WHERE j.kind IN ('conversation_message','conversation_reply','completed','cancelled','report')
-          OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question'))SQL");
+          OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
+          OR (j.kind='user_answer' AND j.conversation_bot_id IS NULL AND json_extract(j.data,'$.conversation') IS NOT 1))SQL");
     tx.commit();
 }
 
@@ -63,11 +64,18 @@ Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Jso
                    {"startMessageId",saved.at("startMessageId")},{"endMessageId",boundary},{"summary",saved.at("summary")}};
         remaining -= summary.dump().size();
     }
-    auto rows = query("SELECT id,task_id,kind,data,text FROM compactable_messages WHERE bot_id=? AND id>? AND id<?"
-                      " ORDER BY id DESC LIMIT 24",{bot,boundary,before});
+    auto rows = query(R"SQL(
+SELECT id,task_id,kind,data,text FROM compactable_messages WHERE bot_id=? AND id>? AND (
+    (kind='conversation_message' AND id<?) OR
+    (kind='conversation_reply' AND json_extract(data,'$.replyToMessageId')<?) OR
+    kind NOT IN ('conversation_message','conversation_reply'))
+ORDER BY id DESC LIMIT 24
+)SQL",{bot,boundary,before,before});
     while (rows.next()) {
         const auto kind = rows.string(2);
-        const char* role = kind=="conversation_message" ? "user" : kind=="conversation_reply" ? "bot" : "task";
+        const bool user = kind=="conversation_message" || kind=="user_answer";
+        const bool reply = kind=="conversation_reply";
+        const char* role = user ? "user" : reply ? "bot" : "task";
         Json entry = {{"messageId",rows.number(0)},{"kind",kind},{"role",role},{"text",""}};
         if (rows.number(1)) entry["taskId"] = rows.number(1);
         if (kind=="conversation_reply") {
@@ -75,7 +83,8 @@ Json Store::Impl::conversationHistory(std::string_view bot, Id before, const Jso
             for (const auto* key : {"actions","suggestions"})
                 if (data.contains(key)) entry[key] = data.at(key);
         } else if (kind=="waiting") entry["waitId"] = rows.json(3).at("id");
-        const std::size_t limit = kind=="conversation_message" ? 4000 : kind=="conversation_reply" ? 1500 : 700;
+        else if (kind=="user_answer") entry["waitId"] = conversation_storage::integer(rows.json(3),"waitId");
+        const std::size_t limit = user ? 4000 : reply ? 1500 : 700;
         const auto bytes = entry.dump().size() + (history.empty() && summary.is_null() ? 0 : 1);
         if (bytes>remaining) break;
         entry["text"] = boundedJsonText(rows.string(4),limit,remaining-bytes);
@@ -92,9 +101,10 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, std::stri
     if (tool == "continue_fresh_session") {
         auto task = ownTask(identifier(args,"taskId",true),bot);
         if (terminal(task) || task.at("state") == "cancelling") throw Conflict("Task is closed or stopping");
-        auto instruction = args.value("instruction",std::string("Continue with the same completion criteria."));
-        if (!conversation_storage::hasText(instruction) || instruction.size()>8000) throw Conflict("Invalid instruction");
+        const auto instruction = args.contains("instruction") ? conversation_storage::text(args,"instruction",8000,true)
+                                                              : "Continue with the same completion criteria.";
         task["newSessionRequired"] = true;
+        task["freshContextRequested"] = true;
         task["replanning"] = true;
         acceptInstruction(task,message,step,instruction,nullptr,routing,nullptr);
         return {{"ok",true},{"freshContext",true},{"taskId",task.at("id")},{"effect","replanning"}};
