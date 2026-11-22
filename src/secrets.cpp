@@ -158,6 +158,14 @@ SELECT file FROM protected_inputs p WHERE p.status='fulfilled'
     return SecretRedactor(std::move(values));
 }
 
+SecretRedactor Store::Impl::sharedRedactor() const {
+    std::lock_guard lock(mutex);
+    auto rows = query("SELECT file FROM protected_inputs WHERE status='fulfilled'");
+    std::vector<std::string> values;
+    while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
+    return SecretRedactor(std::move(values));
+}
+
 Json Access::redactSecrets(std::string_view bot, const Json& data) const {
     return db_.redactor(bot).record(data,SecretRedactor::Fields::external);
 }

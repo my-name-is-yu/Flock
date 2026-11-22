@@ -1,16 +1,13 @@
 #include "bots.hpp"
 
-
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <charconv>
 #include <cstdint>
 #include <fstream>
 #include <optional>
 #include <set>
-#include <sstream>
 
 namespace flockv0::app {
 namespace {
@@ -291,10 +288,17 @@ std::vector<std::string> Bots::ids() const {
     return result;
 }
 
-Bot Bots::get(std::string_view id) const {
-    const auto file = path(id) / "config.json";
-    const auto config = Json::parse(readText(file,maxConfigBytes),nullptr,false);
+Json Bots::readConfig(std::string_view id) const {
+    auto config = Json::parse(readText(path(id) / "config.json",maxConfigBytes),nullptr,false);
     if (!config.is_object()) throw Conflict("Invalid Bot config.json");
+    return config;
+}
+
+Bot Bots::get(std::string_view id) const {
+    return configuredBot(id,readConfig(id));
+}
+
+Bot Bots::configuredBot(std::string_view id, const Json& config) {
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
@@ -349,25 +353,15 @@ Bot Bots::get(std::string_view id) const {
             throw Conflict("allowedBots must contain valid, unique IDs of other Bots");
         bot.allowedBots.push_back(peerId);
     }
-    const auto schedules = config.value("cron",Json::array());
-    if (!schedules.is_array()) throw Conflict("cron must be an array");
-    std::set<std::string> scheduleIds;
-    for (const auto& schedule : schedules) {
-        const auto scheduleId = validatedString(schedule,"id");
-        const auto expression = validatedString(schedule,"schedule");
-        const auto timezone = validatedString(schedule,"timezone");
-        const auto request = validatedString(schedule,"request");
-        if (!validBotId(scheduleId) || !scheduleIds.insert(scheduleId).second || request.size() > 16000)
-            throw Conflict("Cron IDs must be valid and unique, and requests must fit in 16,000 bytes");
-        Cron(expression,timezone);
-        bot.schedules.push_back({scheduleId,expression,timezone,bot.intake(request)});
-    }
     return bot;
 }
 
-BotNotes Bots::notes(std::string_view id) const {
-    const auto bot = path(id);
-    return {readText(bot / "SOUL.md",8192,true),readText(bot / "MEMORY.md",8192,true)};
+std::string Bots::soul(std::string_view id) const {
+    return readText(path(id) / "SOUL.md",8192,true);
+}
+
+std::string Bots::initialMemory(std::string_view id) const {
+    return readText(path(id) / "MEMORY.md",8192,true);
 }
 
 std::vector<PeerBot> Bots::peers(std::string_view id) const {
@@ -560,24 +554,31 @@ std::optional<AvatarImage> Bots::avatarImage(std::string_view id) const {
     }
 }
 
-bool Bots::hasCron(std::string_view id) const {
-    try {
-        const auto config = Json::parse(readText(path(id) / "config.json",maxConfigBytes),nullptr,false);
-        if (!config.is_object()) return true;
-        return config.contains("cron") && (!config["cron"].is_array() || !config["cron"].empty());
-    } catch (const std::exception&) {
-        return true;
-    }
-}
-
 void Bots::syncSchedules(Store& store, Seconds now,
                          const std::function<void(std::string_view,std::string_view)>& report) const {
     const auto botIds = ids();
     for (const auto& id : botIds) {
         try {
-            store.syncSchedules(id,hasCron(id) ? get(id).schedules : std::vector<ConfiguredSchedule>{},now);
-        } catch (const std::exception& error) { report(id,error.what()); }
+            const auto config = readConfig(id);
+            const auto cron = config.value("cron",Json::array());
+            if (!cron.is_array()) throw Conflict("cron must be an array");
+            std::vector<ConfiguredSchedule> schedules;
+            if (!cron.empty()) {
+                const auto bot = configuredBot(id,config);
+                for (const auto& entry : cron) {
+                    schedules.push_back({validatedString(entry,"id"),validatedString(entry,"schedule"),
+                        validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
+                }
+            }
+            store.syncSchedules(id,schedules,now);
+        } catch (const Conflict& error) {
+            store.syncSchedules(id,{},now);
+            report(id,error.what());
+        } catch (const Json::exception& error) {
+            store.syncSchedules(id,{},now);
+            report(id,error.what());
+        }
     }
-    store.pruneSchedules(botIds);
+    store.pruneAutomations(botIds);
 }
 }

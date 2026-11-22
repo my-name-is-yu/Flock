@@ -111,22 +111,24 @@ struct Runtime::Impl {
     Access access;
     Model& model;
     T3& t3;
-    NotesLoader notes;
+    SoulLoader soul;
     RuntimeOptions options;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
-    Impl(Store& store, Model& m, T3& adapter, NotesLoader loader, RuntimeOptions opts)
+    void fireDueAutomations() {
+        try { db.fireDueAutomations(options.clock()); }
+        catch (const std::exception& error) {
+            if (!options.automationError) throw;
+            options.automationError(error.what());
+        }
+    }
+
+    Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
         : db(*store.p_), access(store.access()), model(m), t3(adapter),
-          notes([&storage = db, load = std::move(loader)](std::string_view botId) {
-              constexpr auto limit = 8192;
-              auto bot = load(botId);
-              bot.soul = bounded(bot.soul,limit);
-              bot.memory = bounded(storage.currentMemory(botId,bot.memory),limit);
-              return bot;
-          }), options(std::move(opts)) {
+          soul(std::move(loader)), options(std::move(opts)) {
         const auto lockPath = std::filesystem::canonical(db.path).string() + ".runtime.lock";
         lockFd = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR, 0600);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
@@ -1402,7 +1404,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (task.value("newSessionRequired",false)) std::erase(tools,"follow_up");
             if (hasPending(task)) std::erase(tools,"complete");
             if (prefillHistory(task,event) == PrefillResult::Persisted) return;
-            const auto bot = notes(field(task,"botId"));
+            const auto bot = db.loadNotes(field(task,"botId"),soul,options.clock());
             Json summary = {{"id",task["id"]},{"botId",task["botId"]},{"request",intent(task)},
                 {"doneWhen",task["doneWhen"]},
                 {"remaining",task["remaining"]},{"additionalUsed",task["additionalUsed"]},{"revisionId",revision(task)}};
@@ -1503,23 +1505,23 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     }
 };
 
-Runtime::Runtime(Store& store, Model& model, T3& t3, NotesLoader notes, RuntimeOptions options)
-    : p_(std::make_unique<Impl>(store,model,t3,std::move(notes),std::move(options))) {}
+Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
+    : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
 void Runtime::runConversations() {
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick; ++i) {
         const auto pending = p_->db.pendingConversations(1);
-        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->notes,p_->options.clock)) break;
+        if (pending.empty() || !p_->db.runTurn(pending.front().second,p_->model,p_->t3,p_->soul,p_->options.clock)) break;
     }
 }
 void Runtime::tick() {
-    p_->db.fireDueAutomations(p_->options.clock());
+    p_->fireDueAutomations();
     runConversations();
     for (auto id : p_->eligible()) p_->step(id);
 }
 void Runtime::tickConcurrent() {
-    p_->db.fireDueAutomations(p_->options.clock());
+    p_->fireDueAutomations();
     const auto collect = [](auto& workers) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -1537,7 +1539,7 @@ void Runtime::tickConcurrent() {
             if (p_->conversationWorkers.size() >= maxConversationWorkers) break;
             if (!p_->conversationWorkers.contains(bot)) {
                 p_->conversationWorkers.emplace(bot,std::async(std::launch::async,[this,id] {
-                    p_->db.runTurn(id,p_->model,p_->t3,p_->notes,p_->options.clock);
+                    p_->db.runTurn(id,p_->model,p_->t3,p_->soul,p_->options.clock);
                 }));
             }
         }

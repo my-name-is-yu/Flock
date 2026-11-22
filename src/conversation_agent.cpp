@@ -167,7 +167,7 @@ Json sourceRef(const Json& result) {
 }
 }
 
-Json Store::Impl::turnInput(const Message& message, int step) const {
+Json Store::Impl::turnInput(const Message& message, int step, Seconds now) const {
     Json tasks = Json::array();
     std::set<Id> listed;
     const auto latestResult = [&](Id taskId) -> Json {
@@ -306,16 +306,18 @@ ORDER BY j.id DESC LIMIT ?
                        " AND result IS NOT NULL ORDER BY step",{message.id,step});
     while (steps.next()) {
         const auto decision = steps.json(0);
-        turn.push_back({{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}});
+        Json trace{{"tool",decision.at("tool")},{"args",decision.at("args")},{"result",steps.json(1)}};
+        if (trace.at("args").contains("docId")) trace = sharedRedactor().record(std::move(trace));
+        turn.push_back(std::move(trace));
     }
     return {{"task",{{"tasks",std::move(tasks)},{"moreTasks",moreTasks},{"environments",std::move(environments)}}},
             {"event",{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
-                      {"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
+                      {"currentTime",now},{"replyTo",std::move(replyTo)},{"turn",std::move(turn)}}},
             {"history",std::move(history)}};
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                std::string_view seed, Seconds now) {
+                                Seconds now) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -325,7 +327,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         result["ok"] = true;
         return result;
     }
-    if (auto result = memory(bot,nullptr,tool,args,seed,now); !result.is_null()) {
+    if (auto result = memory(bot,nullptr,tool,args,now); !result.is_null()) {
         result["ok"] = true;
         return result;
     }
@@ -590,7 +592,7 @@ void Store::Impl::pauseTurn(const Message& message) {
     exec("UPDATE conversation_turns SET status='paused',pause_id=? WHERE message_id=?",{reply,message.id});
 }
 
-bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoader& notes,
+bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
                           const std::function<Seconds()>& clock) {
     std::optional<Message> message;
     {
@@ -609,17 +611,6 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         finishTurn(*message,std::move(text),nullptr,route);
         transaction.commit();
     };
-    BotNotes botNotes;
-    try {
-        botNotes = notes(message->bot);
-    } catch (const std::exception& error) {
-        const auto diagnostic = Json::parse(Json(error.what()).dump(
-            -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
-        finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
-                  : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
-               "error");
-        return true;
-    }
     const auto failure = ja ? "このメッセージを処理できませんでした。もう一度送ってください。"
                             : "I couldn't process this message. Please send it again.";
     for (int step = 1; step <= maxSteps; ++step) {
@@ -639,13 +630,25 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
             transaction.commit();
         }
         if (!decision) {
+            const auto now = clock();
+            BotNotes botNotes;
+            try {
+                botNotes = loadNotes(message->bot,soul,now);
+            } catch (const std::exception& error) {
+                const auto diagnostic = Json::parse(Json(error.what()).dump(
+                    -1,' ',false,Json::error_handler_t::replace)).get<std::string>();
+                finish(ja ? "このBotのノートを読み込めませんでした (" + diagnostic + ")。ファイルを修正してから、もう一度送ってください。"
+                          : "I couldn't read this Bot's notes (" + diagnostic + "). Fix the file and send your message again.",
+                       "error");
+                return true;
+            }
             ModelInput input;
             Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (!turnMessage(id)) return true;
-                const auto context = turnInput(*message,step);
+                const auto context = turnInput(*message,step,now);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = turnTools,.feedback = {},.config = message->routing.at("config")};
                 auto reserved = query("SELECT reserved_attempt FROM conversation_turns WHERE message_id=?"
@@ -763,7 +766,7 @@ bool Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::NotesLoade
         } else if (result.is_null()) {
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(*current,step,*decision,botNotes.memory,clock());
+                result = applyTurnTool(*current,step,*decision,clock());
                 exec("RELEASE turn_tool");
             } catch (const std::exception& error) {
                 exec("ROLLBACK TO turn_tool");

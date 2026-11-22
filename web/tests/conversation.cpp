@@ -227,7 +227,7 @@ void suggestionsAndEnvironmentsInView(const std::filesystem::path& path) {
         store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     auto config = callbacks();
     const auto configuredIntake = config.intake;
     config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
@@ -266,7 +266,7 @@ void conversationEntry(const std::filesystem::path& path) {
     FixedT3 t3;
     store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     std::atomic_bool disableIntake = false;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; });
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     auto server = startWeb(store,0,callbacks(&disableIntake));
     Browser browser(*server);
     const auto taskId = browser.request("release",comparisonRequest);
@@ -452,7 +452,7 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
     web.peers = peers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },RuntimeOptions{.peers=peers});
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
     Browser browser(*server);
     constexpr auto dm = "/api/peer-conversation?bot=ernest&peer=reviewer";
@@ -531,15 +531,15 @@ void approvedProfiles(const std::filesystem::path& directory) {
 }
 
 void chatGPTConversation(const std::filesystem::path& home) {
-    Store store(home / "conversation.sqlite");
+    const app::Bots bots(home / "bots");
+    Store store(home / "conversation.sqlite",[&](std::string_view bot) { return bots.initialMemory(bot); });
     for (auto env : {"local-env","backup-env"})
         store.access().resourceGrant({"fixture",true},"release",{"environment",env,"launch"},GrantChange::grant);
     app::ChatGPTModel model(home / "credentials" / "chatgpt");
-    const app::Bots bots(home / "bots");
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = [&](std::string_view bot) { return bots.peers(bot); };
-    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.notes(bot); },options);
+    Runtime runtime(store,model,t3,[&](std::string_view bot) { return bots.soul(bot); },options);
     const auto server = startWeb(store,0,{
         [&] { return bots.cards(); },
         [&](std::string_view bot,std::string_view request) { return bots.get(bot).intake(request); },
@@ -655,7 +655,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     FixedModel model;
     FixedT3 t3;
     const auto start = [&] {
-        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return BotNotes{}; });
+        return std::make_unique<Runtime>(*store,model,t3,[](auto) { return std::string{}; });
     };
     auto runtime = start();
     auto webCallbacks = callbacks();

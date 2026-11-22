@@ -90,6 +90,13 @@ Decision Store::Impl::callModel(std::string_view bot, Model& model, const ModelI
         decision = model.decide(safe);
         for (auto& [key,value] : decision.args.items()) value = scrub.payload(value);
         decision.reason = scrub.text(decision.reason);
+        if (decision.args.contains("docId")) {
+            const auto shared = sharedRedactor();
+            const auto document = decision.args.at("docId");
+            decision.args = shared.record(std::move(decision.args),SecretRedactor::Fields::external);
+            if (decision.args.at("docId") != document) decision.args["docId"] = nullptr;
+            decision.reason = shared.text(decision.reason);
+        }
         if (std::find(input.tools.begin(),input.tools.end(),decision.tool)==input.tools.end())
             decision.tool = scrub.text(decision.tool);
         decision.usage = scrub.payload(decision.usage);

@@ -121,19 +121,19 @@ struct Person;
 struct ConfiguredSchedule;
 class Store {
 public:
-    explicit Store(std::filesystem::path database);
+    using MemorySeed = std::function<std::string(std::string_view)>;
+    explicit Store(std::filesystem::path database, MemorySeed = {});
     ~Store();
     Store(const Store&) = delete;
     Store& operator=(const Store&) = delete;
 
     Access access();
-    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args,
-                std::string_view initialMemory = {});
+    Json memory(const Person&, std::string_view bot, std::string_view operation, const Json& args);
     Json createAutomation(const Person&, const Intake&, const Json& args, Seconds now);
     Json automations(const Person&, std::string_view bot, Id before = 0) const;
     Json cancelAutomation(const Person&, std::string_view bot, Id id);
     void syncSchedules(std::string_view bot, const std::vector<ConfiguredSchedule>&, Seconds now);
-    void pruneSchedules(const std::vector<std::string>& configuredBots);
+    void pruneAutomations(const std::vector<std::string>& configuredBots);
     void fireDueAutomations(Seconds now);
     Json receiveWebhook(const Person&, std::string_view source, std::string_view externalEventId,
                         const Json& event, Seconds now);
@@ -179,11 +179,12 @@ struct RuntimeOptions {
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
     std::function<std::vector<PeerBot>(std::string_view)> peers;
+    std::function<void(std::string_view)> automationError = {};
 };
 class Runtime {
 public:
-    using NotesLoader = std::function<BotNotes(std::string_view)>;
-    Runtime(Store&, Model&, T3&, NotesLoader, RuntimeOptions = {});
+    using SoulLoader = std::function<std::string(std::string_view)>;
+    Runtime(Store&, Model&, T3&, SoulLoader, RuntimeOptions = {});
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;

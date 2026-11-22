@@ -6,8 +6,20 @@ namespace flockv0 {
 namespace {
 constexpr std::size_t memoryBytes = 8192;
 
+struct MemoryDocument {
+    std::string content;
+    Id version = 0;
+    Seconds updatedAt = 0;
+};
+
 std::string privateKey(std::string_view bot) {
     return "bot:" + std::string(bot) + ":memory";
+}
+
+std::optional<MemoryDocument> findMemory(sqlite3* db, std::string_view key) {
+    Statement row(db,"SELECT content,version,updated_at FROM memory_documents WHERE doc_key=?",{key});
+    if (!row.next()) return std::nullopt;
+    return MemoryDocument{row.string(0),row.number(1),row.number(2)};
 }
 
 std::vector<std::string_view> lines(std::string_view content) {
@@ -68,24 +80,47 @@ CREATE INDEX IF NOT EXISTS memory_proposals_document ON memory_proposals(doc_key
     tx.commit();
 }
 
-std::string Store::Impl::currentMemory(std::string_view bot, std::string_view seed) const {
+BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader& soul, Seconds now) {
+    BotNotes notes{soul ? bounded(soul(bot),memoryBytes) : std::string{},{}};
+    const auto key = privateKey(bot);
     std::lock_guard lock(mutex);
-    auto row = query("SELECT content FROM memory_documents WHERE doc_key=?",{privateKey(bot)});
-    return row.next() ? row.string(0) : std::string(seed);
+    if (auto doc = findMemory(db,key)) {
+        notes.memory = std::move(doc->content);
+        return notes;
+    }
+    Transaction tx(db);
+    if (auto doc = findMemory(db,key)) notes.memory = std::move(doc->content);
+    else notes.memory = seedPrivateMemory(key,bot,redactor(bot),now);
+    tx.commit();
+    return notes;
 }
 
-Json Store::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args,
-                   std::string_view initialMemory) {
+void Store::Impl::createMemory(std::string_view key, std::string_view bot, std::string_view id,
+                              std::string_view content, Seconds now) {
+    exec(R"SQL(
+INSERT INTO memory_documents(doc_key,scope_kind,owner_bot,doc_id,content,version,updated_at)
+VALUES(?,?,?,?,?,0,?)
+)SQL",{key,bot.empty() ? "shared" : "private",bot.empty() ? Json(nullptr) : Json(bot),id,content,now});
+}
+
+std::string Store::Impl::seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor& scrub,
+                                          Seconds now) {
+    auto content = memorySeed ? bounded(scrub.text(memorySeed(bot)),memoryBytes) : std::string{};
+    createMemory(key,bot,"memory",content,now);
+    return content;
+}
+
+Json Store::memory(const Person& actor, std::string_view bot, std::string_view operation, const Json& args) {
     std::lock_guard lock(p_->mutex);
     Transaction tx(p_->db);
-    auto result = p_->memory(bot,&actor,operation,args,initialMemory,unixTime());
+    auto result = p_->memory(bot,&actor,operation,args,unixTime());
     if (result.is_null()) throw Conflict("Unknown memory operation");
     tx.commit();
     return result;
 }
 
 Json Store::Impl::memory(std::string_view bot, const Person* actor, std::string_view operation, const Json& args,
-                         std::string_view seed, Seconds now) {
+                         Seconds now) {
     const bool reading = operation == "read_memory" || operation == "memory_history";
     if (!reading && operation != "propose_memory_edit" && operation != "apply_memory_edit" &&
         operation != "revert_memory_edit" && !(actor && operation == "reject_memory_edit")) return nullptr;
@@ -100,20 +135,14 @@ Json Store::Impl::memory(std::string_view bot, const Person* actor, std::string_
 
     const auto key = shared ? "shared:" + id : privateKey(bot);
     const auto author = actor ? "person:" + actor->id : "bot:" + std::string(bot);
-    const auto scrub = redactor(bot);
+    const auto scrub = shared ? sharedRedactor() : redactor(bot);
     scrub.requirePublic({key,author});
-    exec(R"SQL(
-INSERT INTO memory_documents(doc_key,scope_kind,owner_bot,doc_id,content,version,updated_at)
-VALUES(?,?,?,?,?,0,?) ON CONFLICT(doc_key) DO NOTHING
-)SQL",{key,shared ? "shared" : "private",shared ? Json(nullptr) : Json(bot),id,
-       shared ? std::string{} : scrub.text(bounded(seed,memoryBytes)),now});
-    auto doc = query("SELECT content,version,updated_at FROM memory_documents WHERE doc_key=?",{key});
-    if (!doc.next()) throw std::runtime_error("Memory document disappeared");
-    const auto content = doc.string(0);
-    const auto version = doc.number(1);
+    auto doc = findMemory(db,key);
+    if (!doc && !shared) doc = MemoryDocument{seedPrivateMemory(key,bot,scrub,now),0,now};
+    const auto [content,version,updatedAt] = doc.value_or(MemoryDocument{});
 
     if (operation == "read_memory")
-        return scrub.payload({{"docKey",key},{"content",content},{"version",version},{"updatedAt",doc.number(2)}});
+        return scrub.record({{"docKey",key},{"content",content},{"version",version},{"updatedAt",updatedAt}});
     if (operation == "memory_history") {
         if (args.contains("revisionId")) {
             auto row = query(R"SQL(
@@ -124,23 +153,29 @@ FROM memory_revisions WHERE doc_key=? AND id=?
             auto detail = revisionView(row);
             detail["previousContent"] = row.string(7);
             detail["newContent"] = row.string(8);
-            return scrub.payload(detail);
+            return scrub.record(std::move(detail));
         }
         const Id proposal = args.contains("proposalId") ? requiredInteger(args,"proposalId") : 0;
+        const auto proposalsBefore = args.contains("proposalsBefore") ? requiredInteger(args,"proposalsBefore") : 0;
         auto proposals = query(R"SQL(
 SELECT id,base_version,rationale,author,status,created_at,decided_by,decided_at,diff_summary,proposed_content
-FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) ORDER BY id DESC LIMIT 20
-)SQL",{key,proposal,proposal});
-        Json pending = Json::array();
+FROM memory_proposals WHERE doc_key=? AND (?=0 OR id=?) AND (?=0 OR id<?) ORDER BY id DESC LIMIT 21
+)SQL",{key,proposal,proposal,proposalsBefore,proposalsBefore});
+        Json edits = Json::array();
+        Id nextProposal = 0;
         while (proposals.next()) {
+            if (edits.size() == 20) {
+                nextProposal = edits.back().at("id");
+                break;
+            }
             Json row = {{"id",proposals.number(0)},{"baseVersion",proposals.number(1)},{"rationale",proposals.string(2)},
                         {"author",proposals.string(3)},{"status",proposals.string(4)},{"createdAt",proposals.number(5)},
                         {"decidedBy",proposals.string(6)},{"decidedAt",proposals.number(7)},{"diffSummary",proposals.string(8)}};
             if (proposal) {
                 row["proposedContent"] = proposals.string(9);
-                return scrub.payload(row);
+                return scrub.record(std::move(row));
             }
-            pending.push_back(std::move(row));
+            edits.push_back(std::move(row));
         }
         if (proposal) throw Conflict("Memory proposal not found");
         const auto before = args.contains("before") ? requiredInteger(args,"before") : 0;
@@ -157,7 +192,7 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
             }
             history.push_back(revisionView(revisions));
         }
-        return scrub.payload({{"docKey",key},{"version",version},{"revisions",history},{"proposals",pending},{"before",next}});
+        return scrub.record({{"docKey",key},{"version",version},{"revisions",history},{"proposals",edits},{"before",next},{"proposalsBefore",nextProposal}});
     }
 
     const auto proposal = args.contains("proposalId") ? requiredInteger(args,"proposalId") : 0;
@@ -188,10 +223,12 @@ FROM memory_revisions WHERE doc_key=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT 2
         if (!args.contains("content") || !args.at("content").is_string() ||
             args.at("content").get_ref<const std::string&>().size() > memoryBytes)
             throw Conflict("Memory content must be text up to 8,192 bytes");
-        updated = scrub.text(field(args,"content"));
+        updated = field(args,"content");
     }
 
+    updated = bounded(scrub.text(updated),memoryBytes);
     const auto summary = diffSummary(content,updated);
+    if (!doc) createMemory(key,{},id,{},now);
     if (operation == "propose_memory_edit") {
         const auto rationale = field(args,"rationale");
         if (rationale.empty() || rationale.size() > 1000) throw Conflict("Enter a rationale up to 1,000 bytes");

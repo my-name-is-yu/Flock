@@ -181,7 +181,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
     (void)home;
 #endif
     options.peers = [&](std::string_view botId) { return bots.peers(botId); };
-    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.notes(botId); },options);
+    options.automationError = [](std::string_view error) { std::cerr << "Unable to fire automations: " << error << '\n'; };
+    Runtime runtime(store,*model,*t3,[&](std::string_view botId) { return bots.soul(botId); },options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
@@ -200,7 +201,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
             options.peers,
             identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
             [&](const BotChange& change) { bots.apply(change); },
-            [&](std::string_view botId) { return bots.notes(botId).memory; },
             options.clock,
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
@@ -304,7 +304,7 @@ int runCli(Arguments& args) {
         return 0;
     }
     std::filesystem::create_directories(home);
-    Store store(home / "flock.sqlite3");
+    Store store(home / "flock.sqlite3",[&](std::string_view id) { return bots.initialMemory(id); });
     if (command == "run") daemon(args,home,store,bots);
     else if (command == "access") accessCommand(store,args);
     else if (command == "submit") {

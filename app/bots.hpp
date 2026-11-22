@@ -10,7 +10,6 @@ namespace flockv0::app {
 struct Bot {
     std::string id, name, environmentId, projectId;
     Json settings = Json::object(), avatar;
-    std::vector<ConfiguredSchedule> schedules;
     std::vector<std::string> allowedBots;
     Intake intake(std::string_view request) const;
 };
@@ -20,7 +19,8 @@ public:
     explicit Bots(std::filesystem::path directory);
     std::vector<std::string> ids() const;
     Bot get(std::string_view id) const;
-    BotNotes notes(std::string_view id) const;
+    std::string soul(std::string_view id) const;
+    std::string initialMemory(std::string_view id) const;
     std::vector<PeerBot> peers(std::string_view id) const;
     Json cards() const;
     void apply(const BotChange&);
@@ -33,7 +33,8 @@ private:
     mutable std::mutex mutex_;
     std::filesystem::path path(std::string_view id) const;
     Json cardLocked(std::string_view id) const;
-    bool hasCron(std::string_view id) const;
+    Json readConfig(std::string_view id) const;
+    static Bot configuredBot(std::string_view id, const Json&);
 };
 
 }

@@ -1312,16 +1312,14 @@ function generalContent(bot) {
 function cronContent(bot) {
   const list = node('div', 'settings-card cron-list');
   for (const item of bot.cron) {
-    const expression = String(item.schedule ?? item.expression ?? item.cron ?? '');
-    const timezone = item.timezone ?? item.timeZone;
+    const expression = item.schedule;
     const readable = describeCron(expression);
-    const row = node('div', `cron-row${item.enabled === false ? ' disabled' : ''}`);
+    const row = node('div', 'cron-row');
     const when = node('p', 'cron-when');
-    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression || '—'));
-    if (timezone) when.append(node('span', 'cron-zone', timezone));
+    when.append(readable ? node('span', 'cron-schedule', readable) : node('code', 'cron-expression', expression));
+    when.append(node('span', 'cron-zone', item.timezone));
     if (readable) when.append(node('code', 'cron-expression', expression));
-    row.append(when, node('span', 'cron-state', item.enabled === false ? 'Disabled in config' : 'In config'),
-      node('p', 'cron-request', item.request));
+    row.append(when, node('p', 'cron-request', item.request));
     list.append(row);
   }
   return [list];

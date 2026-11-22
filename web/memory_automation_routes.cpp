@@ -54,10 +54,9 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const auto bot = target(store,callbacks,actor,req.get_param_value("bot"),Role::view);
             Json args = Json::object();
             if (req.has_param("docId")) args["docId"] = req.get_param_value("docId");
-            for (auto key : {"before","revisionId","proposalId"})
+            for (auto key : {"before","proposalsBefore","revisionId","proposalId"})
                 if (req.has_param(key)) args[key] = queryId(req,key);
-            const auto seed = !args.contains("docId") && callbacks.initialMemory ? callbacks.initialMemory(bot) : std::string{};
-            reply(res,200,store.memory(actor,bot,req.path.ends_with("/history") ? "memory_history" : "read_memory",args,seed));
+            reply(res,200,store.memory(actor,bot,req.path.ends_with("/history") ? "memory_history" : "read_memory",args));
         });
     });
     server.Post(R"(/api/memory/(propose|apply|revert|reject))",[&](const Request& req, Response& res) {
@@ -65,8 +64,7 @@ void memoryAutomationRoutes(httplib::Server& server, Store& store, const WebCall
             const auto args = body(req);
             const auto actor = person(callbacks,req);
             const auto bot = target(store,callbacks,actor,args.at("botId").get<std::string>(),Role::decide);
-            const auto seed = !args.contains("docId") && callbacks.initialMemory ? callbacks.initialMemory(bot) : std::string{};
-            reply(res,200,store.memory(actor,bot,req.matches[1].str()+"_memory_edit",args,seed));
+            reply(res,200,store.memory(actor,bot,req.matches[1].str()+"_memory_edit",args));
         });
     });
     server.Get("/api/schedules",[&](const Request& req, Response& res) {

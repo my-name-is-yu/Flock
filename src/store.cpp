@@ -77,7 +77,8 @@ RunRef runRef(const Json& data) {
     return {field(data,"threadId"), field(data,"runId"), field(data,"link")};
 }
 
-Store::Impl::Impl(std::filesystem::path file) : path(std::move(file)) {
+Store::Impl::Impl(std::filesystem::path file, MemorySeed seed)
+    : path(std::move(file)), memorySeed(std::move(seed)) {
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
     try {
         if (rc != SQLITE_OK) sqlError(db);
@@ -294,7 +295,8 @@ void Store::Impl::unlockQuestion(Json& task, std::string_view reason) {
     task["question"] = nullptr;
 }
 
-Store::Store(std::filesystem::path db) : p_(std::make_unique<Impl>(std::move(db))) {}
+Store::Store(std::filesystem::path db, MemorySeed seed)
+    : p_(std::make_unique<Impl>(std::move(db),std::move(seed))) {}
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
 

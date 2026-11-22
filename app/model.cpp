@@ -329,7 +329,8 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
         if (name == "read_memory") description = "Read memory and its current edit version.";
         else if (name == "memory_history") {
             description = "List recent revisions and proposals or inspect one item and its contents.";
-            integer("before","Cursor from the preceding history page.");
+            integer("before","Revision cursor from the preceding history page.");
+            integer("proposalsBefore","Proposal cursor from the preceding history page.");
             integer("revisionId","Revision to inspect.");
             integer("proposalId","Proposal to inspect.");
         } else {
@@ -356,7 +357,7 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
             text("timezone","IANA timezone, for example Asia/Tokyo or Etc/UTC.");
         } else if (name == "create_reminder") {
             description = "Create a one-off reminder for this Bot.";
-            integer("fireAt","Reminder time in Unix seconds.",true);
+            integer("fireAt","Future Unix seconds. Use event.currentTime as the reference for relative times.",true);
             text("timezone","IANA timezone used when interpreting the requested time.");
             text("label","Short reminder label.",false);
         } else {

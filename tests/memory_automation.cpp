@@ -59,7 +59,9 @@ const Json& lastResult(const ModelInput& input) {
 }
 
 void memoryFlow(const std::filesystem::path& db) {
-    Store store(db);
+    Store store(db,[](std::string_view id) {
+        return id == "alpha" ? "Prefer CSV.\n" : "Beta private.";
+    });
     auto access = store.access();
     const std::string path = "team/staging.md";
     for (const auto* bot : {"alpha","beta"})
@@ -69,9 +71,7 @@ void memoryFlow(const std::filesystem::path& db) {
     Adapter adapter;
     Script bot;
     RuntimeOptions options; options.clock = [] { return Seconds{1'767'456'000}; };
-    Runtime runtime(store,bot,adapter,[](std::string_view id) {
-        return BotNotes{"",id == "alpha" ? "Prefer CSV.\n" : "Beta private."};
-    },options);
+    Runtime runtime(store,bot,adapter,{},options);
     const auto turn = [&](const Intake& target, std::string_view id, std::vector<Decision> choices) {
         const auto start = bot.inputs.size();
         choices.push_back(reply());
@@ -95,6 +95,8 @@ void memoryFlow(const std::filesystem::path& db) {
     });
     const auto history = lastResult(bot.inputs.at(apply+2));
     const auto first = history.at("revisions").at(0);
+    check(bot.inputs.at(apply+1).notes.memory == "Prefer CSV.\nUse staging-eu.\n",
+          "An active conversation used memory from before its own edit");
     check(first.at("author") == "bot:alpha" && first.at("diffSummary") == "-0 +1 lines" &&
           history.at("proposals").at(0).at("status") == "applied","Memory proposal and diff were not recorded");
     const auto followup = turn(alpha,"Which staging environment is standard?",{});
@@ -160,6 +162,17 @@ void memoryFlow(const std::filesystem::path& db) {
     });
     check(lastResult(bot.inputs.at(stale+1)).at("error").get<std::string>().starts_with("Memory version conflict"),
           "Bot accepted a stale shared version");
+
+    const auto secret = access.requestSecret("beta",{"deployment-token"});
+    access.submitSecret(owner,"beta",secret,"fixture-protected-token");
+    const auto redact = turn(alpha,"Record a sanitized staging example",{
+        {"apply_memory_edit",{{"docId",path},{"baseVersion",2},{"content","Example: fixture-protected-token"}},
+         "Example includes fixture-protected-token"},
+    });
+    check(bot.inputs.at(redact+1).event.dump().find("fixture-protected-token") == std::string::npos,
+          "Shared-memory decision leaked a protected value in the conversation trace");
+    const auto sharedContent = store.memory(owner,"beta","read_memory",{{"docId",path}});
+    check(sharedContent.at("content") == "Example: [redacted]","Shared text exposed another Bot's protected value");
 }
 
 Seconds utc(int year, unsigned month, unsigned day, int hour = 0) {
@@ -188,7 +201,7 @@ void downtime(const std::filesystem::path& db) {
         Script model;
         Adapter adapter;
         RuntimeOptions options; options.clock = [&] { return now; };
-        Runtime runtime(store,model,adapter,[](auto) { return BotNotes{}; },options);
+        Runtime runtime(store,model,adapter,[](auto) { return std::string{}; },options);
         runtime.tick();
     };
     {
@@ -226,15 +239,50 @@ void downtime(const std::filesystem::path& db) {
     }
 }
 
+void isolatedFirings(const std::filesystem::path& db) {
+    Store store(db);
+    const auto now = utc(2026,3,1,1) + 30 * 60;
+    const Json rare{{"kind","schedule"},{"cron","30 2 */31,25-31 3 0"},{"timezone","Europe/Berlin"},
+        {"request","Sparse check"}};
+    const auto schedule = store.createAutomation(owner,alpha,rare,utc(2025,12,1)).at("id");
+    const auto reminder = [&](const Intake& target) {
+        return store.createAutomation(owner,target,{{"kind","reminder"},{"fireAt",now},{"timezone","Etc/UTC"},
+            {"request","Check the deployment"}},now - 1).at("id");
+    };
+    const auto invalid = reminder({"broken","","env","protected-destination"});
+    const auto regular = reminder(beta);
+    auto access = store.access();
+    const auto secret = access.requestSecret("broken",{"deployment-token"});
+    access.submitSecret(owner,"broken",secret,"protected-destination");
+    store.fireDueAutomations(now);
+    const auto alphaSchedule = store.automations(owner,"alpha").at("automations").at(0);
+    check(alphaSchedule.at("nextRunAt") == utc(2037,3,1,1) + 30 * 60 &&
+          store.tasks("alpha").at(0).at("trigger").at("triggerId") == schedule,
+          "A long gap after a valid occurrence prevented delivery");
+    const auto failed = store.automations(owner,"broken").at("automations").at(0);
+    check(failed.at("id") == invalid && failed.at("status") == "failed" && failed.at("nextRunAt").is_null() &&
+          store.tasks("broken").empty() && store.tasks("beta").at(0).at("trigger").at("triggerId") == regular,
+          "A rejected firing blocked or contaminated the rest of the batch");
+
+    const auto end = lastAutomationTime;
+    store.createAutomation(owner,alpha,{{"kind","schedule"},{"cron","* * * * *"},{"timezone","Etc/UTC"},
+        {"request","Final occurrence"}},end - 60);
+    store.cancelAutomation(owner,"alpha",schedule.get<Id>());
+    store.fireDueAutomations(end);
+    check(store.tasks("alpha").size() == 2 &&
+          store.automations(owner,"alpha").at("automations").at(0).at("status") == "delivered",
+          "The final supported occurrence was dropped");
+}
+
 void automationConversation(const std::filesystem::path& db) {
     Store store(db);
     Script bot;
     Adapter adapter;
     RuntimeOptions options; options.clock = [] { return utc(2026,1,4); };
-    Runtime runtime(store,bot,adapter,[](auto) { return BotNotes{}; },options);
+    Runtime runtime(store,bot,adapter,[](auto) { return std::string{}; },options);
     bot.choices = {
         {"create_schedule",{{"cron","0 9 * * 1"},{"timezone","Asia/Tokyo"},{"request","Weekly progress"}},"Create schedule"},
-        {"create_reminder",{{"fireAt",utc(2026,1,6)},{"timezone","Etc/UTC"},{"request","Reminder"}},"Create reminder"},
+        {"create_reminder",{{"fireAt",options.clock() + 600},{"timezone","Etc/UTC"},{"request","Reminder"}},"Create reminder"},
         {"create_trigger",{{"source","deploy"},{"eventFilter",{{"status","finished"}}},{"request","Check deployed status"}},"Create trigger"},
         {"list_schedules",Json::object(),"List managed automations"},reply(),
     };
@@ -242,6 +290,8 @@ void automationConversation(const std::filesystem::path& db) {
     runtime.runConversations();
     const auto list = lastResult(bot.inputs.back()).at("automations");
     check(list.size() == 3 && list.at(0).at("createdBy") == "bot:alpha","Conversation automation tools did not create entries");
+    check(bot.inputs.at(1).event.at("currentTime") == options.clock() &&
+          list.at(1).at("nextRunAt") == options.clock() + 600,"Conversation reminder did not use the Runtime clock");
     const auto triggerId = list.at(0).at("id");
     bot.choices = {{"remove_schedule",{{"id",list.at(2).at("id")}},"Cancel schedule"},reply()};
     store.receive(alpha,"remove","Cancel the weekly progress schedule");
@@ -257,6 +307,39 @@ void automationConversation(const std::filesystem::path& db) {
           trigger.at("externalEventId") == "deployment-1" && trigger.at("event").at("status") == "finished",
           "Webhook trigger provenance was not retained");
 }
+
+void webhookGrants(const std::filesystem::path& db) {
+    const Person sender{"alpha-ingress"}, other{"beta-ingress"};
+    const auto now = utc(2026,1,4);
+    const Json trigger{{"kind","trigger"},{"source","deploy"},{"request","Check event"},
+        {"eventFilter",{{"status","accepted"}}}};
+    const Json event{{"status","accepted"},{"data","fixture-webhook-token"}};
+    Json alphaReceipt;
+    {
+        Store store(db);
+        auto access = store.access();
+        access.personGrant(owner,"alpha",sender.id,Role::decide,GrantChange::grant);
+        access.personGrant(owner,"beta",other.id,Role::decide,GrantChange::grant);
+        access.submitSecret(owner,"beta",access.requestSecret("beta",{"webhook-secret"}),"fixture-webhook-token");
+        store.createAutomation(owner,alpha,trigger,now);
+        store.createAutomation(owner,beta,trigger,now);
+        const auto received = store.receiveWebhook(sender,"deploy","evt-1",event,now);
+        alphaReceipt = received.at("tasks");
+        check(received.at("duplicate") == false && alphaReceipt.size() == 1 &&
+              alphaReceipt.at(0).at("botId") == "alpha" && store.tasks("beta").empty(),
+              "An unrelated Bot's trigger blocked or received the webhook");
+        check(store.tasks("alpha").at(0).at("trigger").at("event").at("data") == "[redacted]",
+              "Webhook fanout copied a protected value into a task");
+    }
+    Store restarted(db);
+    const auto otherDelivery = restarted.receiveWebhook(other,"deploy","evt-1",event,now);
+    check(otherDelivery.at("duplicate") == false && otherDelivery.at("tasks").size() == 1 &&
+          otherDelivery.at("tasks").at(0).at("botId") == "beta",
+          "A delivery to another Bot consumed this Bot's authorized event");
+    const auto replay = restarted.receiveWebhook(sender,"deploy","evt-1",event,now);
+    check(replay.at("duplicate") == true && replay.at("tasks") == alphaReceipt && restarted.tasks().size() == 2,
+          "Webhook replay leaked unrelated receipts or queued duplicate work");
+}
 }
 
 int main() {
@@ -264,6 +347,8 @@ int main() {
         Directory temp;
         memoryFlow(temp.path / "memory.sqlite3");
         downtime(temp.path / "downtime.sqlite3");
+        isolatedFirings(temp.path / "firings.sqlite3");
         automationConversation(temp.path / "webhook.sqlite3");
+        webhookGrants(temp.path / "webhook-grants.sqlite3");
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -175,10 +175,7 @@ void Access::personScope(const Person& root, std::string_view person, const Scop
     Transaction tx(db_.db);
 
     if (!root.adminRoot || !identifier(root.id) || !identifier(person) || !scope.valid()) throw Conflict("Root capability required");
-    auto files = db_.query("SELECT file FROM protected_inputs WHERE status='fulfilled'");
-    std::vector<std::string> values;
-    while (files.next()) values.push_back(db_.secrets.read({files.string(0)}));
-    SecretRedactor(std::move(values)).requirePublic({root.id,person,scope.resource});
+    db_.sharedRedactor().requirePublic({root.id,person,scope.resource});
     if (revoke) db_.exec("DELETE FROM person_resource_grants WHERE person=? AND kind=? AND resource=? AND op=?",
                          {person,scope.kind,scope.resource,scope.operation});
     else db_.exec("INSERT OR IGNORE INTO person_resource_grants VALUES(?,?,?,?)",{person,scope.kind,scope.resource,scope.operation});

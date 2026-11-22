@@ -108,7 +108,7 @@ struct SimulatedT3 : T3 {
 struct RuntimeFixture {
     ScriptedModel model;
     SimulatedT3 t3;
-    std::function<BotNotes(std::string_view)> notes = [](std::string_view) { return BotNotes{}; };
+    Runtime::SoulLoader notes = [](std::string_view) { return std::string{}; };
     Runtime runtime;
 
     explicit RuntimeFixture(Store& store)
@@ -274,7 +274,7 @@ void notesFailureEndsTheTurnWithoutWork() {
     Fixture fixture;
     Store store(fixture.database());
     RuntimeFixture execution(store);
-    execution.notes = [](std::string_view) -> BotNotes { throw std::runtime_error("SOUL.md is unreadable"); };
+    execution.notes = [](std::string_view) -> std::string { throw std::runtime_error("SOUL.md is unreadable"); };
     execution.model.conversation = [](const ModelInput&) -> Decision {
         throw std::runtime_error("The model was called without notes");
     };

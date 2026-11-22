@@ -316,7 +316,7 @@ void peerHistory(const std::filesystem::path& path) {
     FixedT3 t3;
     RuntimeOptions options;
     options.peers = fixturePeers;
-    Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
     const auto server = startWeb(store,0,callbacks());
     Browser browser(*server);
     seedPeerHistory(browser,runtime,t3);
@@ -400,7 +400,7 @@ void peerConversation(const std::filesystem::path& path) {
     Json history;
     {
         Store store(path);
-        Runtime runtime(store,model,t3,[](std::string_view) { return BotNotes{}; },options);
+        Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
         const auto server = startWeb(store,0,web);
         Browser browser(*server);
         const auto empty = browser.get(primary);
@@ -461,7 +461,7 @@ void exercise(const std::filesystem::path& path) {
     store.access().resourceGrant({"fixture",true},"triage",{"environment","linked env","launch"},GrantChange::grant);
     FixedModel model;
     FixedT3 t3;
-    const auto notes = [](std::string_view) { return BotNotes{}; };
+    const auto notes = [](std::string_view) { return std::string{}; };
     auto runtime = std::make_unique<Runtime>(store,model,t3,notes);
     auto server = startWeb(store,0,callbacks());
     const auto port = server->port();
@@ -832,9 +832,8 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
 }
 
 void memoryAutomationEndpoints(const std::filesystem::path& path) {
-    Store store(path);
+    Store store(path,[](auto) { return "Initial convention"; });
     auto cb = callbacks();
-    cb.initialMemory = [](auto) { return "Initial convention"; };
     cb.clock = [] { return Seconds{2'000'000'000}; };
     cb.authenticate = [](std::string_view credential) {
         if (credential == "Bearer owner") return Person{"owner",true};
@@ -857,9 +856,23 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
           "Web revision did not expose the diff");
     browser.post("/api/memory/revert",{{"botId","release"},{"baseVersion",1},{"revisionId",revision}});
     check(browser.get("/api/memory?bot=release").at("content") == "Initial convention","Web revert failed");
+    const auto pending = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
+        {"content","Pending convention"},{"rationale","Original proposal"}}).at("proposalId");
+    for (int i = 0; i < 20; ++i) {
+        const auto newer = browser.post("/api/memory/propose",{{"botId","release"},{"baseVersion",2},
+            {"content","Newer convention"},{"rationale","Subsequent proposal"}}).at("proposalId");
+        browser.post("/api/memory/reject",{{"botId","release"},{"proposalId",newer}});
+    }
+    const auto firstPage = browser.get("/api/memory/history?bot=release");
+    const auto older = browser.get("/api/memory/history?bot=release&proposalsBefore=" +
+        std::to_string(firstPage.at("proposalsBefore").get<Id>())).at("proposals");
+    check(firstPage.at("proposals").size() == 20 && older.at(0).at("id") == pending &&
+          older.at(0).at("status") == "pending","Newer proposals hid a pending proposal");
 
     const auto reminder = browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},
         {"request","Check staging"},{"timezone","Asia/Tokyo"},{"fireAt",2'000'000'010}},201).at("id").get<Id>();
+    browser.post("/api/schedules",{{"botId","release"},{"kind","reminder"},{"request","Check staging"},
+        {"timezone","Asia/Tokyo"},{"fireAt",2'000'000'000}},409);
     const auto cancelPath = "/api/schedules?bot=release&id=" + std::to_string(reminder);
     Browser::checked(browser.client.Delete(cancelPath),403);
     check(Browser::checked(browser.client.Delete(cancelPath,browser.headers()),200).at("status") == "canceled",

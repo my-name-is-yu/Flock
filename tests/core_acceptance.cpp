@@ -203,14 +203,16 @@ struct Fixture {
     }
     void restart() {
         runtime.reset();
-        store = std::make_unique<Store>(directory/"state.db");
+        store = std::make_unique<Store>(directory/"state.db",[&](std::string_view id) {
+            return notes.at(std::string(id)).memory;
+        });
         RuntimeOptions options{[&] { return now; },read};
         options.peers = [&](std::string_view source) {
             const auto found = peers.find(source);
             return found == peers.end() ? std::vector<PeerBot>{} : found->second;
         };
         runtime = std::make_unique<Runtime>(*store,model,t3,[&](std::string_view id) {
-            return notes.at(std::string(id));
+            return notes.at(std::string(id)).soul;
         },std::move(options));
     }
     void allowBeta() {

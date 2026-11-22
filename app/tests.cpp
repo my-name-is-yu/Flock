@@ -68,21 +68,34 @@ void createBot(const std::filesystem::path& path, const Json& config, std::strin
 }
 
 void cronSyntaxAndTimeZones() {
+    const auto matches = [](const Cron& cron, Seconds when) { return cron.next(when - 1) == when; };
     const Cron local("0 9 * * 1-5","Asia/Tokyo");
-    check(local.matches(utc(2026,11,20,0,0)), "weekday in the configured IANA timezone");
-    check(!local.matches(utc(2026,11,21,0,0)), "skip Saturday");
+    check(matches(local,utc(2026,11,20,0,0)), "weekday in the configured IANA timezone");
+    check(!matches(local,utc(2026,11,21,0,0)), "skip Saturday");
     const Cron listsAndSteps("5,10-22/4 2/3 * 11 7","Etc/UTC");
-    check(listsAndSteps.matches(utc(2026,11,22,5,14)), "list/range/step/Sunday alias");
-    check(!listsAndSteps.matches(utc(2026,11,22,5,15)), "minute step mismatch");
+    check(matches(listsAndSteps,utc(2026,11,22,5,14)), "list/range/step/Sunday alias");
+    check(!matches(listsAndSteps,utc(2026,11,22,5,15)), "minute step mismatch");
     const Cron eitherDay("0 0 21 * 1","Etc/UTC");
-    check(eitherDay.matches(utc(2026,11,21,0,0)), "day-of-month alternative");
-    check(eitherDay.matches(utc(2026,11,23,0,0)), "day-of-week alternative");
-    check(!eitherDay.matches(utc(2026,11,22,0,0)), "neither eligible day");
+    check(matches(eitherDay,utc(2026,11,21,0,0)), "day-of-month alternative");
+    check(matches(eitherDay,utc(2026,11,23,0,0)), "day-of-week alternative");
+    check(!matches(eitherDay,utc(2026,11,22,0,0)), "neither eligible day");
     rejects<Conflict>([] { Cron("1 2 * * * *","Etc/UTC"); },"six fields accepted");
     rejects<Conflict>([] { Cron("*/0 2 * * *","Etc/UTC"); },"zero divisor accepted");
     rejects<Conflict>([] { Cron("0 24 * * *","Etc/UTC"); },"hour 24 accepted");
     rejects<Conflict>([] { Cron("1,,2 0 * * *","Etc/UTC"); },"empty list element accepted");
     rejects<Conflict>([] { Cron("* * * * *","Not/A_Zone"); },"unknown time zone accepted");
+    rejects<Conflict>([] { Cron("* * * * *","/usr/share/zoneinfo/UTC"); },"non-IANA zone path accepted");
+    const Cron leap("0 0 29 2 *","Etc/UTC");
+    check(leap.next(utc(2096,2,29,0,0)) == utc(2104,2,29,0,0),"century leap year was not skipped");
+    const Cron futureDST("30 2 * 3 0","America/New_York");
+    check(futureDST.next(utc(2040,3,11,0,0)) == utc(2040,3,18,6,30),"future DST gap was not skipped");
+    const Cron halfHourFold("45 1 * * *","Australia/Lord_Howe");
+    const auto firstFold = utc(2026,4,4,14,45), secondFold = utc(2026,4,4,15,15);
+    const auto folded = halfHourFold.between(firstFold,secondFold);
+    check(folded.first == firstFold && folded.last == secondFold && folded.count == 2,"half-hour fall-back lost an instant");
+    const Cron always("* * * * *","Etc/UTC");
+    check(always.between(0,utc(2026,1,1,0,0)).count == utc(2026,1,1,0,0) / 60 + 1,
+          "multi-decade catch-up lost occurrences");
 }
 
 void cronIntakeAndRestart() {
@@ -121,6 +134,67 @@ void cronIntakeAndRestart() {
         store.fireDueAutomations(utc(2027,11,1,5,35));
         check(store.tasks().size() == 4,"configured schedules did not retain their due time across restart");
     }
+}
+
+void configuredScheduleLifecycle() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto folder = home / "release";
+    auto config = botConfig();
+    const Json entry{{"id","daily"},{"schedule","0 9 * * *"},{"timezone","Asia/Tokyo"},{"request","Daily check"}};
+    config["cron"] = Json::array({entry});
+    createBot(folder,config,"SOUL","MEMORY");
+    createBot(home / "other",botConfig(),"","");
+    const Bots bots(home);
+    const Person owner{"fixture",true};
+    Store store(temp.path / "tasks.db");
+    std::vector<std::string> errors;
+    const auto sync = [&](Seconds now) {
+        bots.syncSchedules(store,now,[&](std::string_view, std::string_view error) { errors.emplace_back(error); });
+    };
+    const auto schedule = [&] { return store.automations(owner,"release").at("automations").front(); };
+    const auto start = utc(2026,1,1,12,0);
+    const auto next = utc(2026,1,2,0,0);
+    sync(start);
+    const auto id = schedule().at("id").get<Id>();
+    config["projectId"] = "";
+    write(folder / "config.json",config.dump());
+    sync(next);
+    store.fireDueAutomations(next);
+    check(errors.size() == 1 && schedule().at("status") == "inactive" && store.tasks().empty(),
+          "invalid configuration left its previously stored route active");
+
+    config["projectId"] = "repaired-project";
+    write(folder / "config.json",config.dump());
+    sync(next);
+    store.fireDueAutomations(next);
+    check(store.tasks("release").size() == 1 && store.tasks("release").at(0).at("projectId") == "repaired-project",
+          "repaired config did not restore the schedule's identity and route");
+
+    config["cron"] = Json::array();
+    write(folder / "config.json",config.dump());
+    sync(next);
+    check(schedule().at("status") == "inactive","omitted schedule was not deactivated");
+    config["cron"] = Json::array({entry});
+    write(folder / "config.json",config.dump());
+    sync(next);
+    store.fireDueAutomations(next);
+    check(schedule().at("id") == id && schedule().at("status") == "active" && store.tasks().size() == 1,
+          "reintroduced configuration duplicated a firing or lost its schedule ID");
+    store.cancelAutomation(owner,"release",id);
+    sync(next);
+    check(schedule().at("status") == "canceled","sync reactivated an explicit cancellation");
+
+    const auto routing = bots.get("release").intake("");
+    store.createAutomation(owner,routing,{{"kind","reminder"},{"timezone","Asia/Tokyo"},{"fireAt",next+1},
+        {"request","Check again"}},next);
+    store.createAutomation(owner,routing,{{"kind","trigger"},{"source","deploy"},{"request","Deploy check"}},next);
+    std::filesystem::remove_all(folder);
+    sync(next);
+    store.fireDueAutomations(next+1);
+    rejects<AccessDenied>([&] { store.receiveWebhook(owner,"deploy","event-1",Json::object(),next+1); },
+                          "webhook was delivered for a removed Bot");
+    check(store.tasks().size() == 1,"automation for a removed Bot queued work");
 }
 
 class NotesModel final : public Model {
@@ -167,13 +241,14 @@ void notesAndRoutingOnRestart() {
     createBot(folder / "first",botConfig(),"First version","First memory");
     createBot(folder / "second",botConfig(),"Second version","Second-only memory");
     const Bots bots(folder);
-    const auto notes = [&](std::string_view bot) { return bots.notes(bot); };
+    const auto soul = [&](std::string_view bot) { return bots.soul(bot); };
+    const auto seed = [&](std::string_view bot) { return bots.initialMemory(bot); };
     NotesModel model;
     NotesT3 t3;
     Id firstId, secondId, waitId;
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
+        Store store(db,seed);
+        Runtime runtime(store,model,t3,soul);
         for (auto bot : {"first","second"})
             store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
         firstId = store.submit(bots.get("first").intake("Request for first Bot"));
@@ -187,8 +262,8 @@ void notesAndRoutingOnRestart() {
             "same-project tasks must queue across Bots");
     }
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
+        Store store(db,seed);
+        Runtime runtime(store,model,t3,soul);
         store.operate(firstId,waitId,"answer",{{"text","main"}});
         rejects<Conflict>([&] { store.operate(firstId,waitId,"answer",{{"text","old answer"}}); },"duplicate answer accepted");
         runtime.tick();
@@ -207,8 +282,9 @@ void notesAndRoutingOnRestart() {
     createBot(folder / "first",botConfig("new-model"),"New SOUL would now ask for something different","First updated memory");
     t3.finished = true;
     {
-        Store store(db);
-        Runtime runtime(store,model,t3,notes);
+        Store store(db,seed);
+        store.memory({"fixture",true},"first","apply_memory_edit",{{"baseVersion",0},{"content","First updated memory"}});
+        Runtime runtime(store,model,t3,soul);
         for (int i = 0; i < 4; ++i) runtime.tick();
         check(store.task(firstId)["state"] == "completed","first Bot did not complete with its original criterion");
         check(store.task(secondId)["state"] == "sending","next task did not begin when the first task closed");
@@ -280,7 +356,11 @@ void notesAcrossConversationAndWork() {
     createBot(folder / "first",botConfig("first-model"),first.soul + "界tail",first.memory + "tail");
     createBot(folder / "second",botConfig("second-model"),second.soul,second.memory);
     const Bots bots(folder);
-    Store store(temp.path / "tasks.db");
+    Store store(temp.path / "tasks.db",[&](std::string_view bot) {
+        auto memory = bots.initialMemory(bot);
+        if (!memory.empty()) memory += std::string(64,'X');
+        return memory;
+    });
     for (auto bot : {"first","second"})
         store.access().resourceGrant({"fixture",true},bot,{"environment","env-canonical","launch"},GrantChange::grant);
     NotesT3 t3;
@@ -288,10 +368,9 @@ void notesAcrossConversationAndWork() {
     std::optional<std::string> noteReadError;
     Runtime runtime(store,model,t3,[&](std::string_view botId) {
         if (noteReadError) throw Conflict(*noteReadError);
-        auto notes = bots.notes(botId);
-        if (!notes.soul.empty()) notes.soul += std::string(64,'X');
-        if (!notes.memory.empty()) notes.memory += std::string(64,'X');
-        return notes;
+        auto soul = bots.soul(botId);
+        if (!soul.empty()) soul += std::string(64,'X');
+        return soul;
     });
     const auto expectedNotes = [](BotNotes notes) {
         if (!notes.soul.empty()) notes.soul += std::string(64,'X');
@@ -359,12 +438,14 @@ void notesAcrossConversationAndWork() {
     const auto edited = askAboutResult(firstIntake,firstTask,"edited-notes");
     first = {"Use the verified report.","Lead with the evidence."};
     write(folder / "first" / "SOUL.md",first.soul);
-    write(folder / "first" / "MEMORY.md",first.memory);
-    checkResultAnswer(firstIntake,firstTask,edited,expectedNotes(first),std::string(explanation) + " " + conclusion);
+    const auto stored = expectedNotes(first);
+    store.memory({"fixture",true},"first","apply_memory_edit",{{"baseVersion",0},{"content",stored.memory}});
+    checkResultAnswer(firstIntake,firstTask,edited,stored,std::string(explanation) + " " + conclusion);
     const auto deleted = askAboutResult(firstIntake,firstTask,"deleted-notes");
     std::filesystem::remove(folder / "first" / "SOUL.md");
     std::filesystem::remove(folder / "first" / "MEMORY.md");
-    checkResultAnswer(firstIntake,firstTask,deleted,{},explanation);
+    std::filesystem::create_directory(folder / "first" / "MEMORY.md");
+    checkResultAnswer(firstIntake,firstTask,deleted,{"",stored.memory},std::string(explanation) + " " + conclusion);
 
     const auto beforeFailure = model.requests.size();
     const auto originalRequest = "Collect the missing release evidence";
@@ -601,7 +682,7 @@ void fixedDemoWithUserCriteriaAndContinuation() {
     } changes;
     auto t3 = makeDemoT3();
     const auto demo = makeDemoModel();
-    const auto notes = [](auto) { return BotNotes{}; };
+    const auto notes = [](auto) { return std::string{}; };
     const Intake intake{"demo","Measure the result","local","project"};
     const auto tickUntil = [](Runtime& runtime,const auto& ready,std::string_view message) {
         for (int step = 0; step < 12 && !ready(); ++step) runtime.tick();
@@ -655,7 +736,7 @@ void fixedDemoFollowUpKeepsTheExplainedResult() {
     store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
-    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
     const Intake intake{"demo","Measure the result","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "completed"; ++i) runtime.tick();
@@ -681,7 +762,7 @@ void fixedDemoAnswersAnAnchoredQuestion() {
     store.access().resourceGrant({"fixture",true},"demo",{"environment","local","launch"},GrantChange::grant);
     const auto demo = makeDemoModel();
     const auto t3 = makeDemoT3();
-    Runtime runtime(store,*demo,*t3,[](auto) { return BotNotes{}; });
+    Runtime runtime(store,*demo,*t3,[](auto) { return std::string{}; });
     const Intake intake{"demo","ask: Which dataset should I use?","local","project"};
     const auto task = store.submit(intake);
     for (int i = 0; i < 12 && store.task(task)["state"] != "waiting"; ++i) runtime.tick();
@@ -843,6 +924,7 @@ int main() {
     try {
         cronSyntaxAndTimeZones();
         cronIntakeAndRestart();
+        configuredScheduleLifecycle();
         notesAndRoutingOnRestart();
         notesAcrossConversationAndWork();
         directionalPeerConfiguration();

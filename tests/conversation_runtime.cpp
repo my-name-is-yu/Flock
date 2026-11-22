@@ -213,7 +213,7 @@ struct Fixture {
         store = std::make_unique<Store>(dir/"state.db");
         runtime = std::make_unique<Runtime>(*store,model,t3,[this](auto) {
             if (beforeNotes) beforeNotes();
-            return BotNotes{};
+            return std::string{};
         },RuntimeOptions{[this] { return now; }});
     }
     Intake routing(std::string request = "計測", std::string bot = "alpha", std::string environment = "desktop",
