@@ -53,6 +53,13 @@
   --sidebar-width: 18.5rem;
   --content-width: 52rem;
 
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-press: 140ms;
+  --dur-fast: 160ms;
+  --dur-medium: 240ms;
+
   font-family: var(--font-sans);
   font-size: 16px;
   color: var(--text);
@@ -85,7 +92,7 @@ svg { display: block; }
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
-  transition: grid-template-columns .22s cubic-bezier(.2, .9, .25, 1);
+  transition: grid-template-columns var(--dur-medium) var(--ease-out);
 }
 .workspace.sidebar-resizing { transition: none; user-select: none; cursor: col-resize; }
 .workspace.keyboard-viewport {
@@ -109,15 +116,30 @@ svg { display: block; }
 .avatar-icon-glyph > svg { width: 54%; height: 54%; }
 /* Pale avatars need an edge against light surfaces. Animated avatars wrap their canvas in a div. */
 .mug-outline > :is(svg, canvas, div) { filter: drop-shadow(0 0 .55px light-dark(rgb(28 20 40 / .36), transparent)); }
-.icon-button { background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm); width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center; font-size: 1.25rem; flex: none; }
-.icon-button:hover { background: var(--hover); color: var(--text); }
+.icon-button {
+  background: none; color: var(--text-2); border: 0; border-radius: var(--radius-sm);
+  width: 2.15rem; height: 2.15rem; padding: 0; display: grid; place-items: center;
+  font-size: 1.25rem; flex: none;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+}
+.icon-button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.icon-button:active:not(:disabled) { transform: scale(.92); }
 .icon-button svg { width: 1.18rem; height: 1.18rem; }
 .narrow-only { display: none; }
 .text-button, .link { color: var(--accent); font-size: var(--text-sm); text-decoration: none; font-weight: 600; }
-.text-button { background: transparent; border: 0; border-radius: var(--radius-sm); padding: .4rem .55rem; }
+.text-button {
+  background: transparent; border: 0; border-radius: var(--radius-sm); padding: .4rem .55rem;
+  transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+}
 .text-button:hover, .link:hover { text-decoration: underline; }
-.button { border: 0; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent); padding: .42rem .7rem; font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+.text-button:active:not(:disabled) { transform: scale(.97); }
+.button {
+  border: 0; border-radius: var(--radius-md); background: var(--accent-soft); color: var(--accent);
+  padding: .42rem .7rem; font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere;
+  transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, transform var(--dur-press) var(--ease-out);
+}
 .button:hover:not(:disabled) { background: var(--accent-soft-hover); }
+.button:active:not(:disabled) { transform: scale(.97); }
 .button.danger { background: var(--danger-soft); color: var(--danger); }
 .button.danger:hover:not(:disabled) { background: var(--danger-soft-hover); }
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
@@ -131,5 +153,7 @@ svg { display: block; }
 @media (prefers-reduced-motion: reduce) {
   .workspace, .workspace .main { transition: none; }
   .workspace.nav-open .main { transform: none; }
+  .icon-button, .text-button, .button { transition-property: background-color, color; }
+  .icon-button:active:not(:disabled), .text-button:active:not(:disabled), .button:active:not(:disabled) { transform: none; }
   *, *::before, *::after { scroll-behavior: auto !important; }
 }
