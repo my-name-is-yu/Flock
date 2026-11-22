@@ -6,6 +6,10 @@
 namespace flockv0 {
 namespace {
 constexpr auto unavailable = "Session evidence not found";
+constexpr auto searchTimedOut = "Session search timed out. Retry with the same filters and cursor.";
+constexpr std::size_t searchCandidateLimit = 64;
+constexpr auto searchTimeLimit = std::chrono::seconds(2);
+using Clock = std::chrono::steady_clock;
 
 Json failure(std::string_view error) { return {{"ok",false},{"error",error}}; }
 
@@ -36,7 +40,7 @@ struct Filters {
     std::string query, from, to;
 };
 
-enum class RefKind { session, search, events, event, attachment };
+enum class RefKind { session, search, events, event, attachment, searchPosition };
 
 struct Reference {
     SessionTarget target;
@@ -73,34 +77,52 @@ public:
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
+        const auto scopedKey = Json::array({key,channelScope_});
         std::optional<Reference> anchor;
         SessionTarget after;
         if (hasCursor(args)) {
-            anchor = resolve(reference(args,"cursor"),RefKind::search);
-            if (!anchor || anchor->payload != key || !permitted(anchor->target) || !readable(anchor->target))
-                return scopedResult(failure(unavailable));
-            after = anchor->target;
+            const auto cursor = reference(args,"cursor");
+            anchor = resolve(cursor,RefKind::search);
+            if (anchor) {
+                if ((anchor->payload != scopedKey && anchor->payload != key) ||
+                    !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
+                    return scopedResult(failure(unavailable));
+                after = anchor->target;
+            } else {
+                const auto position = resolve(cursor,RefKind::searchPosition);
+                if (!position || position->payload != scopedKey) return scopedResult(failure(unavailable));
+                after = position->target;
+            }
         }
 
         const auto scrub = store_.sharedRedactor();
         std::vector<Candidate> matches;
         std::vector<SessionTarget> incomplete;
-        std::vector<SessionTarget> batch;
-        std::size_t next = 0;
-        bool exhausted = false;
+        const auto batch = candidates(after);
+        const auto scanLimit = std::min(searchCandidateLimit,batch.size());
+        const auto scanDeadline = Clock::now()+searchTimeLimit;
+        std::size_t scanned = 0;
+        bool timedOut = false;
+        bool skippedSlowCandidate = false;
         for (;;) {
-            while (matches.size() <= limit && !exhausted) {
-                if (next == batch.size()) {
-                    batch = candidates(after);
-                    next = 0;
-                    if (batch.empty()) {
-                        exhausted = true;
-                        break;
-                    }
+            while (matches.size() <= limit && scanned < scanLimit) {
+                if (Clock::now() >= scanDeadline) {
+                    timedOut = true;
+                    break;
                 }
-                after = batch[next++];
-                if (!permitted(after)) continue;
-                auto item = t3_.sessionMetadata(after,!filters.query.empty());
+                const auto& target = batch[scanned];
+                std::optional<SessionMetadata> item;
+                try {
+                    if (permitted(target)) item = t3_.sessionMetadata(target,!filters.query.empty(),scanDeadline);
+                } catch (const SessionReadTimeout&) {
+                    timedOut = true;
+                    if (scanned == 0) {
+                        skippedSlowCandidate = true;
+                        ++scanned;
+                    }
+                    break;
+                }
+                ++scanned;
                 if (!item ||
                     (!project.empty() && item->projectId != project &&
                      !session_read::contains(scrub.text(item->project),project)) ||
@@ -108,28 +130,28 @@ public:
                     !session_read::inRange(item->updatedAt,filters.from,filters.to)) continue;
                 auto match = matchText(scrub,*item,filters.query);
                 if (match.matched)
-                    matches.push_back({after,std::move(*item),std::move(match)});
-                else if (match.incomplete) incomplete.push_back(after);
+                    matches.push_back({target,std::move(*item),std::move(match)});
+                else if (match.incomplete) incomplete.push_back(target);
             }
 
+            if (timedOut && scanned == 0) return scopedResult(failure(searchTimedOut));
             std::lock_guard lock(store_.mutex);
             Transaction transaction(store_.db);
             if (anchor && !permitted(anchor->target)) return scopedResult(failure(unavailable));
             std::erase_if(matches,[&](const Candidate& row) { return !permitted(row.target); });
-            if (matches.size() <= limit && !exhausted) continue;
+            if (matches.size() <= limit && !timedOut && scanned < scanLimit) continue;
 
             Json result{{"ok",true},{"sessions",Json::array()},{"nextCursor",nullptr},{"truncated",false}};
             auto& items = result["sessions"];
             auto scopes = Json::array();
             if (anchor) scopes.push_back(issue(RefKind::session,anchor->target,nullptr));
             const auto latestScrub = store_.sharedRedactor();
-            SessionTarget last;
             const auto unsearched = std::ranges::find_if(incomplete,[&](const SessionTarget& target) { return permitted(target); });
-            bool truncated = unsearched != incomplete.end();
-            if (truncated) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
+            bool truncated = skippedSlowCandidate || unsearched != incomplete.end();
+            if (unsearched != incomplete.end()) scopes.push_back(issue(RefKind::session,*unsearched,nullptr));
             for (const auto& [target,item,match] : matches) {
                 if (items.size() == limit) {
-                    result["nextCursor"] = issue(RefKind::search,last,key);
+                    result["nextCursor"] = issue(RefKind::search,matches[limit-1].target,scopedKey);
                     scopes.push_back(issue(RefKind::session,target,nullptr));
                     break;
                 }
@@ -143,8 +165,9 @@ public:
                     {"title",display(item.title,240)},{"project",display(item.project,240)},
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
-                last = target;
             }
+            if (result["nextCursor"].is_null() && scanned < batch.size())
+                result["nextCursor"] = issue(RefKind::searchPosition,batch[scanned-1],scopedKey);
             result["truncated"] = truncated;
             transaction.commit();
             return scopedResult(std::move(result),std::move(scopes));
@@ -193,7 +216,9 @@ public:
         for (auto& step : steps) {
             const auto& tool = step.at("tool");
             if (tool != "flock_session_search" && tool != "flock_session_events") continue;
-            const auto& refs = step.at("result").at("sessions");
+            const auto& outcome = step.at("result");
+            if (!outcome.contains("sessions") && outcome.value("ok",true) == false) continue;
+            const auto& refs = outcome.at("sessions");
             for (const auto& token : refs) {
                 const auto& ref = token.get_ref<const std::string&>();
                 auto [entry, fresh] = checked.try_emplace(ref);
@@ -233,7 +258,6 @@ private:
         SessionMetadata metadata;
         TextMatch match;
     };
-    static constexpr std::size_t candidateBatch = 64;
     Store::Impl& store_;
     Access& access_;
     std::string_view bot_;
@@ -251,9 +275,11 @@ WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
         return access_.permits(bot_,Scope::sessionRead(target.environmentId,target.threadId),true);
     }
 
-    bool readable(const SessionTarget& target) const {
+    bool readable(const SessionTarget& target, SessionReadDeadline deadline = {}) const {
         try {
-            return t3_.sessionMetadata(target,false).has_value();
+            return t3_.sessionMetadata(target,false,deadline).has_value();
+        } catch (const SessionReadTimeout&) {
+            throw;
         } catch (const std::exception&) {
             return false;
         }
@@ -281,7 +307,7 @@ WITH candidates(environment,thread) AS (
 )
 SELECT environment,thread FROM candidates WHERE (environment,thread) > (?2,?3)
 ORDER BY environment,thread LIMIT ?4
-)SQL",{bot_,after.environmentId,after.threadId,candidateBatch,channelScope_});
+)SQL",{bot_,after.environmentId,after.threadId,searchCandidateLimit+1,channelScope_});
         std::vector<SessionTarget> result;
         while (rows.next()) result.push_back({rows.string(0),rows.string(1)});
         return result;
@@ -436,6 +462,10 @@ Json Store::Impl::sessionReadTool(std::string_view bot, std::string_view channel
         return decision.tool == "flock_session_search" ? evidence.search(decision.args) : evidence.events(decision.args);
     } catch (const Conflict& error) {
         return scopedResult(failure(error.what()));
+    } catch (const SessionReadTimeout&) {
+        return scopedResult(failure(searchTimedOut));
+    } catch (const StorageError&) {
+        throw;
     } catch (const std::exception&) {
         return scopedResult(failure("Session evidence could not be read"));
     }

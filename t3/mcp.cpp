@@ -189,13 +189,15 @@ HttpResponse http(const std::string& url, std::string_view method, const Headers
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.data());
         curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size()));
     }
-    if (curl_easy_perform(curl.get()) != CURLE_OK)
-        throw Failure(Failure::Kind::Wire, "T3 HTTP connection failed or timed out");
+    if (const auto code = curl_easy_perform(curl.get()); code != CURLE_OK)
+        throw Failure(Failure::Kind::Wire, "T3 HTTP connection failed or timed out",
+                      code == CURLE_OPERATION_TIMEDOUT ? Failure::Reason::Timeout : Failure::Reason::Other);
     curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response.status);
     return response;
 }
 
-Client::Client(Credential credential) : credential_(std::move(credential)), headers_{
+Client::Client(Credential credential, SessionReadDeadline deadline)
+    : credential_(std::move(credential)), deadline_(deadline), headers_{
     {"Authorization", "Bearer " + credential_.token}, {"Accept", "application/json, text/event-stream"},
     {"Content-Type", "application/json"}} {
     try {
@@ -218,7 +220,19 @@ Client::~Client() {
 }
 
 HttpResponse Client::request(std::string_view method, const std::string& body, long timeoutMs) {
-    auto response = http(credential_.mcpUrl, method, headers_, body, timeoutMs);
+    // Leave time for best-effort MCP session teardown within the same deadline.
+    const auto cleanupTime = std::chrono::milliseconds(method == "DELETE" ? 0 : 250);
+    const auto remaining = deadline_ ? std::chrono::ceil<std::chrono::milliseconds>(
+        *deadline_ - std::chrono::steady_clock::now() - cleanupTime).count() : timeoutMs;
+    if (remaining <= 0) throw SessionReadTimeout();
+    HttpResponse response;
+    try {
+        response = http(credential_.mcpUrl, method, headers_, body, std::min<long>(timeoutMs,remaining));
+    } catch (const Failure& error) {
+        if (deadline_ && remaining <= timeoutMs && error.reason == Failure::Reason::Timeout)
+            throw SessionReadTimeout();
+        throw;
+    }
     if (response.status == 401 || response.status == 403)
         throw Failure(Failure::Kind::Auth, "T3 refused the OAuth credential or its access level");
     if (response.status < 200 || response.status >= 300)

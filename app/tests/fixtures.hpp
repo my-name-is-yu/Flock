@@ -49,7 +49,7 @@ inline Json botConfig(std::string model = "fixture-model") {
     return {{"environmentId","env-canonical"},{"projectId","project-canonical"},{"modelProvider","chatgpt"},
         {"model",model},{"runTimeoutSeconds",999},
         {"session",{{"model","child-model"},{"providerInstanceId","child-provider"},{"runtimeMode","auto"},
-            {"workspaceStrategy",{{"kind","worktree"},{"remote","origin"},{"branch","main"}}}}},
+            {"workspaceStrategy",{{"type","worktree"},{"baseRef","origin/main"},{"startFromOrigin",true}}}}},
         {"cron",Json::array()}};
 }
 
