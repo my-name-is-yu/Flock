@@ -2111,7 +2111,7 @@ void specialistAdmission(SpecialistMode mode) {
             check(command.config.at("session").at("workspaceStrategy").at("expectedCommit")==pin &&
                   command.config.at("session").at("interactionMode")=="default" &&
                   command.config.at("session").at("runtimeMode")=="approval-required" &&
-                  command.instruction.find("findings (briefly name the check")!=std::string::npos,
+                  command.instruction.find("findings (a nonempty string or up to eight nonempty strings")!=std::string::npos,
                   "a stage launch lost the immutable input or the findings contract");
         check(f.t3.seen.at(0).instruction.find("verify-1")!=std::string::npos &&
               f.t3.seen.at(1).instruction.find("verify-2")!=std::string::npos,
@@ -2141,7 +2141,7 @@ void specialistAdmission(SpecialistMode mode) {
         const bool failed = mode==SpecialistMode::FailedWorkflow;
         const auto firstFindings = failed ? "Reproduction exited with status 1" : "Reproduction exited with status 0";
         f.t3.runs.at(run1).report = Json{{"artifactVersion",pin},{"verdict",failed ? "fail" : "pass"},
-            {"findings",firstFindings}}.dump();
+            {"findings",Json::array({firstFindings,"HEAD matched the assigned SHA"})}}.dump();
         f.reach(stage1,"completed");
         f.restart();
         f.reach(first.senderTaskId,"completed");
@@ -2156,7 +2156,7 @@ void specialistAdmission(SpecialistMode mode) {
         const auto& refs = result->at("data").at("references");
         check(std::ranges::any_of(refs,[&](const Json& ref) {
                   return ref.at("stageId")=="verify-1" && ref.at("runId")==f.t3.runs.at(run1).resultRunId &&
-                      ref.at("verdict")== (failed ? "fail" : "pass") && ref.at("findings")==firstFindings;
+                      ref.at("verdict")== (failed ? "fail" : "pass") && ref.at("findings")==std::string(firstFindings)+"\nHEAD matched the assigned SHA";
               }) && std::ranges::any_of(refs,[&](const Json& ref) {
                   const auto& findings = ref.at("findings").get_ref<const std::string&>();
                   return ref.at("stageId")=="verify-2" && ref.at("runId")==f.t3.runs.at(run2).resultRunId &&

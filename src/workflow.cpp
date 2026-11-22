@@ -6,6 +6,22 @@ namespace flockv0 {
 namespace {
 constexpr std::size_t maxFindingsBytes = 2000;
 
+std::string specialistFindings(const Json& report) {
+    const auto value = report.find("findings");
+    if (value == report.end()) return {};
+    if (value->is_string()) return value->get<std::string>();
+    if (!value->is_array() || value->empty() || value->size() > 8) return {};
+    std::string result;
+    for (const auto& item : *value) {
+        if (!item.is_string()) return {};
+        const auto& text = item.get_ref<const std::string&>();
+        if (!conversation_storage::hasText(text)) return {};
+        if (!result.empty()) result += '\n';
+        result += text;
+    }
+    return result;
+}
+
 Seconds deadlineSeconds(const Json& args, Seconds inherited = 0) {
     if (!args.contains("softDeadlineSeconds")) return inherited;
     const auto& value = args.at("softDeadlineSeconds");
@@ -214,7 +230,7 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
             item["verdict"] = evidence.string(3);
             if (peer) {
                 const auto parsed = Json::parse(field(report,"report"),nullptr,false);
-                const auto findings = field(parsed,"findings");
+                const auto findings = specialistFindings(parsed);
                 if (conversation_storage::hasText(findings))
                     item["findings"] = bounded(scrub.text(findings),maxFindingsBytes);
             }
@@ -458,7 +474,7 @@ void Store::Impl::appendStageRequirements(std::string& instruction, const Json& 
         instruction += "\nAssigned check: " + field(spec,"name") + " (" + field(spec,"stageId") + ").";
         instruction += "\nCheck that HEAD is the pinned commit and keep the assigned worktree unchanged.";
         instruction += "\nVerify that exact version. Return only a JSON object with artifactVersion, verdict (pass or fail), "
-                       "and findings (briefly name the check you actually ran and its observed result).";
+                       "and findings (a nonempty string or up to eight nonempty strings describing the check and observed result).";
     } else if (role=="verify") instruction += "\nVerify that exact version. Return only JSON with artifactVersion and verdict (pass or fail).";
     else if (role=="implement") instruction += "\n\nReturn only JSON with the immutable artifactVersion (full lowercase commit SHA or SHA-256 digest).";
 }
@@ -488,7 +504,7 @@ bool Store::Impl::settleStageReport(Json& task) {
     const auto version = field(result,"artifactVersion");
     bool ok = field(report,"status")=="completed" && !report.value("truncated",false);
     if (task.contains("workflowParentTaskId"))
-        ok = ok && !field(report,"itemId").empty() && conversation_storage::hasText(field(result,"findings"));
+        ok = ok && !field(report,"itemId").empty() && conversation_storage::hasText(specialistFindings(result));
     std::string output;
     if (role=="verify") {
         const auto verdict = field(result,"verdict");

@@ -1174,7 +1174,7 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
             instruction += "\n\nCheck only this immutable commit in the assigned worktree: " +
                 field(task,"inputArtifactVersion") +
                 ". Verify HEAD before checking. Keep the worktree unchanged. Return only a JSON object with "
-                "artifactVersion, verdict (pass or fail), and your findings.";
+                "artifactVersion, verdict (pass or fail), and findings (one nonempty JSON string).";
         }
         quotes.remaining += recentReportBudget;
         if (moved) {
