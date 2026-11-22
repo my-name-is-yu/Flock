@@ -75,6 +75,12 @@ RunRef runRef(const Json& data) {
     return {field(data,"threadId"), field(data,"runId"), field(data,"link")};
 }
 
+Json questionTarget(const Json& task) {
+    const auto& wait = task.at("wait");
+    return {{"waitId",field(wait,"reason") == "user_question" ? wait.at("id") : Json(nullptr)},
+        {"eventId",task.at("eventId")},{"run",task.at("activeRun")},{"requestId",field(task.at("question"),"requestId")}};
+}
+
 Store::Impl::Impl(std::filesystem::path file) : path(std::move(file)) {
     if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
@@ -121,7 +127,8 @@ CREATE INDEX IF NOT EXISTS runs_task ON runs(task_id,action_id);
 CREATE TABLE IF NOT EXISTS peer_exchanges(
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, phase TEXT NOT NULL, last_message TEXT NOT NULL,
   sender_task INTEGER NOT NULL REFERENCES tasks(id),
-  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id));
+  recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
+  sender_environment TEXT NOT NULL, sender_revision INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
@@ -296,8 +303,7 @@ Json Store::Impl::currentEvent(const Json& task) const {
     return result;
 }
 void Store::Impl::consumeEvent(const Json& task) {
-    exec("UPDATE events SET consumed=1,data=json_remove(data,'$._flockDeferredCompletion','$._flockSavedCompletion')"
-         " WHERE id=? AND task_id=? AND consumed=0", {task["eventId"], task["id"]});
+    exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task["eventId"], task["id"]});
 }
 void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
@@ -345,108 +351,6 @@ std::string taskIntent(const Json& task) {
     return intent.empty() ? field(task,"request") : intent;
 }
 
-Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent, const Json& pending,
-                                      std::size_t availableBytes, std::string_view instruction) const {
-    std::lock_guard lock(mutex);
-    std::map<std::pair<Id,int>,Json> byMessage;
-    std::size_t sourceBytes = 8192;
-    const auto workKey = [](const Json& item) -> std::string {
-        if (item.contains("doneWhen")) return "criteria";
-        if (item.contains("intent")) return "intent";
-        if (item.contains("environmentId") && field(item,"replaceKey") == "environment") return {};
-        return field(item,"replaceKey");
-    };
-    std::set<std::string> replaced{"environment"};
-    for (const auto& item : pending) replaced.insert(workKey(item));
-    const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
-
-    const auto remember = [&](Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
-        const bool mixedRouteAndWork = item.contains("environmentId") &&
-            (item.contains("intent") || item.contains("doneWhen"));
-        const bool staleWorkRevision =
-            (item.contains("intent") && item.at("intent") != intent) ||
-            (item.contains("doneWhen") && item.at("doneWhen") != criteria);
-        if (staleWorkRevision && !mixedRouteAndWork) return;
-        const auto key = staleWorkRevision && mixedRouteAndWork ? std::string{} : workKey(item);
-        if (!key.empty() && !replaced.insert(key).second) return;
-        const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
-        if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
-        auto text = field(item,"text");
-        if (item.contains("environmentId")) {
-            text = "Apply the work directions in this earlier message. The current Task intent and Completion criteria "
-                   "in this prompt are authoritative. The current execution destination is \"" +
-                   field(task,"environmentId") +
-                   "\" and supersedes any destination in the quote.\n" + text;
-            item["replaceKey"] = key;
-            item.erase("environmentId");
-        }
-        text = bounded(text,std::min(bytes-separatorBytes,availableBytes-2));
-        if (text.empty()) return;
-        bytes -= text.size() + separatorBytes;
-        availableBytes -= text.size() + 2;
-        item["text"] = std::move(text);
-        item.erase("intent");
-        item.erase("doneWhen");
-        if (auto source = item.find("source"); source != item.end()) {
-            const auto excerpt = bounded(field(*source,"text"),sourceBytes);
-            sourceBytes -= excerpt.size();
-            (*source)["text"] = excerpt;
-        }
-        byMessage.emplace(id,std::move(item));
-    };
-    const auto delivered = [&](Id owner, int& count, std::size_t& bytes) {
-        if (!count || !bytes) return;
-        auto rows = query(R"SQL(
-SELECT entry.value FROM outbox JOIN runs ON runs.action_id=outbox.id, json_each(outbox.data,'$.instructions') entry
-WHERE runs.task_id=? AND outbox.phase='accepted'
-ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
-)SQL",{owner,count});
-        while (bytes && rows.next()) {
-            --count;
-            remember(rows.json(0),bytes);
-        }
-    };
-
-    if (!task.at("lastRun").is_null()) {
-        int count = 20;
-        std::size_t bytes = 4000;
-        delivered(task.at("id"),count,bytes);
-    }
-
-    int deliveredCount = 20, resumeCount = 20;
-    std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes, resumeBytes = 4000;
-    const auto rememberResume = [&](Id message, const std::string& request) {
-        if (!resumeCount || !message || request.empty() || request == intent ||
-            instruction.find(request) != instruction.npos) return;
-        --resumeCount;
-        const auto context = "Earlier resume request, subject to the current task intent, completion criteria, "
-            "and execution destination (" + field(task,"environmentId") + "):\n" + request;
-        remember({{"messageId",message},{"text",context}},resumeBytes);
-    };
-    const auto restart = task.find("restartContext");
-    Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
-    if (parent && !task.at("lastRun").is_null())
-        rememberResume(task.at("sourceMessageId"),field(task,"request"));
-    Id child = task.at("id");
-    while (parent && availableBytes > 2) {
-        auto row = query("SELECT json_extract(data,'$.restartContext.taskId'),"
-                         "coalesce(json_extract(data,'$.cancelledInstructions'),'[]'),"
-                         "json_extract(data,'$.sourceMessageId'),json_extract(data,'$.request') FROM tasks WHERE id=? AND id<?",
-                         {parent,child});
-        if (!row.next()) throw Conflict("Invalid cancelled task reference");
-        const auto cancelled = row.json(1);
-        for (auto item = cancelled.rbegin(); item != cancelled.rend() && pendingBytes > 4; ++item)
-            remember(*item,pendingBytes,4);
-        delivered(parent,deliveredCount,deliveredBytes);
-        if (row.number(0)) rememberResume(row.number(2),row.string(3));
-        child = parent;
-        parent = row.number(0);
-    }
-    Json directions = Json::array();
-    for (auto& [id,item] : byMessage) directions.push_back(std::move(item));
-    return directions;
-}
-
 Store::Store(std::filesystem::path db) : p_(std::make_unique<Impl>(std::move(db))) {}
 Store::~Store() = default;
 const std::filesystem::path& Store::path() const { return p_->path; }
@@ -487,7 +391,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
     modelCallLimit(item.config);
-    Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
+    Json data = {{"botId", item.botId}, {"request", item.request}, {"intent", item.request}, {"environmentId", item.environmentId},
         {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
@@ -554,6 +458,11 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
     const auto reason = field(wait,"reason");
     std::string next = "deciding";
     if (operation == "answer" && reason == "user_question") {
+        const auto& owner = task["question"].is_object() ? task["question"] : wait;
+        const Json savedTarget = {{"waitId",wait.at("id")},{"eventId",wait.at("eventId")},
+            {"run",wait.at("run")},{"requestId",field(wait,"questionId")}};
+        if (owner.value("target",savedTarget) != questionTarget(task))
+            throw Conflict("The question is no longer current");
         if (replanReady(task)) throw Conflict("The task is replanning; this question is no longer answerable");
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
@@ -613,6 +522,7 @@ void Store::Impl::operate(Id id, Id waitId, std::string_view operation, const Js
         throw Conflict("Operation is unavailable for this waiting item");
     }
     clearWait(task,operation);
+    if (operation == "answer" && task["question"].is_object()) task["question"]["target"] = questionTarget(task);
     task["state"] = next;
     save(task);
 }

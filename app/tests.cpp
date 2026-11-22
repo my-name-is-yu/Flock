@@ -441,7 +441,7 @@ void responseContract() {
     input.tools = {"delegate","ask_user"};
     const auto initial = responseRequest(input);
     check(initial["tools"][0]["tools"][0]["parameters"]["required"] ==
-        Json::array({"reason","instruction","doneWhen"}),"initial delegate requires a saved criterion");
+        Json::array({"reason","instruction"}),"saved requested criteria must not require model authorship");
     check(requestContext(initial).at("task").at("requestedDoneWhen") == "Use independently verified measurements" &&
           initial.at("instructions").get_ref<const std::string&>().find("requestedDoneWhen") != std::string::npos,
           "the initial work prompt must direct the Bot to use the requested completion criteria");
@@ -472,7 +472,10 @@ void responseContract() {
     check(turn.dump().find("must-stay-local") == std::string::npos,"conversation adapter config leaked into the prompt");
     input.event = {{"kind","intake"}};
 
+    input.task.erase("requestedDoneWhen");
+    input.needsDoneWhen = true;
     input.task["peers"] = Json::array({{{"botId","verifier"},{"name","Verifier"}}});
+    input.task["peer"] = {{"replyKinds",{"question","result","failed"}}};
     input.tools = {"send_bot_message","reply_to_bot","read_bot_evidence"};
     const auto peerRequest = responseRequest(input);
     const auto peerContext = Json::parse(peerRequest["input"][0]["content"].get<std::string>());
@@ -494,17 +497,19 @@ void responseContract() {
         send["required"].get<Names>() == Names{"reason","botId","kind","text"},
         "first peer work may set a criterion while consultation only needs a question");
     const auto& reply = parameters(peerRequest,"reply_to_bot");
-    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","answer","result","failed"} &&
+    check(reply["properties"]["kind"]["enum"].get<Names>() == Names{"question","result","failed"} &&
         reply["required"].get<Names>() == Names{"reason","kind","text"},
         "peer replies must specify their kind and text");
     const auto& evidence = parameters(peerRequest,"read_bot_evidence");
     check(evidence["properties"]["messageId"]["type"] == "string" &&
         evidence["required"].get<Names>() == Names{"reason","messageId"},
         "peer evidence must identify the message that carries it");
+    input.needsDoneWhen = false;
     input.task["doneWhen"] = "Saved work acceptance";
     const auto nextPeerRequest = responseRequest(input);
     check(!parameters(nextPeerRequest,"send_bot_message")["properties"].contains("doneWhen"),
         "later peer work must keep the saved criterion");
+    input.canForwardUserMessage = true;
     input.task["forwardableUserMessage"] = {{"text","Saved user message"},{"time",123}};
     const auto forwardRequest = responseRequest(input);
     const auto& forward = parameters(forwardRequest,"send_bot_message");
@@ -517,6 +522,13 @@ void responseContract() {
     const auto valid = responseDecision(Json::array({{{"type","reasoning"}},call}),{"complete"});
     check(valid.tool == "complete" && valid.reason == "Evidence provided" && valid.args == Json{{"report","Done"}},
         "Responses call did not map to core decision");
+    for (const auto* key : {"namespace","status"}) {
+        auto incomplete = call;
+        incomplete.erase(key);
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),{"complete"}); },"missing provider qualifier");
+        incomplete[key] = nullptr;
+        rejects<ModelError>([&] { responseDecision(Json::array({incomplete}),{"complete"}); },"null provider qualifier");
+    }
     rejects<ModelError>([&] { responseDecision(Json::array({call,call}),{"complete"}); },"multiple tools accepted");
     rejects<ModelError>([&] { responseDecision(Json::array({call}),{"follow_up"}); },"state-invalid tool accepted");
     rejects<ModelError>([] { responseDecision(Json::array(),{"complete"}); },"missing tool accepted");
@@ -528,9 +540,9 @@ public:
     Decision decide(const ModelInput& input) override {
         requests.push_back(responseRequest(input));
         if (input.task["botId"] == "regression") {
-            return {"follow_up",{{"instruction","Add the required test"}},"A regression test is missing."};
+            return {"follow_up",{{"instruction","Cover the reported bug with a new automated check"}},"A regression test is missing."};
         }
-        return {"complete",{{"report","Existing tests passed"}},"The required existing tests passed."};
+        return {"complete",{{"report","All existing checks succeeded"}},"The required existing tests passed."};
     }
 };
 

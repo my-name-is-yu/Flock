@@ -101,12 +101,17 @@ struct Script : Model {
             if (question != questions.end() && !input.event.contains("userAnswer"))
                 return {"ask_user",question->second,"The fixture needs a user answer"};
             Json args = {{"instruction","Measure and report the fixture"}};
-            if (input.task["doneWhen"] == "") args["doneWhen"] = "Report baseline latency";
+            if (input.needsDoneWhen) args["doneWhen"] = "Report baseline latency";
             return {"delegate",args,"Collect the fixture evidence"};
         }
         check(input.event["kind"] == "result","unexpected model event");
         if (beforeComplete) beforeComplete(input);
         if (onResult) return onResult(input);
+        if (input.task.contains("userInstructions")) {
+            const auto canFollow = std::ranges::find(input.tools,"follow_up") != input.tools.end();
+            return {canFollow ? "follow_up" : "delegate",{{"instruction","Apply the pending instructions"}},
+                    "The report predates the user instructions"};
+        }
         return {"complete",{{"report",input.event["report"]}},"The fixture report includes the requested evidence"};
     }
 };
@@ -334,6 +339,7 @@ void followUpCarriesTheReferencedReport() {
           f.task(id)["sourceResultRefs"] == Json::array({pending["source"]}),
           "the active task did not save the referenced result with the pending instruction");
     f.restart();
+    f.model.onResult = {};
     f.t3.finish("run-2","Separate baseline checked");
     f.reach(id,"deciding");
     f.reach(id,"running");
@@ -668,9 +674,13 @@ void resumeRestoresCancelledTaskDirections() {
     f.script("Use a pinned regression fixture",{send(old)});
     f.receive("past-direction","Use a pinned regression fixture");
     f.reach(old,"running");
-    constexpr auto mixedDirections = "Stay on ローカルMac and keep the raw timing file";
-    f.script(mixedDirections,{change(old,{{"environment","ローカルMac"},{"doneWhen",f.task(old)["doneWhen"]}})});
-    f.receive("pending-direction",mixedDirections);
+    const std::string prefix = "Record all timing samples: ";
+    const std::string constraint = "Keep the raw timing file.";
+    const auto pending = prefix + std::string(9000 - prefix.size() - constraint.size(),'x') + constraint;
+    f.script("Add timing requirements",{send(old,{{"instruction",pending}})});
+    f.receive("pending-direction","Add timing requirements");
+    check(f.task(old).at("pendingInstructions").back().at("text") == pending,
+          "the full instruction was not pending at cancellation");
     f.store->operate(old,0,"cancel");
     f.t3.finish("run-1","Cancelled work settled");
     f.reach(old,"cancelled");
@@ -682,7 +692,7 @@ void resumeRestoresCancelledTaskDirections() {
     const auto running = f.store->submit(f.routing("Another task","alpha","desktop","other"));
     f.reach(running,"running");
     constexpr auto request = "この作業をクラウドMacで再開して";
-    f.script(request,{start({{"request","Resume the measurement and keep the flamegraph"},{"sourceResultMessageId",cancellation},
+    f.script(request,{start({{"request","Resume the measurement"},{"sourceResultMessageId",cancellation},
                              {"resume",true},{"environment","クラウドMac"}})});
     f.script("Resume the other one",{start({{"request","Resume"},{"resume",true}})});
     f.receive("resume-wrong-source","Resume the other one");
@@ -692,13 +702,16 @@ void resumeRestoresCancelledTaskDirections() {
     const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(next,"running");
     const auto& instruction = f.t3.sent.back().instruction;
+    const auto position = instruction.find(pending);
+    check(position != instruction.npos && instruction.find(prefix) == position &&
+          instruction.find(prefix,position + 1) == instruction.npos,
+          "the resumed Session did not receive the full pending instruction exactly once");
     check(f.task(next)["doneWhen"] == f.task(old)["doneWhen"] && f.task(next)["sourceTaskId"] == old && next != old &&
           f.task(next)["environmentId"] == "cloud" &&
           instruction.find("Measure the reference dataset") != std::string::npos &&
           instruction.find("Report baseline latency") != std::string::npos &&
           instruction.find("Use a pinned regression fixture") != std::string::npos &&
-          instruction.find(mixedDirections) != std::string::npos &&
-          instruction.find("keep the flamegraph") != std::string::npos && f.t3.sent.back().tool == "delegate",
+          f.t3.sent.back().tool == "delegate",
           "resume omitted the original intent, criteria, or accepted directions");
 
     constexpr auto goal = "Measure the release dataset";
@@ -737,7 +750,6 @@ void resumeRestoresCancelledTaskDirections() {
     check(resumed.find(trace) != resumed.npos,"the second resume lost the accepted trace direction");
     check(f.t3.sent.back().environmentId == "cloud",
           "the second resume did not use its current destination");
-    check(resumed.find(mixedDirections) != resumed.npos,"the second resume lost the earlier mixed move direction");
     check(resumed.find(revisionRequest) != resumed.npos,"the second resume lost the revised mixed direction");
     check(resumed.find("Report baseline latency") == resumed.npos,"the second resume replayed superseded criteria");
     check(f.task(last)["remaining"] == 3,"the second resume charged for old work");
@@ -749,8 +761,8 @@ void resumeRestoresCancelledTaskDirections() {
     f.advanceUntil([&] { return f.t3.sent.back().tool == "follow_up"; },
                    "the supplement never reached the Session");
     const auto& follow = f.t3.sent.back().instruction;
-    check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos &&
-          follow.find(mixedDirections) == follow.npos,"the follow-up omitted or replayed directions");
+    check(follow.find(localNote) != follow.npos && follow.find("Measure the reference dataset") == follow.npos,
+          "the follow-up omitted or replayed directions");
 
     constexpr auto move = "Continue the measurement on ローカルMac";
     f.script(move,{change(last,{{"environment","ローカルMac"}})});
@@ -760,8 +772,7 @@ void resumeRestoresCancelledTaskDirections() {
                    "the resumed task did not move");
     const auto& moved = f.t3.sent.back().instruction;
     check(moved.find(localNote) != moved.npos && moved.find(localNote) == moved.rfind(localNote) &&
-          moved.find(trace) != moved.npos && moved.find(mixedDirections) != moved.npos &&
-          moved.find("Earlier resume request") != moved.npos && moved.find("keep the flamegraph") != moved.npos &&
+          moved.find(trace) != moved.npos &&
           sessionPrompt(f.t3.sent.back().actionId,moved).size() <= maxSessionPromptBytes &&
           f.task(last)["remaining"] == 1,
           "the moved Session lost an applicable direction or spent extra allowance");
@@ -799,18 +810,13 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
           "the live replan dropped or duplicated the trace direction");
     const auto intentHeading = instruction.find("Task intent:\n");
     const auto criteriaHeading = instruction.find("Completion criteria:\n");
-    const auto contractAuthority = instruction.find(
-        "The current Task intent and Completion criteria in this prompt are authoritative.");
     const auto intentValue = instruction.find(goal,intentHeading);
     const auto criteriaValue = instruction.find(correctedCriteria,criteriaHeading);
     check(intentHeading != instruction.npos && intentHeading == instruction.rfind("Task intent:\n") &&
           intentValue != instruction.npos && intentValue == instruction.rfind(goal) &&
           criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
-          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(correctedCriteria) &&
-          contractAuthority != instruction.npos,
-          "the live replan did not state the authoritative task intent and criteria once");
-    check(instruction.find("The current execution destination is \"desktop\" and supersedes any destination in the quote.") != instruction.npos,
-          "the live replan did not mark the current destination authoritative");
+          criteriaValue != instruction.npos && criteriaValue == instruction.rfind(correctedCriteria),
+          "the live replan did not state the current task intent and criteria once");
 }
 
 void environmentOnlyMoveKeepsWorkAcrossResume() {
@@ -829,9 +835,8 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
                            " and attach trace " + trace;
     f.script(direction,{change(original,{{"environment","ローカルMac"}})});
     f.receive("move-with-checksum",direction);
-    const auto pending = f.task(original)["pendingInstructions"].back();
-    check(pending["replaceKey"] == "environment" && !pending.contains("intent") && !pending.contains("doneWhen"),
-          "the fixture did not create an environment-only instruction");
+    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+          "the fixture did not create an environment-only move");
 
     f.t3.finish("run-1","Cloud work settled");
     f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the move was not delivered to its new Session");
@@ -869,10 +874,6 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
           criteriaHeading != instruction.npos && criteriaHeading == instruction.rfind("Completion criteria:\n") &&
           criteriaValue != instruction.npos && criteriaValue == instruction.rfind(criteria) && criteriaValue > criteriaHeading,
           "the resumed prompt duplicated or lost its large task contract");
-    const auto destinationAuthority = "The current execution destination is \"cloud\" and supersedes any destination in the quote.";
-    check(instruction.find("The current Task intent and Completion criteria in this prompt are authoritative.") != instruction.npos &&
-          instruction.find(destinationAuthority) != instruction.npos,
-          "the resumed Session did not make its current destination authoritative");
     check(sessionPrompt(command.actionId,instruction).size() <= maxSessionPromptBytes,
           "the resumed prompt exceeded the Session prompt cap");
 }
@@ -887,9 +888,8 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
                                "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
     f.script(direction,{change(original,{{"environment","ローカルMac"}})});
     f.receive("cancel-before-move-delivery",direction);
-    const auto pending = f.task(original)["pendingInstructions"].back();
-    check(pending["replaceKey"] == "environment" && !pending.contains("intent") && !pending.contains("doneWhen"),
-          "the fixture did not create an environment-only instruction");
+    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+          "the fixture did not create an environment-only move");
     const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
     f.store->operate(original,0,"cancel");
     f.t3.finish(activeRun,"Cloud work cancelled before the move was delivered");
@@ -912,8 +912,86 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
           "the resumed task did not use its current destination");
     check(instruction.find(checksum) != instruction.npos && instruction.find(checksum) == instruction.rfind(checksum),
           "the cancelled pending direction was dropped or duplicated");
-    check(instruction.find("The current execution destination is \"cloud\" and supersedes any destination in the quote.") != instruction.npos,
-          "the cancelled pending direction did not defer to the current destination");
+}
+
+void resumeBatchesOversizedPendingBacklog() {
+    Fixture f;
+    const auto old = f.store->submit(f.routing(std::string(16000,'i')));
+    f.script("Set criteria",{change(old,{{"doneWhen",std::string(8000,'c')},{"instruction",std::string(8000,'d')}})});
+    f.receive("criteria","Set criteria");
+    f.reach(old,"running");
+
+    std::vector<std::string> specs;
+    for (int i = 1; i <= 9; ++i) {
+        const auto marker = "SPEC-" + std::to_string(i);
+        specs.push_back(marker + std::string(14000,'x') + "END-" + std::to_string(i));
+        f.script(marker,{send(old,{{"instruction",specs.back()}})});
+        f.receive(marker,marker);
+    }
+    f.store->operate(old,0,"cancel");
+    f.t3.finish("run-1","Cancelled work settled");
+    f.reach(old,"cancelled");
+    Id anchor = 0;
+    for (const auto& row : f.store->history(old))
+        if (row["kind"] == "cancelled") anchor = row.at("id");
+    f.script("Resume",{start({{"request",std::string(16000,'r')},{"sourceResultMessageId",anchor},{"resume",true}})});
+    f.receive("resume","Resume",anchor);
+    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
+    std::vector<Json> shown;
+    const auto recordBatch = [&](const ModelInput& input) {
+        if (!input.task.contains("userInstructions")) return;
+        shown.push_back(input.task.at("userInstructions"));
+        if (shown.back().size() < input.task.at("pendingInstructionCount").get<std::size_t>())
+            check(std::ranges::find(input.tools,"complete") == input.tools.end(),"completion could skip unseen instructions");
+    };
+    f.model.beforeIntake = recordBatch;
+    f.model.beforeComplete = recordBatch;
+    f.t3.loseNextSend = true;
+    f.reach(next,"waiting");
+    const auto inherited = f.task(next).at("pendingInstructions");
+    check(inherited.size() == specs.size() && f.t3.sent.back().tool == "delegate",
+          "unconfirmed delegate lost part of the inherited backlog");
+    for (std::size_t i = 0; i < specs.size(); ++i)
+        check(inherited[i].at("text") == specs[i],"unconfirmed delivery changed an inherited specification");
+
+    const auto wait = f.task(next).at("wait");
+    check(wait.at("reason") == "unknown_delivery","missing acknowledgement did not enter delivery recovery");
+    f.store->operate(next,wait.at("id"),"reconcile");
+    f.reach(next,"running");
+    const auto remaining = f.task(next).at("pendingInstructions");
+    check(!remaining.empty() && remaining.size() < inherited.size(),"delegate did not consume a bounded batch");
+    f.restart();
+    check(f.task(next).at("pendingInstructions") == remaining,"restart lost the outstanding batch");
+    for (std::size_t batch = 0; batch < specs.size(); ++batch) {
+        f.t3.finish(f.task(next).at("activeRun").at("runId").get<std::string>(),"Batch applied");
+        if (f.task(next).at("pendingInstructions").empty()) break;
+        f.reach(next,"deciding");
+        f.reach(next,"running");
+        check(f.t3.sent.back().tool == "follow_up","a subsequent batch did not continue the Session");
+    }
+    f.reach(next,"completed");
+    check(f.task(next).value("pendingInstructions",Json::array()).empty(),"completed with inherited work pending");
+
+    check(f.t3.sent.size() == shown.size() + 1,"expected one resumed Session command per model batch");
+    for (std::size_t batch = 0; batch < shown.size(); ++batch)
+        for (const auto& item : shown[batch])
+            check(f.t3.sent[batch + 1].instruction.find(item.at("text").get<std::string>()) != std::string::npos,
+                  "Session command differed from the batch shown to the model");
+    std::string dispatched;
+    for (const auto& cmd : f.t3.sent) {
+        check(cmd.instruction.size() + 2 * cmd.actionId.size() + 36 <= 120000,"Session prompt exceeded T3 preflight");
+        dispatched += cmd.instruction;
+    }
+    std::size_t cursor = 0;
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto pos = dispatched.find(specs[i],cursor);
+        check(pos != dispatched.npos,"Session commands omitted, truncated or reordered a specification");
+        cursor = pos + specs[i].size();
+        for (const auto marker : {"SPEC-","END-"}) {
+            const auto token = marker + std::to_string(i + 1);
+            check(dispatched.find(token,dispatched.find(token) + 1) == dispatched.npos,"duplicated specification marker");
+        }
+    }
 }
 
 void appendWaitsForSafeBoundary() {
@@ -946,89 +1024,28 @@ void appendWaitsForSafeBoundary() {
     check(f.t3.sent.size() == 3,"the queued task did not inherit the released project slot");
 }
 
-void resumedBacklogFitsOneT3Command() {
+void settledInstructionsCanBeAcknowledgedWithoutAnotherRun() {
     Fixture f;
-    const auto old = f.store->submit(f.routing("Measure the reference dataset"));
-    f.reach(old,"running");
-    const auto add = [&](Id task, const std::string& prefix, int number) {
-        const auto tag = prefix + std::to_string(number);
-        const auto text = tag + " " + std::string(11900,'x');
-        f.script(text,{send(task)});
-        f.receive(tag,text);
-        return text;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Confirm the existing criteria",{change(id,{{"doneWhen","Report baseline latency"}})});
+    const auto receipt = f.receive("same-criteria","Confirm the existing criteria");
+    check(!f.task(id).value("replanning",false) && f.task(id)["revisions"].size() == 1,
+          "repeating a criterion triggered replanning");
+    f.t3.finish("run-1","Baseline latency is 10 ms");
+    int decisions = 0;
+    f.model.onResult = [&](const ModelInput& input) {
+        const auto& item = input.task.at("userInstructions").at(0);
+        check(item.at("messageId") == receipt.at("messageId") && input.event.at("report") == "Baseline latency is 10 ms",
+              "settled decision missed the instruction identity or evidence");
+        Json args = {{"report","Baseline latency is 10 ms"}};
+        if (++decisions > 1)
+            args["acknowledgedInstructions"] = Json::array({{{"messageId",item.at("messageId")},{"step",item.at("step")}}});
+        return Decision{"complete",args,"The existing report satisfies the repeated criterion"};
     };
-    for (int i = 0; i < 6; ++i) add(old,"old supplement ",i);
-    f.store->operate(old,0,"cancel");
-    f.t3.finish("run-1","Stopped " + std::string(9000,'q'));
-    f.reach(old,"cancelled");
-    const auto source = f.store->latestTaskResult(old).at("id");
-    const auto request = std::string("Resume measuring the reference dataset ") + std::string(9000,'r');
-    f.script(request,{start({{"request",request},{"sourceResultMessageId",source},{"resume",true}})});
-    f.receive("resume",request,source.get<Id>());
-    const auto next = f.store->tasks("alpha").front().at("id").get<Id>();
-    std::vector<std::string> accepted;
-    for (int i = 0; i < 5; ++i) accepted.push_back(add(next,"new supplement ",i));
-    f.reach(next,"running");
-    const auto& command = f.t3.sent.back();
-    check(sessionPrompt(command.actionId,command.instruction).size() <= maxSessionPromptBytes &&
-          command.instruction.find("old supplement 5") != std::string::npos &&
-          command.instruction.find("(reference only):\nStopped") != std::string::npos,
-          "the resumed command exceeded T3's limit or lost its recent direction or referenced report");
-    for (const auto& text : accepted)
-        check(command.instruction.find(text) != std::string::npos,"the resumed command dropped an accepted direction");
-}
-
-void repacksHistoryAfterDroppingOlderReference() {
-    Fixture f;
-    const auto goal = std::string("Measure the sample ") + std::string(7800,'g');
-    const auto criteria = std::string("Report the target ") + std::string(7800,'c');
-    f.script("Start reference packing work",{start({{"request",goal},{"doneWhen",criteria}})});
-    f.receive("start-reference-packing","Start reference packing work");
-    const auto old = f.store->tasks("alpha").front().at("id").get<Id>();
-    f.reach(old,"running");
-    f.model.onResult = [](const ModelInput&) {
-        return Decision{"delegate",{{"instruction","Start a fresh Session"}},"Continue in a fresh Session"};
-    };
-    f.t3.finish("run-1","OLDER_REFERENCE_REPORT " + std::string(8100,'s'));
-    f.reach(old,"deciding");
-    f.reach(old,"running");
-    const auto source = f.store->latestTaskResult(old).at("id");
-    const auto addDirection = [&](const std::string& text, std::string_view key, Id reference = 0) {
-        f.script(text,{send(old,reference ? Json{{"sourceResultMessageId",reference}} : Json::object())});
-        f.receive(key,text,reference);
-    };
-    const auto older = std::string("OLDER_REFERENCED_DIRECTION ") + std::string(1000,'o');
-    const auto newerOne = std::string("NEWER_FULL_DIRECTION_ONE ") + std::string(14500,'1');
-    const auto newerTwo = std::string("NEWER_FULL_DIRECTION_TWO ") + std::string(14500,'2');
-    const auto newerThree = std::string("NEWER_FULL_DIRECTION_THREE ") + std::string(14500,'3');
-    addDirection(older,"older-reference",source);
-    addDirection(newerOne,"newer-one");
-    addDirection(newerTwo,"newer-two");
-    addDirection(newerThree,"newer-three");
-    f.store->operate(old,0,"cancel");
-    f.t3.finish(f.task(old)["activeRun"]["runId"].get<std::string>(),"Reference packing stopped");
-    f.reach(old,"cancelled");
-
-    const auto cancellation = f.store->latestTaskResult(old).at("id");
-    constexpr auto request = "Resume the reference packing work";
-    f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true}})});
-    f.receive("resume-reference-packing",request,cancellation.get<Id>());
-    const auto resumed = f.store->tasks("alpha").front().at("id").get<Id>();
-    for (int i = 0; i < 5; ++i) {
-        const auto text = std::string("CURRENT_PENDING_DIRECTION ") + std::to_string(i) + " " + std::string(11900,'p');
-        f.script(text,{send(resumed)});
-        f.receive("current-pending-" + std::to_string(i),text);
-    }
-    f.reach(resumed,"running");
-    const auto& command = f.t3.sent.back();
-    check(sessionPrompt(command.actionId,command.instruction).size() <= maxSessionPromptBytes &&
-          f.task(resumed)["intent"] == goal && f.task(resumed)["doneWhen"] == criteria &&
-          command.instruction.find("OLDER_REFERENCED_DIRECTION") == std::string::npos &&
-          command.instruction.find("OLDER_REFERENCE_REPORT") == std::string::npos,
-          "the resumed Session retained the older reference or lost its current contract");
-    for (const auto* direction : {&newerOne,&newerTwo,&newerThree})
-        check(command.instruction.find(*direction) != std::string::npos,
-              "a newer direction did not use the bytes released by the older reference");
+    f.reach(id,"completed");
+    check(decisions == 2 && f.t3.sent.size() == 1 && f.event(id,"decision").at("args").contains("acknowledgedInstructions"),
+          "completion ignored pending instructions or forced another Run");
 }
 
 void twoInstructionsFromOneMessageAreTrackedSeparately() {
@@ -1050,6 +1067,33 @@ void twoInstructionsFromOneMessageAreTrackedSeparately() {
           f.t3.sent.back().instruction.find("Add a chart") != std::string::npos &&
           f.conversationMessage(message["messageId"])["deliveredToT3"] == true,
           "the instructions were not both delivered");
+}
+
+void cancellationTakesOverRevisionStop() {
+    Fixture f;
+    const auto id = f.store->submit(f.routing());
+    f.reach(id,"running");
+    f.script("Change criteria",{change(id,{{"doneWhen","Include timings"}})});
+    f.receive("revision","Change criteria");
+    f.advanceUntil([&] { return !f.t3.interrupted.empty(); },"revision did not interrupt its Run");
+    const auto stop = f.task(id).at("runStop");
+    check(stop.at("intent") == "replan" && stop.at("run") == f.task(id).at("activeRun"),"wrong revision stop target");
+    f.store->operate(id,0,"cancel");
+    f.restart();
+    f.tick();
+    check(f.task(id).at("runStop").at("intent") == "cancel" && f.t3.interrupted.size() == 1,
+          "cancellation issued a second interrupt before its retry time");
+    f.now += 5;
+    f.tick();
+    check(f.t3.interrupted.size() == 2 && f.t3.interrupted[0] == f.t3.interrupted[1],"stop retry changed its Run");
+    f.t3.finish("run-1","Interrupted",false);
+    f.tick();
+    check(f.task(id)["state"] == "cancelling" && f.task(id)["activeRun"] == stop.at("run"),
+          "interrupt request released unsettled delegated work");
+    f.t3.finish("run-1","Interrupted");
+    f.reach(id,"cancelled");
+    check(f.t3.sent.size() == 1 && !f.task(id).contains("runStop") &&
+          f.event(id,"interrupt_settled")["intent"] == "cancel","settlement resumed superseded work");
 }
 
 void deliveryWaitsForEveryTarget() {
@@ -1076,8 +1120,8 @@ void unknownSendThenScopeChange() {
     f.t3.loseNextSend = true;
     f.reach(id,"waiting");
     const auto before = f.task(id);
-    f.script("完了条件は p95 レイテンシを報告",{change(id,{{"doneWhen","p95 レイテンシを報告"}})});
-    const auto change = f.receive("revision","完了条件は p95 レイテンシを報告");
+    f.script("Use the updated specification",{change(id,{{"intent","Measure startup latency"},{"doneWhen","p95 レイテンシを報告"}})});
+    const auto change = f.receive("revision","Use the updated specification");
     check(f.task(id)["revisions"].size() == 2 && f.task(id)["doneWhen"] == "p95 レイテンシを報告",
           "explicit criteria did not create a revision");
     f.restart();
@@ -1115,7 +1159,9 @@ void unknownSendThenScopeChange() {
     f.store->operate(id,f.task(id)["wait"]["id"],"reconcile");
     f.reach(id,"running");
     check(f.t3.sent.size() == 2 && f.t3.reconciled.back().actionId == replacementAction &&
-          f.t3.sent.back().instruction.find("p95 レイテンシ") != std::string::npos &&
+          f.t3.sent.back().tool == "follow_up" &&
+          f.t3.sent.back().instruction.find("Task intent:\nMeasure startup latency") != std::string::npos &&
+          f.t3.sent.back().instruction.find("Completion criteria:\np95 レイテンシを報告") != std::string::npos &&
           f.conversationMessage(change["messageId"])["deliveredToT3"] == true,
           "the replacement did not reconcile as one delivery for the new revision");
     const auto runs = f.task(id)["runs"];
@@ -1233,9 +1279,13 @@ void pendingReadOnlyMessageDoesNotSpendAnotherCompletionCall() {
     check(f.task(other)["state"] == "completed" && f.task(id)["state"] == "deciding" && completionCalls == 1,
           "a received message failed to hold same-Bot completion or held another Bot's completion");
 
+    const auto held = f.task(id);
+    check(held.at("pendingDecision").at("eventId") == held.at("eventId") &&
+          held.at("pendingDecision").at("generation") == held.at("generation") &&
+          held.at("pendingDecision").at("tool") == "complete","deferred decision lost its task or event identity");
     f.restart();
     f.reach(id,"completed");
-    check(f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
+    check(!f.task(id).contains("pendingDecision") && f.event(id,"completed")["text"] == "Settled evidence" && completionCalls == 1,
           "the buffered completion was lost or requested another model call after the read-only turn");
 }
 
@@ -1416,7 +1466,15 @@ void cloudDestinationWaitsForItsProject() {
     f.tick(2);
     check(f.task(desktopFollowing)["state"] == "queued" && f.task(desktopFollowing)["blockedBy"]["id"] == moving,
           "the desktop slot was released before the old Run settled");
-    f.t3.finish("run-2","Old location stopped");
+    f.t3.finish("run-2","Old location stopped " + std::string(6000,'x'));
+    bool sawHistoricalEnvironment = false;
+    f.model.beforeComplete = [&](const ModelInput& input) {
+        if (input.task["id"] != moving) return;
+        for (const auto& row : input.history) {
+            if (row.at("kind") == "report" && row.value("truncated",false))
+                sawHistoricalEnvironment = row.at("source").at("environmentId") == "desktop";
+        }
+    };
     f.restart();
     f.reach(desktopFollowing,"running");
     check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 3 &&
@@ -1426,7 +1484,7 @@ void cloudDestinationWaitsForItsProject() {
     f.reach(occupied,"completed");
     f.reach(moving,"running");
     const auto task = f.task(moving);
-    check(f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
+    check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
           f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&
           task["runs"][1]["environmentId"] == "cloud" && task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
@@ -1479,8 +1537,7 @@ void latestTargetPrecedesABatchedBacklog() {
     f.receive("new-location","計測はローカルMacで");
     f.t3.finish("run-1","Settled before the next destination");
     f.advanceUntil([&] { return f.t3.sent.size() > 1; },"the backlog did not reach T3");
-    check(f.t3.sent[1].instruction.find("ローカルMacで") != std::string::npos,
-          "the first continuation did not take the latest destination into account");
+    check(f.t3.sent[1].environmentId == "desktop","the structured destination did not use the latest patch");
     for (std::size_t run = 2; run <= f.t3.sent.size(); ++run) {
         check(run <= 4,"the backlog exceeded the additional work allowance");
         f.t3.finish("run-" + std::to_string(run),"Continuation settled");
@@ -1489,11 +1546,14 @@ void latestTargetPrecedesABatchedBacklog() {
     }
     std::string sentInstructions;
     for (auto command = std::next(f.t3.sent.begin()); command != f.t3.sent.end(); ++command) {
-        check(command->environmentId == "desktop" && command->instruction.find("クラウドMacで") == std::string::npos,
+        check(command->environmentId == "desktop",
               "a continuation was sent with a superseded destination");
         sentInstructions += command->instruction;
         sentInstructions += '\n';
     }
+    check(sentInstructions.find("クラウドMacで") < sentInstructions.find(notes.front()) &&
+          sentInstructions.find("ローカルMacで") > sentInstructions.find(notes.back()),
+          "environment corrections dropped or reordered accepted directions");
     for (const auto& note : notes) {
         const auto first = sentInstructions.find(note);
         check(first != std::string::npos && sentInstructions.find(note,first + note.size()) == std::string::npos,
@@ -1674,13 +1734,14 @@ int main() {
         suggestionsStayWithTheBotMessage();
         cancelledReportCanBeReferencedWithoutRestarting();
         resumeRestoresCancelledTaskDirections();
+        resumeBatchesOversizedPendingBacklog();
         liveMoveAndCriteriaCorrectionKeepCurrentContract();
         environmentOnlyMoveKeepsWorkAcrossResume();
         environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume();
         appendWaitsForSafeBoundary();
-        resumedBacklogFitsOneT3Command();
-        repacksHistoryAfterDroppingOlderReference();
+        settledInstructionsCanBeAcknowledgedWithoutAnotherRun();
         twoInstructionsFromOneMessageAreTrackedSeparately();
+        cancellationTakesOverRevisionStop();
         deliveryWaitsForEveryTarget();
         unknownSendThenScopeChange();
         completeRacingWithNewCriteria();

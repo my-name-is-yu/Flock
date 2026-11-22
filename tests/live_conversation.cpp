@@ -286,7 +286,7 @@ void checkCriteria(const Scene& s, const Turn& turn, Id id) {
     check(turn.reply.at("actions").front().at("effect") == "replanning" && after.value("replanning",false) &&
           accepted.size() == 1 && accepted.front().at("messageId") == turn.message() &&
           after.at("pendingInstructions").back() == accepted.front() && accepted.front().at("conflicting") == true &&
-          accepted.front().at("replaceKey") == "criteria" && accepted.front().at("revisionId") == revision.at("id") &&
+          accepted.front().at("revisionId") == revision.at("id") &&
           !rejectsStartupColumn(lower(accepted.front().at("text").get<std::string>())),
           "the turn did not queue a consistent criteria replan for its new revision");
 }
