@@ -41,7 +41,7 @@ WHERE t.status IN ('pending','running');
 CREATE VIEW IF NOT EXISTS next_conversation_turns AS
 SELECT head.bot_id,head.message_id FROM (
   SELECT bot_id,min(message_id) AS message_id FROM open_conversation_turns GROUP BY bot_id
-) head JOIN conversation_turns t USING(message_id) WHERE t.retry_at<=unixepoch();
+) head JOIN conversation_turns t USING(message_id) WHERE t.retry_at<=CAST(strftime('%s','now') AS INTEGER);
 CREATE TABLE IF NOT EXISTS conversation_steps(
   message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id), step INTEGER NOT NULL,
   decision TEXT, effect TEXT, result TEXT,

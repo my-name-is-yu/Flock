@@ -178,6 +178,32 @@ Json resultPreview(const Json& row) {
             {"excerpt",bounded(field(data,row.at("kind") == "report" ? "report" : "text"),600)}};
 }
 
+void fitReportRead(Json& entry, std::size_t allowance) {
+    entry.erase("args");
+    auto& result = entry.at("result");
+    result.erase("request");
+    if (entry.dump().size() <= allowance) return;
+
+    auto chunk = std::move(result.at("text").get_ref<std::string&>());
+    const auto offset = result.at("offset").get<std::size_t>();
+    result["end"] = false;
+    result["truncated"] = true;
+    const auto prefix = [&](std::size_t length) {
+        auto visible = bounded(chunk,length);
+        result["nextOffset"] = offset + visible.size();
+        result["text"] = std::move(visible);
+    };
+    // Escaping and the continuation offset both count against the serialized budget.
+    std::size_t low = 0, high = chunk.size();
+    while (low < high) {
+        const auto mid = (low + high + 1) / 2;
+        prefix(mid);
+        if (entry.dump().size() <= allowance) low = mid;
+        else high = mid - 1;
+    }
+    prefix(low);
+}
+
 void budgetTurnInput(Json& input) {
     // The complete user message is authoritative, even when JSON escaping expands it.
     const auto limit = std::max(turnInputBytes,input["event"]["text"].dump().size() + 2048);
@@ -186,7 +212,7 @@ void budgetTurnInput(Json& input) {
     const auto compact = [&](Json& entry) {
         const auto& result = entry.at("result");
         Json summary = Json::object();
-        for (const auto* key : {"ok","effect","delivery","taskId","messageId","revisionId","nextOffset","before"})
+        for (const auto* key : {"ok","effect","delivery","taskId","messageId","revisionId","before"})
             if (result.contains(key)) summary[key] = result.at(key);
         if (result.contains("tasks"))
             for (const auto& task : result.at("tasks")) summary["taskIds"].push_back(task.at("taskId"));
@@ -196,8 +222,8 @@ void budgetTurnInput(Json& input) {
         entry = std::move(reduced);
     };
     for (std::size_t i = 0; bytes > limit && i + 1 < past.size(); ++i) compact(past[i]);
-    const auto trim = [&](Json& items, bool oldestFirst) {
-        while (bytes > limit && !items.empty()) {
+    const auto trim = [&](Json& items, bool oldestFirst, std::size_t keep = 0) {
+        while (bytes > limit && items.size() > keep) {
             auto it = oldestFirst ? items.begin() : std::prev(items.end());
             bytes -= it->dump().size() + (items.size() > 1);
             items.erase(it);
@@ -217,7 +243,16 @@ void budgetTurnInput(Json& input) {
         anchor.erase("choices");
         bytes = input.dump().size();
     }
-    if (bytes > limit && !past.empty()) compact(past.back());
+    if (bytes <= limit || past.empty()) return;
+    if (past.back().at("tool") == "read_result" && past.back().at("result").contains("text")) {
+        trim(past,true,1);
+        if (bytes > limit) {
+            auto& latest = past.back();
+            fitReportRead(latest,limit - (bytes - latest.dump().size()));
+        }
+        return;
+    }
+    compact(past.back());
     trim(past,true);
 }
 }

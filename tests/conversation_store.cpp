@@ -513,6 +513,43 @@ void longResultsAreReadInChunks() {
           "A long result was not readable in UTF-8 safe chunks");
 }
 
+void escapedMessageLeavesRoomForReportReads() {
+    Fixture fixture;
+    Store store(fixture.database());
+    RuntimeFixture execution(store);
+    const auto id = task(store,"Read a multilingual report");
+    std::string report;
+    for (int i = 0; i < 750; ++i) report += "報告\n" + std::to_string(i);
+    execution.finish(store,id,report);
+    const auto result = store.latestTaskResult(id).at("id");
+    const auto message = std::string(15990,'\n') + "Read";
+    std::string received;
+    execution.model.conversation = [&](const ModelInput& input) -> Decision {
+        const Json serialized = {{"event",input.event},{"task",input.task},{"history",input.history}};
+        check(input.event.at("text") == message && serialized.dump().size() <= Json(message).dump().size() + 2048,
+              "Escaped message was shortened or its context exceeded the budget");
+        const auto& steps = input.event.at("turn");
+        if (steps.empty()) return {"read_result",{{"messageId",result}},"Read"};
+        const auto& chunk = steps.back().at("result");
+        const auto& text = chunk.at("text").get_ref<const std::string&>();
+        check(chunk.at("offset") == received.size() && !text.empty() &&
+              report.compare(received.size(),text.size(),text) == 0,"Report read skipped bytes");
+        const auto requested = bounded(std::string_view(report).substr(received.size()),6000);
+        check(chunk.value("truncated",false) == (text.size() < requested.size()),
+              "Report read misreported budget truncation");
+        if (received.empty()) check(text.size() < requested.size(),"First chunk did not exercise truncation");
+        received += text;
+        check(chunk.at("end") == (received.size() == report.size()),"Wrong end of report");
+        if (chunk.at("end") == true) return say("Done");
+        check(chunk.at("nextOffset") == received.size(),"Cursor advanced past visible text");
+        return {"read_result",{{"messageId",result},{"offset",chunk.at("nextOffset")}},"Continue"};
+    };
+    const auto receipt = receive(store,"escaped",message);
+    execution.runtime.runConversations();
+    check(reply(store,receipt)["text"] == "Done" && received == report,
+          "Budgeted reads did not reconstruct the complete report");
+}
+
 void budgetPauseLetsLaterMessagesRunAndApprovalResumes() {
     Fixture fixture;
     Store store(fixture.database());
@@ -589,6 +626,7 @@ int main() {
         taskApprovalReservesTheAttempt();
         serializedTurnBudgetIncludesPriorCalls();
         longResultsAreReadInChunks();
+        escapedMessageLeavesRoomForReportReads();
         budgetPauseLetsLaterMessagesRunAndApprovalResumes();
         replyTargetsReachTheTurn();
         std::cout << "Conversation Store acceptance passed\n";
