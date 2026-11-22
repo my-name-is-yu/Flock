@@ -122,7 +122,8 @@ struct FixedModel : Model {
         check(anchor.is_object() && anchor.at("kind") == "task_question","Unexpected message in HTTP fixture: " + text);
         if (!steps.empty()) return reply(steps.back().at("result").value("ok",false) ? "回答を伝えました。" : "その質問は終了しています。");
         if (!anchor.at("current").get<bool>()) return reply("その質問は終了しています。");
-        return {"answer_task_question",{{"taskId",anchor.at("taskId")},{"waitId",anchor.at("waitId")},{"text",text}},"Answer the question"};
+        return {"answer_task_question",{{"taskId",anchor.at("taskId")},{"waitId",anchor.at("waitId")},{"text",text},
+            {"revisionId",anchor.at("revisionId")},{"generation",anchor.at("generation")}},"Answer the question"};
     }
 };
 
@@ -695,11 +696,13 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     check(conversationReply(browser.get("/api/view?bot=release"),independent.at("messageId")).at("text") == "I'm the release Bot." &&
           model.turns == 3,"a paused turn blocked an independent message to the same Bot");
 
-    Json approval = {{"botId","triage"},{"waitMessageId",wait.at("messageId")},{"operation","approve"}};
-    browser.post("/api/operations",approval,409);
+    Json approval = {{"botId","triage"},{"itemKind","conversation_model_budget"},{"itemId",wait.at("replyToMessageId")},
+        {"waitId",wait.at("messageId")},{"taskId",0},{"targetRevision",0},{"targetGeneration",wait.at("messageId")},
+        {"decision","approve"}};
+    browser.post("/api/inbox/decide",approval,409);
     approval["botId"] = "release";
-    browser.post("/api/operations",approval);
-    browser.post("/api/operations",approval,409);
+    browser.post("/api/inbox/decide",approval);
+    browser.post("/api/inbox/decide",approval,409);
     runtime->runConversations();
     const auto resumed = browser.get("/api/view?bot=release");
     const auto& answer = resumed.at("events").back().at("data");

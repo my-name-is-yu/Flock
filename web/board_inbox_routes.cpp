@@ -47,20 +47,27 @@ void setBotNames(Json& rows, Store& store, const WebCallbacks& callbacks) {
 }
 
 void boardInboxRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
-    for (const auto* path : {"/api/board","/api/inbox","/api/inbox/history"}) {
-        server.Get(path,[&store,&callbacks](const Request& req, Response& res) {
+    const auto get = [&](const char* path, const char* key, auto project) {
+        server.Get(path,[&store,&callbacks,key,project](const Request& req, Response& res) {
             const auto actor = person(callbacks,req);
             try {
                 const auto bot = parameter(req,"bot");
                 if (req.has_param("bot") && !validBotId(bot)) return error(res,400,"invalid_bot");
-                auto rows = req.path == "/api/board" ? store.board(actor,bot,parameter(req,"status"))
-                    : req.path == "/api/inbox" ? store.inbox(actor,bot) : store.decisionHistory(actor,bot);
+                auto rows = project(actor,bot,req);
                 setBotNames(rows,store,callbacks);
-                const auto* key = req.path == "/api/board" ? "tasks" : req.path == "/api/inbox" ? "items" : "decisions";
                 reply(res,200,{{key,std::move(rows)}});
             } catch (const std::invalid_argument&) { error(res,400,"invalid_filter"); }
         });
-    }
+    };
+    get("/api/board","tasks",[&store](const Person& actor, const std::string& bot, const Request& req) {
+        return store.board(actor,bot,parameter(req,"status"));
+    });
+    get("/api/inbox","items",[&store](const Person& actor, const std::string& bot, const Request&) {
+        return store.inbox(actor,bot);
+    });
+    get("/api/inbox/history","decisions",[&store](const Person& actor, const std::string& bot, const Request&) {
+        return store.decisionHistory(actor,bot);
+    });
 
     server.Post("/api/inbox/decide",[&store,&callbacks](const Request& req, Response& res) {
         if (req.body.size() > 128 * 1024) return error(res,413,"payload_too_large");

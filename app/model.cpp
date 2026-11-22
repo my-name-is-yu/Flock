@@ -267,15 +267,22 @@ Json toolSchema(const std::string& name, bool initial, bool canForwardUserMessag
         description = "Answer a task's open user_question with the user's answer.";
         integer("taskId","The task that asked.",true);
         integer("waitId","The question's waitId.",true);
+        integer("revisionId","The revisionId of the task that asked.",true);
+        integer("generation","The generation of the task that asked.",true);
+        fields["revisionId"]["minimum"] = 0;
+        fields["generation"]["minimum"] = 0;
         text("text","The user's answer.");
     } else if (name == "record_task_blocker" || name == "withdraw_task_question") {
         const bool record = name == "record_task_blocker";
-        description = record ? "Record or update what is blocking an active task on the board."
+        description = record ? "Record or clear what is blocking an active task on the board."
                              : "Withdraw an open question the task no longer needs answered.";
         integer("taskId","The active task.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
-        if (record) text("blockerReason","What prevents the task from proceeding.");
+        if (record) {
+            text("blockerReason","What prevents the task from proceeding. Use an empty string to clear it.");
+            integer("waitId","Supply the active wait's ID if resolving it also clears the blocker.");
+        }
         else integer("waitId","The waitId of the open user_question.",true);
     } else if (name == "cancel_task") {
         description = "Stop an active task.";

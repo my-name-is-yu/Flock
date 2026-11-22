@@ -221,7 +221,7 @@ std::string displayState(const Json& task) {
 
 Json taskSummary(const Json& task) {
     Json result = {{"state",displayState(task)}};
-    copyFields(result,task,{"id","request","deadline","currentRevision","sourceTaskId","createdAt"});
+    copyFields(result,task,{"id","request","deadline","currentRevision","generation","sourceTaskId","createdAt"});
     return result;
 }
 
@@ -387,7 +387,7 @@ Json botView(Store& store, const Json& bot) {
     auto& paused = result["pausedConversations"] = Json::array();
     for (const auto& turn : store.pausedConversations(id)) {
         Json view = Json::object();
-        copyFields(view,turn,{"messageId","text","route"});
+        copyFields(view,turn,{"messageId","replyToMessageId","text","route"});
         paused.push_back(std::move(view));
     }
     if (!paused.empty() && (result["presence"] == "idle" || result["presence"] == "queued"))

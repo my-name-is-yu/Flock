@@ -79,6 +79,15 @@ struct Script : Model {
                         args["blockerReason"] = "Waiting for a signed report";
                         return {"record_task_blocker",args,"Report the current blocker"};
                     }
+                    if (prompt == "Clear the blocker" || prompt == "The question is blocking") {
+                        args["blockerReason"] = prompt == "Clear the blocker" ? "" : "Waiting for the branch";
+                        if (prompt == "The question is blocking") args["waitId"] = task.at("wait").at("waitId");
+                        return {"record_task_blocker",args,"Update the current blocker"};
+                    }
+                    if (prompt == "Use Final") {
+                        args.update({{"waitId",task.at("wait").at("waitId")},{"revisionId",task.at("revisionId")},{"text","Final"}});
+                        return {"answer_task_question",args,"Send the person's answer"};
+                    }
                     if (prompt == "Withdraw the question") {
                         args["waitId"] = task.at("wait").at("waitId");
                         return {"withdraw_task_question",args,"The answer is no longer needed"};
@@ -156,7 +165,7 @@ void exercise(const std::filesystem::path& path) {
     const auto model = store.submit(intake("review","Add a model call","model"));
     const auto hidden = store.submit(intake("private","Unshared request","private"));
     const auto terminal = store.submit(intake("review","Cancelled request","closed"));
-    store.operate(terminal,0,"cancel");
+    store.operate(localOwner,TaskTarget::from(store.task(terminal),0),"cancel");
 
     Seconds now = unixTime();
     Script script;
@@ -184,7 +193,7 @@ void exercise(const std::filesystem::path& path) {
     const auto secret = access.requestSecret("review",{"report-credential"});
     access.resourceGrant(owner,"review",{"bot_admin","review","rename_bot"},GrantChange::grant);
     const auto botRequest = access.requestBotChange("review","rename_bot","review","Reviewer");
-    const auto conversation = store.receive(intake("review","unused","turn",{{"modelCallLimit",1}}),
+    const auto conversation = store.receive(localOwner,intake("review","unused","turn",{{"modelCallLimit",1}}),
                                             "pause","Pause this conversation");
     script.failConversation = true;
     runtime.runConversations();
@@ -225,6 +234,9 @@ void exercise(const std::filesystem::path& path) {
     const auto questionBefore = pending(store,user_question);
     rejected<DecisionDenied>([&] { store.decideInbox(reader,questionBefore,"answer",{{"text","Final"}}); },
                              "view-only person answered a question");
+    const auto taskQuestion = TaskTarget::from(store.task(question),questionBefore.waitId);
+    rejected<DecisionDenied>([&] { store.operate(reader,taskQuestion,"answer",{{"text","Final"}}); },
+                             "view-only person answered through the direct controls");
     rejected<DecisionDenied>([&] { store.decideInbox(alice,pending(store,grant_request),"approve"); },
                              "decider approved a grant requiring admin");
     auto forged = questionBefore;
@@ -247,8 +259,10 @@ void exercise(const std::filesystem::path& path) {
           "inbox Bot change bypassed canonical application");
 
     const auto old = target(row(store.inbox(alice),"taskId",changed));
+    const auto staleReview = store.requestPrReview(changed,old.targetRevision,old.targetGeneration,
+                                                  prUrl,"Review revision A","Review the first source");
     script.managed = changed;
-    store.receive(intake("report","unused","turn"),"change","Switch the scope");
+    store.receive(localOwner,intake("report","unused","turn"),"change","Switch the scope");
     runtime.runConversations();
     const auto revisionB = store.task(changed);
     check(revisionB.at("currentRevision") != old.targetRevision && revisionB.at("doneWhen") == "Verify source B",
@@ -256,6 +270,8 @@ void exercise(const std::filesystem::path& path) {
     const auto sent = sessions.sends;
     const auto interrupted = sessions.interrupts;
     rejected<RequestChanged>([&] { store.decideInbox(alice,old,"approve"); },"old approval applied to revision B");
+    rejected<RequestChanged>([&] { store.decideInbox(alice,{"report",pr_review,staleReview,0,changed,
+        old.targetRevision,old.targetGeneration},"approve"); },"an old PR review approved a new revision");
     check(store.task(changed) == revisionB && sessions.sends == sent && sessions.interrupts == interrupted &&
           store.decisionHistory(owner).size() == 4, "rejected approval changed task, delivery, or history");
 
@@ -279,18 +295,26 @@ void exercise(const std::filesystem::path& path) {
           "task history lost who decided, when, or what they reviewed");
 
     script.managed = question;
-    store.receive(intake("report","unused","turn"),"block","Report the blocker");
+    store.receive(localOwner,intake("report","unused","turn"),"block","Report the blocker");
     runtime.runConversations();
     const auto blocked = store.board(reader,"report","blocked");
     check(row(blocked,"taskId",question).at("blockerReason") == "Waiting for a signed report" &&
           row(store.history(question),"kind","blocker_recorded").at("data").at("blockerReason") == "Waiting for a signed report",
           "blocker tool did not update the board and history");
+    store.receive(alice,intake("report","unused","turn"),"clear","Clear the blocker");
+    runtime.runConversations();
+    check(store.board(reader,"report","blocked").empty() && row(store.history(question),"kind","blocker_cleared").is_object(),
+          "explicitly clearing an independent blocker left the task blocked");
+    store.receive(alice,intake("report","unused","turn"),"wait-blocker","The question is blocking");
+    runtime.runConversations();
+    check(row(store.board(reader,"report","blocked"),"taskId",question).at("blockerReason") == "Waiting for the branch",
+          "the recorded blocker lost its progress condition");
     const auto withdrawing = pending(store,user_question);
-    store.receive(intake("report","unused","turn"),"withdraw","Withdraw the question");
+    store.receive(localOwner,intake("report","unused","turn"),"withdraw","Withdraw the question");
     runtime.runConversations();
     for (const auto& remaining : store.inbox(alice,"report"))
         check(remaining.at("itemKind") != "user_question","withdrawn question remained in the Inbox");
-    check(store.task(question).at("wait").is_null() &&
+    check(store.task(question).at("wait").is_null() && store.board(reader,"report","blocked").empty() &&
           row(store.history(question),"kind","question_withdrawn").at("data").at("waitId") == withdrawing.waitId,
           "withdraw action did not close and journal the question");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,withdrawing,"answer",{{"text","Final"}}); },
@@ -311,13 +335,65 @@ void exercise(const std::filesystem::path& path) {
     store.decideInbox(alice,pending(store,deadline),"extend",{{"deadline",due+3600}});
     check(store.task(deadlineTask).at("deadline") == due+3600,"deadline extension did not resume the run");
     store.decideInbox(alice,pending(store,model_budget,"review"),"approve");
-    check(store.task(model).at("state") == "deciding","model budget approval did not release the wait");
+    check(store.task(model).at("state") == "deciding" && db.exec(
+        "SELECT count(*) FROM events e JOIN model_attempts a ON a.id=e.reserved_attempt WHERE a.task_id=" +
+        std::to_string(model)) == 1,"model approval did not reserve a call for the exact task event");
     const auto turn = pending(store,conversation_model_budget);
     store.decideInbox(alice,turn,"approve");
     rejected<DecisionUnavailable>([&] { store.decideInbox(alice,turn,"approve"); },"turn approved twice");
     check(store.pausedConversations("review").empty() && access.grants("review").size() >= 2,
           "conversation model approval did not release the pause");
     access.request("review",{"repository","after-restart","read"});
+}
+
+void protectedInputSource(const std::filesystem::path& path) {
+    Store store(path);
+    auto access = store.access();
+    const SecretRef ref{"report-credential"};
+    const auto routing = intake("report","Prepare the report","question");
+    const auto request = access.requestSecret("report",ref);
+    const auto source = store.receive(owner,routing,"secret","First request").at("messageId").get<Id>();
+    const auto repeat = store.receive(owner,routing,"repeat","Repeated request").at("messageId").get<Id>();
+    check(access.requestSecret("report",ref,source) == request &&
+          access.requestSecret("report",ref,repeat) == request,"repeated protected input changed its request ID");
+    const auto inbox = store.inbox(owner,"report");
+    check(inbox.size() == 1 && inbox.at(0).at("itemId") == request &&
+          inbox.at(0).at("request") == "First request","protected input lost its first conversation source");
+}
+
+void chatDecision(const std::filesystem::path& path) {
+    Store store(path);
+    auto access = store.access();
+    access.resourceGrant(owner,"report",{"environment","sandbox","launch"},GrantChange::grant);
+    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
+    const auto routing = intake("report","Prepare the report","question");
+    const auto taskId = store.submit(routing);
+    Script script;
+    Sessions sessions;
+    sessions.questionProject = "question";
+    Runtime runtime(store,script,sessions,[](std::string_view) { return BotNotes{}; });
+    for (int step = 0; step < 6; ++step) runtime.tick();
+    script.managed = taskId;
+    store.receive(alice,routing,"report-blocker","The question is blocking");
+    runtime.runConversations();
+    check(store.board(alice,"report","blocked").size() == 1,"question-linked blocker was not projected");
+    const auto task = store.task(taskId);
+    const auto& wait = task.at("wait");
+    const auto item = pending(store,InboxKind::user_question,"report");
+    store.receive(alice,routing,"revoked","Use Final",wait.at("messageId"));
+    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::revoke);
+    runtime.runConversations();
+    check(store.task(taskId) == task && store.decisionHistory(owner).empty(),"a queued chat answer survived access revocation");
+    access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
+    store.receive(alice,routing,"answer","Use Final",wait.at("messageId"));
+    runtime.runConversations();
+    const auto history = store.decisionHistory(owner);
+    check(history.size() == 1 && history.at(0).at("decidedBy") == alice.id && history.at(0).at("decision") == "answer" &&
+          history.at(0).at("targetRevision") == item.targetRevision && store.inbox(owner,"report").empty() &&
+          store.board(alice,"report","blocked").empty(),
+          "the chat answer did not use the canonical decision audit");
+    rejected<DecisionUnavailable>([&] { store.decideInbox(alice,item,"answer",{{"text","Draft"}}); },
+                                  "the Inbox applied an answer after chat decided the wait");
 }
 }
 
@@ -326,6 +402,8 @@ int main() {
         Directory directory;
         const auto path = directory.path/"state.db";
         exercise(path);
+        protectedInputSource(directory.path/"protected-input.db");
+        chatDecision(directory.path/"chat.db");
         Store restarted(path);
         const auto history = restarted.decisionHistory(alice);
         const auto approval = row(history,"itemKind","extra_run");

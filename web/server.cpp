@@ -3,6 +3,7 @@
 #include "views.hpp"
 #include "access_routes.hpp"
 #include "board_inbox_routes.hpp"
+#include "flock/board_inbox.hpp"
 
 #include <httplib.h>
 
@@ -62,13 +63,13 @@ Id queryId(const Request& req, const char* key, bool optional) {
     return id;
 }
 
-Id bodyId(const Json& body, std::string_view key) {
+Id bodyId(const Json& body, std::string_view key, Id minimum = 1) {
     const auto value = body.find(key);
     if (value == body.end() || !value->is_number_integer() ||
         (value->is_number_unsigned() && value->get<std::uint64_t>() > std::numeric_limits<Id>::max()))
         throw InputError("invalid_id");
     const auto id = value->get<Id>();
-    if (id <= 0) throw InputError("invalid_id");
+    if (id < minimum) throw InputError("invalid_id");
     return id;
 }
 
@@ -490,16 +491,16 @@ private:
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
             const auto bot = requiredText(body,"botId",1024);
-            if (!store_.access().permitsPerson(web::person(callbacks_,req),bot,Role::decide)) return error(res,403,"access_denied");
-            const auto known = bots();
-            if (!botById(known,bot)) return error(res,404,"bot_not_found");
+            const auto actor = web::person(callbacks_,req);
             if (mutation != Mutation::Operation) {
+                if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
+                if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
                 const auto message = mutation == Mutation::Message;
                 const auto request = requiredText(body,message ? "text" : "request",16000);
                 const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
                 const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
                 if (message) {
-                    const auto previous = store_.receipt(bot,clientMessageId,request,replyTo);
+                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo);
                     if (previous) return json(res,201,*previous);
                 }
                 Intake intake;
@@ -512,23 +513,18 @@ private:
                 intake.request = request;
                 intake.scheduleId.clear();
                 intake.scheduledAt = 0;
-                if (message) return json(res,201,store_.receive(intake,clientMessageId,request,replyTo));
+                if (message) return json(res,201,store_.receive(actor,intake,clientMessageId,request,replyTo));
                 return json(res,201,{{"taskId",store_.submit(intake)}});
             }
             const auto operation = requiredText(body,"operation",32);
-            if (body.contains("waitMessageId")) {
-                if (operation != "approve" || body.contains("taskId") || body.contains("waitId"))
-                    throw InputError("invalid_operation");
-                store_.approveMessageModelCall(bot,bodyId(body,"waitMessageId"));
-                return json(res,200,{{"accepted",true}});
-            }
             const auto id = bodyId(body,"taskId");
             const auto wait = bodyId(body,"waitId");
             const auto data = operationData(body,operation);
-            if (web::field(store_.task(id),"botId") != bot) return error(res,404,"task_not_found");
-            store_.operate(id,wait,operation,data);
+            store_.operate(actor,{bot,id,wait,bodyId(body,"targetRevision",0),bodyId(body,"targetGeneration",0)},operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
+        catch (const DecisionDenied&) { error(res,403,"access_denied"); }
+        catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {
             const auto code = mutation == Mutation::Message ? "message_conflict" :
                 mutation == Mutation::Request ? "request_conflict" : "operation_conflict";

@@ -67,7 +67,8 @@ function taskCard(task) {
   field('Done when', task.doneWhen);
   field('Deadline', task.deadlineAt && time(task.deadlineAt));
   field('Blocker', task.blockerReason);
-  if (task.wait) field('Current wait', task.wait.text || labels[task.wait.reason] || task.wait.reason);
+  if (task.wait && task.wait.text !== task.blockerReason)
+    field('Current wait', task.wait.text || labels[task.wait.reason] || task.wait.reason);
   if (details.children.length) article.append(details);
   for (const pr of task.prRefs) article.append(prLink(pr.url, pr.title));
   return article;
@@ -76,7 +77,7 @@ function decisionCard(item, submit) {
   const article = card(item.requestTitle, `${item.botName} · ${labels[item.itemKind]}`);
   if (item.request && item.request !== item.requestTitle) article.append(element('p', item.request));
   article.append(element('p', item.prompt));
-  if (item.prUrl) article.append(prLink(item.prUrl, 'Open pull request'));
+  if (item.prUrl) article.append(prLink(item.prUrl, item.prTitle));
   if (!item.canDecide) {
     article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
@@ -121,6 +122,7 @@ function decisionCard(item, submit) {
   form.append(buttons);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (!event.submitter) return;
     const data = Object.fromEntries(Object.entries(inputs).map(([field, input]) => [field, input.value]));
     if (data.deadline) data.deadline = Math.floor(new Date(data.deadline).getTime() / 1000);
     const fields = [...form.elements];
@@ -142,7 +144,12 @@ export function mountBoardInbox(api) {
   const message = byId('work-view-message');
   const items = byId('work-view-items');
   const history = byId('work-view-history');
-  const titles = { board: 'Task board', inbox: 'Decision inbox', 'inbox/history': 'Recent decisions' };
+  const views = {
+    board: ['Task board', 'tasks', 'No matching tasks.', taskCard],
+    inbox: ['Decision inbox', 'items', 'No pending decisions.', (item) => decisionCard(item, submit)],
+    'inbox/history': ['Recent decisions', 'decisions', 'No recorded decisions.', (entry) => card(labels[entry.itemKind],
+      `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`)],
+  };
   let view;
   let version = 0;
 
@@ -168,11 +175,13 @@ export function mountBoardInbox(api) {
 
   async function load(update = '') {
     const displayed = ++version;
-    byId('work-view-title').textContent = titles[view];
+    const [title, key, empty, render] = views[view];
+    byId('work-view-title').textContent = title;
     byId('work-view-status-label').hidden = view !== 'board';
     history.hidden = view === 'board';
     history.textContent = view === 'inbox' ? 'Recent decisions' : 'Pending decisions';
     items.replaceChildren();
+    items.setAttribute('aria-busy', 'true');
     message.textContent = 'Loading…';
     const query = new URLSearchParams();
     if (bots.value) query.set('bot', bots.value);
@@ -180,15 +189,13 @@ export function mountBoardInbox(api) {
     try {
       const result = await api(query.size ? `${view}?${query}` : view);
       if (displayed !== version) return;
-      const cards = result.tasks?.map(taskCard) ?? result.items?.map((item) => decisionCard(item, submit)) ??
-        result.decisions.map((entry) => card(labels[entry.itemKind],
-          `${entry.botName} · ${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`));
+      const cards = result[key].map(render);
       for (const entry of cards) items.append(entry);
-      message.textContent = [update, cards.length ? '' : {
-        board: 'No matching tasks.', inbox: 'No pending decisions.', 'inbox/history': 'No recorded decisions.',
-      }[view]].filter(Boolean).join(' ');
+      message.textContent = [update, cards.length ? '' : empty].filter(Boolean).join(' ');
     } catch {
       if (displayed === version) message.textContent = 'Flock could not load this view. Try refreshing.';
+    } finally {
+      if (displayed === version) items.removeAttribute('aria-busy');
     }
   }
 
@@ -196,9 +203,9 @@ export function mountBoardInbox(api) {
     button.addEventListener('click', async () => {
       view = button.dataset.workView;
       bots.value = '';
-      dialog.showModal();
       const allBots = api('bots').catch(() => []);
       load();
+      dialog.showModal();
       const configured = await allBots;
       if (!dialog.open) return;
       const selected = bots.value;

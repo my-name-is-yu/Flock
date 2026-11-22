@@ -523,10 +523,12 @@ void exercise(const std::filesystem::path& path) {
           "new request changed the original wait or lost the queue blocker");
     checkPresence(browser,browser.get("/api/bots"),"release","waiting");
     check(cli.task(next)["environmentId"] == "local-env" && cli.task(next)["scheduleId"] == "","client changed routing or schedule");
-    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"}};
-    browser.post("/api/operations",reply,404);
+    const auto& visibleWait = afterSubmit.at("waits").at(0);
+    Json reply = {{"botId","triage"},{"taskId",release},{"waitId",waitId},{"operation","answer"},{"text","すべて"},
+                  {"targetRevision",visibleWait.at("currentRevision")},{"targetGeneration",visibleWait.at("generation")}};
+    browser.post("/api/operations",reply,409);
     reply["botId"] = "release";
-    cli.operate(release,waitId,"answer",{{"text","利用者向けのみ"}});
+    cli.operate(localOwner,TaskTarget::from(cli.task(release),waitId),"answer",{{"text","利用者向けのみ"}});
     const auto answered = browser.get("/api/view?bot=release");
     check(std::any_of(answered["events"].begin(),answered["events"].end(),[&](const Json& row) {
         return row["kind"] == "user_answer" && row["taskId"] == release &&
@@ -565,15 +567,18 @@ void exercise(const std::filesystem::path& path) {
     t3.observations["thread-triage"] = {};
     tick(*runtime,1);
     check(reopened.get("/api/view?bot=triage")["waits"].empty(),"resolved T3 wait stayed visible");
-    reopened.post("/api/operations",{{"botId","triage"},{"taskId",triage},{"waitId",externalId},{"operation","cancel"}},409);
+    reopened.post("/api/operations",{{"botId","triage"},{"taskId",triage},{"waitId",externalId},{"operation","cancel"},
+        {"targetRevision",external.at("currentRevision")},{"targetGeneration",external.at("generation")}},409);
     check(cli.task(triage)["state"] == "running","stale cancellation affected a resumed Run");
 
     auto& triageQuestion = t3.observations["thread-triage"];
     triageQuestion.kind = Observation::Kind::Question;
     triageQuestion.question = {"scope-question",Json::array({{{"id","scope"},{"required",true}}})};
     tick(*runtime,2);
-    const auto questionId = reopened.get("/api/view?bot=triage")["waits"][0]["wait"]["id"];
-    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",questionId},{"operation","answer"},{"text","すべて"}};
+    const auto question = reopened.get("/api/view?bot=triage").at("waits").at(0);
+    const Json answer = {{"botId","triage"},{"taskId",triage},{"waitId",question.at("wait").at("id")},
+        {"operation","answer"},{"text","すべて"},{"targetRevision",question.at("currentRevision")},
+        {"targetGeneration",question.at("generation")}};
     reopened.post("/api/operations",answer);
     reopened.post("/api/operations",answer,409);
     tick(*runtime,2);

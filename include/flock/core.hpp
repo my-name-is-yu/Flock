@@ -122,6 +122,11 @@ class Access;
 struct Person;
 struct InboxTarget;
 struct BotChange;
+struct TaskTarget {
+    std::string botId;
+    Id taskId, waitId, revision, generation;
+    static TaskTarget from(const Json& task, Id waitId);
+};
 using ApplyBotChange = std::function<void(const BotChange&)>;
 class Store {
 public:
@@ -140,17 +145,15 @@ public:
                        std::string_view title, std::string_view prompt);
     Id submit(const Intake&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
-    Json receive(const Intake& routing, std::string_view clientMessageId, std::string_view text,
+    Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0);
-    std::optional<Json> receipt(std::string_view botId, std::string_view clientMessageId,
+    std::optional<Json> receipt(const Person&, std::string_view botId, std::string_view clientMessageId,
                                 std::string_view text, Id replyToMessageId = 0) const;
     // Conversation turns paused on the model call limit, newest first.
     Json pausedConversations(std::string_view botId) const;
-    // Approve one call for a conversation turn paused on the model call limit.
-    void approveMessageModelCall(std::string_view botId, Id waitMessageId);
     // Operations: answer {text}, approve, retry, extend {deadline}, reconcile
     // {threadId?,runId?,questionId?,session?}, cancel. All except cancel require a matching waitId.
-    void operate(Id taskId, Id waitId, std::string_view operation, const Json& data = Json::object());
+    void operate(const Person&, const TaskTarget&, std::string_view operation, const Json& data = Json::object());
     Json task(Id taskId) const;
     bool hasTask(Id taskId) const;
     // tasks: newest first, cursor is an exclusive id. history: oldest first, cursor is an exclusive id.
