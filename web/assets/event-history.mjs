@@ -34,3 +34,32 @@ export async function refreshEventHistory(history, latest, readOlder, isCurrent)
   for (const [id, event] of updates) history.events.set(id, event);
   history.newestEvent = latest.events.at(-1)?.id ?? history.newestEvent ?? 0;
 }
+
+function sameRunResult(report, completion) {
+  if (report.kind !== 'report' || completion?.kind !== 'completed'
+      || !Number.isSafeInteger(report.taskId) || report.taskId !== completion.taskId) return false;
+  const recorded = report.data;
+  const final = completion.data;
+  return recorded.status === 'completed' && recorded.truncated === false
+    && typeof recorded.report === 'string' && recorded.report.trim() !== '' && recorded.report === final.text
+    && Number.isSafeInteger(recorded.revisionId) && recorded.revisionId === final.revisionId
+    && [recorded.run?.environmentId, recorded.run?.threadId, recorded.resultRunId].every(id => typeof id === 'string' && id !== '')
+    && recorded.run.environmentId === final.run?.environmentId
+    && recorded.run.threadId === final.run?.threadId
+    && recorded.resultRunId === final.run?.runId;
+}
+
+export function timelineMessages(events, dayOf) {
+  const messages = [];
+  for (let index = 0; index < events.length; index++) {
+    const event = events[index];
+    const next = events[index + 1];
+    if (sameRunResult(event, next) && dayOf(event.time) === dayOf(next.time)) {
+      messages.push({ event: next, report: event });
+      index++;
+    } else if (event.kind !== 'wait_closed') {
+      messages.push({ event });
+    }
+  }
+  return messages;
+}
