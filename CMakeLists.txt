@@ -14,7 +14,6 @@ if(NOT nlohmann_json_FOUND)
   FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-# libc++ on supported macOS versions does not ship the C++20 time-zone library.
 function(flock_fetch_cctz)
   set(BUILD_TESTING OFF)
   set(BUILD_TOOLS OFF)

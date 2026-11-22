@@ -65,4 +65,5 @@ For a webhook, post JSON with `externalEventId` and an `event` object to
 `Origin`. With configured identities, the sender needs an authorization header
 and decide access to each Bot that should receive the event. Flock deduplicates
 each Bot's delivery by source and event ID. Retries return the authorized task
-receipts. The queued task includes the event and its provenance.
+receipts. The queued task records the configured source, trigger ID, firing
+time, and redacted event payload. The external event ID is used for deduplication.

@@ -357,16 +357,15 @@ AND json_extract(definition,'$.source')=? ORDER BY id
     while (rows.next()) {
         const auto bot = rows.string(1);
         if (delivered.contains(bot) || !permits(bot)) continue;
-        const auto [delivery,first] = received.try_emplace(bot,Json::array());
-        if (first) p_->redactor(bot).requirePublic({source,eventId});
+        auto& receipts = received.try_emplace(bot,Json::array()).first->second;
         const auto def = rows.json(2);
         if (!matchesEvent(def.at("eventFilter"),event,scrub)) continue;
         if (!payload) payload = scrub.payload(event);
         const auto id = rows.number(0);
-        const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",source},
-                              {"externalEventId",eventId},{"event",*payload},{"firedAt",now}};
+        const Json trigger = {{"triggerKind","webhook"},{"triggerId",id},{"source",def.at("source")},
+                              {"event",*payload},{"firedAt",now}};
         const auto task = p_->submit(intake(bot,field(def,"request"),rows.json(3)),{},0,nullptr,trigger);
-        delivery->second.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
+        receipts.push_back({{"taskId",task},{"botId",bot},{"triggerId",id}});
     }
     if (delivered.empty() && received.empty()) throw AccessDenied("Webhook source unavailable");
     Json tasks = Json::array();

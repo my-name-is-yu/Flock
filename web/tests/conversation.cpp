@@ -780,7 +780,8 @@ void memoryAutomationEndpoints(const std::filesystem::path& path) {
     store.fireDueAutomations(cb.clock()+60);
     check(store.tasks().size() == 1,"Canceled reminder fired after its due time");
     const auto request = browser.get("/api/conversation?bot=release").at("events").back().at("data");
-    check(request.at("trigger").at("externalEventId") == "event-1" && request.at("trigger").at("triggerId") == trigger,
+    check(request.at("trigger").at("source") == "deploy" && request.at("trigger").at("triggerId") == trigger &&
+          !request.at("trigger").contains("externalEventId"),
           "Web conversation lost webhook provenance");
 }
 

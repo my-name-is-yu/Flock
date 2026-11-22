@@ -30,7 +30,7 @@ void copyTrigger(Json& output, const Json& source) {
     if (trigger == source.end() || !trigger->is_object()) return;
     copyFields(output["trigger"] = Json::object(),*trigger,
                {"triggerKind","triggerId","targetTime","coveredFrom","coveredTo","occurrenceCount",
-                "firedAt","timezone","label","source","externalEventId"});
+                "firedAt","timezone","label","source"});
 }
 
 // The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <optional>
 #include <set>
 
@@ -566,10 +567,20 @@ void Bots::syncSchedules(Store& store, Seconds now,
             if (!cron.is_array()) throw Conflict("cron must be an array");
             if (!cron.empty()) {
                 const auto bot = configuredBot(id,config);
+                std::map<std::string_view,std::size_t> counts;
+                for (const auto& entry : cron) {
+                    const auto key = entry.find("id");
+                    if (key == entry.end() || !key->is_string()) continue;
+                    const auto& scheduleId = key->get_ref<const std::string&>();
+                    if (validBotId(scheduleId)) ++counts[scheduleId];
+                }
                 for (std::size_t i = 0; i < cron.size(); ++i) {
                     const auto& entry = cron[i];
                     try {
-                        schedules.push_back({validatedString(entry,"id"),validatedString(entry,"schedule"),
+                        const auto scheduleId = validatedString(entry,"id");
+                        if (validBotId(scheduleId) && counts.at(scheduleId) > 1)
+                            throw Conflict("Duplicate configured schedule ID");
+                        schedules.push_back({scheduleId,validatedString(entry,"schedule"),
                             validatedString(entry,"timezone"),bot.intake(validatedString(entry,"request"))});
                     } catch (const Conflict& error) {
                         errors.push_back("cron entry " + std::to_string(i + 1) + ": " + error.what());

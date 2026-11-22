@@ -175,6 +175,45 @@ void invalidEntriesPreserveDueSchedule() {
           tasks.at(0).at("trigger").at("occurrenceCount") == 3,
           "The valid sibling did not fire its saved occurrences after restart");
 }
+
+void malformedDuplicatesDeactivateSchedules() {
+    Sandbox temp;
+    const auto home = temp.path / "bots";
+    const auto folder = home / "release";
+    const auto db = temp.path / "tasks.db";
+    const Bots bots(home);
+    auto config = botConfig();
+    const Json daily{{"id","daily"},{"schedule","0 0 * * *"},{"timezone","Etc/UTC"},{"request","Daily check"}};
+    const Json weekly{{"id","weekly"},{"schedule","0 0 * * 5"},{"timezone","Etc/UTC"},{"request","Weekly check"}};
+    config["cron"] = Json::array({daily,weekly});
+    createBot(folder,config,"","");
+    std::vector<std::string> errors;
+    const auto report = [&](std::string_view, std::string_view error) { errors.emplace_back(error); };
+    {
+        Store store(db);
+        bots.syncSchedules(store,utc(2026,1,1,12,0),report);
+        check(errors.empty(),"Initial schedule import failed");
+    }
+
+    auto malformed = daily;
+    malformed.erase("request");
+    config["cron"] = Json::array({malformed,weekly,daily});
+    write(folder / "config.json",config.dump());
+    Store store(db);
+    const auto due = utc(2026,1,2,0,0);
+    bots.syncSchedules(store,due,report);
+    check(errors == std::vector<std::string>{"cron entry 1: Duplicate configured schedule ID",
+                                            "cron entry 3: Duplicate configured schedule ID"},
+          "A malformed duplicate did not invalidate both entries");
+    const auto schedules = store.automations({"fixture",true},"release").at("automations");
+    check(schedules.size() == 2 && schedules.at(1).at("configId") == "daily" &&
+          schedules.at(1).at("status") == "inactive" && schedules.at(1).at("nextRunAt").is_null(),
+          "A malformed duplicate left the previously configured schedule active");
+    store.fireDueAutomations(due);
+    const auto tasks = store.tasks("release");
+    check(tasks.size() == 1 && tasks.at(0).at("request") == "Weekly check",
+          "The unrelated schedule did not fire on restart");
+}
 }
 
 void configuredSchedules() {
@@ -182,5 +221,6 @@ void configuredSchedules() {
     cronIntakeAndRestart();
     configuredScheduleLifecycle();
     invalidEntriesPreserveDueSchedule();
+    malformedDuplicatesDeactivateSchedules();
 }
 }

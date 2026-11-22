@@ -358,7 +358,7 @@ void automationConversation(const std::filesystem::path& db) {
           restarted.tasks().size() == 1,"Webhook duplicate across connections was enqueued");
     const auto trigger = restarted.tasks().at(0).at("trigger");
     check(trigger.at("triggerId") == triggerId && trigger.at("triggerKind") == "webhook" &&
-          trigger.at("externalEventId") == "deployment-1" && trigger.at("event").at("status") == "finished",
+          trigger.at("source") == "deploy" && trigger.at("event").at("status") == "finished",
           "Webhook trigger provenance was not retained");
 }
 
@@ -421,7 +421,7 @@ void webhookMatchesRawPublicFields(const std::filesystem::path& db) {
           "Webhook provenance retained a protected event value");
 }
 
-void webhookMetadataUsesTargetBotSecrets(const std::filesystem::path& db) {
+void webhookEventIdsStayPrivate(const std::filesystem::path& db) {
     Store store(db);
     const auto now = utc(2026,1,1);
     const Person sender{"sender",false};
@@ -435,12 +435,21 @@ void webhookMetadataUsesTargetBotSecrets(const std::filesystem::path& db) {
     access.submitSecret(owner,alpha.botId,own,"fixture-alpha-secret");
     access.submitSecret(owner,beta.botId,other,"fixture-beta-secret");
 
-    const auto receipt = store.receiveWebhook(sender,"deploy","fixture-beta-secret",Json::object(),now);
-    check(receipt.at("tasks").size() == 1 && receipt.at("tasks").at(0).at("botId") == alpha.botId &&
-          store.tasks(beta.botId).empty(),"Another Bot's secret blocked an authorized webhook");
-    rejectsWithConflict([&] { store.receiveWebhook(sender,"deploy","fixture-alpha-secret",Json::object(),now); },
-                        "Secret values cannot be used as metadata");
-    check(store.tasks().size() == 1,"A target Bot secret was accepted as webhook metadata");
+    const auto deliver = [&](std::string_view eventId) {
+        return store.receiveWebhook(sender,"deploy",eventId,Json::object(),now);
+    };
+    const std::string_view firstId = "fixture-external-id-1", secondId = "fixture-external-id-2";
+    const auto first = deliver(firstId), second = deliver(secondId), replay = deliver(firstId);
+    check(first.at("duplicate") == false && second.at("duplicate") == false && replay.at("duplicate") == true &&
+          first.at("tasks").size() == 1 && second.at("tasks").size() == 1 && first.at("tasks") != second.at("tasks") &&
+          replay.at("tasks") == first.at("tasks") && store.tasks(beta.botId).empty(),
+          "Webhook IDs did not deduplicate authorized deliveries independently");
+    const auto tasks = store.tasks(alpha.botId);
+    const auto conversation = store.conversation(alpha.botId).dump();
+    check(tasks.size() == 2 && !tasks.at(0).at("trigger").contains("externalEventId") &&
+          !tasks.at(1).at("trigger").contains("externalEventId") &&
+          conversation.find(firstId) == std::string::npos && conversation.find(secondId) == std::string::npos,
+          "Webhook deduplication IDs appeared in task or conversation provenance");
 }
 }
 
@@ -455,6 +464,6 @@ int main() {
         automationConversation(temp.path / "webhook.sqlite3");
         webhookGrants(temp.path / "webhook-grants.sqlite3");
         webhookMatchesRawPublicFields(temp.path / "webhook-filters.sqlite3");
-        webhookMetadataUsesTargetBotSecrets(temp.path / "webhook-metadata.sqlite3");
+        webhookEventIdsStayPrivate(temp.path / "webhook-metadata.sqlite3");
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
