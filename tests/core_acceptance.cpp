@@ -90,6 +90,7 @@ struct SimulatedT3 : T3 {
     std::string generation = "same-oauth-session";
     bool loseAcknowledgement = false;
     bool hasReconciledRun = true;
+    std::string expectedBranch = "main";
     std::map<std::string,Observation> runs;
     std::map<std::string,RunRef> assignments;
     std::vector<Command> seen, recovery;
@@ -110,7 +111,7 @@ struct SimulatedT3 : T3 {
         check(cmd.authGeneration == generation,"OAuth generation missing from committed send");
         if (cmd.tool == "answer_session_question") {
             ++replies;
-            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == "main","wrong T3 answer");
+            check(cmd.questionId == "branch-question" && cmd.answers["branch"] == expectedBranch,"wrong T3 answer");
             runs.at(cmd.target.runId) = {};
             if (std::exchange(loseAcknowledgement,false)) return {};
             return {Delivery::Kind::Accepted,{},{}};
@@ -624,6 +625,39 @@ void connectionRecoveryDiscardsExpiredSessionQuestion() {
         check(f.t3.replies == 0 && f.logs(id,"session_question_closed") == 1,
               "a closed question was answered or remained open");
     }
+}
+
+void connectionRecoveryReconsidersNewDirections() {
+    Fixture f;
+    const auto id = f.submit("Check main initially");
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "intake") return work();
+        f.t3.runs.at("run-1") = {.kind = Observation::Kind::Unavailable,.status = "auth"};
+        return reply();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.wait(id,"auth");
+    check(f.t3.replies == 0,"the original answer escaped before recovery");
+
+    f.model.script = [&](const ModelInput& input) {
+        if (input.event.at("kind") == "conversation_turn")
+            return converse(input,"send_to_task",id,Json::object());
+        check(input.task.at("userInstructions").dump().find("Use dev") != std::string::npos,
+              "question inference lost the new direction");
+        auto answer = reply();
+        answer.args["answers"]["branch"] = "dev";
+        return answer;
+    };
+    f.store->receive(localOwner,{"alpha","","e","p"},"new-direction-during-outage","Use dev");
+    f.runtime->runConversations();
+    f.restart();
+    f.t3.expectedBranch = "dev";
+    f.t3.question("run-1");
+    f.runtime->tick();
+    f.reach(id,"running");
+    check(f.t3.replies == 1 && f.t3.seen.back().answers.at("branch") == "dev",
+          "connection recovery applied the old Session answer");
 }
 
 void connectionRecoveryRestoresQuestionModelApproval() {
@@ -2170,6 +2204,7 @@ int main() {
             {"recover live question across auth and settings waits",connectionRecoveryRestoresSessionQuestion},
             {"discard expired question after connection recovery",connectionRecoveryDiscardsExpiredSessionQuestion},
             {"recover the question's model approval",connectionRecoveryRestoresQuestionModelApproval},
+            {"reconsider new directions after question recovery",connectionRecoveryReconsidersNewDirections},
             {"delivery recovery",recoveredDelivery},{"cancel during delivery",cancelDuringDelivery},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
