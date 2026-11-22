@@ -37,10 +37,17 @@ std::string pendingText(const Json& task, const Json& item) {
     const auto text = field(item,"text");
     if (!item.contains("environmentId") || (!item.contains("intent") && !item.contains("doneWhen"))) return text;
     const auto destination = task.value("pendingEnvironmentId",field(task,"environmentId"));
-    if (!matchesWorkRevision(task,item)) return "Use the current execution destination " + destination + ".";
+    const auto supersededQuote = [&] {
+        const auto criteria = task.value("requestedDoneWhen",field(task,"doneWhen"));
+        return "Apply the work directions in this earlier message. The authoritative current task intent is \"" +
+               taskIntent(task) + "\" and supersedes any intent in the quote. The authoritative current completion "
+               "criteria are \"" + criteria + "\" and supersede any criteria in the quote. The authoritative "
+               "current execution destination is \"" + destination + "\" and supersedes any destination in the quote.\n" +
+               text;
+    };
+    if (!matchesWorkRevision(task,item)) return supersededQuote();
     if (item.at("environmentId") == destination) return text;
-    return "Apply the work directions in this earlier message. The current execution destination is " +
-           destination + " and supersedes any destination in the quote.\n" + text;
+    return supersededQuote();
 }
 
 InstructionBatch pendingBatch(const Json& task, std::size_t byteLimit = instructionBatchBytes) {
@@ -57,9 +64,12 @@ InstructionBatch pendingBatch(const Json& task, std::size_t byteLimit = instruct
         if (key.empty()) continue;
         if (key == "environment") {
             const bool laterMove = std::exchange(newerDestination,true);
-            if ((item.contains("intent") || item.contains("doneWhen")) && matchesWorkRevision(task,item))
-                key = item.contains("doneWhen") ? "criteria" : "intent";
-            else if (laterMove) {
+            if (item.contains("intent") || item.contains("doneWhen")) {
+                key = matchesWorkRevision(task,item)
+                    ? (item.contains("doneWhen") ? "criteria" : "intent")
+                    : "mixed-route-work-" + std::to_string(item.value("messageId",Id{0})) + "-" +
+                      std::to_string(item.value("step",0));
+            } else if (laterMove) {
                 superseded.insert(i-1);
                 continue;
             }
@@ -849,7 +859,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
     }
 
     void queueAction(Json& task, const std::string& action, std::string_view tool, std::string instruction,
-                     const Json& args, const Json&, bool charge) {
+                     const Json& args, bool charge) {
         const bool work = tool == "delegate" || tool == "follow_up";
         if (charge) chargeAdditionalWork(task);
         Json resultReferences = Json::array(), pending = Json::array();
@@ -863,10 +873,15 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             const auto goal = needsContext ? taskIntent(task) : std::string{};
             const auto criteria = needsContext ? field(task,"doneWhen") : std::string{};
             const auto actionTag = "\n\n[Flock action ID: " + action + "]";
-            const auto limit = maxSessionPromptBytes - sessionPrompt(action,actionTag).size();
+            const auto fixedPromptBytes = sessionPrompt(action,actionTag).size();
+            const auto limit = fixedPromptBytes >= maxSessionPromptBytes ? 0 :
+                maxSessionPromptBytes - fixedPromptBytes;
             // Fit current directions first. Deferred directions stay pending until a later command accepts them.
-            auto reserved = instruction.size() + directionHeading.size() + intentHeading.size() + goal.size() +
-                            criteriaHeading.size() + criteria.size();
+            const auto goalBytes = goal.empty() || instruction.find(goal) != instruction.npos ? 0 :
+                intentHeading.size() + goal.size();
+            const auto criteriaBytes = criteria.empty() || instruction.find(criteria) != instruction.npos ? 0 :
+                criteriaHeading.size() + criteria.size();
+            auto reserved = instruction.size() + directionHeading.size() + goalBytes + criteriaBytes;
             auto batch = pendingBatch(task,std::min(instructionBatchBytes,limit - std::min(limit,reserved)));
             supersedeInstructions(task,batch.superseded);
             pending = std::move(batch.instructions);
@@ -879,10 +894,31 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             for (const auto& item : earlier) historyBytes += item.at("text").get_ref<const std::string&>().size() + 2;
             if (historyBytes + references.size() > available) {
                 // Only reclaim space used by real reference labels and excerpts.
-                earlier = db.sessionInstructions(task,goal,pending,available - references.size(),instruction);
+                const auto originalReferenceBytes = references.size();
+                const auto contextBase = instruction;
+                earlier = db.sessionInstructions(task,goal,pending,
+                    references.size() >= available ? 0 : available - references.size(),instruction);
                 includeWorkContext(instruction,task,earlier,pending,goal,criteria);
                 references.clear();
-                resultReferences = appendResultReferences(references,task,pending,earlier,limit - instruction.size());
+                resultReferences = appendResultReferences(references,task,pending,earlier,
+                    instruction.size() >= limit ? 0 : limit - instruction.size());
+                if (references.size() < originalReferenceBytes) {
+                    std::set<std::pair<Id,int>> retained;
+                    for (const auto& item : earlier)
+                        retained.emplace(item.at("messageId").get<Id>(),item.value("step",0));
+                    const auto refilled = db.sessionInstructions(task,goal,pending,
+                        references.size() >= available ? 0 : available - references.size(),contextBase);
+                    earlier = Json::array();
+                    for (const auto& item : refilled) {
+                        if (retained.contains({item.at("messageId").get<Id>(),item.value("step",0)}))
+                            earlier.push_back(item);
+                    }
+                    instruction = contextBase;
+                    includeWorkContext(instruction,task,earlier,pending,goal,criteria);
+                    references.clear();
+                    resultReferences = appendResultReferences(references,task,pending,earlier,
+                        instruction.size() >= limit ? 0 : limit - instruction.size());
+                }
             } else {
                 includeWorkContext(instruction,task,earlier,pending,goal,criteria);
             }
@@ -929,7 +965,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             db.consumeEvent(current);
             db.journal(current["id"],"decision",{{"actionId",action},{"tool",tool},{"reason",reason},
                 {"eventId",current["eventId"]},{"revisionId",revision(current)}});
-            queueAction(current,action,tool,std::move(instruction),Json::object(),pending.instructions,true);
+            queueAction(current,action,tool,std::move(instruction),Json::object(),true);
             return true;
         });
     }
@@ -1315,7 +1351,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
                     const auto report = field(event.value("sessionResult",Json(nullptr)),"report");
                     if (!report.empty()) workInstruction += "\n\nPrevious Session report (reference only):\n" + report;
                 }
-                queueAction(current,action,tool,std::move(workInstruction),args,Json::array(),charge);
+                queueAction(current,action,tool,std::move(workInstruction),args,charge);
             }
             return true;
         });

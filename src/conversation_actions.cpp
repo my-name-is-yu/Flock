@@ -17,9 +17,11 @@ Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot,
     const auto priorId = source.at("taskId").get<Id>();
     const auto prior = load(priorId);
     auto task = load(id);
+    const auto intent = taskIntent(prior);
     if (const auto criteria = prior.value("requestedDoneWhen",field(prior,"doneWhen")); !criteria.empty())
         task["requestedDoneWhen"] = criteria;
-    task["restartContext"] = {{"intent",prior.value("intent",prior.at("request"))},{"taskId",priorId},
+    task["intent"] = intent;
+    task["restartContext"] = {{"intent",intent},{"taskId",priorId},
                               {"pendingInstructions",prior.value("cancelledInstructions",Json::array())}};
     auto rows = query(R"SQL(
 SELECT entry.value FROM outbox, json_each(outbox.data,'$.instructions') entry
@@ -77,6 +79,8 @@ bool Store::Impl::acceptInstruction(Id taskId, Id revision, Id messageId, int st
         if (conflicting) task["pendingEnvironmentId"] = environment;
     }
     if (conflicting) {
+        if (!change->intent.empty()) pending["intent"] = change->intent;
+        if (!change->doneWhen.empty()) pending["doneWhen"] = change->doneWhen;
         pending["replaceKey"] = !environment.empty() ? "environment" : !change->doneWhen.empty() ? "criteria"
                                 : !change->intent.empty() ? "intent" : "target";
         task["replanning"] = true;

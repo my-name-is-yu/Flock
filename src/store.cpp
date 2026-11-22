@@ -362,16 +362,23 @@ Json Store::Impl::sessionInstructions(const Json& task, std::string_view intent,
 
     // Newest first, so a later change supersedes earlier directions with the same replacement key.
     const auto remember = [&](Json item, std::size_t& bytes, std::size_t separatorBytes = 0) {
-        const auto key = workKey(item);
+        const bool mixedRouteAndWork = item.contains("environmentId") &&
+            (item.contains("intent") || item.contains("doneWhen"));
+        const bool staleWorkRevision =
+            (item.contains("intent") && item.at("intent") != intent) ||
+            (item.contains("doneWhen") && item.at("doneWhen") != criteria);
+        if (staleWorkRevision && !mixedRouteAndWork) return;
+        const auto key = staleWorkRevision && mixedRouteAndWork ? std::string{} : workKey(item);
         if (!key.empty() && !replaced.insert(key).second) return;
-        if ((item.contains("intent") && item.at("intent") != intent) ||
-            (item.contains("doneWhen") && item.at("doneWhen") != criteria)) return;
         const auto id = std::pair{item.at("messageId").get<Id>(),item.value("step",0)};
         if (byMessage.contains(id) || bytes <= separatorBytes || availableBytes <= 2) return;
         auto text = field(item,"text");
         if (item.contains("environmentId")) {
-            text = "Apply the work directions in this earlier message. The current execution destination is " +
-                   field(task,"environmentId") + " and supersedes any destination in the quote.\n" + text;
+            text = "Apply the work directions in this earlier message. The authoritative current task intent is \"" +
+                   std::string(intent) + "\" and supersedes any intent in the quote. The authoritative current completion "
+                   "criteria are \"" + criteria + "\" and supersede any criteria in the quote. The authoritative "
+                   "current execution destination is \"" + field(task,"environmentId") +
+                   "\" and supersedes any destination in the quote.\n" + text;
             item["replaceKey"] = key;
             item.erase("environmentId");
         }
@@ -408,15 +415,15 @@ ORDER BY outbox.rowid DESC, entry.key DESC LIMIT ?
         delivered(task.at("id"),count,bytes);
     }
 
-    int deliveredCount = 20;
-    std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes;
+    int deliveredCount = 20, resumeCount = 20;
+    std::size_t deliveredBytes = 8000, pendingBytes = instructionBatchBytes, resumeBytes = 4000;
     const auto rememberResume = [&](Id message, const std::string& request) {
-        if (!deliveredCount || !message || request.empty() || request == intent ||
+        if (!resumeCount || !message || request.empty() || request == intent ||
             instruction.find(request) != instruction.npos) return;
-        --deliveredCount;
+        --resumeCount;
         const auto context = "Earlier resume request, subject to the current task intent, completion criteria, "
             "and execution destination (" + field(task,"environmentId") + "):\n" + request;
-        remember({{"messageId",message},{"text",context}},deliveredBytes);
+        remember({{"messageId",message},{"text",context}},resumeBytes);
     };
     const auto restart = task.find("restartContext");
     Id parent = restart == task.end() ? 0 : restart->at("taskId").get<Id>();
