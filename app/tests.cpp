@@ -786,7 +786,13 @@ void botProfilesAndAvatars() {
         {"name","Custom Two"},
         {"avatar",{{"kind","shape"},{"example","mug"},{"color","#69c9ac"}}},
     });
-    check(std::filesystem::exists(customDir / "avatar.png"),"shape save deleted an image the avatar did not reference");
+    const auto customImage = pngBytes + "new upload";
+    bots.updateProfile("custom",{{"name","Custom Two"},{"avatar",{{"kind","upload"}}}},AvatarImage{customImage});
+    const auto reopened = Bots(temp.path / "bots").avatarImage("custom");
+    std::ifstream spare(customDir / "avatar.png",std::ios::binary);
+    check(reopened && reopened->bytes() == customImage &&
+          std::string(std::istreambuf_iterator<char>(spare),{}) == pngBytes,
+          "upload failed to persist the new image and preserve the unrelated image");
 
     // A save that would exceed the config read limit fails before the file changes.
     const auto bigDir = temp.path / "bots" / "big";

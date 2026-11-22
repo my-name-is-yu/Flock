@@ -19,6 +19,7 @@ class AvatarImage {
 public:
     static constexpr std::size_t maxBytes = 5 * 1024 * 1024;
     explicit AvatarImage(std::string bytes);
+    std::string storageFilename(unsigned index) const;
     static bool isStoredFilename(std::string_view name);
     const AvatarFormat& format() const { return format_; }
     const std::string& bytes() const { return bytes_; }
