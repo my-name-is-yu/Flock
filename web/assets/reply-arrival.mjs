@@ -1,18 +1,15 @@
 const replyKinds = new Set(['conversation_reply', 'completed', 'report', 'waiting']);
 
-export function createReplyArrival(show) {
-  const seenHeads = new WeakMap();
-  return (conversation, events, visible) => {
-    const head = conversation?.newestEvent;
-    if (head == null) return;
-    const previous = seenHeads.get(conversation);
-    seenHeads.set(conversation, head);
-    if (!visible || previous == null || head <= previous) return;
-
-    const added = events.filter((event) => event.id > previous && event.kind !== 'wait_closed');
-    // A reply and its prompt can be delivered together. Larger batches are catch-up.
-    if (added.length > 2 || !added.length) return;
-    const reply = added.at(-1);
-    if (replyKinds.has(reply.kind) && !added.slice(0, -1).some((event) => replyKinds.has(event.kind))) show(reply.id);
-  };
+export function replyArrivalId(events, previousHead) {
+  if (previousHead == null) return;
+  const added = events.filter((event) => event.id > previousHead && event.kind !== 'wait_closed');
+  // A prompt and its reply, or a workflow report and its completion, can arrive together.
+  if (!added.length || added.length > 2) return;
+  const reply = added.at(-1);
+  if (!replyKinds.has(reply.kind)) return;
+  const first = added[0];
+  if (added.length === 1 || !replyKinds.has(first.kind) ||
+      (first.kind === 'report' && reply.kind === 'completed' && first.taskId != null && first.taskId === reply.taskId)) {
+    return reply.id;
+  }
 }
