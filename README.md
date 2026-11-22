@@ -77,3 +77,21 @@ build/app/flock answer <task-id> <wait-id> 'main'
 To check whether a live model applies different completion criteria, run `build/app/flock model acceptance <model-slug>` with an authorized ChatGPT connection. The command prints the decision and rationale for each trial as JSON Lines.
 
 The Bot normally evaluates the Session's final report. To compare decisions based on the work history, run `run --session-read on_demand` to let the Bot read that history. The runtime saves up to three excerpts per event in SQLite, with a limit of 8 KiB per excerpt.
+
+### Bot resource authorization
+
+Set `enforceAccess` to `true` in a Bot's config to require grants from its
+first Session. Configuring a Bot's first person or resource grant also enables
+checks for its existing tasks. Set `services` and `mcpServers` to arrays of
+connection names for the conversation tools. Manage grants and protected input
+from **Manage access and credentials** in Bot settings.
+
+Adapters that perform resource operations should use the contracts in
+`include/flock/access.hpp`. At the execution boundary, pass the authenticated
+Session's environment and Run reference to `Access::executeSessionResource`,
+together with the exact scope, the upstream permission check and the action.
+Flock resolves the Run's owning task, checks current grants, and journals the
+completed action. The transport must establish the calling Run's identity.
+A peer's task and its Runs always resolve to the recipient Bot. Secret-consuming
+adapters use `Access::useSecret` with the owning task and a named `SecretRef`.
+External adapters must call these checks for each protected operation.

@@ -154,6 +154,7 @@ LEFT JOIN tasks sender ON sender.id=peer.sender_task AND sender.environment_id=t
 WHERE task.state NOT IN ('completed','cancelled') AND COALESCE(peer.kind,'')<>'consult';
 )SQL";
         if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+        migrateAccess();
         migrateConversation();
         migrateModelBudget();
         exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
@@ -185,7 +186,7 @@ Json Store::Impl::queueBlocker(Id id) const {
     return {{"id",row.number(0)},{"botId",row.string(1)},{"request",row.string(2)},{"state",row.string(3)}};
 }
 Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
-    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, data});
+    exec("INSERT INTO journal(task_id,time,kind,data) VALUES(?,?,?,?)", {id, unixTime(), kind, secrets.redactSecrets(data)});
     return last();
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
@@ -222,7 +223,7 @@ void Store::Impl::requestCancellation(Json& task) {
 }
 
 Id Store::Impl::event(Json& task, std::string_view key, Json data) {
-    exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task["id"], key, data});
+    exec("INSERT OR IGNORE INTO events(task_id,dedupe,data) VALUES(?,?,?)", {task["id"], key, secrets.redactSecrets(data)});
     if (!sqlite3_changes(db)) return 0;
     const auto id = last();
     task["eventId"] = id;
@@ -246,6 +247,7 @@ void Store::Impl::consumeEvent(const Json& task) {
 }
 void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
     clearWait(task, "superseded");
+    data = secrets.redactSecrets(data);
     data["reason"] = reason;
     data["eventId"] = task.value("eventId", Id{});
     data["run"] = task["activeRun"];
@@ -303,8 +305,8 @@ Id Store::Impl::submit(const Intake& item, std::string_view peerKind, Id sourceM
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
     modelCallLimit(item.config);
-    Json data = {{"botId", item.botId}, {"request", item.request}, {"environmentId", item.environmentId},
-        {"projectId", item.projectId}, {"config", item.config}, {"scheduleId", item.scheduleId},
+    Json data = {{"botId", item.botId}, {"request", secrets.redactSecrets(item.request)}, {"environmentId", item.environmentId},
+        {"projectId", item.projectId}, {"config", environmentSettings(item.botId,item.environmentId,item.config)}, {"scheduleId", item.scheduleId},
         {"scheduledAt", item.scheduledAt}, {"createdAt", unixTime()}, {"doneWhen", ""}, {"remaining", 3},
         {"additionalUsed", 0}, {"eventId", 0}, {"actionId", ""}, {"deadline", 0},
         {"activeRun", nullptr}, {"lastRun", nullptr}, {"question", nullptr}, {"wait", nullptr}};
@@ -342,7 +344,7 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
 void Store::operate(Id id, Id waitId, std::string_view operation, const Json& data) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
-    p_->operate(id,waitId,operation,data);
+    p_->operate(id,waitId,operation,p_->secrets.redactSecrets(data));
     transaction.commit();
 }
 
@@ -462,7 +464,7 @@ Json Store::Impl::taskDetails(Id id, bool includeBlocker) const {
     while (runs.next())
         result["runs"].push_back({{"threadId",runs.string(0)},{"runId",runs.string(1)},
                                   {"link",runs.string(2)},{"actionId",runs.string(3)},
-                                  {"environmentId",runs.string(4)},{"revisionId",runs.number(5)}});
+                                  {"environmentId",runs.string(4)},{"revisionId",runs.number(5)},{"ownerBotId",result.at("botId")}});
     return result;
 }
 

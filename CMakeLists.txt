@@ -15,7 +15,7 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp
-                       src/model_budget.cpp src/runtime.cpp)
+                       src/model_budget.cpp src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp)
 target_include_directories(flock_core PUBLIC include)
 if(TARGET SQLite3::SQLite3)
   target_link_libraries(flock_core PUBLIC SQLite3::SQLite3)
@@ -27,6 +27,9 @@ target_compile_options(flock_core PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(flock_access_secrets tests/access_secrets.cpp)
+  target_link_libraries(flock_access_secrets PRIVATE flock_core)
+  add_test(NAME flock_access_secrets COMMAND flock_access_secrets)
   add_executable(flock_core_tests tests/core.cpp)
   target_link_libraries(flock_core_tests PRIVATE flock_core)
   add_test(NAME flock_core COMMAND flock_core_tests)

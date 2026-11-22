@@ -1323,7 +1323,11 @@ function cronContent(bot) {
 }
 function settingsContent(bot, section = 'general') {
   elements['detail-title'].textContent = settingsSections[section][0];
-  return section === 'cron' ? cronContent(bot) : generalContent(bot);
+  if (section === 'cron') return cronContent(bot);
+  const access = document.createElement('a');
+  access.href = '/settings/' + encodeURIComponent(bot.id) + '/access';
+  access.textContent = 'Manage access and credentials';
+  return [...generalContent(bot), access];
 }
 function waitForm(label, fields, submit, id) {
   const form = node('form', 'wait-form');

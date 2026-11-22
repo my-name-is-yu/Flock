@@ -83,7 +83,7 @@ std::optional<Json> Store::receipt(std::string_view bot, std::string_view client
     auto row = p_->query("SELECT id,text,coalesce(reply_to,0) FROM messages WHERE bot_id=? AND client_message_id=?",
                          {bot,clientId});
     if (!row.next()) return std::nullopt;
-    return receiptRow(row,text,replyTo);
+    return receiptRow(row,p_->secrets.redactSecrets(text).get<std::string>(),replyTo);
 }
 
 Json Store::receive(const Intake& routing, std::string_view clientId, std::string_view text, Id replyTo) {
@@ -106,7 +106,7 @@ Json Store::receive(const Intake& routing, std::string_view clientId, std::strin
             p_->exec(R"SQL(
 INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing)
 SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),text,saved,routing.botId});
+)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),p_->secrets.redactSecrets(text),saved,routing.botId});
             receipt = {{"messageId",id},{"status","received"}};
         }
         transaction.commit();

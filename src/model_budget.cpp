@@ -78,13 +78,28 @@ void Store::Impl::grantModelCall(std::string_view budget) {
 Decision Store::Impl::callModel(Model& model, const ModelInput& input, Id attemptId) {
     Decision decision;
     try {
-        decision = model.decide(input);
+        auto safe = input;
+        safe.task = secrets.redactSecrets(input.task);
+        safe.event = secrets.redactSecrets(input.event);
+        safe.history = secrets.redactSecrets(input.history);
+        safe.evidence = secrets.redactSecrets(input.evidence);
+        safe.config = secrets.redactSecrets(input.config);
+        safe.notes.soul = secrets.redactSecrets(input.notes.soul).get<std::string>();
+        safe.notes.memory = secrets.redactSecrets(input.notes.memory).get<std::string>();
+        safe.feedback = secrets.redactSecrets(input.feedback).get<std::string>();
+        decision = model.decide(safe);
+        decision.args = secrets.redactSecrets(decision.args);
+        decision.reason = secrets.redactSecrets(decision.reason).get<std::string>();
+        decision.tool = secrets.redactSecrets(decision.tool).get<std::string>();
+        decision.usage = secrets.redactSecrets(decision.usage);
     } catch (const ModelError& error) {
         if (!error.usage.empty()) {
             std::lock_guard lock(mutex);
-            exec("UPDATE model_attempts SET usage=? WHERE id=?",{error.usage,attemptId});
+            exec("UPDATE model_attempts SET usage=? WHERE id=?",{secrets.redactSecrets(error.usage),attemptId});
         }
-        throw;
+        throw ModelError(secrets.redactSecrets(std::string(error.what())).get<std::string>(),error.transient,secrets.redactSecrets(error.usage));
+    } catch (const std::exception& error) {
+        throw ModelError(secrets.redactSecrets(std::string(error.what())).get<std::string>(),false);
     }
     if (!decision.usage.empty()) {
         std::lock_guard lock(mutex);

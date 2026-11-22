@@ -183,6 +183,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
 #ifdef FLOCK_WITH_WEB
     std::unique_ptr<WebServer> server;
     if (web) {
+        const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
         server = startWeb(store,port,{
             [&] { return bots.cards(); },
             [&](std::string_view botId,std::string_view request) { return bots.get(botId).intake(request); },
@@ -192,6 +193,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Store& store, Bo
             },
             [&](std::string_view botId) { return bots.avatarImage(botId); },
             options.peers,
+            identityFile ? webIdentities(identityFile) : std::function<Person(std::string_view)>{},
         });
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }

@@ -383,6 +383,14 @@ Bot Bots::get(std::string_view id) const {
     if (!plainId(bot.environmentId) || !plainId(bot.projectId))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
+    if (config.contains("enforceAccess")) bot.settings["enforceAccess"] = config.at("enforceAccess").get<bool>();
+    for (const auto key : {"services","mcpServers"}) {
+        if (!config.contains(key)) continue;
+        if (!config[key].is_array()) throw Conflict("Connection names must be an array");
+        for (const auto& name : config[key])
+            if (!name.is_string() || !plainId(name.get<std::string>())) throw Conflict("Invalid connection name");
+        bot.settings[key] = config[key];
+    }
     if (config.contains("modelCallLimit")) bot.settings["modelCallLimit"] = modelCallLimit(config);
     if (config.contains("conversationEnvironments")) {
         const auto& destinations = config["conversationEnvironments"];

@@ -445,7 +445,8 @@ void responseContract() {
           "the initial work prompt must direct the Bot to use the requested completion criteria");
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
-                   "message_session","interrupt_session","read_result","find_tasks","reply"};
+                   "message_session","interrupt_session","read_result","find_tasks","reply","list_grants","request_access","list_secrets","request_secret_input","list_connections",
+                                         "check_environment_readiness","update_bot_settings","request_bot_change"};
     input.event = {{"kind","conversation_turn"},{"text","Create a sales report in CSV format"},{"turn",Json::array()}};
     const auto turn = responseRequest(input);
     const auto turnTool = [&](std::string_view name) -> const Json& {
@@ -453,7 +454,9 @@ void responseContract() {
             if (function.at("name") == name) return function.at("parameters");
         throw std::runtime_error("Missing conversation tool: " + std::string(name));
     };
-    check(turn.at("tools").at(0).at("tools").size() == 10 &&
+    check(turn.at("tools").at(0).at("tools").size() == 18 &&
+          turnTool("request_access")["required"] == Json::array({"reason","resourceKind","resourceId","operation"}) &&
+          turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&

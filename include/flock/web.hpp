@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 
 #include <optional>
 #include <string>
@@ -20,7 +20,9 @@ struct WebCallbacks {
     std::function<Json(std::string_view botId, const Json& profile, const std::optional<AvatarImage>& image)> updateBot;
     std::function<std::optional<AvatarImage>(std::string_view botId)> botAvatar;
     std::function<std::vector<PeerBot>(std::string_view botId)> peers = {};
+    std::function<Person(std::string_view authorization)> authenticate = {};
 };
+std::function<Person(std::string_view)> webIdentities(const std::filesystem::path&);
 class WebServer {
 public:
     virtual ~WebServer() = default;

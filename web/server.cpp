@@ -1,6 +1,7 @@
 #include "flock/web.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
+#include "access_routes.hpp"
 
 #include <httplib.h>
 
@@ -276,12 +277,23 @@ public:
                     res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
                 });
         }
-        server_.Get("/api/bots",[this](const Request&, Response& res) {
-            json(res,200,botList());
+        server_.Get(R"(/settings/([^/]+)/(secrets|environment|access))",[](const Request&, Response& res) {
+            for (const auto& asset : web::assets) {
+                if (asset.path == "/access.html") {
+                    res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
+                    return;
+                }
+            }
+            error(res,404,"settings_not_found");
+        });
+        web::accessRoutes(server_,store_,callbacks_);
+        server_.Get("/api/bots",[this](const Request& req, Response& res) {
+            json(res,200,botList(web::person(callbacks_,req)));
         });
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
+            if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
             if (!callbacks_.botAvatar) return error(res,404,"avatar_not_found");
             const auto image = callbacks_.botAvatar(id);
             if (!image || !inList(allowedImageTypes,image->contentType) || image->bytes.empty())
@@ -292,6 +304,7 @@ public:
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
+                if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
                 const auto known = bots();
                 const auto* bot = botById(known,id);
                 if (!bot) return error(res,404,"bot_not_found");
@@ -303,6 +316,7 @@ public:
                         return json(res,200,web::taskDetail(task,store_.latestTaskResult(taskId)));
                     }
                     const auto before = queryId(req,"before",true);
+                    if (req.path == "/api/peer-conversation" && !store_.access().permitsPerson(web::person(callbacks_,req),req.get_param_value("peer"),Role::view)) return error(res,403,"access_denied");
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,id,before);
                     if (req.path == "/api/view") json(res,200,web::botView(store_,*bot));
                     else if (req.path == "/api/conversation") json(res,200,web::conversation(store_,id,before));
@@ -358,6 +372,11 @@ private:
             error(res,403,"invalid_origin");
             return HandlerResult::Handled;
         }
+        if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
+            res.set_header("WWW-Authenticate","Basic realm=\"Flock\"");
+            error(res,401,"identity_required");
+            return HandlerResult::Handled;
+        }
         if (req.method == "GET" || req.method == "HEAD") return HandlerResult::Unhandled;
         if (req.method != "POST") error(res,405,"method_not_allowed");
         else if (!sameOrigin || req.get_header_value_count("X-Flock-Action") != 1 ||
@@ -389,11 +408,13 @@ private:
         try {
             if (update) {
                 const auto botId = requiredText(body,"botId",1024);
+                if (!store_.access().permitsPerson(web::person(callbacks_,req),botId,Role::admin)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false,false);
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 return json(res,200,web::botSettings(saved));
             }
+            if (!web::person(callbacks_,req).adminRoot) return error(res,403,"access_denied");
             auto parsed = parseBotProfile(body,true,true);
             const auto created = callbacks_.createBot(parsed.profile,parsed.image);
             return json(res,201,web::botSettings(created));
@@ -421,8 +442,12 @@ private:
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
-    Json botList() const {
-        auto list = web::botList(store_,bots());
+    Json botList(const Person& person) const {
+        auto visible = bots();
+        visible.erase(std::remove_if(visible.begin(),visible.end(),[&](const auto& bot) {
+            return !store_.access().permitsPerson(person,web::field(bot,"id"),Role::view);
+        }),visible.end());
+        auto list = web::botList(store_,visible);
         std::set<std::string> known;
         for (const auto& bot : list) known.insert(web::field(bot,"id"));
         std::map<std::string,std::set<std::string>> connections;
@@ -434,7 +459,7 @@ private:
                 connections[peer].insert(id);
             }
             for (const auto& peer : store_.peerPartners(id))
-                if (id != peer) connections[id].insert(peer);
+                if (id != peer && store_.access().permitsPerson(person,peer,Role::view)) connections[id].insert(peer);
         }
         for (auto& bot : list) {
             auto& entries = bot["peers"] = Json::array();
@@ -463,6 +488,7 @@ private:
         if (!body.is_object()) return error(res,400,"invalid_json");
         try {
             const auto bot = requiredText(body,"botId",1024);
+            if (!store_.access().permitsPerson(web::person(callbacks_,req),bot,Role::decide)) return error(res,403,"access_denied");
             const auto known = bots();
             if (!botById(known,bot)) return error(res,404,"bot_not_found");
             if (mutation != Mutation::Operation) {

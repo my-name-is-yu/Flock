@@ -530,6 +530,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
 
     Command command(const Json& task, const Json& action) {
         Command c;
+        c.ownerBotId = field(task,"botId");
         c.actionId = field(action,"id");
         c.tool = field(action,"tool");
         c.environmentId = action.value("environmentId",field(task,"environmentId"));
@@ -605,6 +606,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
                     task["activeRun"] = runJson(outcome.run);
+                    task["activeRun"]["ownerBotId"] = task["botId"];
                     task["activeRun"]["environmentId"] = task["environmentId"];
                     task["activeRun"]["revisionId"] = action.value("revisionId",Json(nullptr));
                     db.journal(id,"run_started",{{"run",task["activeRun"]},{"actionId",action["id"]},
@@ -665,6 +667,15 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (action["phase"] == "started") {
                 outcome = t3.reconcile(cmd);
             } else {
+                const auto launchAllowed = [&] {
+                    return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
+                           db.runtimePermits(task,{"environment",cmd.environmentId,"launch"});
+                };
+                const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in /settings/"+cmd.ownerBotId+"/environment",true};
+                if (!launchAllowed()) {
+                    applyDelivery(id,action,denied);
+                    return;
+                }
                 if (const auto stop = t3.preflight(cmd)) {
                     applyDelivery(id,action,*stop);
                     return;
@@ -677,11 +688,12 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
                     db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
                     return true;
                 })) return;
-                outcome = t3.send(cmd);
+                outcome = launchAllowed() ? t3.send(cmd) : denied;
             }
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
+        outcome.detail = db.secrets.redactSecrets(outcome.detail).get<std::string>();
         applyDelivery(id,action,std::move(outcome));
     }
 
@@ -747,7 +759,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
         if ((!excerpt.threadId.empty() && excerpt.threadId != req.threadId) ||
             (!excerpt.runId.empty() && excerpt.runId != req.runId))
             throw Conflict("History source does not match the requested Run");
-        const auto text = bounded(excerpt.text,8192);
+        const auto text = bounded(db.secrets.redactSecrets(excerpt.text).get<std::string>(),8192);
         return {{"environmentId",req.environmentId},{"threadId",req.threadId},{"runId",req.runId},
                 {"itemId",excerpt.itemId},{"text",text},{"more",excerpt.more || text.size() < excerpt.text.size()},
                 {"itemTruncated",excerpt.nextOffset > req.offset || text.size() < excerpt.text.size()},
@@ -778,6 +790,7 @@ WHERE runs.task_id=? AND runs.environment_id=? AND runs.thread_id=? AND runs.run
             if (row.next()) throw Conflict("History reference matches more than one Session");
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("History reference does not belong to this task");
+        if (!db.runtimePermits(task,{"session",req.threadId,"read"})) throw Conflict("Session read access required");
         auto entry = readExcerpt(req);
         return change(task,[&](Json& current) {
             auto evidence = event["evidence"];
@@ -1016,6 +1029,7 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
         peer.intake.scheduleId.clear();
         peer.intake.scheduledAt = 0;
+        if (db.managedAccess(sender)) peer.intake.config["enforceAccess"] = true;
         const auto id = db.submit(peer.intake,0,nullptr,true);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
@@ -1129,9 +1143,10 @@ WHERE m.id=? AND m.bot_id=? AND m.text=? AND j.kind='conversation_message'
             auto row = db.query("SELECT recipient_task FROM peer_exchanges WHERE id=? AND sender_task=? AND last_message=?",
                                 {event["exchangeId"],task["id"],messageId});
             if (!row.next()) throw Conflict("The Bot result does not belong to this task");
-            req.config = db.load(row.number(0))["config"];
+            req.config = db.managedAccess(task) ? task.at("config") : db.load(row.number(0))["config"];
         }
         if (req.threadId.empty() || req.runId.empty()) throw Conflict("The Bot result has no readable Run");
+        if (!db.runtimePermits(task,{"session",req.threadId,"read"})) throw Conflict("Session read access required");
         auto entry = readExcerpt(req);
         entry["messageId"] = messageId;
         entry["exchangeId"] = event["exchangeId"];

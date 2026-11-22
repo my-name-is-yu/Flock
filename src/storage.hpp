@@ -1,5 +1,5 @@
 #pragma once
-#include "flock/core.hpp"
+#include "flock/access.hpp"
 #include <mutex>
 #include <sqlite3.h>
 #include <utility>
@@ -35,6 +35,13 @@ struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
     mutable std::recursive_mutex mutex;
+    SecretStore secrets{path.parent_path() / "secrets"};
+    void migrateAccess();
+    bool managedAccess(const Json& task) const;
+    bool runtimePermits(const Json& task, const Scope&);
+    Json accessTool(std::string_view bot, const Json& routing, const Decision&);
+    Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
+    Json environmentSettings(std::string_view bot, std::string_view environment, Json config) const;
     explicit Impl(std::filesystem::path path);
     ~Impl();
     Statement query(const char* sql, const Json& args = Json::array()) const { return Statement(db, sql, args); }

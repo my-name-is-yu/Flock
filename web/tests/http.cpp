@@ -750,6 +750,35 @@ void botProfileEndpoints(const std::filesystem::path& path) {
         {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}},
     },404);
 }
+void accessEndpoints(const std::filesystem::path& path) {
+    Store store(path);
+    const auto id = store.access().request("release",{"repository","private","read"});
+    auto cb = callbacks();
+    cb.authenticate = [](std::string_view credential) -> Person {
+        if (credential == "Bearer owner") return {"owner",true};
+        if (credential == "Bearer alice") return {"alice"};
+        return {};
+    };
+    auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    Browser::checked(browser.client.Get("/api/access?bot=release"),401);
+    browser.client.set_default_headers({{"Authorization","Bearer owner"}});
+    const auto secretRequest = store.access().requestSecret("release",{"fixture-token"});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}});
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",secretRequest},{"value",privateValue}},403);
+    browser.post("/api/access/person",{{"botId","release"},{"action","grant"},{"person","alice"},{"role","view"}});
+    browser.post("/api/access/decision",{{"botId","release"},{"requestId",id},{"approve",true}});
+    auto state = browser.get("/api/access?bot=release");
+    check(state.at("requests").at(0).at("status")=="approved" && state.at("grants").size()==1,"approval not effective");
+    browser.post("/api/access/resource",{{"botId","release"},{"action","revoke"},{"resourceKind","repository"},
+                                          {"resourceId","private"},{"operation","read"}});
+    browser.client.set_default_headers({{"Authorization","Bearer alice"}});
+    browser.get("/api/conversation?bot=release");
+    Browser::checked(browser.client.Get("/api/conversation?bot=triage"),403);
+    browser.post("/api/messages",{{"botId","release"},{"text","hello"},{"clientMessageId","1"}},403);
+    browser.post("/api/access/resource",{{"botId","release"},{"adminRoot",true}},403);
+    browser.post("/api/access/secret",{{"botId","release"},{"requestId",1},{"value",privateValue}},403);
+}
 } // namespace
 
 int main() {
@@ -758,6 +787,7 @@ int main() {
         exercise(directory.path / "state.db");
         peerHistory(directory.path / "peers.db");
         peerConversation(directory.path / "peer-conversations.db");
+        accessEndpoints(directory.path / "access.db");
         botProfileEndpoints(directory.path / "profiles.db");
     }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
