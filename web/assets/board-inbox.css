@@ -43,6 +43,7 @@
 .board-inbox-card p, .board-inbox-card a { font-size: var(--text-sm); }
 .board-inbox-meta, #work-view-message { color: var(--text-2); }
 .board-inbox-card a { color: var(--accent); justify-self: start; }
+.board-inbox-card button.board-inbox-source { color: var(--accent); justify-self: start; }
 .board-inbox-form input, .board-inbox-form textarea {
   width: min(100%, 32rem);
   padding: .5rem;

@@ -194,12 +194,16 @@ function conversationUrl(botId, peerId) {
 function selectBot(botId, peerId = null, updateHistory = true) {
   menu = null;
   openNavigation(false);
-  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) { renderBots(); return; }
+  if (view?.id === botId && (view?.dm?.peerId ?? null) === peerId) {
+    if (view.source) backToLatest();
+    else renderBots();
+    return;
+  }
   rememberReadingPosition();
   closeDetail();
   const existing = view?.id === botId ? view : null;
   view = botId ? { id: botId, data: null, events: new Map(), olderBefore: 0, loadedSessions: new Map(),
-    sessionsBefore: 0, ...existing, loadingOlder: false, loadingSessions: false,
+    sessionsBefore: 0, ...existing, source: null, loadingOlder: false, loadingSessions: false,
     dm: peerId ? { id: botId, peerId, events: new Map(), olderBefore: 0 } : null } : null;
   const url = conversationUrl(botId, peerId);
   if (url.href !== location.href) {
@@ -881,6 +885,50 @@ function sourceAction(source, label = 'Open source') {
     renderDetail();
   });
 }
+function backToLatest() {
+  view.source = null;
+  view.pendingSource = null;
+  render('bottom');
+  elements.conversation.scrollTop = elements.conversation.scrollHeight;
+  elements.conversation.focus({ preventScroll: true });
+}
+function cardSourceAction(bot, id, close) {
+  const botId = bot.id;
+  const exact = Number.isSafeInteger(id) && id > 0 && id < Number.MAX_SAFE_INTEGER;
+  return button(exact ? 'Show in conversation' : 'Open conversation', 'board-inbox-source', async () => {
+    close();
+    selectBot(botId);
+    if (!exact) {
+      backToLatest();
+      return;
+    }
+    const context = view;
+    // A later jump or Jump to latest replaces this request; only the newest one may apply.
+    const request = context.pendingSource = { id };
+    let page;
+    try {
+      page = await api(botQuery('conversation', botId, id + 1));
+    } catch {}
+    if (context !== view || context.pendingSource !== request) return;
+    context.pendingSource = null;
+    if (!page?.events.some((event) => event.id === id)) {
+      setNotice(context, page ? 'That message is no longer in this conversation.' : 'Could not load that message.', true);
+      return;
+    }
+    context.source = { id, bot, events: page.events };
+    renderTimeline();
+    const target = byId(`event-${id}`);
+    if (target) {
+      // Scroll only the conversation; scrollIntoView would also shift the page around it.
+      const scroller = elements.conversation;
+      const box = scroller.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      scroller.scrollTop += row.top - box.top - (box.height - row.height) / 2;
+      target.focus({ preventScroll: true });
+    }
+    updateJumpToLatest();
+  });
+}
 function runIcon(run) {
   const link = linkToRun(run);
   if (!link) return null;
@@ -940,7 +988,7 @@ function eventCard(event, context, place, report) {
   const extras = [];
   let replyTarget = null;
   let copy = data.text ?? '';
-  const pendingWait = event.kind === 'waiting' ? context.waits.get(data.id) : null;
+  const pendingWait = event.kind === 'waiting' && !context.readOnly ? context.waits.get(data.id) : null;
 
   if (event.kind === 'waiting') {
     copy = waitText(data);
@@ -954,7 +1002,7 @@ function eventCard(event, context, place, report) {
       const open = node('div', 'event-actions question-actions');
       open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
-    } else {
+    } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
       resolution.append(icon('check'), document.createTextNode(closedLabels[context.closed.get(data.id)] ?? 'Request closed'));
       extras.push(resolution);
@@ -1141,6 +1189,7 @@ function timelineScrollPosition() {
 }
 
 function rememberReadingPosition() {
+  if (view?.source) return;
   const context = timelineContext();
   if (context?.newestEvent == null || (!context.peerId && !context.data)) return;
   const { top, atBottom } = timelineScrollPosition();
@@ -1176,7 +1225,8 @@ function eventHistoryForRefresh(context) {
 
 function updateJumpToLatest() {
   const control = elements['jump-to-latest'];
-  const hidden = timelineScrollPosition().atBottom;
+  // An earlier page opened from a card is never the latest, even when scrolled to its end.
+  const hidden = !view?.source && timelineScrollPosition().atBottom;
   if (control.hidden === hidden) return;
   if (hidden && document.activeElement === control) elements.conversation.focus({ preventScroll: true });
   control.hidden = hidden;
@@ -1184,10 +1234,12 @@ function updateJumpToLatest() {
 
 function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition()) {
   const older = elements.older;
-  const data = view?.data;
+  const source = view?.source;
+  const data = source ? null : view?.data;
   const context = timelineContext();
-  const events = [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
-  older.hidden = !context?.olderBefore;
+  const events = source?.events ?? [...(context?.events.values() ?? [])].sort((a, b) => a.id - b.id);
+  elements.conversation.classList.toggle('viewing-source', !!source);
+  older.hidden = !!source || !context?.olderBefore;
   older.disabled = !!context?.loadingOlder;
   older.textContent = context?.loadingOlder ? 'Loading…' : 'Show earlier conversation';
   const peerStatus = elements['peer-status'];
@@ -1223,12 +1275,14 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
     moveScroll();
     return;
   }
-  if (!changed('timeline', view?.id, data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
-    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now()))) return;
+  if (!changed('timeline', view?.id, source ?? [data?.composerPerson, data?.bot, events, data?.waits, data?.queued, [...pendingWaits], listLoaded,
+    data?.presence, data?.activeSessions, data?.sessionTasks, data?.pausedConversations, bots, dayFormat.format(Date.now())])) return;
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
-    bot: data?.bot ?? bots.find((item) => item.id === view?.id),
-    canDecide: data?.canDecide === true,
+    bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
+    // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
+    canDecide: !source && data?.canDecide === true,
+    readOnly: !!source,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
@@ -1261,11 +1315,13 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
       taskStart: previous?.taskId !== event.taskId,
       afterQuestion: previous?.kind === 'waiting' && previous.waitId === event.data.waitId,
     };
-    fragment.append(eventCard(event, timeline, place, report));
+    const message = eventCard(event, timeline, place, report);
+    if (event.id === source?.id) message.classList.add('conversation-source-target');
+    fragment.append(message);
     previous = { side, taskId: event.taskId, kind: event.kind, waitId: event.data.id };
   });
   appendPeerMessages();
-  if (!fragment.childElementCount) {
+  if (!fragment.childElementCount && !source) {
     const empty = node('div', 'empty-state');
     if (data?.bot) empty.append(avatar(data.bot));
     const loaded = !!data || (!view && listLoaded);
@@ -1976,6 +2032,11 @@ async function submit(event) {
   if (view?.data?.canDecide !== true) return;
   const context = view;
   if (!context?.composer || context.dm || elements.send.disabled) return;
+  context.pendingSource = null;
+  if (context.source) {
+    context.source = null;
+    render('bottom');
+  }
   const { composer } = context;
   const payload = composer.prepareSend();
   sendingMessages.add(composer);
@@ -2028,9 +2089,20 @@ elements['jump-to-latest'].addEventListener('pointerdown', (event) => {
   if (event.button === 0) event.preventDefault();
 });
 elements['jump-to-latest'].addEventListener('click', () => {
+  if (view?.source) {
+    backToLatest();
+    return;
+  }
   const scroller = elements.conversation;
   scroller.scrollTop = scroller.scrollHeight;
   updateJumpToLatest();
+});
+elements.conversation.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && view?.source) {
+    event.preventDefault();
+    event.stopPropagation();
+    backToLatest();
+  }
 });
 elements['more-sessions'].addEventListener('click', loadSessions);
 elements.composer.addEventListener('submit', submit);
@@ -2153,4 +2225,4 @@ window.addEventListener('pagehide', () => liveUpdates.use(null));
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });
 window.addEventListener('popstate', () => { if (listLoaded) selectLocation(); });
 
-mountBoardInbox(api);
+mountBoardInbox(api, cardSourceAction);
