@@ -233,6 +233,8 @@ void expansionCursorKeepsItsSearchRange() {
             "A page between messages did not return a continuation");
     const auto wider = f.turn("ALPHA evidence added later");
     f.call("compact_conversation",{{"endMessageId",wider},{"summary","Collate the new evidence"}});
+    f.turn("Continue with a smaller range","expand_context",{{"cursor",cursor},{"endMessageId",lastMatch}});
+    require(f.bot.result.at("ok") == false,"A cursor accepted a smaller search range");
     const auto continued = f.call("expand_context",{{"cursor",cursor}});
     require(continued.at("messages").size()==1 && continued.at("messages").at(0).at("messageId")==lastMatch &&
             !continued.contains("nextCursor"),"A cursor resumed a wider range or lost its search filter");

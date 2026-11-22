@@ -212,11 +212,11 @@ LIMIT 2
         if (!conversation_storage::hasText(originalNeedle)) originalNeedle.clear();
         if ((args.contains("startMessageId") && start!=saved.number(0)) ||
             (args.contains("offset") && offset!=saved.number(1)) ||
-            (args.contains("query") && needle!=originalNeedle))
-            throw Conflict("Cursor does not match the requested message, offset or search");
+            (args.contains("query") && needle!=originalNeedle) || end<saved.number(3))
+            throw Conflict("Cursor does not match the requested range, offset or search");
         start = saved.number(0);
         offset = saved.number(1);
-        end = std::min(end,saved.number(3));
+        end = saved.number(3);
         queryMessage = saved.number(4);
         queryStep = saved.number(5);
         needle = std::move(originalNeedle);
