@@ -103,7 +103,10 @@
 .msg-actions { display: flex; align-items: center; gap: .05rem; align-self: center; opacity: 0; transition: opacity .15s ease; }
 .msg.user .msg-actions { flex-direction: row-reverse; }
 .msg:hover .msg-actions, .msg:focus-within .msg-actions { opacity: 1; }
-.msg-actions .msg-time { opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem; }
+.msg-actions .msg-time, .event-message > .msg-time {
+  opacity: 1; color: var(--text-3); font-size: var(--text-xs); padding-inline: .3rem;
+}
+.event-message.bot > .msg-time { margin-inline-start: var(--avatar-col); }
 .msg-action { width: 1.85rem; height: 1.85rem; color: var(--text-3); }
 .msg-action svg { width: 1rem; height: 1rem; }
 
@@ -161,7 +164,9 @@
 
 @media (hover: none), (pointer: coarse) {
   .msg-actions { opacity: 1; pointer-events: auto; }
-  .event-message:not(:focus-within) .msg-actions .msg-time { opacity: 0; }
+}
+@media (hover: none) {
+  .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { opacity: 0; }
 }
 
 .msg:focus-visible, .system-note:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }

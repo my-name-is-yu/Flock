@@ -17,6 +17,7 @@ const elements = Object.fromEntries([
 ].map((id) => [id, byId(id)]));
 const workspace = document.querySelector('.workspace');
 const narrow = matchMedia('(max-width: 700px)');
+const noHover = matchMedia('(hover: none)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
 const preciseClock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
@@ -826,6 +827,65 @@ function eventTime(event, extra) {
   time.title = [fullTime.format(timestamp), extra].filter(Boolean).join(' · ');
   return time;
 }
+
+function messageBubble(target) {
+  if (!(target instanceof Element)) return null;
+  const bubble = target.closest('.event-message .bubble');
+  const control = target.closest('a, button, input, select, textarea, label, summary, [controls], '
+    + '[contenteditable]:not([contenteditable="false"]), [tabindex], [role="button"], [role="link"]');
+  return bubble?.contains(control) ? null : bubble;
+}
+
+function closeMessageTime() {
+  if (!view?.revealedTimeRow) return;
+  const row = byId(view.revealedTimeRow);
+  const time = row?.querySelector(':scope > .msg-time');
+  if (time) row.querySelector('.msg-actions').prepend(time);
+  view.revealedTimeRow = null;
+}
+
+let messageTap = null;
+const tapMoved = (event, tap) => Math.hypot(event.clientX - tap.x, event.clientY - tap.y) > 10;
+const hasTextSelection = () => window.getSelection()?.isCollapsed === false;
+
+// Observe the native click after a short, stationary press. Leave scrolling and selection to the browser.
+elements.timeline.addEventListener('pointerdown', (event) => {
+  const bubble = noHover.matches && event.isPrimary && event.button === 0 && messageBubble(event.target);
+  messageTap = bubble && !hasTextSelection()
+    ? { bubble, id: event.pointerId, x: event.clientX, y: event.clientY, start: event.timeStamp, released: false }
+    : null;
+}, { passive: true });
+elements.timeline.addEventListener('pointermove', (event) => {
+  if (messageTap?.id === event.pointerId && tapMoved(event, messageTap)) messageTap = null;
+}, { passive: true });
+elements.timeline.addEventListener('pointerup', (event) => {
+  if (messageTap?.id !== event.pointerId) return;
+  if (tapMoved(event, messageTap) || event.timeStamp - messageTap.start >= 500) messageTap = null;
+  else messageTap.released = true;
+}, { passive: true });
+for (const type of ['pointercancel', 'contextmenu']) {
+  elements.timeline.addEventListener(type, () => { messageTap = null; }, { passive: true });
+}
+elements.timeline.addEventListener('click', (event) => {
+  const tap = messageTap;
+  messageTap = null;
+  if (!view || !noHover.matches || !tap?.released || !event.detail || hasTextSelection()
+    || messageBubble(event.target) !== tap.bubble) return;
+  const row = tap.bubble.closest('.event-message');
+  const wasRevealed = view.revealedTimeRow === row.id;
+  closeMessageTime();
+  if (wasRevealed) return;
+  const line = tap.bubble.parentElement;
+  const time = line.querySelector('.msg-time');
+  line.after(time);
+  view.revealedTimeRow = row.id;
+  time.scrollIntoView({ block: 'nearest' });
+});
+noHover.addEventListener('change', () => {
+  messageTap = null;
+  if (!noHover.matches) closeMessageTime();
+});
+
 function sourceAction(source, label = 'Open source') {
   return button(label, 'text-button', async () => {
     const target = byId(`event-${source.messageId}`);
@@ -1006,6 +1066,7 @@ function eventCard(event, context, place) {
   if (!actions.querySelector('button:not(:disabled)')) row.tabIndex = 0;
   line.append(bubble, actions);
   row.append(line, ...extras);
+  if (noHover.matches && context.revealedTimeRow === row.id) line.after(time);
   return row;
 }
 function workingLine(data) {
@@ -1129,6 +1190,7 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   scroller.setAttribute('aria-label', 'Conversation history');
   const timeline = {
     bot: data?.bot ?? bots.find((item) => item.id === view?.id),
+    revealedTimeRow: view?.revealedTimeRow,
     paused: new Map((data?.pausedConversations ?? []).map(item => [item.messageId, item])),
     waits: new Map((data?.waits ?? []).map((task) => [task.wait.id, task])),
     queued: new Map((data?.queued ?? []).map((task) => [task.id, task])),
