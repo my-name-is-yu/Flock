@@ -349,7 +349,7 @@ void responseContract() {
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
                    "record_task_blocker","withdraw_task_question",
-                   "message_session","invite_bot","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
+                   "message_session","invite_bot","leave_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
                    "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
                    "expand_context","continue_fresh_session",
                    "list_secrets","request_secret_input","list_connections",
@@ -376,6 +376,7 @@ void responseContract() {
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
           turnTool("message_session")["required"] == Json::array({"reason","environmentId","threadId","text"}) &&
           turnTool("invite_bot")["required"] == Json::array({"reason","botId","environmentId","threadId","note"}) &&
+          turnTool("leave_session")["required"] == Json::array({"reason","environmentId","threadId"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&

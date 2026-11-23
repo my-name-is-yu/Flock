@@ -47,6 +47,8 @@ class Fixture(BaseHTTPRequestHandler):
                        {key: self.server.state.get(key, {}) for key in ("stockLaunches", "stockPromptSends")})
         elif self.path == "/fixture/lineage-sessions":
             self.reply(self.server.state.get("lineageSessions", {}))
+        elif self.path == "/fixture/stop-runs":
+            self.reply(self.server.state.get("stopRuns", {}))
         elif self.path == "/protected,resource":
             if self.server.state.get("oauthFailure") == "discovery":
                 self.reply({"error": "invalid_resource"}, code=400)
@@ -169,6 +171,11 @@ class Fixture(BaseHTTPRequestHandler):
                         self.reply(envelope)
                         return
             content = self.tool(tool["name"], tool["arguments"])
+            if (tool["name"] == "t3_queue" and tool["arguments"]["action"] == "cancel" and
+                    tool["arguments"].get("queuedRunId") == state.get("stopDropReply") and "sequence" in content):
+                state.pop("stopDropReply")
+                self.close_connection = True
+                return
             if tool["name"] == "t3_thread_launch" and state.get("lineageLaunchError") == "lost-response":
                 self.close_connection = True
                 return
@@ -255,6 +262,8 @@ class Fixture(BaseHTTPRequestHandler):
                 assert args["threadId"] == "thread" and args["mode"] == "queue"
                 assert args["clientRequestId"].startswith("flock-turn-")
                 state["botRun"] = "bot-run-" + str(len(state["effects"]["t3_thread_send"]))
+                if "stopRuns" in state:
+                    state["stopRuns"][state["botRun"]] = "queued"
                 return {"threadId": "thread", "runId": state["botRun"], "delivery": "queued"}
             if scenario == "selected-session":
                 thread = args["threadId"]
@@ -271,6 +280,20 @@ class Fixture(BaseHTTPRequestHandler):
             state["followup"] = args["message"]
             return {"threadId": "thread", "runId": "follow", "delivery": "started", "link": "t3://thread"}
         if name == "t3_queue":
+            if args["action"] == "cancel" and "stopRuns" in state:
+                run_id = args["queuedRunId"]
+                runs = state["stopRuns"]
+                if runs.get(run_id) != "queued":
+                    return {"_tag": "OrchestratorMcpFailure", "code": "orchestration_error",
+                            "message": f"Run {run_id} is not queued."}
+                runs[run_id] = "cancelled"
+                return {"sequence": 11}
+            if args["action"] == "cancel" and state.get("sessionWakeFixture"):
+                if args["queuedRunId"] == state["botRun"] and state["botRunStatus"] == "queued":
+                    state["botRunStatus"] = "cancelled"
+                    return {"sequence": 11}
+                return {"_tag": "OrchestratorMcpFailure", "code": "orchestration_error",
+                        "message": "The Run is no longer queued."}
             if scenario == "selected-session":
                 assert args["threadId"] in ("human-selected", "flock-selected")
                 action = args["action"]
@@ -327,8 +350,14 @@ class Fixture(BaseHTTPRequestHandler):
                 return {"threadId": child["threadId"], "runId": args["runId"], "status": status,
                         "timedOut": status != "completed"}
             if state.get("sessionWakeFixture"):
-                assert args["threadId"] == "thread" and args["runId"] == state["botRun"]
+                assert args["threadId"] == "thread"
                 assert not args["untilDelegatedWorkSettled"]
+                if "stopRuns" in state:
+                    run_id = args["runId"]
+                    status = state["stopRuns"][run_id]
+                    return {"threadId": "thread", "runId": run_id, "status": status,
+                            "timedOut": status in ("running", "queued")}
+                assert args["runId"] == state["botRun"]
                 if state.get("transientWakeFailure"):
                     return {"_tag": "OrchestratorMcpFailure", "code": "temporarily_unavailable"}
                 status = state["botRunStatus"]
@@ -428,6 +457,14 @@ class Fixture(BaseHTTPRequestHandler):
             summary |= {"title": "Staging follow-up", "status": "running", "runCount": 2,
                         "createdAt": "2026-11-21T01:00:00.000Z", "updatedAt": "2026-11-21T13:00:00.000Z"}
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
+        if "stopRuns" in state:
+            recent = [{"runId": run, "ordinal": ordinal, "status": status,
+                       "startedAt": "2026-11-21T00:00:00.000Z" if status in ("running", "completed") else None}
+                      for ordinal, (run, status) in enumerate(state["stopRuns"].items(), 2)] + recent
+        elif state.get("sessionAskFixture"):
+            recent += [{"runId": f"bot-run-{i}", "ordinal": i + 1, "status": "completed",
+                        "startedAt": "2026-11-21T00:00:00.000Z"}
+                       for i in range(1, len(state["effects"].get("t3_thread_send", [])))]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
         if scenario == "selected-session":

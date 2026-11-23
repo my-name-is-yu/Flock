@@ -29,7 +29,7 @@ constexpr std::size_t sourceSize = 8192;
 
 const std::vector<std::string> turnTools{"start_task","send_to_task","change_task","answer_task_question",
                                          "record_task_blocker","withdraw_task_question",
-                                         "cancel_task","message_session","invite_bot","interrupt_session","read_result",
+                                         "cancel_task","message_session","invite_bot","leave_session","interrupt_session","read_result",
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
@@ -640,7 +640,10 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     releaseModelCall(takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
-    sessionSendReceipts.erase(message.id);
+    if (const auto receipt = sessionSendReceipts.find(message.id); receipt != sessionSendReceipts.end()) {
+        recordSessionSendRun(message.id,receipt->second);
+        sessionSendReceipts.erase(receipt);
+    }
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
@@ -939,6 +942,10 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
         }
         if (decision.tool == "invite_bot") {
             if (!inviteSessionBot(message,step,decision,t3,intake,shutdown)) return;
+            continue;
+        }
+        if (decision.tool == "leave_session") {
+            if (!leaveSession(message,step,decision,t3,shutdown)) return;
             continue;
         }
 

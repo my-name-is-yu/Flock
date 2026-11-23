@@ -142,6 +142,13 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
+    // Add the Session stop tables to states written before durable queue cancellation.
+    if (!query("SELECT 1 FROM sqlite_schema WHERE name='session_queue_cancellations' AND type='table'").next()) {
+        Transaction update(db);
+        initializeConversationSchema();
+        initializeParticipationSchema();
+        update.commit();
+    }
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");

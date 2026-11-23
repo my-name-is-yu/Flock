@@ -1017,6 +1017,45 @@ public:
         invalidResponse();
     }
 
+    QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
+        using Outcome = QueueCancelOutcome;
+        try {
+            auto connection = credential(target.environmentId,Json::object());
+            requireOperate(connection);
+            Client client(std::move(connection));
+            const auto environment = client.call("t3_environment_read",Json::object());
+            if (str(environment,"environmentId") != target.environmentId) return Outcome::Retry;
+            try {
+                const auto reply = client.call("t3_queue",{{"action","cancel"},{"threadId",target.threadId},{"queuedRunId",run}});
+                position(member(reply,"sequence"));
+                return Outcome::Cancelled;
+            } catch (const Failure& failure) {
+                if (failure.kind != Failure::Kind::Tool) return Outcome::Retry;
+            }
+
+            // T3 rejects the mutation if the Run left the queue. Read the exact Run to
+            // distinguish that race from a transient failure or a retried cancellation.
+            const auto head = threadHead(client,target.threadId,50);
+            for (const auto& entry : array(head,"recentRuns")) {
+                if (str(entry,"runId") != run) continue;
+                const auto status = str(entry,"status");
+                const auto started = entry.find("startedAt");
+                if (started != entry.end() && started->is_string() && !started->get_ref<const std::string&>().empty())
+                    return Outcome::AlreadyStarted;
+                if (status == "cancelled" && started != entry.end() && started->is_null()) return Outcome::Cancelled;
+                break;
+            }
+            const auto exact = wait(client,{target.threadId,std::string(run),{}},WaitFor::Run,1);
+            if (str(exact,"runId") != run) return Outcome::NotCancellable;
+            const auto status = str(exact,"status");
+            if (status == "running" || status == "waiting" || status == "completed") return Outcome::AlreadyStarted;
+            if (terminal(status)) return Outcome::NotCancellable;
+        } catch (const Failure& failure) {
+            if (failure.reason == Failure::Reason::HistoryNotFound) return Outcome::NotCancellable;
+        }
+        return Outcome::Retry;
+    }
+
     Excerpt read(const ReadRequest& request) override {
         if (request.threadId.empty() || request.runId.empty() || (request.view != "activity" && request.view != "messages") ||
             (request.itemId.empty() && request.offset != 0) || request.offset > 9007199254740991ULL)

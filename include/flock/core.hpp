@@ -132,6 +132,7 @@ struct Delivery {
     std::string launchWarning = {};
 };
 enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
+enum class QueueCancelOutcome { Cancelled, AlreadyStarted, NotCancellable, Retry };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
@@ -186,6 +187,9 @@ class T3 {
 public:
     virtual ~T3() = default;
     virtual std::string sessionMessageWake(const SessionTarget&, const RunRef&) { return "unknown"; }
+    virtual QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view) {
+        return QueueCancelOutcome::Retry;
+    }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }

@@ -1,6 +1,7 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
+#include "flock/participation.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -865,13 +866,14 @@ ORDER BY id)SQL");
         const auto sessionActionAllowed = [&](const Json& current) {
             if (!cmd.sessionOrigin && !sendsToSession) return true;
             std::lock_guard lock(db.mutex);
-            if (cmd.sessionOrigin) {
+            if (const auto origin = current.find("sessionOrigin"); origin != current.end()) {
                 const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
                 const auto actor = db.turnActor(source);
-                const auto& origin = cmd.sessionOrigin->target;
-                return db.activeSessionOrigin(cmd.ownerBotId,actor.id,origin,cmd.environmentId) &&
-                    policy.allows(actor,Action::bot_decide,cmd.ownerBotId) &&
-                    policy.allows(cmd.ownerBotId,Action::environment_inspect,origin.environmentId);
+                const SessionTarget parent{field(*origin,"environmentId"),field(*origin,"threadId")};
+                if (!db.activeSessionOrigin(cmd.ownerBotId,actor.id,parent,cmd.environmentId) ||
+                    !policy.allows(actor,Action::bot_decide,cmd.ownerBotId) ||
+                    !policy.allows(cmd.ownerBotId,Action::environment_inspect,parent.environmentId)) return false;
+                if (!sendsToSession) return true;
             }
             if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId})) return false;
             if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
@@ -2249,6 +2251,7 @@ void Runtime::runConversations() {
     p_->settleApprovals();
     p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
+    p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     p_->db.deliverChannels(p_->shutdown.get_token());
     constexpr auto messagesPerTick = 20;
@@ -2266,6 +2269,7 @@ void Runtime::tick() {
     p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
+    p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
     p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
@@ -2302,6 +2306,7 @@ void Runtime::tickConcurrent() {
         p_->deferContendedWork("Session wake worker",[&] { p_->sessionWakeWorker.get(); });
     if (!p_->sessionWakeWorker.valid())
         p_->sessionWakeWorker = std::async(std::launch::async,[impl = p_.get()] {
+            impl->db.settleSessionQueueCancellations(impl->t3,impl->shutdown.get_token());
             impl->db.wakeSessionMessages(impl->t3,impl->shutdown.get_token());
         });
     constexpr auto maxConversationWorkers = Impl::batchLimit;

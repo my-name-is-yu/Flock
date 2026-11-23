@@ -349,6 +349,11 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("environmentId","The Session's environment ID.");
         text("threadId","The Session's thread ID.");
         text("note","What you want the invited Bot to do in the Session.");
+    } else if (name == "leave_session") {
+        description = "Stop your participation in this T3 Session and stop all Bots you invited, including their invitees. "
+                      "Cancel your group's queued Bot messages and report any that already started. The person's work continues.";
+        text("environmentId","The Session's environment ID.");
+        text("threadId","The Session's thread ID.");
     } else if (name == "interrupt_session") {
         description = "Interrupt the active Run in the task’s T3 Session. This affects the Session, and the task stays open. The Bot decides what "
                       "to do next. Use cancel_task to stop the whole task.";
@@ -640,6 +645,7 @@ Use message_session to queue a message in an existing Session using its environm
 The delivery result says whether T3 started or queued it. Reply to finish the current turn.
 Flock starts a separate turn with event.sessionWake when the work finishes or needs an answer.
 In that turn, read the Session history with flock_session_events using those identifiers, then decide what to do.
+Use leave_session when the person asks you to stop participating in a Session.
 interrupt_session asks T3 to interrupt a Run while keeping the task open.
 Use read_result and find_tasks to inspect results and older tasks. The current task's doneWhen takes
 precedence over older criteria in history. If intentTruncated or

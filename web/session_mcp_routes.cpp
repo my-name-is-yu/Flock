@@ -69,7 +69,9 @@ Json toolDefinitions() {
                          {"properties",{{"bot",bot},{"threadId",thread},
                              {"requestId",{{"type","string"},{"minLength",1},{"maxLength",128},{"pattern","^[A-Za-z0-9._:-]+$"}}},
                              {"text",{{"type","string"},{"minLength",1},{"maxLength",maxRequestText}}}}}}}},
-        {{"name",stopTool},{"description","End this Bot's participation in the T3 Session and block future messages from that Bot."},
+        {{"name",stopTool},{"description","Stop this Bot's participation in the T3 Session and stop all Bots it invited, "
+                                       "including their invitees. Cancel their queued Bot messages and report any that already started. "
+                                       "The person's work continues."},
          {"annotations",{{"idempotentHint",true}}},
          {"inputSchema",{{"type","object"},{"additionalProperties",false},{"required",{"bot","threadId"}},
                          {"properties",{{"bot",bot},{"threadId",thread}}}}}}
@@ -165,9 +167,8 @@ void mcpRequest(Store& store, const WebCallbacks& callbacks, const httplib::Requ
         const auto bot = identifier(arguments,"bot",128);
         const auto thread = identifier(arguments,"threadId",256);
         if (tool == stopTool) {
-            participation.stop(*connection,bot,thread);
-            return rpcResult(res,*id,{{"structuredContent",{{"stopped",true}}},
-                                    {"content",toolContent("The Bot's participation in this Session has stopped.")}});
+            const auto stopped = participation.stop(*connection,bot,thread);
+            return rpcResult(res,*id,{{"structuredContent",stopped.data()},{"content",toolContent(stopped.summary())}});
         }
         const auto requestId = identifier(arguments,"requestId",128);
         const SessionAsk request{bot,requestText(arguments,"text"),thread,requestId};

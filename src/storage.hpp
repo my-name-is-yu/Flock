@@ -103,6 +103,7 @@ struct PolicyOrigin {
     Id anchor = 0, turn = 0, task = 0, revision = 0, generation = 0;
     bool background = false;
 };
+struct SessionStopResult;
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 
@@ -120,6 +121,7 @@ struct Store::Impl {
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     std::shared_mutex sessionDispatchMutex;
+    std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
@@ -166,6 +168,8 @@ struct Store::Impl {
     bool activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
                              std::string_view destinationEnvironment) const;
     bool sessionParticipationStopped(std::string_view bot, const SessionTarget&) const;
+    Id stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&);
+    SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, Id participation = 0);
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
     void initializeMemorySchema();
     void initializeAutomationSchema();
@@ -278,12 +282,15 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    std::map<Id,Delivery> sessionSendReceipts;
+    struct SessionSendReceipt { std::string bot; SessionTarget target; Delivery delivery; };
+    std::map<Id,SessionSendReceipt> sessionSendReceipts;
+    void recordSessionSendRun(Id, const SessionSendReceipt&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,
                  const BotTools&, GitHost*, const ApplyBotChange&, const ReconcileBotCreation&, const IntakeResolver&,
                  std::stop_token);
     bool sendSessionMessage(const conversation::Message&, int, const Decision&, bool hasWebEvidence, T3&, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&, std::stop_token);
+    bool leaveSession(const conversation::Message&, int, const Decision&, T3&, std::stop_token);
     void wakeSessionMessages(T3&, std::stop_token);
     bool runSessionEffect(const conversation::Message&, int step, const Decision&, bool offered, bool hasWebEvidence,
                           T3&, std::stop_token);

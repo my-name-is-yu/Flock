@@ -153,6 +153,21 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     return true;
 }
 
+namespace {
+bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
+    return receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId &&
+           !receipt.run.runId.empty() && (receipt.delivery == "started" || receipt.delivery == "queued");
+}
+}
+
+void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
+    const auto& [bot,target,delivery] = receipt;
+    if (!acceptedSessionSend(target,delivery)) return;
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,notified) VALUES(?,?,?,?,?,?)",
+         {message,bot,target.environmentId,target.threadId,delivery.run.runId,
+          sessionParticipationStopped(bot,target) ? 1 : 0});
+}
+
 bool Store::Impl::sendSessionMessage(const conversation::Message& message, int step, const Decision& decision,
                                      bool hasWebEvidence, T3& t3, std::stop_token shutdown) {
     const auto id = message.id;
@@ -176,11 +191,7 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
     const SessionTarget target{command.environmentId,command.target.threadId};
     const Resource resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target};
     const auto saveReceipt = [&](const Delivery& receipt) {
-        if (receipt.kind == Delivery::Kind::Accepted && receipt.run.threadId == target.threadId &&
-            !receipt.run.runId.empty() && (receipt.delivery == "started" || receipt.delivery == "queued")) {
-            if (!sessionParticipationStopped(message.bot,target))
-                exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run) VALUES(?,?,?,?,?)",
-                     {id,message.bot,target.environmentId,target.threadId,receipt.run.runId});
+        if (acceptedSessionSend(target,receipt)) {
             save({{"ok",true},{"delivery",receipt.delivery},{"environmentId",target.environmentId},{"threadId",target.threadId}});
         } else {
             auto result = toolFailure(receipt.detail.empty() ? "Could not confirm delivery to T3" : receipt.detail);
@@ -197,9 +208,10 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",{id,step});
         if (!row.next()) return false;
         if (!row.string(0).empty()) {
-            if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end())
-                saveReceipt(receipt->second);
-            else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
+            if (const auto receipt = sessionSendReceipts.find(id); receipt != sessionSendReceipts.end()) {
+                recordSessionSendRun(id,receipt->second);
+                saveReceipt(receipt->second.delivery);
+            } else save({{"ok",false},{"delivery","unknown"},{"error","Flock restarted while sending this. Check the Session before sending again."}});
         } else if (sessionParticipationStopped(message.bot,target)) {
             save(toolFailure(stopped));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
@@ -253,6 +265,12 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
         if (!sqlite3_changes(db)) return false;
+        // A send from the Bot screen can be the Bot's first participation in this Session.
+        exec(R"SQL(
+INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
+SELECT ?,e.environment_id,?,c.person_id,'active' FROM t3_connector c CROSS JOIN t3_connected_environments e
+WHERE e.environment_id=?
+)SQL",{message.bot,target.threadId,target.environmentId});
         transaction.commit();
     }
 
@@ -266,9 +284,11 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
     }
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
-    const auto checkpoint = sessionSendReceipts.insert_or_assign(id,std::move(receipt)).first;
+    const auto checkpoint = sessionSendReceipts.insert_or_assign(
+        id,SessionSendReceipt{message.bot,target,std::move(receipt)}).first;
     Transaction transaction(db);
-    saveReceipt(checkpoint->second);
+    recordSessionSendRun(id,checkpoint->second);
+    saveReceipt(checkpoint->second.delivery);
     transaction.commit();
     sessionSendReceipts.erase(checkpoint);
     return true;

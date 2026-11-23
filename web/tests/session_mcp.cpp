@@ -113,6 +113,66 @@ void stopDuringSendPreflight() {
     check(model.asks == 1 && stopped && t3.sends == 0,"A stop during Session access verification let the send through");
 }
 
+void stopDuringSendDispatch() {
+    struct InFlightT3 : FixedT3 {
+        std::promise<void> entered;
+        std::shared_future<void> release;
+        std::vector<std::string> cancelled;
+        unsigned sends = 0;
+
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline) override {
+            SessionMetadata metadata;
+            metadata.projectId = "origin-project";
+            return metadata;
+        }
+        Delivery send(const Command&) override {
+            ++sends;
+            entered.set_value();
+            release.wait();
+            return {Delivery::Kind::Accepted,{"thread","in-flight-run",{}},{},false,"queued"};
+        }
+        QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
+            check(target == SessionTarget{"env-1","thread"},"Cancelled the wrong Session");
+            cancelled.emplace_back(run);
+            return QueueCancelOutcome::Cancelled;
+        }
+    } t3;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    const auto token = T3Connections(store).connect("env-1",localOwner.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    const auto server = startWeb(store,0,cb);
+    Mcp mcp(*server,token);
+    const Json ask{{"bot","release"},{"text","Send an update"},{"threadId","thread"},{"requestId","wire-race"}};
+    check(mcp.call("flock_ask",ask).contains("structuredContent"),"The dispatch race ask was rejected");
+
+    AskModel model;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    std::promise<void> release, stopping;
+    t3.release = release.get_future().share();
+    auto entered = t3.entered.get_future();
+    auto dispatch = std::async(std::launch::async,[&] { runtime.runConversations(); });
+    const auto dispatched = entered.wait_for(std::chrono::seconds(2));
+    auto stop = std::async(std::launch::async,[&] {
+        stopping.set_value();
+        return Mcp(*server,token).call("flock_stop",{{"bot","release"},{"threadId","thread"}});
+    });
+    stopping.get_future().wait();
+    const auto stoppedBeforeReceipt = stop.wait_for(std::chrono::milliseconds(100));
+    release.set_value();
+    dispatch.get();
+    const auto result = stop.get().at("structuredContent");
+    check(dispatched == std::future_status::ready && stoppedBeforeReceipt == std::future_status::timeout &&
+          result.at("cancelled") == 1 && t3.cancelled == std::vector<std::string>{"in-flight-run"},
+          "Stop committed before recording and cancelling the in-flight Run");
+
+    store.receive(localOwner,cb.intake("release",""),"after-wire-race","Send another update");
+    runtime.runConversations();
+    check(t3.sends == 1 && model.wakes == 0 && model.send.at("error") == "This Bot's participation in the Session has stopped",
+          "A send or wake passed the committed stop");
+}
+
 void sessionInvitations() {
     struct InviteT3 : FixedT3 {
         std::vector<Command> sends;
@@ -120,6 +180,7 @@ void sessionInvitations() {
         bool reachable = true;
         std::string completedRun = "someone-elses-run";
         std::function<void()> duringRead;
+        std::vector<std::string> cancellationAttempts;
 
         std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
             if (duringRead) duringRead();
@@ -136,6 +197,10 @@ void sessionInvitations() {
         std::string sessionMessageWake(const SessionTarget&, const RunRef& run) override {
             checkedRuns.push_back(run.runId);
             return run.runId == completedRun ? "finished" : "";
+        }
+        QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view run) override {
+            cancellationAttempts.emplace_back(run);
+            return QueueCancelOutcome::AlreadyStarted;
         }
     } t3;
     struct InviteModel : Model {
@@ -273,13 +338,28 @@ void sessionInvitations() {
     t3.reachable = false;
     reject("unreachable","triage","This Session is unavailable through your T3 connection");
     t3.reachable = true;
+    const auto stop = [&](const char* bot) {
+        return mcp.call("flock_stop",{{"bot",bot},{"threadId","thread"}});
+    };
+    check(stop("specialist").at("structuredContent").at("stopped") == true && t3.cancellationAttempts.empty(),
+          "Stopping an invitee stopped its inviter");
+    reject("stopped-invitee","specialist","The invited Bot's participation in the Session has stopped");
     t3.duringRead = [&] {
-        const auto result = mcp.call("flock_stop",{{"bot","release"},{"threadId","thread"}});
-        check(result.contains("structuredContent"),"Could not stop during the invitation preflight: " + result.dump());
+        const auto result = stop("release");
+        check(result.at("structuredContent").at("alreadyStarted") == 1,
+              "Stopping the inviter omitted an invited Bot's Run: " + result.dump());
     };
     reject("stop-race","triage","This Bot's participation in the Session has stopped");
     t3.duringRead = {};
     reject("stopped","triage","This Bot's participation in the Session has stopped");
+    for (const auto* bot : {"release","triage","settings","specialist"}) {
+        const auto result = mcp.call("flock_ask",{{"bot",bot},{"threadId","thread"},{"requestId",std::string("after-stop-")+bot},
+                                                 {"text","Check whether this participation is still active."}});
+        check(result.value("isError",false),"The cascade left an invited Bot active: " + result.dump());
+    }
+    check(t3.cancellationAttempts == std::vector<std::string>{"triage-run"} &&
+          stop("triage").at("structuredContent").at("alreadyStarted") == 1,
+          "Repeated stops did not share the cascade's terminal cancellation receipt");
     check(model.invitations == 3 && model.wakes == 1 && t3.sends.size() == 1,"A rejected invitation produced a side effect");
 }
 
@@ -438,17 +518,125 @@ void sessionAsks(std::string_view fixtureUrl, const std::filesystem::path& crede
     check(sends().size() == 2 && model.send.at("error") == "This Bot's participation in the Session has stopped",
           "The Web send path bypassed the stop");
 }
+
+void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& credentials) {
+    httplib::Client fixture(fixtureUrl.data());
+    const auto configure = [&](const Json& settings) {
+        Browser::checked(fixture.Post("/fixture",settings.dump(),"application/json"),200);
+    };
+    const auto effects = [&] { return Browser::checked(fixture.Get("/fixture/effects"),200); };
+    const auto runs = [&] { return Browser::checked(fixture.Get("/fixture/stop-runs"),200); };
+    configure({{"effects",Json::object()},{"stopRuns",{{"person-queued","queued"}}},{"personFinished",false},
+               {"botRunStatus","queued"},{"stopDropReply","bot-run-3"}});
+    auto t3 = makeT3Mcp(credentials);
+    TestDirectory dir;
+    const auto database = dir.path/"flock.sqlite3";
+    auto db = std::make_unique<Store>(database);
+    auto cb = callbacks();
+    cb.sessionT3 = t3.get();
+    const auto token = T3Connections(*db).connect("env-1",localOwner.id,4173);
+    auto server = startWeb(*db,0,cb);
+    const auto ask = [&](const char* bot, const char* id, std::string_view text) {
+        return Mcp(*server,token).call("flock_ask",{{"bot",bot},{"threadId","thread"},{"requestId",id},{"text",text}});
+    };
+    const auto stop = [&](const char* bot) {
+        return Mcp(*server,token).call("flock_stop",{{"bot",bot},{"threadId","thread"}});
+    };
+    const auto cancel = [](std::string_view run) -> Json {
+        return {{"action","cancel"},{"threadId","thread"},{"queuedRunId",run}};
+    };
+    struct StopModel final : Model {
+        AskModel ask;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("text") == "Leave this Session") {
+                check(input.event.at("turn").empty(),"A stopped Session-origin turn reached the model again");
+                return {{{"leave_session",{{"environmentId","env-1"},{"threadId","thread"}},"Leave this Session"}}};
+            }
+            return ask.decide(input);
+        }
+    } model;
+    auto now = unixTime();
+    const RuntimeOptions options{.clock=[&] { return now; }};
+    const auto soul = [](std::string_view) { return std::string{}; };
+    auto runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    for (const auto* id : {"first-send","started-send","lost-cancellation"}) {
+        check(ask("release",id,"Send an update").contains("structuredContent"),"Stop trial ask was rejected");
+        runtime->runConversations();
+    }
+    check(ask("triage","other-bot","Send an update").contains("structuredContent"),"The other Bot's ask was rejected");
+    runtime->runConversations();
+    auto outstanding = runs();
+    check(outstanding.size() == 5 && outstanding.at("bot-run-4") == "queued","The stop fixture did not queue four Bot Runs");
+    outstanding["bot-run-2"] = "running";
+    configure({{"stopRuns",outstanding}});
+
+    // Reopen saved send receipts from a database created before the stop outbox existed.
+    runtime.reset();
+    server.reset();
+    db.reset();
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> oldState(raw,sqlite3_close);
+    check(opened == SQLITE_OK && sqlite3_exec(oldState.get(),"DROP TABLE session_queue_cancellations",
+                                             nullptr,nullptr,nullptr) == SQLITE_OK,"Could not prepare the pre-stop schema");
+    db = std::make_unique<Store>(database);
+    server = startWeb(*db,0,cb);
+    runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    const auto result = stop("release");
+    check(result.at("structuredContent") == Json{{"stopped",true},{"cancelled",1},{"alreadyStarted",1},
+                                                {"notCancellable",0},{"pending",1}} &&
+          result.at("content").at(0).at("text").get<std::string>().find("1 message had already started") != std::string::npos &&
+          stop("release") == result,"The stop report did not distinguish started Runs and a lost cancellation reply");
+    check(effects().at("t3_queue") == Json::array({cancel("bot-run-1"),cancel("bot-run-2"),cancel("bot-run-3")}) &&
+          !effects().contains("t3_thread_interrupt") &&
+          runs() == Json{{"bot-run-1","cancelled"},{"bot-run-2","running"},{"bot-run-3","cancelled"},
+                         {"bot-run-4","queued"},{"person-queued","queued"}},
+          "flock_stop cancelled another participant's work or interrupted the running Run");
+
+    runtime.reset();
+    server.reset();
+    db = std::make_unique<Store>(database);
+    server = startWeb(*db,0,cb);
+    now += 10;
+    runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
+    runtime->runConversations();
+    runtime->runConversations();
+    const auto released = stop("release");
+    check(released.at("structuredContent") == Json{{"stopped",true},{"cancelled",2},{"alreadyStarted",1},
+                                                  {"notCancellable",0},{"pending",0}} &&
+          stop("release") == released && model.ask.wakes == 0 &&
+          effects().at("t3_queue") == Json::array({cancel("bot-run-1"),cancel("bot-run-2"),cancel("bot-run-3"),cancel("bot-run-3")}),
+          "Restart did not retry only the unknown cancellation or woke the stopped Bot");
+
+    check(ask("triage","leave","Leave this Session").contains("structuredContent"),"The other Bot stopped participating");
+    runtime->runConversations();
+    const auto left = stop("triage");
+    check(left.at("structuredContent").at("cancelled") == 1 &&
+          db->conversation("triage").back().at("data").at("text") == left.at("content").at(0).at("text") &&
+          effects().at("t3_queue").back() == cancel("bot-run-4") && effects().at("t3_queue").size() == 5 &&
+          !effects().contains("t3_thread_interrupt") && runs().at("person-queued") == "queued",
+          "leave_session did not perform and report the same stop as flock_stop");
+    check(ask("triage","after-leave","Send an update").value("isError",false),"An ask reopened a Bot that left");
+}
 }
 
 int main(int argc, char** argv) {
+    const char* scenario = "setup";
     try {
         check(argc == 3,"Expected fixture URL and credentials directory");
+        scenario = "Session asks";
         sessionAsks(argv[1],argv[2]);
+        scenario = "Session stops";
+        sessionStops(argv[1],argv[2]);
+        scenario = "stop during send preflight";
         stopDuringSendPreflight();
+        scenario = "stop during send dispatch";
+        stopDuringSendDispatch();
+        scenario = "Session invitations";
         sessionInvitations();
         return 0;
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::cerr << scenario << ": " << error.what() << '\n';
         return 1;
     }
 }
