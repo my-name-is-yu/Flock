@@ -1,14 +1,42 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <sqlite3.h>
 #include <stdexcept>
 #include <unistd.h>
 
 using namespace flockv0;
 namespace {
 void check(bool b, std::string_view message) { if (!b) throw std::runtime_error(std::string(message)); }
+
+void unsupportedSchemaLeavesDatabaseIntact(const std::filesystem::path& file, const char* schema) {
+    {
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open(file.c_str(),&raw);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+        check(opened == SQLITE_OK,"could not open the old database fixture");
+        check(sqlite3_exec(db.get(),schema,nullptr,nullptr,nullptr) == SQLITE_OK,"could not create the unsupported database fixture");
+    }
+    const auto contents = [&] {
+        std::ifstream data(file,std::ios::binary);
+        check(data.good(),"could not read the old database fixture");
+        return std::string(std::istreambuf_iterator<char>(data),std::istreambuf_iterator<char>());
+    };
+    const auto original = contents();
+    bool refused = false;
+    try {
+        Store store(file);
+    } catch (const Conflict& error) {
+        refused = std::string_view(error.what()).find("--home") != std::string_view::npos;
+    }
+    check(refused && contents() == original && !std::filesystem::exists(file.string() + "-wal"),
+          "opening unsupported state did not fail with guidance or changed the original database");
+}
 
 void tickUntil(Runtime& runtime, const auto& satisfied, std::string_view failure) {
     for (int i = 0; i < 12 && !satisfied(); ++i) runtime.tick();
@@ -60,6 +88,16 @@ int main() {
     char temp[] = "/tmp/flock-core-XXXXXX";
     const auto path = std::filesystem::path(mkdtemp(temp));
     try {
+        unsupportedSchemaLeavesDatabaseIntact(path / "old-state.db",
+            "CREATE TABLE tasks(id INTEGER PRIMARY KEY); INSERT INTO tasks VALUES (1);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "unrelated-state.db",
+            "PRAGMA application_id=123; PRAGMA user_version=1; CREATE TABLE items(id INTEGER PRIMARY KEY);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "pre-policy-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=1; CREATE TABLE tasks(id INTEGER PRIMARY KEY);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "full-policy-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=2;"
+            "CREATE TABLE policy_settings(id INTEGER PRIMARY KEY,mode TEXT NOT NULL);"
+            "INSERT INTO policy_settings VALUES (1,'full');");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;
@@ -68,7 +106,6 @@ int main() {
         {
             Store store(db);
             Runtime runtime(store,model,t3,notes);
-            store.access().resourceGrant({"fixture",true},"release",{"environment","env","launch"},GrantChange::grant);
             id = store.submit({"release","Check main","env","proj"});
             tickUntil(runtime, [&] { return store.task(id)["state"] == "running"; }, "delegate did not start");
             const auto callsBeforeIdle = model.calls;

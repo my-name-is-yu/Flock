@@ -115,12 +115,12 @@ std::string branch(const Json& args, const char* key) {
     return ref;
 }
 
-bool repositoryAccess(const Access& access, GitHost& host, const GitContext& context,
+bool repositoryAccess(const Policy& policy, GitHost& host, const GitContext& context,
                       const GitRepository& repo, std::string_view op, const Decision* storedRead = nullptr) {
-    const Scope scope{"repository",repo.resource(),std::string(op)};
-    if (!access.permits(context.botId,scope,true)) return false;
+    const auto action = parseAction("repository." + std::string(op));
+    if (!action || policy.forbidden(context.botId,*action,repo.resource())) return false;
     const bool upstream = storedRead ? host.permitsStoredRead(context,repo,*storedRead) : host.permits(context,repo,op);
-    return access.permits(context.botId,scope,upstream);
+    return upstream && !policy.forbidden(context.botId,*action,repo.resource());
 }
 
 GitContext taskGitContext(const Json& task) {
@@ -224,7 +224,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     if (!event.contains("gitResults")) return;
 
     const auto scrub = sharedRedactor();
-    const Access access(*this);
+    const Policy policy(*this);
     std::set<Id> authorized;
     for (const auto& [id,read] : requested) {
         const auto& [source,result] = read;
@@ -232,11 +232,11 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
         try {
             if (source.tool == "git_find_repos") {
                 if (!std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
-                    return repositoryAccess(access,host,context,{std::string(host.name()),repo.get<std::string>()},"read");
+                    return repositoryAccess(policy,host,context,{std::string(host.name()),repo.get<std::string>()},"read",&source);
                 })) continue;
             } else {
                 const auto repo = GitRepository::parse(host.name(),field(source.args,"repo"));
-                if (!repositoryAccess(access,host,context,repo,"read",&source)) continue;
+                if (!repositoryAccess(policy,host,context,repo,"read",&source)) continue;
             }
             authorized.insert(id);
         } catch (const StorageError&) {
@@ -247,8 +247,8 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
     }
     std::lock_guard lock(mutex);
     Transaction projection(db,Transaction::Mode::read);
-    const auto localReadGranted = [&](std::string_view repo) {
-        return access.permits(context.botId,{"repository",GitRepository::parse(host.name(),repo).resource(),"read"},true);
+    const auto localReadAllowed = [&](std::string_view repo) {
+        return policy.allows(context.botId,Action::repository_read,GitRepository::parse(host.name(),repo).resource());
     };
     for (auto& entry : event.at("gitResults")) {
         if (!entry.contains("readId")) continue;
@@ -257,9 +257,18 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
             const auto& [source,result] = requested.at(id);
             const bool localAllowed = source.tool == "git_find_repos"
                 ? std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
-                    return localReadGranted(repo.get_ref<const std::string&>());
+                    return localReadAllowed(repo.get_ref<const std::string&>());
                 })
-                : localReadGranted(field(source.args,"repo"));
+                : [&] {
+                    const auto target = GitRepository::parse(host.name(),field(source.args,"repo")).resource();
+                    if (policy.forbidden(context.botId,Action::repository_read,target)) return false;
+                    return localReadAllowed(field(source.args,"repo")) || query(R"SQL(
+SELECT 1 FROM git_task_reads r JOIN policy_approvals a
+ ON a.operation='git/' || r.task_id || '/' || r.invocation
+WHERE r.task_id=? AND r.id=? AND a.task=r.task_id AND a.bot=?
+ AND a.action='repository.read' AND a.target=? AND a.status='used'
+)SQL",{context.taskId,id,context.botId,target}).next();
+                }();
             if (localAllowed) {
                 entry.update({{"sourceTool",source.tool},{"target",scrub.payload(source.args)},
                               {"result",scrub.payload(result)}});
@@ -272,7 +281,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
 }
 
 Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const Json& routing,
-                          const Decision& decision, std::string_view invocation, std::optional<Id> generation) {
+                          const Decision& decision, std::string_view invocation, std::optional<Id> generation, Id turn) {
     if (decision.tool == "git_read_result" && !generation) throw Conflict("Saved Git reads are available within their task");
     const auto op = validate(decision,!generation.has_value());
     const auto& args = decision.args;
@@ -298,39 +307,65 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             if (previous.next()) return {{"readId",previous.number(0)}};
         }
     }
-    const Access access(*this);
+    const Policy policy(*this);
     const auto permits = [&](const GitRepository& repository, std::string_view required) {
-        return repositoryAccess(access,host,context,repository,required);
+        return repositoryAccess(policy,host,context,repository,required);
     };
     if (decision.tool == "git_find_repos") {
-        std::vector<GitRepository> candidates;
-        {
-            std::lock_guard lock(mutex);
-            auto rows = query("SELECT resource FROM bot_grants WHERE bot=? AND kind='repository' AND op=?"
-                              " AND substr(resource,1,?)=? ORDER BY resource",{bot,op,hostId.size()+1,hostId + "/"});
-            while (rows.next()) candidates.push_back({hostId,rows.string(0).substr(hostId.size()+1)});
-        }
+        const auto page = args.value("page",Id{1});
+        const auto [candidates,more] = host.repositories(context,lower(field(args,"query")),page);
         Json repos = Json::array();
-        const auto search = lower(field(args,"query"));
-        bool truncated = false;
+        bool truncated = more;
         for (const auto& candidate : candidates) {
-            if (candidate.repo.find(search) == candidate.repo.npos || !permits(candidate,op)) continue;
+            if (!permits(candidate,op) || !policy.allows(bot,Action::repository_read,candidate.resource())) continue;
             if (repos.size() == 100) {
                 truncated = true;
                 break;
             }
             repos.push_back(candidate.repo);
         }
-        const auto result = sharedRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated}},
+        const auto result = sharedRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated},
+                                                     {"nextPage",more && page < std::numeric_limits<Id>::max() ? Json(page+1) : Json(nullptr)}},
                                                     SecretRedactor::Fields::external);
         if (generation) return saveTaskGitRead(taskId,invocation,decision.tool,readTarget(decision,hostId),result);
         return result;
     }
     const auto repo = GitRepository::parse(hostId,field(args,"repo"));
     if (!permits(repo,op)) throw Conflict("Repository access denied");
+    {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        PolicyOrigin origin;
+        if (turn) origin = policyOrigin(loadTurnMessage(turn));
+        if (taskId) {
+            const auto task = load(taskId);
+            if (generation && task.at("generation") != *generation) throw RequestChanged{};
+            if (!turn) origin = taskPolicyOrigin(task);
+            else {
+                origin.task = taskId;
+                origin.revision = task.value("currentRevision",Id{});
+                origin.generation = task.at("generation");
+            }
+        }
+        if (turn || origin.task) {
+            const auto action = *parseAction("repository." + std::string(op));
+            const auto key = turn ? std::string(invocation) : "git/" + std::to_string(taskId) + "/" + std::string(invocation);
+            const auto payload = Json::array({decision.tool,decision.args});
+            const auto gate = approveAction(origin,{action,repo.resource()},key,payload,policyClock());
+            if (gate == ApprovalGate::waiting && !turn)
+                exec("UPDATE policy_approvals SET resume=? WHERE operation=?",
+                     {Json{{"tool",decision.tool},{"args",decision.args},{"reason",sharedRedactor().text(decision.reason)},
+                           {"invocation",invocation}},key});
+            transaction.commit();
+            if (gate == ApprovalGate::waiting) return {{"policyWaiting",true}};
+            if (gate != ApprovalGate::allow) return toolFailure(approvalError(gate));
+        } else transaction.commit();
+    }
     if (decision.tool == "git_open_pr") {
         const auto head = args.contains("headRepo") ? GitRepository::parse(hostId,field(args,"headRepo")) : repo;
-        if (head != repo && !permits(head,"read")) throw Conflict("Head repository read access denied");
+        if (head != repo && (!permits(head,"read") ||
+                            !policy.allows(bot,Action::repository_read,head.resource())))
+            throw Conflict("Head repository read access denied");
         auto result = openGitPr(host,context,{{repo,head,branch(args,"baseRef"),branch(args,"headRef")},{},
                                      field(args,"title"),field(args,"body"),args.value("draft",false)},
                                 invocation,args.value("newIntent",false));
@@ -394,6 +429,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             events.next();
             eventCursor = events.number(0);
         }
+        if (policy.forbidden(bot,*parseAction("repository." + std::string(op)),repo.resource()))
+            throw Conflict("Repository access denied");
         exec("INSERT INTO git_mutations(task_id,invocation,dedupe) VALUES(?,?,?)",{taskId,key,dedupe});
         journal(taskId,"git_mutation",sharedRedactor().record(gitJournal(context,decision.tool,repo,
             {{"status","pending"},{"target",audit}})));
@@ -457,7 +494,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
             call.args["taskId"] = owner;
         }
         return gitTool(*host,message.bot,0,message.routing,call,
-                       "turn/" + std::to_string(message.id) + "/" + std::to_string(step));
+                       "turn/" + std::to_string(message.id) + "/" + std::to_string(step),{},message.id);
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {

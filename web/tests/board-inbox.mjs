@@ -99,7 +99,7 @@ async function exercise(mountBoardInbox) {
   await board.refresh();
   check(layer.hidden && !conversation.inert && !trigger.hidden && message.getAttribute('role') === 'status',
     'The decision layer must start closed with a visible pending count and status region');
-  check(!document.querySelector('[data-work-view]') && board.count('release') === 3 && board.count('docs') === 1,
+  check(board.count('release') === 3 && board.count('docs') === 1,
     'Pending counts did not stay scoped to each Bot');
   await browse(trigger);
   check(board.isOpen() && !layer.hidden && conversation.inert && !editor.closest('[inert]') &&

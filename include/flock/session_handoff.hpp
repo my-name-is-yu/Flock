@@ -1,13 +1,10 @@
 #pragma once
 
 #include "flock/root_delivery.hpp"
+#include "flock/t3_connection.hpp"
 
 namespace flockv0 {
 
-struct PairingTicket {
-    std::string code;
-    Seconds expiresAt;
-};
 struct HandoffAck {
     Id channel;
     std::string requestId;
@@ -32,15 +29,17 @@ class SessionHandoff {
 public:
     using Peers = std::function<std::vector<PeerBot>(std::string_view)>;
     using People = std::function<std::optional<Person>(std::string_view)>;
-    SessionHandoff(Store& store, ThreadSession& session, People people, Runtime* runtime = nullptr,
-                   Peers peers = {})
-        : store_(store), session_(session), people_(std::move(people)), runtime_(runtime), peers_(std::move(peers)) {}
+    SessionHandoff(Store& store, ThreadSession& session, People people, IntakeResolver intake,
+                   Runtime* runtime = nullptr, Peers peers = {})
+        : store_(store), session_(session), people_(std::move(people)), intake_(std::move(intake)),
+          runtime_(runtime), peers_(std::move(peers)) {}
 
     void recover();
 
-    PairingTicket pair(const Person&, const ThreadTarget&, std::string_view bot,
-                       std::optional<CoordinationRequest>);
-    HandoffAck intake(std::string_view code, std::string_view requestId, std::string_view text);
+    std::optional<Person> person(const T3Connection&) const;
+    HandoffAck invoke(const T3Connection&, const Json& arguments,
+                      const std::function<bool(std::string_view)>& botExists,
+                      std::chrono::milliseconds proofTimeout = std::chrono::seconds(3));
     SessionHandoffView resume(const Person&, Id channel);
     SessionHandoffView pause(const Person&, Id channel);
     SessionHandoffView freeze(const Person&, Id channel);
@@ -50,15 +49,20 @@ public:
                                   std::string_view stage, Id wait, std::string_view text);
     SessionHandoffView view(const Person&, Id channel) const;
     std::vector<SessionHandoffView> recent(const Person&) const;
-    void consult(const Person&, Id channel, Model&, const IntakeResolver&, const Runtime::SoulLoader&);
-    SessionHandoffView step(const Person&, Id channel, Model&, const IntakeResolver&, const Runtime::SoulLoader&);
+    void consult(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
+    SessionHandoffView step(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
     std::vector<std::pair<Id,std::string>> pending(Id after) const;
 
 private:
+    HandoffAck openChannel(const T3Connection&, const ThreadProof&, std::string_view bot,
+                           std::string_view requestId, std::string_view text, std::string_view payloadDigest,
+                           const std::optional<CoordinationRequest>&);
     SessionHandoffView freezeAs(const Person&, Id channel, std::string_view state);
+    Intake resolveBot(std::string_view bot) const;
     Store& store_;
     ThreadSession& session_;
     People people_;
+    IntakeResolver intake_;
     Runtime* runtime_;
     Peers peers_;
 };

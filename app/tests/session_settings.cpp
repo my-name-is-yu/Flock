@@ -1,6 +1,6 @@
 #include "fixtures.hpp"
 #include "../../t3/internal.hpp"
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <iostream>
 
@@ -60,7 +60,6 @@ void checkSessionSettings(const std::string& origin, const std::filesystem::path
     Id id;
     {
         Store store(database);
-        store.access().resourceGrant(owner,"release",{"environment","env-1","launch"},GrantChange::grant);
         auto saved = config;
         saved["session"] = legacy;
         id = store.submit({"release","Verify the fixture","env-1","project",saved});
