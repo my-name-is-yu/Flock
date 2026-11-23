@@ -69,6 +69,7 @@ const noHover = matchMedia('(hover: none)');
 const clock = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFormat = new Intl.DateTimeFormat('en', { year: 'numeric', month: 'long', day: 'numeric' });
 const fullTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
+const shortDay = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
 const byteLength = (text) => new TextEncoder().encode(text).length;
 const sessionEndLabels = {
   completed: 'Complete', cancelled: 'Cancelled', failed: 'Failed',
@@ -924,10 +925,10 @@ function activityRow(tag, className, title, status, statusClass) {
   row.append(heading, line);
   return row;
 }
-function sessionRow(task, session, status, tone = '') {
+function sessionRow(request, session, status, tone, startedAt) {
   const link = runHref(session);
-  const row = activityRow(link ? 'a' : 'div', 'session-row', task.request, status, tone);
-  row.title = [task.request, task.createdAt ? `Started ${fullTime.format(task.createdAt * 1000)}` : ''].filter(Boolean).join(' · ');
+  const row = activityRow(link ? 'a' : 'div', 'session-row', request, status, tone);
+  row.title = Number.isFinite(startedAt) ? `${request} · Started ${fullTime.format(startedAt)}` : request;
   if (link) {
     row.href = link;
     row.target = '_blank';
@@ -1054,7 +1055,7 @@ function renderActivity() {
   const more = elements['more-sessions'];
   more.hidden = !view?.sessionsBefore;
   more.disabled = !!view?.loadingSessions;
-  if (changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions)) {
+  if (changed('sessions', view?.id, loading, groups, active, data?.workflows, data?.compactions, dayFormat.format(Date.now()))) {
     const revealedSessions = previousSessionsLoading && !loading;
     previousSessionsLoading = loading;
     const key = (taskId, run) => JSON.stringify([taskId, run.environmentId, run.threadId]);
@@ -1064,15 +1065,22 @@ function renderActivity() {
       const identity = key(run.taskId, run);
       if (activeKeys.has(identity)) continue;
       activeKeys.add(identity);
-      live.push(sessionRow({ request: run.request, createdAt: run.createdAt }, run, stateLabels[run.state] ?? run.state,
-        run.state === 'waiting' ? 'waiting' : 'live'));
+      live.push(sessionRow(run.request, run, stateLabels[run.state] ?? run.state,
+        run.state === 'waiting' ? 'waiting' : 'live', run.createdAt ? run.createdAt * 1000 : undefined));
     }
     const ended = [];
     for (const task of groups.sort((a, b) => b.id - a.id)) {
       for (const session of task.sessions) {
         if (activeKeys.has(key(task.id, session))) continue;
-        const status = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
-        ended.push(sessionRow(task, session, status, session.state === 'failed' ? 'failed' : ''));
+        const startedAt = Date.parse(session.createdAt);
+        const started = Number.isFinite(startedAt) ? startedLabel(startedAt) : '';
+        const quiet = session.state === 'completed' && !!started;
+        const end = Object.hasOwn(sessionEndLabels, session.state) ? sessionEndLabels[session.state] : sessionEndLabels.ended;
+        const status = quiet ? started : [end, started].filter(Boolean).join(' · ');
+        const tone = quiet ? 'quiet' : session.state === 'failed' ? 'failed' : '';
+        const row = sessionRow(task.request, session, status, tone, startedAt);
+        if (quiet) row.querySelector('.activity-mark').after(node('span', 'sr-only', 'Complete, started '));
+        ended.push(row);
       }
     }
     const rows = [];
@@ -1671,6 +1679,10 @@ function workingLine(data) {
   line.append(dots, text);
   row.append(line);
   return row;
+}
+function startedLabel(timestamp) {
+  const day = dayLabel(timestamp / 1000);
+  return day === 'Today' ? clock.format(timestamp) : day === 'Yesterday' ? day : shortDay.format(timestamp);
 }
 function dayLabel(seconds) {
   const today = new Date();
@@ -3295,7 +3307,18 @@ function subscribeToView() {
   liveUpdates.use(params.size ? `/api/events?${params}` : '/api/events');
 }
 
+let sessionDateRefresh;
+function refreshSessionDate() {
+  clearTimeout(sessionDateRefresh);
+  if (document.hidden) return;
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  sessionDateRefresh = setTimeout(refreshSessionDate, midnight - now);
+  renderActivity();
+}
+
 function resumeUpdates() {
+  refreshSessionDate();
   subscribeToView();
   catchUp();
 }
@@ -3311,6 +3334,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => {
   visibilityGeneration++;
+  clearTimeout(sessionDateRefresh);
   liveUpdates.use(null);
 });
 window.addEventListener('pageshow', (event) => { if (event.persisted) resumeUpdates(); });

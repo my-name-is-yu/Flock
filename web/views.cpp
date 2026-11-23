@@ -280,6 +280,7 @@ Json sessionGroup(const Json& task) {
         const bool active = field(*run,"runId") == field(activeRun,"runId") && thread == field(activeRun,"threadId") &&
             field(session,"environmentId") == env;
         session["state"] = active ? displayState(task) : run->value("status","ended");
+        if (const auto createdAt = field(*run,"sessionCreatedAt"); !createdAt.empty()) session["createdAt"] = createdAt;
         sessions.push_back(std::move(session));
     }
     auto group = taskSummary(task);
