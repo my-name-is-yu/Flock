@@ -416,7 +416,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     };
     callbacks.botChannels = [&](std::string_view bot) { return connections.botChannels(bot); };
     callbacks.changeBotChannel = [&](std::string_view bot, const Json& args) {
-        return connections.changeBotChannel(bot,args);
+        return connections.changeBotChannel(bot,args,store.policy());
     };
     std::atomic<unsigned> webPort = 0;
     struct T3Setup {

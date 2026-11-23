@@ -78,9 +78,10 @@ private:
     }
 };
 
-Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::string tool, Json args) {
+Json invoke(Store& store, Runtime& runtime, Script& model, std::string id, std::string tool, Json args,
+            std::string bot = "owner") {
     model.calls.insert_or_assign(id,Decision{std::move(tool),std::move(args),{}});
-    store.receive(localOwner,intake(),id,id);
+    store.receive(localOwner,intake(std::move(bot)),id,id);
     runtime.runConversations();
     if (!model.results.contains(id)) throw std::runtime_error("No result for " + id);
     return model.results.at(id);
@@ -191,16 +192,30 @@ void runner() {
               "Git inbox decision did not update and record");
         check(script.notifications == 3 && historyCount(store,task,"git_webhook") == 3,"webhooks were delivered more than once");
 
-        const auto sibling = store.submit(intake());
+        bool reviewBlockedDeletion = false;
+        try { store.policy().deleteBot(localOwner,"owner"); }
+        catch (const Policy::BotBusy&) { reviewBlockedDeletion = true; }
+        check(reviewBlockedDeletion && !store.policy().botDeleted("owner"),
+              "A pending Git review on a completed task did not block Bot deletion");
+        for (const auto& remaining : store.inbox(localOwner,"owner"))
+            store.decideInbox(localOwner,target(remaining),"request_changes");
+
+        const auto sibling = store.submit(intake("sibling","sibling-project"));
         auto args = openArgs("sibling-change");
         args["taskId"] = sibling;
-        check(invoke(store,runtime,script,"watch-sibling","git_open_pr",args).at("prNumber") == 2,
+        check(invoke(store,runtime,script,"watch-sibling","git_open_pr",args,"sibling").at("prNumber") == 2,
               "Could not create a second watch at the same commit");
         check(store.receiveGitWebhook({hostName,"shared-commit",repoName,"ci","completed",{},sha,"Shared SHA",81}),
               "CI event with a shared SHA was not saved");
         runtime.runConversations();
         check(script.notifications == 3 && historyCount(store,sibling,"git_webhook") == 0,
               "A SHA-only CI event woke a task without an unambiguous watch");
+        store.policy().deleteBot(localOwner,"owner");
+        check(store.receiveGitWebhook({hostName,"retired-watch",repoName,"ci","completed",{1},sha,"Retired PR",81}),
+              "CI event after deletion was not saved");
+        runtime.runConversations();
+        check(script.notifications == 3 && historyCount(store,sibling,"git_webhook") == 0,
+              "Retiring the Bot delivered a notification to its old conversation or changed attribution of a shared SHA");
     }
 }
 

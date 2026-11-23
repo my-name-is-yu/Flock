@@ -17,7 +17,7 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !ke
 env.FLOCK_WEB_IDENTITIES_FILE = identities;
 const cliOptions = { encoding: 'utf8', timeout: 5000, env };
 const cli = (...args) => JSON.parse(execFileSync(executable, [...cliArgs, ...args], cliOptions));
-const sqlite = (script) => execFileSync(python, ['-c', script, join(home, 'flock.sqlite3')], cliOptions);
+const sqlite = (script, ...args) => execFileSync(python, ['-c', script, join(home, 'flock.sqlite3'), ...args], cliOptions);
 let daemon;
 
 async function start() {
@@ -122,6 +122,11 @@ with sqlite3.connect(sys.argv[1]) as db:
   const profile = { name: 'Scout', avatar: { kind: 'shape', example: 'sprout', color: '#69c9ac' } };
   const scout = await api('bots', { actor: owner, body: profile, status: 201 });
   await api('bot-settings/members', { actor: owner, body: { botId: scout.id, person: 'member', add: true } });
+  await api('settings/installation/channels', {
+    body: { action: 'saveBridge', type: 'slack', id: 'fixture', port: 8080, credential: 'fixture-only-bridge-credential-000' },
+  });
+  const link = { action: 'setSender', type: 'slack', id: 'fixture', sender: { id: 'U123', personId: 'owner' } };
+  await api('bot-settings/channels', { body: { botId: scout.id, ...link } });
   assert.equal((await api('bots', { actor: owner })).find((bot) => bot.id === scout.id).canDelete, true);
   assert.equal((await api(`view?bot=${scout.id}`, { actor: owner })).bot.canDelete, true);
   assert.equal((await api('bots', { actor: member })).find((bot) => bot.id === scout.id).canDelete, false);
@@ -137,6 +142,8 @@ with sqlite3.connect(sys.argv[1]) as db:
   assert.equal(replacement.name, scout.name);
   assert.notEqual(replacement.id, scout.id);
   assert.deepEqual(await api('bots', { actor: member }), [], 'The replacement inherited the deleted Bot’s members');
+  const { bridges } = await api('bot-settings/channels', { body: { botId: replacement.id, ...link } });
+  assert.deepEqual(bridges[0].senders, [{ id: 'U123', personId: 'owner' }]);
 
   const botId = 'release';
   const { messageId } = await api('messages', {
@@ -150,6 +157,17 @@ with sqlite3.connect(sys.argv[1]) as db:
   await waitForTask(messageId, 'cancelled');
   const history = cli('history', String(waiting.id));
   assert.ok(history.some(({ kind }) => kind === 'cancelled'));
+
+  // Detached workspace commands have their own lifecycle after a conversation ends.
+  for (const state of ['running', 'stop_requested', 'exited']) {
+    sqlite(`
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("INSERT INTO workspace_commands(id,bot,started_at,state) VALUES(1,'release',0,?) "
+               "ON CONFLICT(id) DO UPDATE SET state=excluded.state", (sys.argv[2],))
+`, state);
+    if (state !== 'exited') assert.deepEqual(await deleteBot(botId, { status: 409 }), { error: 'bot_busy' });
+  }
 
   assert.deepEqual(await deleteBot(botId), { ok: true });
   assert.deepEqual(botIds(await api('bots')), [replacement.id]);

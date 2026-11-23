@@ -70,6 +70,7 @@ void Store::Impl::deliverGitWebhooks() {
     if (gitWebhooksDrainedAt == version) return;
     constexpr unsigned batchSize = 100;
     Transaction transaction(db);
+    // Retired watches still count for commit-only attribution. Policy blocks delivery to their Bots.
     auto rows = query(R"SQL(
 WITH matches AS (
  SELECT e.id,e.host,e.event_id,e.repo,e.data,w.pr_number,w.task_id,w.bot_id,w.run,w.url,

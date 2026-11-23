@@ -317,6 +317,11 @@ SELECT 1 WHERE
              WHERE m.bot_id=?1 AND t.status<>'done')
   OR EXISTS (SELECT 1 FROM workflows w JOIN workflow_stages s ON s.workflow_id=w.id
              WHERE w.bot_id=?1 AND w.stop_requested=0 AND s.task_id IS NULL AND s.status='pending')
+  OR EXISTS (SELECT 1 FROM workspace_commands WHERE bot=?1 AND state IN ('running','stop_requested'))
+  OR EXISTS (SELECT 1 FROM pr_review_items p JOIN tasks t ON t.id=p.task_id
+             WHERE t.bot_id=?1 AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
+               p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
+               AND NOT coalesce(json_extract(t.data,'$.replanning'),0))))
   OR EXISTS (SELECT 1 FROM session_message_waits WHERE bot=?1 AND notified=0)
   OR EXISTS (SELECT 1 FROM messages m JOIN channel_deliveries d ON d.source_id=m.id
              WHERE m.bot_id=?1 AND d.state IN ('pending','unknown'))
@@ -326,7 +331,6 @@ SELECT 1 WHERE
 UPDATE automations SET status=CASE WHEN config_id IS NULL THEN 'canceled' ELSE 'inactive' END,
   next_run_at=NULL,error=NULL WHERE bot_id=? AND status IN ('active','failed')
 )SQL",{bot});
-    db_.exec("DELETE FROM git_pr_watches WHERE bot_id=?",{bot});
     audit(actor,bot,"delete_bot",Json::object());
     tx.commit();
 }
