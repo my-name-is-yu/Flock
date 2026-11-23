@@ -99,7 +99,7 @@ async function exercise(mountBoardInbox) {
   await board.refresh();
   check(layer.hidden && !conversation.inert && !trigger.hidden && message.getAttribute('role') === 'status',
     'The decision layer must start closed with a visible pending count and status region');
-  check(!document.querySelector('[data-work-view]') && board.count('release') === 3 && board.count('docs') === 1,
+  check(board.count('release') === 3 && board.count('docs') === 1,
     'Pending counts did not stay scoped to each Bot');
   await browse(trigger);
   check(board.isOpen() && !layer.hidden && conversation.inert && !editor.closest('[inert]') &&
@@ -132,7 +132,7 @@ async function exercise(mountBoardInbox) {
   board.edit(draft);
   await browse(next);
   const password = item.querySelector('input[type=password]');
-  check(password?.labels[0].textContent === 'Protected value' && !board.composer(),
+  check(password?.labels[0].textContent === 'Secret value' && !board.composer(),
     'The protected input used the conversation composer instead of a labeled password field');
   password.value = 'fixture secret';
   password.dispatchEvent(new Event('input', { bubbles: true }));

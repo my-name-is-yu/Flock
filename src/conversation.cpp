@@ -19,15 +19,12 @@ void Store::setWebIdentityResolver(WebIdentityResolver resolver) {
 }
 
 void Store::Impl::initializeConversationSchema() {
-    Transaction transaction(db);
-    const bool initializeTurnState = !query("SELECT 1 FROM sqlite_schema WHERE type='view'"
-                                           " AND name='conversation_input_status'").next();
     if (sqlite3_exec(db,R"SQL(
 CREATE INDEX IF NOT EXISTS journal_bot ON journal(conversation_bot_id,id) WHERE conversation_bot_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
-  json_extract(data,'$.messageId'),task_id,coalesce(json_extract(data,'$.step'),0))
+  json_extract(data,'$.messageId'),task_id,json_extract(data,'$.step'))
   WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
@@ -38,17 +35,18 @@ CREATE TABLE IF NOT EXISTS messages(
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
   person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
-  principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3)),
+  principal_source INTEGER NOT NULL CHECK(principal_source IN (0,1,2,3)),
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
+  status TEXT NOT NULL CHECK(status IN ('running','paused','policy_waiting','done')),
   pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE INDEX IF NOT EXISTS conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
 CREATE VIEW IF NOT EXISTS conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN 'paused' THEN 'needs_you'
+                WHEN 'policy_waiting' THEN 'needs_you'
                 WHEN 'done' THEN coalesce(
                   (SELECT json_extract(data,'$.status') FROM journal WHERE id=t.reply_id),'access_revoked')
   END AS status
@@ -69,17 +67,6 @@ CREATE TABLE IF NOT EXISTS task_revisions(
   UNIQUE(task_id,number));
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK)
         throw StorageError(db);
-    if (!query("SELECT 1 FROM pragma_table_info('messages') WHERE name='principal_source'").next())
-        exec("ALTER TABLE messages ADD COLUMN principal_source INTEGER NOT NULL DEFAULT 0 CHECK(principal_source IN (0,1,2,3))");
-    if (initializeTurnState || query("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='journal_pending_turn'").next()) {
-        exec(R"SQL(
-INSERT OR IGNORE INTO conversation_turns(message_id,status)
-SELECT j.id,'running' FROM journal j JOIN messages m ON m.id=j.id
-WHERE j.kind IN ('conversation_message','git_webhook') AND json_extract(j.data,'$.status') IS NULL
-)SQL");
-        exec("DROP INDEX IF EXISTS journal_pending_turn");
-    }
-    transaction.commit();
 }
 
 Id Store::Impl::addRevision(Json& task, std::string_view intent, std::string_view doneWhen, Id source) {
@@ -126,7 +113,7 @@ std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, st
                                    std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
     if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
-    if (!Access(*p_).permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+    if (!Policy(*p_).allows(actor,Action::bot_talk,bot)) throw DecisionDenied{};
     return p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
 }
 
@@ -153,7 +140,7 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
     {
         std::lock_guard lock(p_->mutex);
         Transaction transaction(p_->db);
-        if (!access().permitsPerson(actor,bot,Role::decide)) throw DecisionDenied{};
+        if (!policy().allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
         const auto existing = p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
         if (existing) receipt = *existing;
         else {

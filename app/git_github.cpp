@@ -161,9 +161,21 @@ public:
     }
     bool permitsStoredRead(const GitContext& context, const GitRepository& repo, const Decision& read) override {
         if (repo.host != name()) return false;
-        if (read.tool == "git_read_ci_logs") jobLogUrl(repo,read.args.at("jobId"));
+        if (read.tool == "git_find_repos") json("GET",path(repo));
+        else if (read.tool == "git_read_ci_logs") jobLogUrl(repo,read.args.at("jobId"));
         else call(context,repo,read);
         return true;
+    }
+
+    std::pair<std::vector<GitRepository>,bool> repositories(const GitContext&, std::string_view query, Id page) override {
+        std::vector<GitRepository> matches;
+        const auto response = json("GET","/user/repos?sort=full_name&per_page=100&page=" + std::to_string(page));
+        if (!response.is_array()) throw Conflict("Expected a list of GitHub repositories");
+        for (const auto& item : response) {
+            auto repo = GitRepository::parse(name(),str(item,"full_name"));
+            if (repo.repo.find(query) != repo.repo.npos) matches.push_back(std::move(repo));
+        }
+        return {std::move(matches),response.size() == 100};
     }
 
     GitPullRequest createPullRequest(const GitContext&, const GitOpenPr& request) override {

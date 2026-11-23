@@ -42,10 +42,14 @@ Example `bots/release/config.json`
 }
 ```
 
-Use the exact environment and project IDs from T3. The optional `session`
+Use the exact environment and project IDs from T3 for the Bot's default destination for
+new Sessions and for configured schedules. A personal Bot with a model configured
+can search connected T3 and start work in an existing Session with those IDs omitted.
+The optional `session`
 object accepts `model`, `providerInstanceId`, `runtimeMode`, and
-`workspaceStrategy`. Omitted Session settings use the T3 project's defaults.
-Set `model` and `providerInstanceId` together. Runtime modes are
+`workspaceStrategy`. Omitted Session settings use T3's defaults. If T3 cannot
+select a model for the project, set `model` and `providerInstanceId` together
+using a pair listed by T3's `orchestrator_capabilities`. Runtime modes are
 `approval-required`, `auto-accept-edits`, `auto`, and `full-access`.
 For the project checkout, use `{"type":"root"}`. For a new worktree, use
 `{"type":"worktree","baseRef":"origin/main","startFromOrigin":true}` and
@@ -78,7 +82,7 @@ Ask a Bot in its conversation to remember a convention, manage a schedule or
 reminder, or follow up on a webhook. Flock imports `MEMORY.md` on the first
 private memory access. SQLite supplies private memory for conversation and task
 decisions from then on. Use the memory tools or Web API to edit it. Shared
-playbooks and text documents use an explicit document ID and require a Bot grant
+playbooks and text documents use an explicit document ID and follow the installation policy
 for the requested `shared_memory` operation.
 
 ## Connect and run
@@ -87,48 +91,70 @@ for the requested `shared_memory` operation.
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 login ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
 build/app/flock run
 ```
 
 Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
-permission to use the eligible ChatGPT plan. Copy a slug from `flock model
-models` into each Bot configuration. The CLI supports a re-consent flow
-through `flock model login --reconsent`. The active connection and a link to
-manage plan usage appear in `flock model status`.
+permission to use the eligible ChatGPT plan and check for `planUsage: true` in
+`flock model status`. Copy a slug from `flock model models` into each Bot
+configuration. Use `flock model login --reconsent` if plan usage is missing.
+For T3, approve Operate access. Use the connected environment ID in the Bot
+configuration. For T3 on this machine, use the loopback MCP URL published by T3.
+If Flock pauses a launch because of the installation policy, check the active
+mode and rules in **Flock settings**.
 
 The foreground process prints the local Web URL. Use `flock run --no-web`
-for headless operation. Once the daemon is running, submit work with the Web
-conversation or with CLI commands such as the following.
+for headless operation. T3 skills require the Web listener on the port saved by
+`flock t3 connect`. Send a Bot message from the Web conversation or from the CLI.
 
 ```sh
-build/app/flock submit release "Check the upcoming release"
+build/app/flock message release "Check the upcoming release"
 build/app/flock tasks
 build/app/flock status TASK_ID
 build/app/flock history TASK_ID
 build/app/flock answer TASK_ID WAIT_ID REVISION_ID GENERATION "Use main"
 ```
 
+`flock message` queues the message as the local owner and returns a receipt
+with `messageId` and a status of `received`. The running daemon processes the
+message in the Bot's conversation. If the Bot starts a Task, `flock tasks`
+shows the same message ID in the Task's `sourceMessageId` field.
+
 ## Offline demo
 
 For an offline demonstration, set `FLOCK_HOME` to a separate directory and
-configure the `release` Bot there. Replace `ENVIRONMENT_ID` with the value of
-`environmentId` in its `config.json`. Grant launch access before submitting a
-task, then start the demo runtime.
+configure the `release` Bot there. Start the demo runtime.
 
 ```sh
-build/app/flock access grant release environment ENVIRONMENT_ID launch
 build/app/flock run --fixed --no-web
 ```
 
-In a second terminal using the same Flock home, submit a task.
+In a second terminal using the same Flock home, send the Bot a message.
 
 ```sh
-build/app/flock submit release "Check the upcoming release"
+build/app/flock message release "Check the upcoming release"
 ```
 
-Use `flock access list release` to see its grants and `flock access revoke
-release environment ENVIRONMENT_ID launch` to remove this grant. A request
+Full mode is the default. Use `flock mode` to show the current mode and
+`flock mode supervised` or `flock mode full` to change it. Use the Web UI to
+confirm actions that require policy approval.
+
+Use `flock rules list` and `flock rules add|remove allow|ask|never ACTION TARGET`
+to manage installation rules. Quote glob targets, such as `'demo-*'` for
+`environment.launch`. Never wins in both modes. Supervised checks Ask first
+before Allow and caps each of those rule kinds at 20. A rule saved from a
+card replaces the oldest Allow at capacity.
+
+See the [installation policy table](../README.md#installation-policy) for
+which actions ask. The requester and installation roots can decide cards.
+Background cards go to the schedule's Bot owner or T3 connector person
+and expire after 30 minutes. An expired card can save an Allow rule for
+future work. Direct requests stay open. The local owner manages Bots
+created through the CLI or configuration. Web Bot creators manage shared
+members.
+
+A request
 starting with `ask:` produces a demo Bot question. Answering it lets the
 fixture Session run to completion.
 
@@ -177,9 +203,9 @@ home has one ChatGPT connection. See the official [sign-in guide][signin],
 ## Bot tools
 
 Conversation turns can use the Bot's workspace under `<home>/workspaces/<botId>`.
-Grant `workspace/<botId>/read` for files and search, `write` for edits, and
-`exec` plus `read` to run a command. Commands receive write access when the Bot
-also has the `write` grant. macOS uses the system sandbox. Linux requires
+Policy actions `workspace.read`, `workspace.write` and `workspace.exec` target
+the Bot ID. Commands require read and exec and receive write access when the
+policy allows it. macOS uses the system sandbox. Linux requires
 `/usr/bin/bwrap` with unprivileged namespaces, FD-based bind support, and
 seccomp filtering; Linux builds also require the libseccomp development
 library. Existing single-command `argv` calls retain their behavior. On
@@ -226,9 +252,10 @@ Relative paths are resolved against the Flock home.
 }
 ```
 
-Grant `skill/catalog/list` for discovery and `skill/<skill>/read` per skill.
-MCP uses Streamable HTTP. Grant `mcp_server/<name>/discover`, `invoke` and
-`read_resource` independently. `tokenEnv` is optional and points to a
+Skill actions are `skill.list` for the catalog and `skill.read` for individual
+skills. MCP uses Streamable HTTP with `mcp.discover`, `mcp.invoke` and
+`mcp.read_resource` actions targeting the configured server name. `tokenEnv`
+is optional and points to a
 host-managed bearer token. Discovery lists one collection per call and returns
 `nextCursor` when another page is available.
 
