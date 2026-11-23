@@ -28,7 +28,7 @@ root authority only when all of those credentials currently have `adminRoot`.
 
 ## Ask a Bot from a T3 Session
 
-Run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
+In **Flock settings → Connections**, enter the environment ID and T3 MCP URL and choose **Connect**, or run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
 Approve T3 OAuth read and operate access for each connected environment.
 Flock registers a loopback MCP server with installed Codex and Claude Code and
 exports their Flock skills. For shared Web identities, include `local-owner` in

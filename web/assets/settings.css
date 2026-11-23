@@ -132,7 +132,9 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .row-actions { display: flex; gap: .4rem; }
 .row-actions .button { text-decoration: none; }
 #rules:empty { display: none; }
-#rules:not(:empty) + .rule-form:not([hidden]) { border-block-start: 1px solid var(--hairline); }
+:is(#rules, #connections):not(:empty) + .rule-form:not([hidden]) { border-block-start: 1px solid var(--hairline); }
+#connections:empty { display: none; }
+#connections > .settings-row + .settings-row { border-block-start: 1px solid var(--hairline); }
 .settings-group form.rule-form { align-items: end; justify-content: flex-start; border-radius: 0; background: transparent; padding: .8rem 1rem; }
 .rule-form label { flex: 0 1 auto; }
 .rule-form .rule-target { flex: 1 1 12rem; }
@@ -191,3 +193,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row-error .row-label strong { color: var(--danger); }
 .settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
+.settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
+#rule-form, #t3-form { border-radius: 0; }
+.settings-row a.button { text-decoration: none; }

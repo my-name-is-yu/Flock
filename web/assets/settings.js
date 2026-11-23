@@ -52,7 +52,7 @@ for (const input of themeInputs) {
 async function load() {
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
-  const {mode, rules, canManagePolicy, t3, model} = await response.json();
+  const {mode, rules, canManagePolicy, t3, model, t3Setup} = await response.json();
   $('model-section').hidden = !model;
   $('model').replaceChildren();
   renderModel(model);
@@ -87,6 +87,8 @@ async function load() {
   if (t3) {
     for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
     row('connections', emptyLabel('Coding agents', 'Codex and Claude Code on this machine reach Flock on port ', command(String(t3.port)), '.'));
+  } else if (canManagePolicy && t3Setup) {
+    row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));
   } else if (canManagePolicy) {
     row('connections', emptyLabel('Not connected',
       'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on this machine.'));
@@ -94,6 +96,7 @@ async function load() {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
   $('rule-form').hidden = !canManagePolicy;
+  renderT3Setup(t3Setup);
 }
 
 // One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
@@ -200,6 +203,44 @@ function renderModel(model) {
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
   }
 }
+
+// Connecting T3 runs on the machine running Flock; the page shows T3's authorization link and polls.
+let t3Poll = 0;
+function renderT3Setup(setup) {
+  clearTimeout(t3Poll);
+  $('t3-form').hidden = !setup || setup.running;
+  if (!setup) return;
+  if (setup.running) {
+    const item = row('connections', emptyLabel(setup.authorizationUrl ? 'Authorize Flock in T3' : 'Connecting to T3…',
+      setup.authorizationUrl ? 'Approve read and operate access in T3. This page updates when you’re done.' : 'Starting T3 authorization.'));
+    if (setup.authorizationUrl) {
+      const open = link('Open T3', setup.authorizationUrl);
+      open.classList.add('primary');
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      item.append(open);
+    }
+    t3Poll = setTimeout(() => void load().catch(() => {}), 2000);
+  } else if (setup.error) {
+    row('connections', emptyLabel('Connection didn’t finish', setup.error)).classList.add('settings-row-error');
+  }
+}
+$('t3-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  for (const control of form.elements) control.disabled = true;
+  try {
+    const response = await fetch('/api/settings/t3-connect', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+      body: JSON.stringify({ environmentId: data.environmentId.trim(), mcpUrl: data.mcpUrl.trim() }),
+    });
+    if (!response.ok) throw new Error();
+    form.reset();
+  } catch { $('status').textContent = 'Could not start the T3 connection. Check the environment ID and MCP URL.'; }
+  for (const control of form.elements) control.disabled = false;
+  await load().catch(() => {});
+};
 
 async function submit(path, data, controls) {
   for (const control of controls) control.disabled = true;

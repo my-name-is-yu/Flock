@@ -33,8 +33,9 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                          {"canSignIn",bool(callbacks.modelLogin)}};
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
+        const Json t3Setup = canManage && callbacks.t3Setup ? callbacks.t3Setup() : Json(nullptr);
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
-                       {"canManagePolicy",canManage},{"model",model},
+                       {"canManagePolicy",canManage},{"model",model},{"t3Setup",t3Setup},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
@@ -54,6 +55,22 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
             if (!callbacks.modelLogin) return reply(res,409,{{"error","sign_in_unavailable"}});
             callbacks.modelLogin(args.at("reconsent").get<bool>());
+            reply(res,202,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+    });
+    server.Post("/api/settings/t3-connect",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto args = Json::parse(req.body);
+            if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
+            if (!callbacks.t3Connect) return reply(res,409,{{"error","connect_unavailable"}});
+            const auto environment = args.at("environmentId").get<std::string>();
+            const auto url = args.at("mcpUrl").get<std::string>();
+            if (environment.empty() || environment.size() > 200 ||
+                !(url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")))
+                return reply(res,400,{{"error","invalid_input"}});
+            callbacks.t3Connect(environment,url);
             reply(res,202,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }

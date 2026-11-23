@@ -16,6 +16,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <atomic>
 #include <thread>
 
 namespace flockv0::app {
@@ -132,6 +133,39 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
+// Connects one T3 environment for Flock's Session MCP. Shared by `flock t3 connect` and Flock settings;
+// `authorize` receives the T3 authorization URL to open.
+Json connectT3(const std::filesystem::path& home, const std::string& environment, const std::string& url, unsigned port,
+               const Json& skillCards, const std::function<void(const std::string&)>& authorize) {
+    const T3SetupLock setup;
+    auto store = openStore(home);
+    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
+        if (!loadIdentities(store,identities).resolvePerson(localOwner.id))
+            throw Conflict("Configure a Web identity for local-owner before connecting T3");
+    } else if (store.policy().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
+    T3Connections connections(store);
+    const auto previous = connections.settings(localOwner.id);
+    const auto savedPort = previous ? previous->port : 0;
+    if (!port) port = savedPort ? savedPort : 4173;
+    const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
+        [&](const InstallT3Provider& install) {
+            loginT3(home / "credentials" / "t3",environment,url,authorize,true,[&](const std::function<void()>& saveCredential) {
+                const auto refreshProviders = t3ProvidersNeedRefresh([&](std::string_view token) {
+                    return connections.ownsBearer(token);
+                });
+                connections.connect(environment,localOwner.id,port,[&](std::string_view token) {
+                    if (!token.empty()) install(token);
+                    saveCredential();
+                },refreshProviders);
+            });
+        });
+    try { syncT3Skills(skillCards); }
+    catch (const std::exception& error) {
+        std::cerr << "Could not export T3 skills: " << error.what() << '\n';
+    }
+    return {{"port",port},{"portChanged",savedPort != port},{"configuredProviders",providers}};
+}
+
 int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto action = args.pop("T3 command");
     if (action != "connect" && action != "disconnect") throw Conflict("Unknown T3 command");
@@ -155,38 +189,13 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         if (flag == "--port") port = static_cast<unsigned>(number(args,"port",1,65535));
         else throw Conflict("Unknown T3 connection option: " + flag);
     }
-    const T3SetupLock setup;
-    auto store = openStore(home);
-    if (const auto identities = std::getenv("FLOCK_WEB_IDENTITIES_FILE")) {
-        if (!loadIdentities(store,identities).resolvePerson(localOwner.id))
-            throw Conflict("Configure a Web identity for local-owner before connecting T3");
-    } else if (store.policy().requiresIdentity()) throw Conflict("Set FLOCK_WEB_IDENTITIES_FILE before connecting T3");
-    T3Connections connections(store);
-    const auto previous = connections.settings(localOwner.id);
-    const auto savedPort = previous ? previous->port : 0;
-    if (!port) port = savedPort ? savedPort : 4173;
-    const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
-        [&](const InstallT3Provider& install) {
-            loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
-                std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
-            },true,[&](const std::function<void()>& saveCredential) {
-                const auto refreshProviders = t3ProvidersNeedRefresh([&](std::string_view token) {
-                    return connections.ownsBearer(token);
-                });
-                connections.connect(environment,localOwner.id,port,[&](std::string_view token) {
-                    if (!token.empty()) install(token);
-                    saveCredential();
-                },refreshProviders);
-            });
-        });
-    if (savedPort != port)
-        std::cerr << "T3 skills use Flock Web port " << port << ". Restart 'flock run' if it is already running.\n";
-    try { syncT3Skills(bots.skillCards()); }
-    catch (const std::exception& error) {
-        std::cerr << "Could not export T3 skills: " << error.what() << '\n';
-    }
+    const auto result = connectT3(home,environment,url,port,bots.skillCards(),[](const std::string& authorization) {
+        std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
+    });
+    if (result.value("portChanged",false))
+        std::cerr << "T3 skills use Flock Web port " << result.at("port") << ". Restart 'flock run' if it is already running.\n";
     print({{"environmentId",environment},{"connected",true},
-           {"port",port},{"configuredProviders",providers}});
+           {"port",result.at("port")},{"configuredProviders",result.at("configuredProviders")}});
     return 0;
 }
 
@@ -324,10 +333,40 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     callbacks.sessionT3 = t3.get();
     callbacks.modelStatus = modelStatus;
     callbacks.modelLogin = modelLogin;
+    // Connecting T3 from Flock settings runs the CLI's connect in the background and hands the
+    // authorization URL to the page; it uses the port this Web UI is listening on.
+    struct T3Setup { std::mutex mutex; bool running = false; std::string authorizationUrl, error; };
+    auto t3Setup = std::make_shared<T3Setup>();
+    auto webPort = std::make_shared<std::atomic<unsigned>>(0);
+    callbacks.t3Setup = [t3Setup] {
+        std::lock_guard lock(t3Setup->mutex);
+        return Json{{"running",t3Setup->running},{"authorizationUrl",t3Setup->authorizationUrl},{"error",t3Setup->error}};
+    };
+    callbacks.t3Connect = [t3Setup,webPort,home,&bots](const std::string& environment, const std::string& mcpUrl) {
+        std::lock_guard lock(t3Setup->mutex);
+        if (t3Setup->running) return;
+        t3Setup->running = true;
+        t3Setup->authorizationUrl.clear();
+        t3Setup->error.clear();
+        std::thread([t3Setup,webPort,home,environment,mcpUrl,skills = bots.skillCards()] {
+            std::string error;
+            try {
+                connectT3(home,environment,mcpUrl,webPort->load(),skills,[&](const std::string& url) {
+                    std::lock_guard lock(t3Setup->mutex);
+                    t3Setup->authorizationUrl = url;
+                });
+            } catch (const std::exception& failure) { error = failure.what(); }
+            std::lock_guard lock(t3Setup->mutex);
+            t3Setup->running = false;
+            t3Setup->authorizationUrl.clear();
+            t3Setup->error = error;
+        }).detach();
+    };
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
         server = startWeb(store,port.value_or(savedPort),std::move(callbacks));
+        webPort->store(server->port());
         std::cout << "Flock Web UI at http://127.0.0.1:" << server->port() << std::endl;
     }
     std::signal(SIGINT,requestStop);
