@@ -143,7 +143,6 @@ Decision answerQuestion(const Json& task, std::string_view text) {
 Observation finished() {
     Observation result;
     result.kind = Observation::Kind::Finished;
-    result.settled = true;
     result.status = "completed";
     result.report = "Session report";
     return result;

@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
             const auto& saved = task.at("activeRun").is_null() ? task.at("lastRun") : task.at("activeRun");
             const RunRef ref{saved.at("threadId"),saved.at("runId"),saved.at("link")};
             const auto seen = t3->observe(task.at("environmentId"),task.at("config"),ref);
-            std::cout << Json{{"settled",seen.settled},{"assignedRun",ref.runId},{"resultRun",seen.resultRunId},
+            std::cout << Json{{"settled",seen.kind == Observation::Kind::Finished},{"assignedRun",ref.runId},{"resultRun",seen.resultRunId},
                 {"status",seen.status},{"report",seen.report}}.dump() << '\n';
         } else if (operation == "profile" && argc == 6) {
             Store store(argv[2]);
