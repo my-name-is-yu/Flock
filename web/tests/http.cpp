@@ -1371,6 +1371,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
     auto cb = callbacks();
     std::atomic<bool> unavailable = false;
     std::atomic<unsigned> statusCalls = 0;
+    std::atomic<bool> reconsentRequested = false;
+    cb.modelLogin = [&](bool reconsent) { return reconsent && !reconsentRequested.exchange(true); };
     cb.modelStatus = [&] {
         ++statusCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
@@ -1417,7 +1419,8 @@ void settingsEndpoints(const std::filesystem::path& path) {
           settings.at("rules").size() == 1 && !settings.contains("members"),
           "Flock settings lost the installation policy");
     check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
-                                      {"demo",false},{"needsSignIn",true}},
+                                      {"demo",false},{"needsSignIn",true},{"unavailable",false},
+                                      {"signingIn",false},{"signInError",""},{"canSignIn",true}},
           "Flock settings lost model status or exposed credential fields");
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
@@ -1439,9 +1442,15 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Shared member lost read-only settings or gained access to model status");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
+    browser.post("/api/settings/model-login",{{"reconsent",true}},403);
+    check(!reconsentRequested,"a non-root started model sign-in");
     const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};
     browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
+    browser.post("/api/settings/model-login",{{"reconsent","true"}},400);
+    browser.post("/api/settings/model-login",{{"reconsent",true}},202);
+    check(reconsentRequested,"root could not request model reconsent");
+    browser.post("/api/settings/model-login",{{"reconsent",true}},409);
     browser.post("/api/settings/rule",removal);
     check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
     browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);

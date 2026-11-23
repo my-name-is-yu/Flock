@@ -16,6 +16,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 namespace flockv0::app {
@@ -222,13 +223,53 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     std::function<Json()> modelStatus;
+    std::function<bool(bool)> modelLogin;
+    struct SignIn {
+        std::mutex mutex;
+        bool running = false;
+        unsigned attempts = 0;
+        std::string error;
+        std::jthread worker;
+    } signIn;
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
         modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
-        modelStatus = [model = chatgpt.get()] { return model->webStatus(); };
+        modelStatus = [model = chatgpt.get(),&signIn] {
+            unsigned attempts;
+            {
+                std::lock_guard lock(signIn.mutex);
+                if (signIn.running) return Json{{"signingIn",true}};
+                attempts = signIn.attempts;
+            }
+            Json status;
+            try { status = model->webStatus(); }
+            catch (const std::exception&) { status = {{"unavailable",true}}; }
+            std::lock_guard lock(signIn.mutex);
+            if (signIn.running) return Json{{"signingIn",true}};
+            if (signIn.attempts != attempts) status = {{"unavailable",true}};
+            if (!signIn.error.empty()) status["signInError"] = signIn.error;
+            return status;
+        };
+        modelLogin = [&signIn,directory = home / "credentials" / "chatgpt"](bool reconsent) {
+            std::lock_guard lock(signIn.mutex);
+            if (signIn.running) return false;
+            signIn.worker = std::jthread([&signIn,directory,reconsent](std::stop_token stop) {
+                std::string error;
+                try { ChatGPTModel(directory).loginWeb(reconsent,stop); }
+                catch (const ModelError& failure) { error = failure.what(); }
+                catch (const std::exception&) { error = "Could not sign in to ChatGPT."; }
+                std::lock_guard lock(signIn.mutex);
+                signIn.running = false;
+                signIn.error = std::move(error);
+            });
+            signIn.running = true;
+            ++signIn.attempts;
+            signIn.error.clear();
+            return true;
+        };
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
@@ -295,6 +336,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     callbacks.sessionT3 = t3.get();
     callbacks.modelStatus = modelStatus;
+    callbacks.modelLogin = modelLogin;
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;

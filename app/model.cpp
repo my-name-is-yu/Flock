@@ -98,8 +98,14 @@ void checkPrivate(int fd, bool directory) {
     }
 }
 
-std::string invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input) {
-    const bool showLoginInstructions = operation == "login" && fcntl(STDERR_FILENO,F_GETFD) != -1;
+std::string invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input,
+                   std::stop_token stop) {
+    const auto checkStop = [&] {
+        if (stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
+    };
+    checkStop();
+    const bool showLoginInstructions = operation == "login" && !stop.stop_possible() &&
+        fcntl(STDERR_FILENO,F_GETFD) != -1;
     std::filesystem::create_directories(directory.parent_path());
     if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST)
         throw ModelError("Unable to create Flock's private ChatGPT directory", false);
@@ -112,7 +118,9 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     const bool webStatus = operation == "web_status";
     const auto lockDeadline = Clock::now() + 2s;
     while (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
-        if (errno != EWOULDBLOCK && errno != EINTR)
+        const auto lockError = errno;
+        checkStop();
+        if (lockError != EWOULDBLOCK && lockError != EINTR)
             throw ModelError("Unable to lock Flock's ChatGPT credentials",true);
         if (webStatus || Clock::now() >= lockDeadline)
             throw ModelError("Flock's ChatGPT credentials are busy. Finish browser sign-in or retry shortly.",true);
@@ -185,12 +193,14 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     const auto timeout = webStatus ? 1s : operation == "login" ? 365s : 150s;
     const auto deadline = Clock::now() + timeout;
     for (;;) {
+        checkStop();
         pollfd reader {parent.get(),POLLIN,0};
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
         if (remaining <= 0) throw ModelError("ChatGPT transport exceeded its deadline",true);
-        const auto ready = poll(&reader,1,static_cast<int>(remaining));
+        const int wait = stop.stop_possible() ? std::min(100,static_cast<int>(remaining)) : static_cast<int>(remaining);
+        const auto ready = poll(&reader,1,wait);
         if (ready < 0 && errno == EINTR) continue;
-        if (ready == 0) throw ModelError("ChatGPT transport exceeded its deadline",true);
+        if (ready == 0) continue;
         if (ready < 0 || (reader.revents & (POLLERR | POLLNVAL)))
             throw ModelError("Unable to read the ChatGPT transport response",true);
         const auto n = read(parent.get(), buffer, sizeof(buffer));
@@ -583,11 +593,11 @@ Json tokenUsage(const Json& response) {
 
 ChatGPTModel::ChatGPTModel(std::filesystem::path directory) : directory_(std::move(directory)) {}
 
-Json ChatGPTModel::call(std::string_view operation, const Json& input) {
+Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop_token stop) {
     const auto serialized = input.dump(-1, ' ', false, Json::error_handler_t::replace);
     if (serialized.size() > maxTransport)
         throw ModelError("Flock's ChatGPT request exceeded the local transport limit",false);
-    const auto response = Json::parse(invoke(directory_, operation, serialized), nullptr, false);
+    const auto response = Json::parse(invoke(directory_, operation, serialized, stop), nullptr, false);
     if (!response.is_object() || (!response.contains("result") && !response.contains("error")))
         throw ModelError("Flock's ChatGPT transport returned an invalid result", true);
     if (response.contains("error"))
@@ -598,6 +608,9 @@ Json ChatGPTModel::call(std::string_view operation, const Json& input) {
 
 Json ChatGPTModel::login(bool printUrl, bool reconsent) {
     return call("login",{{"printUrl",printUrl},{"reconsent",reconsent}});
+}
+Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop) {
+    return call("login",{{"reconsent",reconsent},{"browserRequired",true}},stop);
 }
 Json ChatGPTModel::status() { return call("status"); }
 Json ChatGPTModel::webStatus() { return call("web_status"); }

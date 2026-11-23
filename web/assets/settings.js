@@ -65,20 +65,13 @@ for (const input of themeInputs) {
 }
 
 async function load() {
+  const modelAtStart = modelRequest;
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
   const data = await response.json();
   const {mode, rules, t3, model} = data;
   canManagePolicy = data.canManagePolicy === true;
-  $('model-section').hidden = !model;
-  $('model').replaceChildren();
-  if (model?.demo) row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
-  else if (model?.unavailable) row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now. Reload to try again.'));
-  else if (model?.connected && !model.needsSignIn) {
-    row('model', emptyLabel('ChatGPT', model.account ? `Saved account ${model.account}` : 'Account registered'));
-    if (!model.planUsage) row('model', emptyLabel('Plan usage unavailable',
-      'Bots can’t use your ChatGPT plan yet. Run ', command('flock model login --reconsent'), ' to grant access.'));
-  } else if (model) row('model', emptyLabel('ChatGPT sign-in needed', 'Run ', command('flock model login'), ' on the machine running Flock to sign in.'));
+  if (modelAtStart === modelRequest && !watchingSignIn) renderModel(model);
   currentMode = mode;
   $('mode-options').classList.toggle('read-only', !canManagePolicy);
   reflectMode(mode);
@@ -175,6 +168,91 @@ async function loadBots() {
   }
 }
 loadBots().catch(() => row('bots', emptyLabel('Could not load Bots', 'Reload the page to try again.')));
+
+let modelPoll = 0;
+let modelRequest = 0;
+let watchingSignIn = false;
+
+function actionButton(item, label, onclick, primary = false) {
+  const control = document.createElement('button');
+  control.type = 'button';
+  control.className = primary ? 'button primary' : 'button';
+  control.textContent = label;
+  control.onclick = onclick;
+  item.append(control);
+  return control;
+}
+
+function pollModel() {
+  clearTimeout(modelPoll);
+  modelPoll = setTimeout(() => void refreshModel(), 2000);
+}
+async function refreshModel() {
+  const request = ++modelRequest;
+  try {
+    const response = await fetch('/api/settings');
+    if (request !== modelRequest) return;
+    if (response.status === 401 || response.status === 403) return renderModel(null);
+    if (!response.ok) throw new Error();
+    const {model} = await response.json();
+    if (request === modelRequest) renderModel(model);
+  } catch {
+    if (request === modelRequest && watchingSignIn) pollModel();
+  }
+}
+
+async function signIn(reconsent, control) {
+  if (watchingSignIn) return;
+  watchingSignIn = true;
+  ++modelRequest;
+  control.disabled = true;
+  try {
+    const response = await fetch('/api/settings/model-login', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
+      body: JSON.stringify({ reconsent }),
+    });
+    if (!response.ok && (response.status !== 409 || (await response.json()).error !== 'sign_in_pending')) throw new Error();
+  } catch {
+    watchingSignIn = false;
+    control.disabled = false;
+    $('status').textContent = 'Could not start ChatGPT sign-in.';
+    return;
+  }
+  $('status').textContent = '';
+  renderModel({signingIn: true});
+  await refreshModel();
+}
+
+function renderModel(model) {
+  clearTimeout(modelPoll);
+  $('model-section').hidden = !model;
+  $('model').replaceChildren();
+  const pending = model?.signingIn || (watchingSignIn && model?.unavailable && !model.signInError);
+  watchingSignIn = !!pending;
+  if (!model) return;
+  if (model.demo) {
+    row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
+    return;
+  }
+  if (pending) {
+    row('model', emptyLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the machine running Flock.'));
+    pollModel();
+    return;
+  }
+  if (model.signInError) row('model', emptyLabel('Sign-in didn’t finish', model.signInError)).classList.add('settings-row-error');
+  if (model.unavailable) {
+    row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now.'));
+  } else if (model.connected && !model.needsSignIn) {
+    row('model', emptyLabel('ChatGPT', model.account ? `Saved account ${model.account}` : 'Account registered'));
+    if (!model.planUsage) {
+      const item = row('model', emptyLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
+      if (model.canSignIn) actionButton(item, 'Allow plan usage', (event) => void signIn(true, event.currentTarget), true);
+    }
+  } else {
+    const item = row('model', emptyLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
+    if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
+  }
+}
 
 async function submit(path, data) {
   if (!canManagePolicy || savingPolicy) return false;

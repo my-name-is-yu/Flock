@@ -241,11 +241,14 @@ function openBrowser(url) {
   });
 }
 
-async function showBrowserOrPrintUrl(url, printUrl, callbackSettled) {
-  if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
+async function showBrowserOrPrintUrl(url, printUrl, callbackSettled, browserRequired) {
+  if (browserRequired) {
+    if (!await openBrowser(url) && !callbackSettled())
+      throw new Failure("Flock could not open a browser for ChatGPT sign-in on this machine");
+  } else if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
 }
 
-async function login({ printUrl = false, reconsent = false } = {}) {
+async function login({ printUrl = false, reconsent = false, browserRequired = false } = {}) {
   let profile = readProfile();
   if (!profile.hostId) {
     profile = { hostId: `urn:uuid:${randomUUID()}` };
@@ -277,7 +280,7 @@ async function login({ printUrl = false, reconsent = false } = {}) {
       error => { callbackSettled = true; throw error; },
     );
     const [{ code, clientId }] = await Promise.all([
-      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled),
+      callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled, browserRequired),
     ]);
     if (!profile.clientId) {
       profile.clientId = clientId;

@@ -191,3 +191,6 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
   .settings-panel:not([hidden]) > section { animation: none; }
   .segmented label, .settings-nav a[data-section] { transition: none; }
 }
+.settings-row-error .row-label strong { color: var(--danger); }
+.settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
+.settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
