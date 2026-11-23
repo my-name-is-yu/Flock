@@ -40,6 +40,9 @@ async function exercise(artifactPath) {
     Math.abs(compact().getBoundingClientRect().height - height) < 2;
   const desktop = innerWidth > 700;
   await waitFor(() => hasCompactHeight(desktop ? 200 : 252), 'A short diagram did not follow its responsive content height');
+  const relative = () => document.querySelector('#event-6 iframe');
+  await waitFor(() => relative() && content(relative(), 'viewport') && relative().getBoundingClientRect().height >= 150,
+    'An inline diagram that uses 100vh collapsed');
   const theme = (mode) => document.querySelector(`[data-theme-mode="${mode}"]`).click();
   const diagramColor = (frame) => frame.contentWindow.getComputedStyle(content(frame, 'diagram')).backgroundColor;
   theme('light');
@@ -117,6 +120,12 @@ async function exercise(artifactPath) {
   page.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true }));
   check(!dialog.open && document.activeElement === expand && inline.isConnected,
     'Escape in the expanded frame did not close the viewer and restore focus');
+  await waitFor(() => !dialog.querySelector('iframe'), 'Closing with Escape left the expanded frame mounted');
+  expand.click();
+  await waitFor(() => dialog.querySelector('iframe')?.contentDocument?.getElementById('diagram-end'),
+    'The expanded diagram did not reopen');
+  dialog.querySelector('#close-detail').click();
+  await waitFor(() => !dialog.open && !dialog.querySelector('iframe'), 'Clicking Close left the expanded frame mounted');
   check(!window.artifactScriptRan, 'A script executed inside the diagram frame');
   check(!window.artifactEventRan, 'An inline event handler executed inside the diagram frame');
 }
@@ -128,6 +137,7 @@ const index = (await read('/index.html')).toString()
 const id = digit => `web-${digit.repeat(32)}`;
 const path = `/api/messages/2/artifacts/${id('1')}`;
 const compactPath = `/api/messages/5/artifacts/${id('5')}`;
+const viewportPath = '/api/messages/6/artifacts/viewport';
 const bot = { id: 'release', name: 'Release' };
 const time = Math.floor(Date.now() / 1000);
 const message = (id, text, artifact) => ({ id, kind: artifact ? 'conversation_reply' : 'conversation_message', time: time + id,
@@ -137,7 +147,8 @@ const events = [message(1, 'Diagram the flow from Flock to T3.'),
   message(2, 'Flock forwards the request to T3.', diagram('opaque-id', 'Request and result', path)),
   message(3, 'The reply is still available.', diagram(id('2'), 'Missing diagram', `/api/messages/3/artifacts/${id('2')}`)),
   message(4, 'An external reply.', { id: `flock-${'3'.repeat(32)}`, title: 'External preview' }),
-  message(5, 'A compact diagram.', diagram(id('5'), 'Compact flow', compactPath))];
+  message(5, 'A compact diagram.', diagram(id('5'), 'Compact flow', compactPath)),
+  message(6, 'A viewport diagram.', diagram(id('6'), 'Viewport flow', viewportPath))];
 const view = { bot, events, olderBefore: 0, presence: 'idle', activeSessions: [], sessionTasks: [], waits: [], canDecide: true };
 const mimeTypes = { '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const appPolicy = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-src 'self'";
@@ -189,6 +200,9 @@ const server = createServer(async (request, response) => {
       response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Security-Policy': artifactPolicy, 'Cache-Control': 'no-store' });
       response.end(`<!doctype html><style>body{margin:0} #compact{height:200px}
         @media(max-width:480px){#compact{height:252px}}</style><div id="compact">Compact flow</div>`);
+    } else if (pathname === viewportPath) {
+      response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Security-Policy': artifactPolicy, 'Cache-Control': 'no-store' });
+      response.end('<!doctype html><style>body{margin:0} #viewport{height:100vh}</style><div id="viewport">Viewport flow</div>');
     } else if (pathname === '/diagram-test-image') {
       imageRequests++;
       response.writeHead(204).end();

@@ -2394,11 +2394,16 @@ function clearDetailSectionTransition() {
   detailSectionTimer = 0;
   elements['detail-body'].classList.remove('section-switching');
 }
-function closeDetail() {
-  detail = null;
+function releaseDetailContent() {
   clearDetailSectionTransition();
   releaseDetailAvatar();
+  roleSize.disconnect();
+  if (elements.detail.classList.contains('diagram-detail')) elements['detail-body'].replaceChildren();
+}
+function closeDetail() {
+  detail = null;
   if (elements.detail.open) elements.detail.close();
+  releaseDetailContent();
 }
 function openDetail(selection) {
   if (!view?.data) return;
@@ -2413,6 +2418,11 @@ function openDetail(selection) {
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
 elements.detail.addEventListener('cancel', (event) => {
+  if (elements.detail.classList.contains('diagram-detail')) {
+    event.preventDefault();
+    closeDetail();
+    return;
+  }
   const keep = elements.detail.querySelector('.wait-stop-keep');
   if (!keep || keep.disabled) return;
   event.preventDefault();
@@ -2420,10 +2430,7 @@ elements.detail.addEventListener('cancel', (event) => {
 });
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
-  clearDetailSectionTransition();
-  releaseDetailAvatar();
-  roleSize.disconnect();
-  if (detail?.kind === 'diagram') elements['detail-body'].replaceChildren();
+  releaseDetailContent();
   const origin = detailOrigin;
   detailOrigin = null;
   const active = document.activeElement;
@@ -2849,7 +2856,7 @@ function renderDetail() {
   if (detail.kind === 'diagram') {
     if (changed('detail', detail)) {
       elements['detail-title'].textContent = detail.title;
-      replaceDetail(() => expandedDiagram(detail, icon));
+      replaceDetail(() => expandedDiagram(detail, icon, closeDetail));
     }
     return;
   }

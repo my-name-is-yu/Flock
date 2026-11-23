@@ -1,16 +1,19 @@
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+const inlineMinimumHeight = 160;
 
 class DiagramPreview extends HTMLElement {
   #path;
   #title;
   #expand;
+  #close;
   #lifetime;
 
-  constructor(path, title, expand) {
+  constructor({ previewPath, title }, { expand, close }) {
     super();
-    this.#path = path;
+    this.#path = previewPath;
     this.#title = title;
     this.#expand = expand;
+    this.#close = close;
   }
 
   connectedCallback() {
@@ -66,10 +69,8 @@ class DiagramPreview extends HTMLElement {
           doc.addEventListener('auxclick', preventNavigation, { capture: true, signal });
           doc.addEventListener('keydown', (event) => {
             if (event.key !== 'Escape') return;
-            const dialog = this.closest('dialog');
-            if (!dialog?.open) return;
             event.preventDefault();
-            dialog.close();
+            this.#close();
           }, { signal });
         }
       }, { once: true, signal });
@@ -88,9 +89,9 @@ class DiagramPreview extends HTMLElement {
       const width = this.clientWidth;
       if (!width) return;
       lastWidth = width;
-      // A small measurement viewport lets a compact preview shrink on reflow.
-      frame.style.height = '1px';
-      const height = Math.max(1, doc.documentElement.scrollHeight, doc.body?.scrollHeight ?? 0);
+      // Measure at a usable minimum so viewport-relative content also fits the inline card.
+      frame.style.height = inlineMinimumHeight + 'px';
+      const height = Math.max(inlineMinimumHeight, doc.documentElement.scrollHeight, doc.body?.scrollHeight ?? 0);
       frame.style.height = `${height}px`;
       this.dispatchEvent(new Event('diagram-layout'));
     };
@@ -112,8 +113,8 @@ class DiagramPreview extends HTMLElement {
 
 customElements.define('flock-diagram-preview', DiagramPreview);
 
-function diagramPreview({ previewPath, title }, expand = null) {
-  const preview = new DiagramPreview(previewPath, title, expand);
+function diagramPreview(selection, actions) {
+  const preview = new DiagramPreview(selection, actions);
   preview.className = 'diagram-preview';
   return preview;
 }
@@ -145,14 +146,14 @@ export function diagramCard(artifact, { icon, open, onLayout }) {
   expand.setAttribute('aria-haspopup', 'dialog');
   expand.append(icon('expand'), document.createTextNode('Expand'));
   caption.append(icon('diagram'), label, expand);
-  const preview = diagramPreview(selection, expand);
+  const preview = diagramPreview(selection, { expand });
   preview.addEventListener('diagram-layout', onLayout);
   card.append(caption, preview);
   return card;
 }
 
-export function expandedDiagram(selection, icon) {
-  const preview = diagramPreview(selection);
+export function expandedDiagram(selection, icon, close) {
+  const preview = diagramPreview(selection, { close });
   const actions = makeElement('div', 'diagram-controls');
   const magnification = makeElement('div', 'diagram-magnification');
   magnification.setAttribute('role', 'group');

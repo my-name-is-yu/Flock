@@ -444,6 +444,18 @@ void responseContract() {
     check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
           responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
+    auto artifactInput = input;
+    artifactInput.tools = {"publish_artifact"};
+    const auto htmlGuidance = [](const ModelInput& source) {
+        return responseRequest(source).at("tools").at(0).at("tools").at(0)
+            .at("parameters").at("properties").at("html").at("description").get<std::string>();
+    };
+    check(htmlGuidance(artifactInput).find("{{flock-image:ATTACHMENT_ID}}") != std::string::npos,
+          "the Web artifact schema must describe inspected images");
+    artifactInput.event["channel"] = Json::object();
+    check(htmlGuidance(artifactInput) == "HTML document to preview. Scripts are disabled.",
+          "external channels must keep their HTML preview guidance");
+
     auto batchInput = input;
     batchInput.tools = {"flock_session_search","reply"};
     check(responseRequest(batchInput).at("parallel_tool_calls") == false,"One batchable tool enabled parallel calls");
