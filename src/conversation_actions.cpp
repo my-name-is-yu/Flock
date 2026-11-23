@@ -87,6 +87,9 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             saveTurnResults(id,step,Json::array({Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},
                 {"delivery","unknown"},{"error","Flock restarted while sending this, so T3 may have received it. "
                                                "Check the Session before sending it again"}}}));
+        } else if (control == SessionControl::Steer && !t3.supportsRunTargetedSteer()) {
+            saveTurnResults(id,step,Json::array({toolFailure("This T3 connection cannot target a specific running Run. "
+                "Use send_to_task to save the instruction for the task's next safe point.")}));
         } else if (!offered) {
             saveTurnResults(id,step,Json::array({toolFailure("Session control was not offered for this turn")}));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {

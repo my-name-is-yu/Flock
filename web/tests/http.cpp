@@ -58,7 +58,7 @@ void boundary(Browser& browser) {
         auto asset = browser.client.Get(path);
         check(asset && asset->status == 200 && !asset->body.empty(),"missing embedded browser asset");
     }
-    const auto draft = R"({"botId":"release","request":"do not accept this"})";
+    const auto draft = R"({"botId":"release","clientRequestId":"draft","request":"do not accept this"})";
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/",httplib::Headers{{"Host","rebound.invalid"}}),403);
     Browser::checked(browser.client.Get("/api/bots",httplib::Headers{{"Origin","https://other.invalid"}}),403);
@@ -78,7 +78,69 @@ void boundary(Browser& browser) {
         check(browser.get(path+"?bot=release").is_array(),"Missing inspector collection");
         Browser::checked(browser.client.Get(path+"?bot=missing"),404);
     }
-    browser.post("/api/requests",{{"botId","broken"},{"request","test"}},422);
+    browser.post("/api/requests",{{"botId","broken"},{"clientRequestId","broken-request"},{"request","test"}},422);
+}
+
+void explicitRequestReceipts(const std::filesystem::path& path) {
+    const Person owner{"owner",true};
+    auto web = callbacks();
+    web.authenticate = [](std::string_view credential) {
+        if (credential == "Bearer requester") return Person{"requester",false};
+        if (credential == "Bearer other") return Person{"other",false};
+        return Person{};
+    };
+    const Json request{{"botId","release"},{"clientRequestId","draft"},{"request","Draft the release notes"}};
+    Json accepted;
+    {
+        Store store(path);
+        auto access = store.access();
+        access.personGrant(owner,"release","requester",Role::decide,GrantChange::grant);
+        access.personGrant(owner,"release","other",Role::decide,GrantChange::grant);
+        access.personGrant(owner,"triage","requester",Role::decide,GrantChange::grant);
+        auto configured = web;
+        configured.intake = [route=web.intake,&access,&owner](std::string_view bot, std::string_view text) {
+            if (text == "Revoke while loading settings")
+                access.personGrant(owner,"release","requester",Role::decide,GrantChange::revoke);
+            return route(bot,text);
+        };
+        const auto server = startWeb(store,0,configured);
+        Browser requester(*server), other(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        other.client.set_default_headers({{"Authorization","Bearer other"}});
+
+        auto missingId = request;
+        missingId.erase("clientRequestId");
+        requester.post("/api/requests",missingId,400);
+        accepted = requester.post("/api/requests",request,201);
+        check(requester.post("/api/requests",request,201) == accepted,"identical retry created a new Task");
+        check(other.post("/api/requests",request,201) != accepted,"different actors shared a receipt");
+        auto otherBot = request;
+        otherBot["botId"] = "triage";
+        check(requester.post("/api/requests",otherBot,201) != accepted,"different Bots shared a receipt");
+
+        const Json revoked{{"botId","release"},{"clientRequestId","revoked"},{"request","Revoke while loading settings"}};
+        requester.post("/api/requests",revoked,403);
+        requester.post("/api/requests",request,403);
+        check(store.tasks().size() == 3,"denied request or retry inserted another Task");
+        access.personGrant(owner,"release","requester",Role::decide,GrantChange::grant);
+    }
+    {
+        Store store(path);
+        web.bots = [] { return Json::array(); };
+        web.intake = [](std::string_view, std::string_view) -> Intake {
+            throw std::runtime_error("The Bot settings are temporarily unavailable");
+        };
+        const auto server = startWeb(store,0,web);
+        Browser requester(*server);
+        requester.client.set_default_headers({{"Authorization","Bearer requester"}});
+        check(requester.post("/api/requests",request,201) == accepted,
+              "Task receipt was lost on reopen or needed current Bot settings");
+        auto changed = request;
+        changed["request"] = "Draft something else";
+        check(requester.post("/api/requests",changed,409).at("error") == "request_conflict",
+              "changing the request behind a receipt did not conflict");
+        check(store.tasks().size() == 3,"opening or replaying persisted receipts inserted a Task");
+    }
 }
 
 void checkPresence(Browser& browser, const Json& list, const std::string& bot, std::string_view expected) {
@@ -560,7 +622,8 @@ void exercise(const std::filesystem::path& path) {
         return row["kind"] == "waiting" && row["data"]["id"] == waitId;
     }),"question fixture did not cross a history page boundary");
 
-    const auto next = browser.post("/api/requests",{{"botId","release"},{"request","次の版の変更点を調べる"},
+    const auto next = browser.post("/api/requests",{{"botId","release"},{"clientRequestId","next-release"},
+        {"request","次の版の変更点を調べる"},
         {"environmentId","ignored"},{"projectId","ignored"},{"trigger",{{"triggerKind","ignored"}}}},201).at("taskId").get<Id>();
     const auto afterSubmit = browser.get("/api/view?bot=release");
     check(afterSubmit["waits"][0]["wait"]["id"] == waitId && afterSubmit["queued"][0]["blockedBy"]["id"] == release,
@@ -1290,6 +1353,7 @@ int main() {
     try {
         TestDirectory directory;
         exercise(directory.path / "state.db");
+        explicitRequestReceipts(directory.path / "request-receipts.db");
         sidebarReplies(directory.path / "sidebar.db");
         failedCompletion(directory.path / "failed-completion.db");
         recurringRequestStatus(directory.path / "recurring-requests.db");

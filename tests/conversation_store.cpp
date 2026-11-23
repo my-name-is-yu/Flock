@@ -344,7 +344,7 @@ void savedCallsAreCheckedBeforeExecution() {
           "An unavailable or protected saved call executed");
 }
 
-void sessionNoteIsNotResentAfterARestart(bool webEvidence) {
+void sessionNoteIsNotResentAfterARestart(bool webEvidence, bool started) {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
     RuntimeFixture execution(store);
@@ -363,16 +363,19 @@ void sessionNoteIsNotResentAfterARestart(bool webEvidence) {
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + "," + step + ",'" +
                 Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
                               {"reason","Saved"}}}).dump() +
-                "','" + effect.dump() + "')");
+                "'," + (started ? "'" + effect.dump() + "'" : "NULL") + ")");
     Json seen;
     execution.model.conversation = [&](const ModelInput& input) {
         seen = turn(input);
         return say("I may have sent that already.");
     };
     execution.runtime.runConversations();
-    check(seen.size() == (webEvidence ? 2 : 1) && seen.back()["result"]["ok"] == false &&
-          seen.back()["result"]["delivery"] == "unknown" && execution.t3.steers == 0,
-          "a note interrupted by a restart was sent again or reported as not delivered");
+    check(seen.size() == (webEvidence ? 2 : 1) && execution.t3.steers == 0,
+          "a saved note ran on a connection without Run-targeted steering");
+    const auto result = seen.back().at("result");
+    check(result.at("ok") == false && (started ? result.value("delivery","") == "unknown" :
+          !result.contains("delivery") && result.at("error").get<std::string>().find("next safe point") != std::string::npos),
+          "a saved note lost the distinction between an uncertain and a refused delivery");
 }
 
 void transientFailureResumesAfterTheLastFinishedStep() {
@@ -818,8 +821,9 @@ int main() {
         rejectedSessionReadStillAllowsAnOrdinaryReply();
         savedCallsAreCheckedBeforeExecution();
         transientFailureResumesAfterTheLastFinishedStep();
-        sessionNoteIsNotResentAfterARestart(false);
-        sessionNoteIsNotResentAfterARestart(true);
+        sessionNoteIsNotResentAfterARestart(false,true);
+        sessionNoteIsNotResentAfterARestart(true,true);
+        sessionNoteIsNotResentAfterARestart(false,false);
         concurrentWorkerRecoversFromWriterContention();
         concurrentWorkerSurfacesStructuralStorageFailure();
         shutdownLeavesAnUnsentRunReadyForRestart();

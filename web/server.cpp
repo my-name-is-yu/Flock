@@ -50,6 +50,7 @@ std::string_view verifiedViewer(const WebCallbacks& callbacks, const Person& per
 }
 
 struct InputError : std::runtime_error { using std::runtime_error::runtime_error; };
+struct RequestIntakeError { int status; const char* code; };
 
 Id queryId(const Request& req, const char* key, bool optional) {
     const auto error = optional ? "invalid_cursor" : "invalid_id";
@@ -555,35 +556,38 @@ private:
         try {
             const auto bot = requiredText(body,"botId",1024);
             const auto actor = web::person(callbacks_,req);
+            if (mutation == Mutation::Request) {
+                const auto request = requiredText(body,"request",16000);
+                const auto clientId = requiredText(body,"clientRequestId",256);
+                const auto taskId = store_.submitRequest(actor,bot,clientId,request,
+                    [this](std::string_view id, std::string_view text) {
+                        if (!botById(bots(),id)) throw RequestIntakeError{404,"bot_not_found"};
+                        try { return callbacks_.intake(id,text); }
+                        catch (const std::exception&) { throw RequestIntakeError{422,"intake_settings"}; }
+                    });
+                return json(res,201,{{"taskId",taskId}});
+            }
             if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
             if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
-            if (mutation != Mutation::Operation) {
-                const auto message = mutation == Mutation::Message;
-                const auto request = requiredText(body,message ? "text" : "request",16000);
-                const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
-                const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
+            if (mutation == Mutation::Message) {
+                const auto request = requiredText(body,"text",16000);
+                const auto clientMessageId = requiredText(body,"clientMessageId",256);
+                const auto replyTo = body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments",Json::array());
-                if (message) {
-                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
-                    if (previous) return json(res,201,*previous);
-                    if (callbacks_.authenticate && !callbacks_.resolveIdentity)
-                        return error(res,503,"message_identity_unavailable");
-                }
+                const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
+                if (previous) return json(res,201,*previous);
+                if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                    return error(res,503,"message_identity_unavailable");
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
-                catch (const std::exception&) {
-                    if (!message) return error(res,422,"intake_settings");
-                }
+                catch (const std::exception&) {}
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) {
-                    const auto receipt = callbacks_.authenticate
-                        ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
-                        : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
-                    return json(res,201,receipt);
-                }
-                return json(res,201,{{"taskId",store_.submit(intake)}});
+                const auto receipt = callbacks_.authenticate
+                    ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
+                    : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
+                return json(res,201,receipt);
             }
             const auto operation = requiredText(body,"operation",32);
             const auto id = bodyId(body,"taskId");
@@ -595,6 +599,7 @@ private:
             store_.operate(actor,{bot,id,wait,bodyId(body,"targetRevision",0),bodyId(body,"targetGeneration",0)},operation,data);
             json(res,200,{{"accepted",true}});
         } catch (const InputError& e) { error(res,400,e.what()); }
+        catch (const RequestIntakeError& e) { error(res,e.status,e.code); }
         catch (const DecisionDenied&) { error(res,403,"access_denied"); }
         catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {

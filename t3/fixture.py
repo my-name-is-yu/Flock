@@ -2,7 +2,9 @@
 import base64
 import hashlib
 import json
+import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -210,11 +213,6 @@ class Fixture(BaseHTTPRequestHandler):
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
-        if name == "t3_thread_send" and args["mode"] == "steer":
-            assert scenario in ("running", "resumed") and args["threadId"] == "thread"
-            assert args["clientRequestId"] == "flock-turn-7-2"
-            return {"threadId": "thread", "runId": state.get("steerReply") or ("continued" if scenario == "resumed" else "root"),
-                    "delivery": "steered"}
         if name == "t3_thread_send":
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
@@ -454,6 +452,10 @@ class Fixture(BaseHTTPRequestHandler):
             self.item("human", 6, "root-run", "user_message", "[Flock result] Complete.", "mcp") |
                 {"messageId": "sent-id"},
         ]
+        if is_root and state.get("handoffText"):
+            rows[-1] = self.item("human", 6, "next-run", "user_message", state["handoffText"], "mcp") | {
+                "messageId": "sent-id"}
+            rows.append(self.item("human", 7, "next-run", "assistant_message", "Received consultation reply."))
         if is_root and state.get("stockHistory") == "late-human":
             rows = [self.item("human", position, "root-run", "assistant_message", f"Progress {position}")
                     for position in range(1, 26)]
@@ -562,12 +564,108 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
+def test_headless_handoff(server, flock, temp):
+    home = Path(temp)
+    args = [flock, "--home", str(home)]
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCK_")}
+    subprocess.run(args + ["access", "grant", "release", "consult", '["env-1","human"]', "reply-once"],
+                   env=env, check=True, capture_output=True, timeout=5)
+    identities = home / "identities.json"
+    identities.write_text(json.dumps([
+        {"authorization": "Bearer fixture-identity", "person": "alice", "adminRoot": True},
+        {"authorization": "Bearer fixture-revoked", "person": "bob"},
+    ]), encoding="utf-8")
+    identities.chmod(0o600)
+    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+
+    credential_dir = home / "credentials" / "t3"
+    credential_dir.mkdir(mode=0o700, parents=True)
+    digest = base64.urlsafe_b64encode(hashlib.sha256(b"env-1").digest()).decode().rstrip("=")
+    generation = "a" * 43
+    credential = credential_dir / f"t3-{digest}.json"
+    credential.write_text(json.dumps({
+        "environmentId": "env-1", "mcpUrl": server.origin + "/mcp", "token": "fixture.signed-token",
+        "generation": generation, "expiresAt": int(time.time()) + 60, "operate": True,
+    }), encoding="utf-8")
+    credential.chmod(0o600)
+    handoff_text = "[Flock Bot release | request request-1 | action command-1]\nConsultation reply"
+    server.state.update(handoffText=handoff_text, finalized=True)
+
+    with sqlite3.connect(home / "flock.sqlite3") as db:
+        # Simulate a daemon exit after T3 accepted the reply and before Flock saved the receipt.
+        db.execute("INSERT INTO return_channels VALUES(1,'env-1','project','human','','request-1','',"
+                   "'release','alice','{\"request\":\"Review the release\"}')")
+        db.execute("INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor) "
+                   "VALUES(1,'active',?,'null','command-1',4)", (generation,))
+        db.execute("INSERT INTO thread_deliveries(command_id,channel_id,generation,text,state,cursor) "
+                   "VALUES('command-1',1,1,?,1,4)", (handoff_text,))
+
+        # Bob has lost access and Carol is absent from the identity directory.
+        for channel, owner in [(2, "bob"), (3, "carol")]:
+            delegation = f"delegation-{channel}"
+            sender, recipient = channel * 2 - 1, channel * 2
+            db.execute("INSERT INTO return_channels VALUES(?,'env-1','project',?,'',?,'',"
+                       "'release',?,?)",
+                       (channel, f"paused-{channel}", f"request-{channel}", owner,
+                        json.dumps({"request": "Review the paused release"})))
+            db.execute("INSERT INTO session_controls(channel_id,state,generation,auth_generation,permission,consult_command,event_cursor) "
+                       "VALUES(?,'paused',2,?,?,'',0)",
+                       (channel, generation, json.dumps({"goal": "Review", "allowDelegation": True})))
+            db.execute("INSERT INTO specialist_budgets(channel_id,allowance) VALUES(?,1)", (channel,))
+            db.executemany("INSERT INTO tasks VALUES(?,'release','env-1','project',?,1,?)",
+                           [(sender, "completed", "{}"),
+                            (recipient, "queued", json.dumps({
+                                "activeRun": None, "environmentId": "env-1", "eventId": 0,
+                                "specialistRole": "executor", "specialistDelegationId": delegation,
+                            }))])
+            db.execute("INSERT INTO peer_exchanges VALUES(?,'specialist','closed','',?,?,'env-1',NULL)",
+                       (delegation, sender, recipient))
+            db.execute("INSERT INTO specialist_delegations VALUES(?,?,1,'Review','Done','',NULL,?,?)",
+                       (delegation, channel, sender, recipient))
+
+    state = None
+    with subprocess.Popen(args + ["run", "--no-web"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            deadline = time.monotonic() + 8
+            with sqlite3.connect(home / "flock.sqlite3") as db:
+                while daemon.poll() is None and time.monotonic() < deadline:
+                    state, = db.execute("SELECT state FROM session_controls WHERE channel_id=1").fetchone()
+                    if state == "completed":
+                        break
+                    time.sleep(0.05)
+        finally:
+            if daemon.poll() is None:
+                daemon.terminate()
+            try:
+                stdout, stderr = daemon.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.communicate()
+                raise
+    assert daemon.returncode == 0 and "headless mode" in stdout, (stdout, stderr)
+    assert state == "completed", f"accepted Session handoff remained {state!r} after restart: {stderr}"
+    with sqlite3.connect(home / "flock.sqlite3") as db:
+        recovered = db.execute("""
+            SELECT r.person_id, c.state, c.generation, t.state,
+                   EXISTS(SELECT 1 FROM journal WHERE task_id=t.id AND kind='cancel_requested')
+            FROM specialist_delegations d JOIN return_channels r ON r.id=d.channel_id
+            JOIN session_controls c ON c.channel_id=r.id JOIN tasks t ON t.id=d.recipient_task
+        """).fetchall()
+        assert {row[0] for row in recovered} == {"bob", "carol"}, recovered
+        for owner, state, generation, task, cancelled in recovered:
+            assert (state, generation) == ("paused", 2), owner
+            assert task in ("cancelling", "cancelled") and cancelled, (owner, task)
+    assert "t3_thread_send" not in server.state.get("effects", {}), "recovery resent an already accepted reply"
+
+
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
-    server.stock_thread = sys.argv[2:] == ["stock-thread"]
-    if server.stock_thread:
+    headless_handoff = sys.argv[2:] == ["headless-handoff"]
+    server.stock_thread = headless_handoff or sys.argv[2:] == ["stock-thread"]
+    if server.stock_thread and not headless_handoff:
         root = temp + "/project"
         good = temp + "/worker"
         wrong = temp + "/wrong-worker"
@@ -591,6 +689,9 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif headless_handoff:
+            test_headless_handoff(server, sys.argv[1], temp)
             code = 0
         else:
             code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode

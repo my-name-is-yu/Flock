@@ -295,7 +295,7 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         fields["resume"] = {{"type","boolean"},{"description",
             "True only to resume the cancelled task that produced sourceResultMessageId, inheriting its criteria and instructions."}};
     } else if (name == "send_to_task") {
-        description = "Pass an additional instruction to an active task without changing its intent or criteria.";
+        description = "Save an additional instruction for an active task's next safe point, without changing its intent or criteria.";
         integer("taskId","The task to instruct.",true);
         integer("generation","The task's generation from the latest task list or tool result.",true);
         fields["generation"]["minimum"] = 0;
@@ -652,8 +652,11 @@ understand what they want, then act with your tools and end the turn with reply.
 Tasks do the work: start_task creates one, send_to_task records an instruction for an active task's next
 safe point, change_task changes its intent, criteria, or environment, answer_task_question answers a task's
 open user_question, and cancel_task stops the whole task. Use record_task_blocker to record what
-blocks an active task and withdraw_task_question when an open question no longer needs an answer. message_session delivers a note to a running
-Session immediately, and interrupt_session asks T3 to interrupt that Run while keeping the task open.
+blocks an active task and withdraw_task_question when an open question no longer needs an answer.
+Use message_session, when offered, to deliver a note to a running Session immediately. If it is unavailable,
+use send_to_task to save the instruction for the next safe point. Tell the user when you have saved an
+instruction and, if a Run is active, that it has yet to receive it. Report immediate delivery only when
+message_session confirms it. interrupt_session asks T3 to interrupt a Run while keeping the task open.
 Use read_result and find_tasks to inspect results and older tasks. The current task's doneWhen takes
 precedence over older criteria in history. If intentTruncated or
 doneWhenTruncated is true, use find_tasks with the taskId to read the full contract before changing it.

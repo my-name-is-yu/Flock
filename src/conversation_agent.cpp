@@ -743,6 +743,7 @@ LIMIT 1
     const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply","read_tool_result"} : turnTools;
+    if (!t3.supportsRunTargetedSteer()) std::erase(tools,"message_session");
     if (gitHost && notification) {
         appendGitNotificationTools(message.routing.at("gitEvent"),tools);
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
@@ -933,8 +934,9 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        const bool sessionControl = decision.tool == "message_session" || decision.tool == "interrupt_session";
-        if (sessionControl && (decision.rejection.empty() || sessionEffect)) {
+        const bool steer = decision.tool == "message_session";
+        const bool sessionControl = steer || decision.tool == "interrupt_session";
+        if (sessionControl && (decision.rejection.empty() || sessionEffect || (steer && !t3.supportsRunTargetedSteer()))) {
             if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
             continue;
         }
