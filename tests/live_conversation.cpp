@@ -67,9 +67,13 @@ struct Runs : T3 {
     std::map<std::string,Observation> runs;
     std::vector<Command> notes;
     std::vector<std::string> interrupted;
+    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&, const Json&) override { return "live-eval"; }
     Delivery send(const Command& command) override {
         if (command.tool == "steer") {
+            const auto run = runs.find(command.target.runId);
+            if (run == runs.end() || run->second.kind != Observation::Kind::Running)
+                return {Delivery::Kind::NotAccepted,{},"The assigned Run is no longer running",true};
             notes.push_back(command);
             return {Delivery::Kind::Accepted,command.target,{}};
         }

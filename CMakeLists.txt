@@ -40,7 +40,7 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
+                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
                        src/session_handoff.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
