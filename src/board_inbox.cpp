@@ -230,17 +230,33 @@ Json Store::decisionHistory(const Person& actor, std::string_view bot) const {
     Transaction snapshot(p_->db,Transaction::Mode::read);
     auto result = Json::array();
     for (const auto& id : p_->visibleBoardBots(actor,bot)) {
+        // Join what was decided on, so History can say what each response was about.
         auto rows = p_->query(R"SQL(
-SELECT id,item_kind,item_id,wait_id,coalesce(task_id,0),target_revision,target_generation,
-       decided_by,decided_at,decision
-FROM inbox_decisions WHERE bot_id=? ORDER BY id DESC LIMIT 100
+SELECT d.id,d.item_kind,d.item_id,d.wait_id,coalesce(d.task_id,0),d.target_revision,d.target_generation,
+       d.decided_by,d.decided_at,d.decision,
+       coalesce(nullif(r.intent,''),nullif(json_extract(t.data,'$.request'),''),m.text,''),
+       coalesce(a.action,''),coalesce(a.target,'')
+FROM inbox_decisions d
+LEFT JOIN tasks t ON t.id=d.task_id AND t.bot_id=d.bot_id
+LEFT JOIN task_revisions r ON r.id=d.target_revision AND r.task_id=t.id
+LEFT JOIN policy_approvals a ON d.item_kind='policy_approval' AND a.id=d.item_id AND a.bot=d.bot_id
+LEFT JOIN protected_inputs p ON d.item_kind='protected_input' AND p.id=d.item_id AND p.bot=d.bot_id
+LEFT JOIN messages m ON m.bot_id=d.bot_id AND m.id=CASE d.item_kind
+    WHEN 'conversation_model_budget' THEN d.item_id
+    WHEN 'protected_input' THEN p.source_message_id
+    WHEN 'policy_approval' THEN a.anchor
+END AND (d.item_kind<>'policy_approval' OR NOT EXISTS (SELECT 1 FROM channel_messages c WHERE c.message_id=m.id))
+WHERE d.bot_id=? ORDER BY d.id DESC LIMIT 100
 )SQL",{id});
         const auto scrub = p_->redactor(id);
         while (rows.next()) {
             auto row = key({id,parseInboxKind(rows.string(1)),rows.number(2),rows.number(3),rows.number(4),
                             rows.number(5),rows.number(6)});
-            row.update(Json{{"id",rows.number(0)},{"decidedBy",scrub.text(rows.string(7))},{"decidedAt",rows.number(8)},
-                            {"decision",rows.string(9)},{"botName",id}});
+            const auto decidedBy = rows.string(7);
+            row.update(Json{{"id",rows.number(0)},{"decidedBy",scrub.text(decidedBy)},{"decidedByYou",decidedBy == actor.id},
+                            {"decidedAt",rows.number(8)},{"decision",rows.string(9)},{"botName",id},
+                            {"requestTitle",title(scrub.text(rows.string(10)))},
+                            {"action",rows.string(11)},{"target",scrub.text(rows.string(12))}});
             result.push_back(std::move(row));
         }
     }

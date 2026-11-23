@@ -54,8 +54,14 @@ function labeled(text, control) {
   label.append(control);
   return label;
 }
+const clockFormat = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const dayFormat = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
+// "Today, 19:10", "Yesterday, 08:02" or "Nov 20, 14:30", matching the conversation's clock.
 function time(seconds) {
-  return new Date(seconds * 1000).toLocaleString();
+  const date = new Date(seconds * 1000);
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(date).setHours(0, 0, 0, 0)) / 86400000);
+  const day = days === 0 ? 'Today' : days === 1 ? 'Yesterday' : dayFormat.format(date);
+  return `${day}, ${clockFormat.format(date)}`;
 }
 function relativeTime(seconds) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '';
@@ -94,9 +100,18 @@ export function pullRequestLink(raw, title) {
   link.rel = 'noopener noreferrer';
   return link;
 }
-function historyCard(title, meta) {
-  const article = element('article', '', 'board-inbox-card');
-  article.append(element('p', meta, 'board-inbox-meta'), element('h3', title));
+function historyCard(entry) {
+  const article = element('article', '', 'board-inbox-card history-card');
+  const approval = entry.itemKind === 'policy_approval' && entry.action;
+  const title = approval ? actionLabel(entry.action) : entry.requestTitle || labels[entry.itemKind] || 'Request';
+  const heading = element('h3', title);
+  if (approval && entry.target) heading.append(element('span', entry.target, 'board-inbox-target'));
+  article.append(heading);
+  // Name the kind of item only when the title doesn't already say it, then who answered and when.
+  const about = approval ? entry.requestTitle : entry.requestTitle && labels[entry.itemKind];
+  if (about) article.append(element('p', about, 'history-about'));
+  const by = entry.decidedByYou ? 'you' : entry.decidedBy;
+  article.append(element('p', `${labels[entry.decision] ?? 'Answered'} by ${by} · ${time(entry.decidedAt)}`, 'board-inbox-meta'));
   return article;
 }
 function button(text, className, click) {
@@ -601,8 +616,7 @@ export function mountBoardInbox({
     try {
       const { decisions } = await api(`inbox/history?${new URLSearchParams({ bot })}`, undefined, request.signal);
       if (!sameView()) return;
-      const cards = decisions.map((entry) => historyCard(labels[entry.itemKind],
-        `${labels[entry.decision]} by ${entry.decidedBy} · ${time(entry.decidedAt)}`));
+      const cards = decisions.map(historyCard);
       host.replaceChildren(...cards);
       message.textContent = decisions.length ? '' : 'Nothing here yet. Questions and approvals you respond to will appear here.';
       animateHistoryCards(cards);
