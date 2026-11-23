@@ -13,10 +13,24 @@
     const resolved = mode === 'system' ? (dark.matches ? 'dark' : 'light') : mode;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', colors[resolved]);
   }
-  let stored = null;
-  try { stored = JSON.parse(localStorage.getItem('flock-theme')); }
-  catch {}
-  apply(stored);
+  function storedMode() {
+    let raw;
+    try { raw = localStorage.getItem('flock-theme'); }
+    catch { return; }
+    try {
+      const value = JSON.parse(raw);
+      return modes.includes(value) ? value : 'system';
+    } catch { return 'system'; }
+  }
+  function restoreStoredMode() {
+    const stored = storedMode();
+    if (stored && stored !== mode) document.dispatchEvent(new CustomEvent('flock-theme', { detail: stored }));
+  }
+  apply(storedMode());
   dark.addEventListener('change', () => apply(mode));
   document.addEventListener('flock-theme', (event) => apply(event.detail));
+  window.addEventListener('pageshow', (event) => { if (event.persisted) restoreStoredMode(); });
+  window.addEventListener('storage', (event) => {
+    if (event.key === 'flock-theme' || event.key === null) restoreStoredMode();
+  });
 })();

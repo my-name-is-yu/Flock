@@ -3,6 +3,8 @@ import { actionLabel, actionLabels } from '/action-labels.mjs';
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
 let currentMode;
+let canManagePolicy = false;
+let savingPolicy = false;
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
 
 function emptyLabel(title, ...detail) {
@@ -32,16 +34,29 @@ function row(list, content) {
 
 const modeDescriptions = {
   full: 'Bots use the access they’re given without asking. Never rules still apply.',
-  supervised: 'Bots ask before actions with outside effects, such as opening pull requests, posting to channels or starting Sessions.',
+  supervised: 'By default, Bots ask before actions with outside effects, such as opening pull requests, posting to channels or starting Sessions.',
 };
 function describeMode(mode) { $('mode-description').textContent = modeDescriptions[mode] ?? ''; }
+function reflectMode(mode) {
+  for (const input of modeInputs) input.checked = input.value === mode;
+  describeMode(mode);
+}
+function updatePolicyControls() {
+  const disabled = savingPolicy || !canManagePolicy;
+  for (const input of modeInputs) input.disabled = disabled;
+  for (const control of document.querySelectorAll('#rules button')) control.disabled = disabled;
+  for (const control of $('rule-form').elements) control.disabled = disabled;
+}
 
 // Theme is a per-browser preference shared with the sidebar switch; theme.js applies it.
 const themeInputs = [...document.querySelectorAll('input[name="theme"]')];
-let theme = 'system';
-try { theme = JSON.parse(localStorage.getItem('flock-theme')) ?? 'system'; } catch {}
+function reflectTheme() {
+  const mode = document.documentElement.dataset.theme ?? 'system';
+  for (const input of themeInputs) input.checked = input.value === mode;
+}
+reflectTheme();
+document.addEventListener('flock-theme', reflectTheme);
 for (const input of themeInputs) {
-  input.checked = input.value === theme;
   input.onchange = () => {
     if (!input.checked) return;
     try { localStorage.setItem('flock-theme', JSON.stringify(input.value)); } catch {}
@@ -50,19 +65,16 @@ for (const input of themeInputs) {
 }
 
 async function load() {
+  const modelAtStart = modelRequest;
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
-  const {mode, rules, canManagePolicy, t3, model} = await response.json();
-  $('model-section').hidden = !model;
-  $('model').replaceChildren();
-  renderModel(model);
+  const data = await response.json();
+  const {mode, rules, t3, model} = data;
+  canManagePolicy = data.canManagePolicy === true;
+  if (modelAtStart === modelRequest && !watchingSignIn) renderModel(model);
   currentMode = mode;
-  for (const input of modeInputs) {
-    input.checked = input.value === mode;
-    input.disabled = !canManagePolicy;
-  }
   $('mode-options').classList.toggle('read-only', !canManagePolicy);
-  describeMode(mode);
+  reflectMode(mode);
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
     ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here. You can also run ', command('flock rules add'), '.')
@@ -80,20 +92,23 @@ async function load() {
     const remove = document.createElement('button');
     remove.textContent = 'Remove';
     remove.className = 'button quiet-danger';
-    remove.onclick = () => void submit('rule', {kind, action, target, add: false}, [remove]);
+    remove.onclick = () => void submit('rule', {kind, action, target, add: false});
     item.append(remove);
   }
   $('connections').replaceChildren();
   if (t3) {
     for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
-    row('connections', emptyLabel('Coding agents', 'Codex and Claude Code on this machine reach Flock on port ', command(String(t3.port)), '.'));
+    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
+      ' for local Codex and Claude Code connections.'));
   } else if (canManagePolicy) {
     row('connections', emptyLabel('Not connected',
-      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on this machine.'));
+      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
   $('rule-form').hidden = !canManagePolicy;
+  if (canManagePolicy) populateRuleActions(data.personOnlyActions);
+  updatePolicyControls();
 }
 
 // One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
@@ -111,23 +126,29 @@ function showSection() {
 addEventListener('hashchange', showSection);
 showSection();
 
-for (const [action, label] of Object.entries(actionLabels)) {
-  const option = document.createElement('option');
-  option.value = action;
-  option.textContent = label;
-  $('rule-action').append(option);
+function populateRuleActions(personOnlyActions) {
+  const select = $('rule-action');
+  if (select.options.length) return;
+  for (const [action, label] of Object.entries(actionLabels)) {
+    if (personOnlyActions.includes(action)) continue;
+    const option = document.createElement('option');
+    option.value = action;
+    option.textContent = label;
+    select.append(option);
+  }
 }
 $('rule-form').onsubmit = async (event) => {
   event.preventDefault();
   const form = event.target;
   const data = Object.fromEntries(new FormData(form));
-  if (await submit('rule', { ...data, target: data.target.trim(), add: true }, [...form.elements])) form.reset();
+  if (await submit('rule', { ...data, target: data.target.trim(), add: true })) form.reset();
 };
 
-function link(label, href) {
+function link(label, href, name) {
   const anchor = document.createElement('a');
   anchor.className = 'button';
   anchor.textContent = label;
+  anchor.setAttribute('aria-label', name);
   anchor.href = href;
   return anchor;
 }
@@ -141,15 +162,17 @@ async function loadBots() {
     const item = row('bots', emptyLabel(bot.name, 'Name, look, role and recurring requests'));
     const actions = document.createElement('span');
     actions.className = 'row-actions';
-    actions.append(link('Edit', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`),
-      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`));
+    actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),
+      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`, `Sharing for ${bot.name}`));
     item.append(actions);
   }
 }
 loadBots().catch(() => row('bots', emptyLabel('Could not load Bots', 'Reload the page to try again.')));
 
-// ChatGPT sign-in runs on the machine running Flock; this page polls until it settles.
 let modelPoll = 0;
+let modelRequest = 0;
+let watchingSignIn = false;
+
 function actionButton(item, label, onclick, primary = false) {
   const control = document.createElement('button');
   control.type = 'button';
@@ -159,50 +182,82 @@ function actionButton(item, label, onclick, primary = false) {
   item.append(control);
   return control;
 }
+
+function pollModel() {
+  clearTimeout(modelPoll);
+  modelPoll = setTimeout(() => void refreshModel(), 2000);
+}
+async function refreshModel() {
+  const request = ++modelRequest;
+  try {
+    const response = await fetch('/api/settings');
+    if (request !== modelRequest) return;
+    if (response.status === 401 || response.status === 403) return renderModel(null);
+    if (!response.ok) throw new Error();
+    const {model} = await response.json();
+    if (request === modelRequest) renderModel(model);
+  } catch {
+    if (request === modelRequest && watchingSignIn) pollModel();
+  }
+}
+
 async function signIn(reconsent, control) {
+  if (watchingSignIn) return;
+  watchingSignIn = true;
+  ++modelRequest;
   control.disabled = true;
   try {
     const response = await fetch('/api/settings/model-login', {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
       body: JSON.stringify({ reconsent }),
     });
-    if (!response.ok) throw new Error();
+    if (!response.ok && (response.status !== 409 || (await response.json()).error !== 'sign_in_pending')) throw new Error();
   } catch {
+    watchingSignIn = false;
     control.disabled = false;
     $('status').textContent = 'Could not start ChatGPT sign-in.';
     return;
   }
-  await load().catch(() => {});
+  $('status').textContent = '';
+  renderModel({signingIn: true});
+  await refreshModel();
 }
+
 function renderModel(model) {
   clearTimeout(modelPoll);
+  $('model-section').hidden = !model;
+  $('model').replaceChildren();
+  const pending = model?.signingIn || (watchingSignIn && model?.unavailable && !model.signInError);
+  watchingSignIn = !!pending;
   if (!model) return;
   if (model.demo) {
     row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
     return;
   }
-  if (model.signingIn) {
-    row('model', emptyLabel('Waiting for ChatGPT…', 'Finish signing in in the browser window that opened on this machine. This page updates when you’re done.'));
-    modelPoll = setTimeout(() => void load().catch(() => {}), 2000);
+  if (pending) {
+    row('model', emptyLabel('Waiting for ChatGPT…', 'Finish signing in in the browser on the machine running Flock.'));
+    pollModel();
     return;
   }
   if (model.signInError) row('model', emptyLabel('Sign-in didn’t finish', model.signInError)).classList.add('settings-row-error');
   if (model.unavailable) {
-    row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now. Reload to try again.'));
-  } else if (model.connected) {
-    row('model', emptyLabel('ChatGPT', model.account ? `Connected as ${model.account}` : 'Connected'));
+    row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now.'));
+  } else if (model.connected && !model.needsSignIn) {
+    row('model', emptyLabel('ChatGPT', model.account ? `Saved account ${model.account}` : 'Account registered'));
     if (!model.planUsage) {
-      const item = row('model', emptyLabel('Plan usage not granted', 'Bots can’t use your ChatGPT plan until you allow it.'));
+      const item = row('model', emptyLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
       if (model.canSignIn) actionButton(item, 'Allow plan usage', (event) => void signIn(true, event.currentTarget), true);
     }
   } else {
-    const item = row('model', emptyLabel('ChatGPT not connected', 'Sign in so your Bots can use your ChatGPT plan.'));
+    const item = row('model', emptyLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
   }
 }
 
-async function submit(path, data, controls) {
-  for (const control of controls) control.disabled = true;
+async function submit(path, data) {
+  if (!canManagePolicy || savingPolicy) return false;
+  savingPolicy = true;
+  updatePolicyControls();
   let saved = false;
   try {
     const response = await fetch('/api/settings/' + path, {
@@ -211,23 +266,26 @@ async function submit(path, data, controls) {
     });
     saved = response.ok;
   } catch {}
-  for (const control of controls) control.disabled = false;
+  if (saved && path === 'mode') currentMode = data.mode;
   try {
     await load();
     $('status').textContent = saved ? 'Saved.' : 'Could not save this change.';
   } catch {
-    for (const input of modeInputs) input.checked = input.value === currentMode;
-    describeMode(currentMode);
+    reflectMode(currentMode);
     $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Could not reload settings.';
+  } finally {
+    savingPolicy = false;
+    updatePolicyControls();
   }
   return saved;
 }
 
 for (const input of modeInputs) {
   input.onchange = async () => {
-    if (!input.checked) return;
+    if (!input.checked || savingPolicy || !canManagePolicy) return;
     describeMode(input.value);
-    await submit('mode', {mode: input.value}, modeInputs);
+    await submit('mode', {mode: input.value});
   };
 }
+updatePolicyControls();
 load().catch(() => { $('status').textContent = 'Could not load Flock settings.'; });
