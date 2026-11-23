@@ -62,10 +62,11 @@ async function load() {
   $('connections').replaceChildren();
   if (t3) {
     for (const environment of t3.environments) row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
-    row('connections', emptyLabel('Coding agents', 'Codex and Claude Code on this machine reach Flock on port ', command(String(t3.port)), '.'));
+    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
+      ' for local Codex and Claude Code connections.'));
   } else if (canManagePolicy) {
     row('connections', emptyLabel('Not connected',
-      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on this machine.'));
+      'To let T3 Sessions ask your Bots, run ', command('flock t3 connect ENVIRONMENT MCP_URL'), ' on the machine running Flock.'));
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
