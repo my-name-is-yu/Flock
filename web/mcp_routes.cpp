@@ -20,7 +20,13 @@ constexpr std::string_view answerTool = "flock_answer_question";
 constexpr std::string_view mcpProtocol = "2025-11-25";
 constexpr std::size_t maxAnswerText = 8000;
 
-struct InvalidToolArguments {};
+struct InvalidToolArguments {
+    std::string message = "Invalid tool arguments";
+};
+
+std::string utf8Limit(std::size_t maxBytes) {
+    return "Maximum " + std::to_string(maxBytes) + " UTF-8 bytes.";
+}
 
 void reply(httplib::Response& res, int status, const Json& data) {
     res.status = status;
@@ -40,7 +46,8 @@ std::string requestText(const Json& object, std::string_view field, std::size_t 
     const auto value = object.find(field);
     if (value == object.end() || !value->is_string()) throw InvalidToolArguments{};
     const auto& text = value->get_ref<const std::string&>();
-    if (text.empty() || text.size() > maxBytes ||
+    if (text.size() > maxBytes) throw InvalidToolArguments{std::string(field) + ": " + utf8Limit(maxBytes)};
+    if (text.empty() ||
         text.find_first_not_of(" \t\r\n") == text.npos || text.find('\0') != text.npos)
         throw InvalidToolArguments{};
     return text;
@@ -72,7 +79,7 @@ Json structuredResult(const Json& data) {
 
 Json byteLimitedString(std::size_t maxBytes) {
     return {{"type","string"},{"minLength",1},
-            {"description","Maximum " + std::to_string(maxBytes) + " UTF-8 bytes."}};
+            {"description",utf8Limit(maxBytes)}};
 }
 
 Json sessionToolDefinitions() {
@@ -276,8 +283,8 @@ void mcpRequest(const httplib::Request& req, httplib::Response& res, Json (*tool
         auto result = callTool(tool,arguments);
         if (result.is_null()) return rpcError(res,200,*id,-32602,"Unknown tool");
         return rpcResult(res,*id,std::move(result));
-    } catch (const InvalidToolArguments&) {
-        rpcError(res,200,*id,-32602,"Invalid tool arguments");
+    } catch (const InvalidToolArguments& error) {
+        rpcError(res,200,*id,-32602,error.message);
     } catch (const Conflict& error) {
         rpcResult(res,*id,{{"isError",true},{"content",toolContent(error.what())}});
     } catch (const std::exception&) {

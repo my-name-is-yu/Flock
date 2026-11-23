@@ -35,13 +35,12 @@ void copyTrigger(Json& output, const Json& source) {
                 "firedAt","timezone","label","source"});
 }
 
-// The hosted T3 route percent-encodes each ID separately. The Store supplies the owning environment.
-std::string threadSegment(std::string_view id) {
+std::string threadSegment(std::string_view id, std::string_view punctuation = "-_.~") {
     constexpr std::string_view hex = "0123456789ABCDEF";
     std::string segment;
     for (const unsigned char c : id) {
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~')
+            punctuation.find(c) != punctuation.npos)
             segment += static_cast<char>(c);
         else {
             segment += '%';
@@ -69,10 +68,11 @@ bool localThreadLink(std::string_view url, std::string_view path) {
     return false;
 }
 
-std::string sessionPath(std::string_view environment, std::string_view thread) {
+std::string sessionPath(std::string_view environment, std::string_view thread,
+                        std::string_view punctuation = "-_.~") {
     if (environment.empty() || thread.empty() || environment == "." || environment == ".." || thread == "." || thread == "..")
         return {};
-    return "/" + threadSegment(environment) + "/" + threadSegment(thread);
+    return "/" + threadSegment(environment,punctuation) + "/" + threadSegment(thread,punctuation);
 }
 
 Json runView(const Json& run, std::string_view environment) {
@@ -345,10 +345,15 @@ Json activity(const Json& activeTasks, std::string_view bot) {
 } // namespace
 
 std::string externalSessionLink(const Json& run) {
-    const auto path = sessionPath(field(run,"environmentId"),field(run,"threadId"));
-    if (path.empty()) return {};
+    const auto environment = field(run,"environmentId");
+    const auto thread = field(run,"threadId");
+    // T3 Code's hosted links also escape dots and tildes. Older records may use the URI form.
+    const auto hosted = sessionPath(environment,thread,"-_");
+    if (hosted.empty()) return {};
     const auto saved = field(run,"link");
-    return saved == hostedSessionBase + path ? saved : std::string{};
+    if (saved == hostedSessionBase + hosted || saved == hostedSessionBase + sessionPath(environment,thread))
+        return saved;
+    return {};
 }
 
 Json botSettings(const Json& bot) {

@@ -1,3 +1,4 @@
+#include "../views.hpp"
 #include "http_fixture.hpp"
 #include "flock/external_mcp.hpp"
 #include "flock/t3_connection.hpp"
@@ -167,8 +168,9 @@ void roundTrip() {
         }
         auto tooLong = ask;
         tooLong["text"] = ask.at("text").get<std::string>() + "a";
-        check(first.request("tools/call",{{"name",submitTool},{"arguments",tooLong}}).at("error").at("code") == -32602 &&
-              store.tasks().empty(),"A submission over the UTF-8 byte budget was accepted");
+        const auto tooLongError = first.request("tools/call",{{"name",submitTool},{"arguments",tooLong}}).at("error");
+        check(tooLongError.at("code") == -32602 && tooLongError.at("message") == "text: Maximum 8192 UTF-8 bytes." &&
+              store.tasks().empty(),"The submission byte budget was not enforced or reported");
         first.submitWithoutReceipt(ask);
         const auto tasks = store.tasks();
         check(tasks.size() == 1 && tasks.front().at("request") == ask.at("text"),"The lost receipt did not leave exactly one Task");
@@ -230,8 +232,9 @@ void roundTrip() {
     client.denied(answerTool,stale,"Answering a mismatched generation succeeded");
     auto tooLong = answer;
     tooLong["text"] = answer.at("text").get<std::string>() + "a";
-    check(client.request("tools/call",{{"name",answerTool},{"arguments",tooLong}}).at("error").at("code") == -32602,
-          "An answer over the UTF-8 byte budget was accepted");
+    const auto tooLongError = client.request("tools/call",{{"name",answerTool},{"arguments",tooLong}}).at("error");
+    check(tooLongError.at("code") == -32602 && tooLongError.at("message") == "text: Maximum 8000 UTF-8 bytes.",
+          "The answer byte budget was not enforced or reported");
     check(client.success(answerTool,answer).at("accepted") == true,"The originating connection could not answer");
     client.denied(answerTool,answer,"A repeated answer was accepted while the Session was resuming");
     tick(runtime,2);
@@ -382,6 +385,10 @@ int main() {
     try {
         credentialScopes();
         roundTrip();
+        const Json encodedSession{{"environmentId","build.prod"},{"threadId","thread~nightly"},
+            {"link","https://app.t3.codes/threads/build%2Eprod/thread%7Enightly"}};
+        check(web::externalSessionLink(encodedSession) == encodedSession.at("link").get<std::string>(),
+              "An encoded hosted link did not match its Session IDs");
         peerCompletion(peerLink,peerLink);
         peerCompletion("http://localhost:3773/linked%20env/thread-triage",nullptr);
         peerCompletion("https://app.t3.codes/threads/linked%20env/other-thread",nullptr);
