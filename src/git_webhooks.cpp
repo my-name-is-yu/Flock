@@ -111,6 +111,7 @@ WITH watches AS (
          ORDER BY h.event_cursor DESC LIMIT 1),
         (SELECT CASE WHEN h.synchronized THEN h.head_sha END FROM git_pr_heads h
          WHERE (h.host,h.repo,h.pr_number)=(w.host,w.repo,w.pr_number) AND h.event_cursor>e.id
+           AND (h.synchronized OR h.head_sha<>json_extract(e.data,'$.headSha'))
          ORDER BY h.event_cursor LIMIT 1)))
 )
 SELECT id,host,event_id,repo,data,pr_number,task_id,bot_id,run,url FROM matches m

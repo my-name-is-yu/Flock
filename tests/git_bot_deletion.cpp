@@ -101,13 +101,14 @@ Json runUntilToolResult(HandoffModel& model, Runtime& runtime, std::string_view 
     throw std::runtime_error("No Git tool result for " + std::string(message));
 }
 
-void deletedBotWatchHandoff(std::string_view tool) {
+void deletedBotWatchHandoff(std::string_view tool, const std::string& delayedSyncHead) {
     Directory directory;
     const auto path = directory.path/"state.db";
     auto host = std::make_shared<FakeHost>();
     HandoffModel model;
     Sessions sessions;
     const std::string newHead(40,'b');
+    const bool observedDelayedHead = delayedSyncHead == newHead;
     const bool requestsReview = tool == "git_request_review";
     Id retired, sibling, replacement;
     const auto mutation = [&](Id task) {
@@ -179,8 +180,8 @@ void deletedBotWatchHandoff(std::string_view tool) {
             webhookQueued->set_value(
                 store.receiveGitWebhook({hostName,"shared-head-during-handoff",repoName,"ci","completed",{},sha,
                                          "CI activity for both PRs before synchronization",0}) &&
-                store.receiveGitWebhook({hostName,"synchronize-during-handoff",repoName,"pull_request","synchronize",{1},newHead,
-                                         "New head before host response",0}) &&
+                store.receiveGitWebhook({hostName,"ci-before-delayed-sync",repoName,"ci","completed",{},delayedSyncHead,
+                                         "CI before its synchronization webhook",0}) &&
                 store.receiveGitWebhook({hostName,"during-handoff",repoName,"ci","completed",{1},newHead,
                                          "New watch before host response",0}) && saveReviewRequests());
             resume.wait();
@@ -205,17 +206,24 @@ void deletedBotWatchHandoff(std::string_view tool) {
     {
         Store store(path);
         Runtime runtime(store,model,sessions,soul,options(host));
-        check(store.receiveGitWebhook({hostName,"after-handoff-explicit",repoName,"ci","completed",{1},newHead,"New watch",0}) &&
-              store.receiveGitWebhook({hostName,"after-handoff-commit",repoName,"ci","completed",{},newHead,"New head",0}),
+        runtime.runConversations();
+        check(webhookWasUndelivered(path,"ci-before-delayed-sync"),"A future head observation attributed unsynchronized CI activity");
+        check(store.receiveGitWebhook({hostName,"synchronize-after-handoff",repoName,"pull_request","synchronize",{1},delayedSyncHead,
+                                       "Delayed synchronization for the CI head",0}) &&
+              store.receiveGitWebhook({hostName,"after-handoff-explicit",repoName,"ci","completed",{1},delayedSyncHead,"New watch",0}) &&
+              store.receiveGitWebhook({hostName,"after-handoff-commit",repoName,"ci","completed",{},delayedSyncHead,"New head",0}),
               "Could not enqueue activity after handoff");
         runtime.runConversations();
         check(historyCount(store,retired,"git_webhook") == 0 && historyCount(store,sibling,"git_webhook") == 0,
               "Handoff delivered an old event to the retired task or changed a shared commit's attribution");
         check(webhookWasUndelivered(path,"shared-head-during-handoff"),"Handoff backdated a head change past ambiguous CI activity");
         const auto history = store.history(replacement,0,200).dump();
-        check(historyCount(store,replacement,"git_webhook") == (requestsReview ? 6 : 4) &&
+        check((history.find("\"ci-before-delayed-sync\"") != std::string::npos) == observedDelayedHead,
+              "Delayed synchronization failed to recover matching CI or crossed a conflicting head observation");
+        const auto expectedNotifications = (requestsReview ? 6 : 4) + (observedDelayedHead ? 1 : 0);
+        check(historyCount(store,replacement,"git_webhook") == expectedNotifications &&
               history.find("\"during-handoff\"") != std::string::npos &&
-              history.find("synchronize-during-handoff") != std::string::npos &&
+              history.find("synchronize-after-handoff") != std::string::npos &&
               history.find("after-handoff-explicit") != std::string::npos &&
               history.find("after-handoff-commit") != std::string::npos && history.find("before-handoff") == std::string::npos,
               "The replacement watch lost new activity or replayed an old event after restart");
@@ -242,8 +250,9 @@ void deletedBotWatchHandoff(std::string_view tool) {
 
 int main() {
     try {
-        deletedBotWatchHandoff("git_update_pr");
-        deletedBotWatchHandoff("git_request_review");
+        deletedBotWatchHandoff("git_update_pr",std::string(40,'b'));
+        deletedBotWatchHandoff("git_request_review",std::string(40,'b'));
+        deletedBotWatchHandoff("git_update_pr",std::string(40,'c'));
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
