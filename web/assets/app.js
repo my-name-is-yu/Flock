@@ -918,38 +918,70 @@ function sessionRow(task, session, status, tone = '') {
   }
   return row;
 }
+const workflowStatusLabels = {
+  pending: 'Not started', running: 'In progress', completed: 'Done', failed: 'Failed',
+  needs_verification: 'Needs another check', stop_requested: 'Stopping', stopped: 'Stopped',
+};
+const stageStatusLabels = {
+  pending: 'Waiting', ready: 'Starting', running: 'Working', completed: 'Done', failed: 'Failed',
+  stopped: 'Stopped', stop_requested: 'Stopping', unreachable: 'Not responding',
+};
+const stageTone = (status) => ({ completed: 'done', running: 'live', ready: 'live', failed: 'failed', unreachable: 'failed', stopped: 'stopped' })[status] ?? 'waiting';
+const workflowTone = (status) => ({ running: 'live', failed: 'failed', needs_verification: 'waiting', stop_requested: 'waiting' })[status] ?? '';
+const humanStatus = (labels, status) => labels[status] ?? (status.charAt(0).toUpperCase() + status.slice(1)).replaceAll('_', ' ');
+
+// Workflows read as progress, not as a dump of stage ids and artifact versions; those stay in hover titles.
 function workflowInspectors(data, open) {
   const sections = [];
-  const section = (key, title) => {
-    const item = node('details');
+  const section = (key, title, status, tone) => {
+    const item = node('details', 'activity-details');
     item.dataset.inspector = key;
     item.open = open.has(key);
-    item.append(node('summary', null, title));
+    const summary = node('summary', 'activity');
+    const line = node('span', `activity-status ${tone}`.trim());
+    line.append(node('span', 'activity-mark'), node('span', null, status));
+    summary.append(node('span', 'activity-title', title), line);
+    item.append(summary);
     sections.push(item);
     return item;
   };
   for (const workflow of data?.workflows ?? []) {
-    const item = section(`workflow-${workflow.workflowId}`, `${workflow.request} · ${workflow.status.replaceAll('_', ' ')}`);
-    for (const stage of workflow.stages) {
-      const status = [stage.status.replaceAll('_', ' ')];
-      if (stage.outdated) status.push('Outdated input');
-      if (stage.stopRequested && stage.status === 'unreachable') status.push('Stop requested');
-      if (stage.lastConfirmedState) status.push(`Last confirmed ${stage.lastConfirmedState}`);
-      if (stage.deadlineExceeded) status.push('Soft deadline exceeded');
-      const row = node('p', null, [stage.name, ...status].join(' · '));
-      const link = linkToRun(stage.runRef);
-      if (link) row.append(' · ', link);
-      item.append(row);
-      if (stage.inputArtifactVersion) item.append(node('p', null, `Pinned input · ${stage.inputArtifactVersion}`));
-      if (stage.outputArtifactVersion) item.append(node('p', null, `Output · ${stage.outputArtifactVersion}`));
+    const stages = workflow.stages ?? [];
+    const done = stages.filter((stage) => stage.status === 'completed' && !stage.outdated).length;
+    const status = [humanStatus(workflowStatusLabels, workflow.status), stages.length ? `${done} of ${stages.length} steps` : '']
+      .filter(Boolean).join(' · ');
+    const item = section(`workflow-${workflow.workflowId}`, workflow.request, status, workflowTone(workflow.status));
+    const list = node('ol', 'workflow-stages');
+    for (const stage of stages) {
+      const verdict = (workflow.verdicts ?? []).findLast((check) => check.stageId === stage.stageId)?.verdict;
+      const row = node('li', 'workflow-stage');
+      row.dataset.tone = stage.outdated ? 'waiting' : stageTone(stage.status);
+      const notes = [];
+      if (verdict) notes.push(verdict === 'pass' ? ['Check passed', 'pass'] : ['Check failed', 'fail']);
+      if (stage.outdated) notes.push(['Needs a rerun after earlier changes', 'warn']);
+      if (stage.deadlineExceeded) notes.push(['Taking longer than planned', 'warn']);
+      if (stage.stopRequested && stage.status === 'unreachable') notes.push(['Stop requested', 'warn']);
+      const text = node('span', 'workflow-stage-text');
+      const head = node('span', 'workflow-stage-head');
+      head.append(node('span', 'workflow-stage-name', stage.name), node('span', 'workflow-stage-status', humanStatus(stageStatusLabels, stage.status)));
+      text.append(head);
+      for (const [note, tone] of notes) {
+        const line = node('span', 'workflow-stage-note', note);
+        line.dataset.tone = tone;
+        text.append(line);
+      }
+      const link = linkToRun(stage.runRef, 'Open');
+      if (link) head.append(link);
+      row.append(node('span', 'workflow-stage-mark'), text);
+      row.title = [stage.inputArtifactVersion && `Input ${stage.inputArtifactVersion}`, stage.outputArtifactVersion && `Output ${stage.outputArtifactVersion}`]
+        .filter(Boolean).join('\n');
+      list.append(row);
     }
-    for (const check of workflow.verdicts) {
-      item.append(node('p', null, `${check.stageId} · ${check.verdict} · ${check.artifactVersion}`));
-    }
+    item.append(list);
   }
   for (const summary of data?.compactions ?? []) {
-    const item = section(`summary-${summary.compactionId}`, `Conversation summary · ${summary.originalCount} messages`);
-    item.append(node('p', null, `Messages ${summary.startMessageId}–${summary.endMessageId}`), node('p', null, summary.summary));
+    const item = section(`summary-${summary.compactionId}`, 'Earlier conversation', `Summary of ${summary.originalCount} messages`, '');
+    item.append(node('p', 'activity-details-body', summary.summary));
   }
   return sections;
 }
