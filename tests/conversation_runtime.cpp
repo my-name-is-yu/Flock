@@ -490,9 +490,9 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
     check(f.task(color).at("state") == "waiting" && f.event(color,"user_answer").is_null(),
           "an old question or its explanation answered the replacement question");
     const auto replacement = f.task(color).at("wait");
-    f.script("青",{stop(color)});
+    f.script("青",{answer(color)});
     const auto stale = f.receive("old-choice","青",explanation.at("messageId"));
-    check(f.response(stale).at("actions").empty() && f.task(color).at("wait") == replacement &&
+    check(f.lastTurn()[0]["result"]["ok"] == false && f.response(stale).at("actions").empty() && f.task(color).at("wait") == replacement &&
           f.event(color,"user_answer").is_null() && f.event(color,"cancel_requested").is_null(),
           "an exact choice for a stale question changed the replacement task");
     f.model.beforeTurn = [&](const ModelInput& input) {
@@ -503,8 +503,8 @@ void answersNeedTheirOwnReplyTargetAndAStableTask() {
           "an in-flight reply recorded an answer after cancellation");
 }
 
-void exactOfferedAnswersPreserveTheStoredChoice() {
-    for (const bool conflictingAnswer : {true,false}) {
+void exactOfferedAnswersUseTheModel() {
+    for (const bool rewriteAnswer : {true,false}) {
         Fixture f;
         const auto id = f.store->submit(f.routing("Decide whether the task should continue"));
         f.model.questions.emplace(id,Json{{"question","Should I keep going?"},
@@ -512,27 +512,36 @@ void exactOfferedAnswersPreserveTheStoredChoice() {
         f.reach(id,"waiting");
         const auto wait = f.task(id).at("wait");
         constexpr auto choice = "Cancel this task";
-        const Step substitute = [id](const ModelInput& input) {
+        f.script("What are the choices?",{say("Cancel this task or Keep going.")});
+        f.receive("ask-choices","What are the choices?",wait.at("messageId"));
+        const auto tools = f.model.turnInputs.front().tools;
+        const std::string expected = rewriteAnswer ? "Keep going" : choice;
+        const auto firstChoiceCall = f.model.turnInputs.size();
+        f.script(choice,{[id,expected](const ModelInput& input) {
             auto call = answer(id)(input);
-            call.args["text"] = "Keep going";
+            call.args["text"] = expected;
             return call;
-        };
-        f.script(choice,{conflictingAnswer ? substitute : stop(id),start({{"request","Unrelated work"}})});
+        },say("Thanks for clarifying.")});
         const auto receipt = f.receive("cancel-choice",choice,wait.at("messageId"));
         const auto response = f.response(receipt);
         const auto recorded = f.event(id,"user_answer");
+        const auto& input = f.model.turnInputs.at(firstChoiceCall);
+        check(input.tools == tools && input.event.at("replyTo").at("choices") == Json::array({choice,"Keep going"}) &&
+              response.at("text") == "Thanks for clarifying.",
+              "the exact choice did not get the normal tools, question context, and model reply");
+        const auto decisions = f.store->decisionHistory(localOwner,"alpha").size();
         check(response.at("actions") == Json::array({{{"tool","answer_task_question"},{"effect","answered"},{"taskId",id}}}) &&
-              recorded.at("text") == choice && recorded.at("messageId") == receipt.at("messageId") &&
+              recorded.at("text") == expected && recorded.at("messageId") == receipt.at("messageId") &&
               recorded.at("waitId") == wait.at("id") && f.task(id).at("wait").is_null() &&
               f.event(id,"cancel_requested").is_null() && f.store->tasks("alpha").size() == 1,
-              "a model decision overrode or misrouted the offered choice");
+              "the model answer was not recorded on the open question");
 
         f.restart();
         check(f.receive("cancel-choice",choice,wait.at("messageId")) == receipt && f.response(receipt) == response &&
-              f.store->decisionHistory(localOwner,"alpha").size() == 1,
+              f.store->decisionHistory(localOwner,"alpha").size() == decisions,
               "retrying an exact choice recorded a second decision");
         f.reach(id,"running");
-        check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(choice) != std::string::npos,
+        check(f.t3.sent.size() == 1 && f.t3.sent.front().instruction.find(expected) != std::string::npos,
               "the next Session did not receive the recorded choice");
     }
 }
@@ -553,7 +562,7 @@ void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
           f.event(id,"user_answer").is_null(),"a newer suggestion answered an older question");
 }
 
-void attachedChoiceRemainsAuthoritative() {
+void attachedChoiceCanBeInspectedBeforeAnswering() {
     Fixture f;
     const auto id = f.store->submit(f.routing("Check the error"));
     constexpr auto choice = "Cancel this task";
@@ -561,15 +570,8 @@ void attachedChoiceRemainsAuthoritative() {
                                       {"choices",{choice,"Keep going"}}});
     f.reach(id,"waiting");
     const auto wait = f.task(id).at("wait");
-    const auto other = f.store->submit(f.routing("Check the logs"));
-    f.store->access().resourceGrant(localOwner,"alpha",{"workspace","alpha","write"},GrantChange::grant);
     f.store->access().resourceGrant(localOwner,"alpha",{"attachment","alpha","inspect"},GrantChange::grant);
     f.script(choice,{
-        [](const ModelInput&) {
-            return Decision{"workspace_write_file",{{"path","note.txt"},{"text","Unrelated note"}},"Scripted write"};
-        },
-        stop(other),
-        start({{"request","Unrelated work"}}),
         [](const ModelInput& input) {
             return Decision{"inspect_attachment",{{"messageId",input.event.at("messageId")},
                 {"attachmentId",input.event.at("attachments").at(0).at("attachmentId")}},"Inspect the attached screenshot"};
@@ -586,19 +588,15 @@ void attachedChoiceRemainsAuthoritative() {
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}}));
     f.runtime->runConversations();
     const auto steps = f.lastTurn();
-    check(steps.at(0).at("result").at("ok") == false && steps.at(1).at("result").at("ok") == false &&
-          steps.at(2).at("result").at("ok") == false && !std::filesystem::exists(f.dir/"workspaces"/"alpha"/"note.txt") &&
-          f.task(other).at("state") == "queued" && f.store->tasks("alpha").size() == 2,
-          "an attached choice allowed an unrelated write or task action");
-    check(steps.at(3).at("result").at("data").at("width") == 1,
+    check(steps.at(0).at("result").at("data").at("width") == 1,
           "the conversation could not inspect the attachment");
     const auto recorded = f.event(id,"user_answer");
-    check(recorded.at("text") == choice && recorded.at("messageId") == receipt.at("messageId") &&
+    check(recorded.at("text") == "Keep going" && recorded.at("messageId") == receipt.at("messageId") &&
           recorded.at("waitId") == wait.at("id") && f.response(receipt).at("text") == "I recorded your answer.",
-          "the conversation changed the selected choice or lost its reply");
+          "the conversation lost the model answer or reply");
 }
 
-void resumedChoicesRecoverSavedEffectsWithoutDispatching() {
+void resumedChoicesRecoverSavedSessionCalls() {
     for (const bool started : {false,true}) {
         Fixture f;
         const auto questionTask = f.store->submit(f.routing("Decide what happens next"));
@@ -630,11 +628,12 @@ void resumedChoicesRecoverSavedEffectsWithoutDispatching() {
         f.restart();
         f.runtime->runConversations();
         const auto previous = f.lastTurn().at(0).at("result");
-        check(previous.at("ok") == false && f.t3.interrupted.empty(),"resuming a choice dispatched a saved interruption");
         if (started)
-            check(previous.at("delivery") == "unknown","the started Session operation lost its recovery result");
+            check(previous.at("ok") == false && previous.at("delivery") == "unknown" && f.t3.interrupted.empty(),
+                  "the started Session operation was dispatched again or lost its recovery result");
         else
-            check(previous.at("error") == "Tool unavailable for this turn","the saved call bypassed offered-tool checking");
+            check(previous.at("ok") == true && f.t3.interrupted.size() == 1,
+                  "the saved Session operation did not dispatch through the normal tool loop");
         check(f.event(questionTask,"user_answer").at("text") == "Interrupt" && f.task(other).at("state") == "running",
               "resuming a saved call lost the anchored answer or changed another Task");
     }
@@ -2199,10 +2198,10 @@ int main() {
         questionAnswerReachesTheBotBeforeContinuingWork();
         answersStayOnTheirQuestion();
         answersNeedTheirOwnReplyTargetAndAStableTask();
-        exactOfferedAnswersPreserveTheStoredChoice();
+        exactOfferedAnswersUseTheModel();
         latestSuggestionsTakePrecedenceOverAnInheritedQuestion();
-        attachedChoiceRemainsAuthoritative();
-        resumedChoicesRecoverSavedEffectsWithoutDispatching();
+        attachedChoiceCanBeInspectedBeforeAnswering();
+        resumedChoicesRecoverSavedSessionCalls();
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();
         directAnswersRemainInConversationHistory();

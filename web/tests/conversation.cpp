@@ -536,8 +536,8 @@ void conversationEntry(const std::filesystem::path& path) {
     check(choiceReply.at("actions") == Json::array({{{"tool","answer_task_question"},{"effect","answered"},
           {"taskId",secondWaitTask}}}) && afterChoice.at("waits").empty() && t3.replies.size() == 2 &&
           t3.replies.back().target.threadId == "thread-next-scope" &&
-          t3.replies.back().answers == Json{{"scope","利用者向けのみ"}},
-          "The exact choice was replaced or reached a different Session");
+          t3.replies.back().answers == Json{{"scope","すべて"}} && choiceReply.at("text") == "回答を伝えました。",
+          "The model answer did not reach the intended Session or its reply was lost");
 }
 
 void botMediatedConversation(const std::filesystem::path& path, std::string_view note, bool authenticated = false) {

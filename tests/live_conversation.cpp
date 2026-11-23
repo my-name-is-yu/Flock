@@ -665,7 +665,7 @@ void selfTest() {
     auto cloud = start("Run the existing test suite");
     cloud.args["environment"] = "cloud Mac";
     test("new request",{cloud,done});
-    test("a reply",{});
+    test("a reply",{action("answer_task_question","Prepare the release label",{{"text","Cancel this task"}}),done});
     test("a named stop",{stop,done});
     test("a named stop",{stop,action("send_to_task","Write the release notes",{{"instruction","Pause drafting"}}),done},
          "unexpected action");
