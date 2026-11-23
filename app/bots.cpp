@@ -254,9 +254,10 @@ Bot configuredBot(std::string_view id, const Json& config, std::vector<std::stri
     Bot bot;
     bot.id = id;
     bot.name = config.contains("name") ? validatedString(config,"name") : bot.id;
-    bot.environmentId = validatedString(config,"environmentId");
-    bot.projectId = validatedString(config,"projectId");
-    if (!plainId(bot.environmentId) || !plainId(bot.projectId))
+    if (config.contains("environmentId")) bot.environmentId = validatedString(config,"environmentId");
+    if (config.contains("projectId")) bot.projectId = validatedString(config,"projectId");
+    if ((!bot.environmentId.empty() && !plainId(bot.environmentId)) ||
+        (!bot.projectId.empty() && !plainId(bot.projectId)))
         throw Conflict("Use canonical environmentId and projectId identifiers from T3");
     bot.settings = {{"modelProvider",validatedString(config,"modelProvider")},{"model",validatedString(config,"model")}};
     for (const auto key : {"services","mcpServers"}) {
@@ -334,13 +335,18 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId)) result.push_back({peer->name,peer->intake(""),peer->role});
+        if (const auto peer = tryGetConfiguredBot(peerId);
+            peer && !peer->environmentId.empty() && !peer->projectId.empty())
+            result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;
 }
 
 Json Bots::cardLocked(std::string_view id) const {
-    const auto botDir = path(id);
+    return cardFromDirectory(id,path(id));
+}
+
+Json Bots::cardFromDirectory(std::string_view id, const std::filesystem::path& botDir) const {
     const auto config = Json::parse(readText(botDir / "config.json",maxConfigBytes),nullptr,false);
     if (!config.is_object())
         return {{"id",id},{"name",id},{"soul","Check this Bot’s configuration."},{"cron",Json::array()}};
@@ -395,7 +401,42 @@ Json Bots::cards() const {
     return items;
 }
 
-void Bots::apply(const BotChange& change) {
+Json Bots::skillCards() const {
+    std::lock_guard lock(mutex_);
+    auto items = Json::array();
+    const auto botIds = ids();
+    if (botIds.empty()) return items;
+    // A cached skill may still carry this ID after the profile directory is removed.
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
+    for (const auto& id : botIds) {
+        writeNewFile(issued / id,"");
+        try {
+            const auto card = cardLocked(id);
+            items.push_back({{"id",id},{"name",card.at("name")},{"role",card.value("role",std::string("custom"))}});
+        } catch (const Conflict&) {
+            items.push_back({{"id",id},{"name",id},{"role","custom"}});
+        }
+    }
+    return items;
+}
+
+bool Bots::reconcileCreation(const BotChange& change) {
+    if (!validBotId(change.target) || !validBotId(change.requestKey))
+        throw Conflict("Invalid Bot creation request");
+    std::lock_guard lock(mutex_);
+    if (std::filesystem::exists(directory_ / change.target)) {
+        const auto config = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes),nullptr,false);
+        const auto request = config.find("creationRequest");
+        return request != config.end() && request->is_string() && *request == change.requestKey;
+    }
+    const auto reservation = directory_ / ".flock-issued-ids" / change.target;
+    if (std::filesystem::exists(reservation) && readText(reservation,128) == change.requestKey)
+        std::filesystem::remove(reservation);
+    return false;
+}
+
+void Bots::apply(const BotChange& change) try {
     if (change.operation == "rename_bot") {
         updateProfile(change.target,{{"name",change.name}});
         return;
@@ -407,10 +448,20 @@ void Bots::apply(const BotChange& change) {
     std::filesystem::create_directories(directory_);
     const auto destination = directory_ / change.target;
     if (std::filesystem::exists(destination)) {
-        const auto existing = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes));
-        if (existing.value("creationRequest","") == change.requestKey) return;
+        try {
+            const auto existing = Json::parse(readText(path(change.target) / "config.json",maxConfigBytes),nullptr,false);
+            const auto request = existing.find("creationRequest");
+            if (request != existing.end() && request->is_string() && *request == change.requestKey) return;
+        } catch (const Conflict&) {
+            // An unreadable profile cannot establish a replay.
+        }
         throw Conflict("Target Bot already exists");
     }
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
+    const auto reservation = issued / change.target;
+    if (std::filesystem::exists(reservation) && readText(reservation,128) != change.requestKey)
+        throw Conflict("This Bot ID has already been used");
     const auto staging = directory_ / (".create-" + change.requestKey);
     if (!std::filesystem::create_directory(staging) &&
         (std::filesystem::is_symlink(staging) || !std::filesystem::is_directory(staging)))
@@ -418,10 +469,21 @@ void Bots::apply(const BotChange& change) {
     const Json config{{"name",name},{"role","custom"},{"creationRequest",change.requestKey},
                       {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
     writeAtomic(staging / "config.json",config.dump(2) + "\n");
-    std::filesystem::rename(staging,destination);
+    if (!writeNewFile(reservation,change.requestKey) && readText(reservation,128) != change.requestKey)
+        throw Conflict("This Bot ID has already been used");
+    std::error_code failure;
+    std::filesystem::rename(staging,destination,failure);
+    if (failure) {
+        std::error_code ignore;
+        std::filesystem::remove(reservation,ignore);
+        throw Conflict("Unable to publish Bot profile");
+    }
+} catch (const std::filesystem::filesystem_error&) {
+    throw Conflict("Unable to save Bot profile");
 }
 
-Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) {
+Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image,
+                  const Policy::PublishOwnedBot& publishOwned) {
     if (!profile.is_object()) throw Conflict("Profile must be an object");
     const auto name = validatedBotName(profile);
     std::string role = "custom";
@@ -434,25 +496,36 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) 
 
     std::lock_guard lock(mutex_);
     std::filesystem::create_directories(directory_);
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
     const auto base = slugForName(name);
+    const auto staging = directory_ / (".create-web-" + actionId());
     std::string id = base;
-    for (unsigned suffix = 2; ; ++suffix) {
-        std::error_code error;
-        if (std::filesystem::create_directory(directory_ / id,error)) break;
-        if (error && error != std::errc::file_exists)
-            throw std::filesystem::filesystem_error("Unable to create Bot directory",directory_ / id,error);
-        id = base + "-" + std::to_string(suffix);
-    }
-    const auto botDir = directory_ / id;
+    bool reserved = false;
+    bool published = false;
     try {
+        for (unsigned suffix = 2; ; ++suffix) {
+            if (!std::filesystem::exists(directory_ / id) && writeNewFile(issued / id,"")) break;
+            id = base + "-" + std::to_string(suffix);
+        }
+        reserved = true;
+        if (!std::filesystem::create_directory(staging)) throw Conflict("Unable to stage Bot profile");
         Json config = {{"name",name},{"role",role},{"avatar",avatar}};
-        saveProfile(botDir,config,image ? &*image : nullptr);
+        saveProfile(staging,config,image ? &*image : nullptr);
         const auto starter = roleStarterSoul(role);
-        if (!starter.empty()) writeAtomic(botDir / "SOUL.md",starter);
-        return cardLocked(id);
+        if (!starter.empty()) writeAtomic(staging / "SOUL.md",starter);
+        auto card = cardFromDirectory(id,staging);
+        const auto publish = [&] {
+            std::filesystem::rename(staging,directory_ / id);
+            published = true;
+        };
+        if (publishOwned) publishOwned(id,publish);
+        else publish();
+        return card;
     } catch (...) {
         std::error_code ignore;
-        std::filesystem::remove_all(botDir,ignore);
+        std::filesystem::remove_all(published ? directory_ / id : staging,ignore);
+        if (reserved && !ignore) std::filesystem::remove(issued / id,ignore);
         throw;
     }
 }
@@ -510,6 +583,8 @@ void Bots::syncSchedules(Store& store, Seconds now,
             if (!cron.is_array()) throw Conflict("cron must be an array");
             if (!cron.empty()) {
                 const auto bot = configuredBot(id,config,&errors);
+                if (bot.environmentId.empty() || bot.projectId.empty())
+                    throw Conflict("Configured schedules need a T3 environment and project");
                 std::map<std::string_view,std::size_t> counts;
                 for (const auto& entry : cron) {
                     const auto key = entry.find("id");

@@ -63,25 +63,25 @@ Json parameter(std::string_view name) {
     return result;
 }
 
-Scope scope(std::string_view bot, const Decision& call) {
+Resource scope(std::string_view bot, const Decision& call) {
     const auto& name = call.tool;
     if (name.starts_with("workspace_")) {
-        const auto operation = name == "workspace_write_file" ? "write" :
-            name == "workspace_read_file" || name == "workspace_search" ? "read" : "exec";
-        return {"workspace",std::string(bot),operation};
+        const auto operation = name == "workspace_write_file" ? Action::workspace_write :
+            name == "workspace_read_file" || name == "workspace_search" ? Action::workspace_read : Action::workspace_exec;
+        return {operation,std::string(bot)};
     }
-    if (name == "web_search") return {"web","public","search"};
-    if (name == "web_fetch") return {"web",webHost(toolText(call.args,"url",2048)),"fetch"};
-    if (name.starts_with("mcp_")) return {"mcp_server",toolText(call.args,"server",128),
-        name == "mcp_discover" ? "discover" : name == "mcp_call_tool" ? "invoke" : "read_resource"};
-    if (name == "skill_list") return {"skill","catalog","list"};
-    if (name == "skill_read") return {"skill",toolText(call.args,"skill",128),"read"};
-    return {"attachment",std::string(bot),"inspect"};
+    if (name == "web_search") return {Action::web_search,"public"};
+    if (name == "web_fetch") return {Action::web_fetch,webHost(toolText(call.args,"url",2048))};
+    if (name.starts_with("mcp_")) return {name == "mcp_discover" ? Action::mcp_discover : name == "mcp_call_tool" ? Action::mcp_invoke : Action::mcp_read_resource,
+        toolText(call.args,"server",128)};
+    if (name == "skill_list") return {Action::skill_list,"catalog"};
+    if (name == "skill_read") return {Action::skill_read,toolText(call.args,"skill",128)};
+    return {Action::attachment_inspect,std::string(bot)};
 }
 
-std::filesystem::path skillRoot(const ToolContext& ctx, const Scope& grant, const std::filesystem::path& database) {
+std::filesystem::path skillRoot(const ToolContext& ctx, const Resource& resource, const std::filesystem::path& database) {
     namespace fs = std::filesystem;
-    const auto root = fs::canonical(ctx.settings.skills.at(grant.resource));
+    const auto root = fs::canonical(ctx.settings.skills.at(resource.target));
     const auto state = fs::canonical(database.has_parent_path() ? database.parent_path() : fs::path("."));
     if (!fs::is_directory(root) || pathContains(root,state) || pathContains(root,fs::weakly_canonical(database)))
         throw Conflict("Skill root overlaps Flock state");
@@ -96,10 +96,10 @@ std::filesystem::path skillRoot(const ToolContext& ctx, const Scope& grant, cons
     return root;
 }
 
-std::pair<std::filesystem::path,std::filesystem::path> skillFile(const ToolContext& ctx, const Scope& grant, const Json& args,
+std::pair<std::filesystem::path,std::filesystem::path> skillFile(const ToolContext& ctx, const Resource& resource, const Json& args,
                                 const std::filesystem::path& database) {
     namespace fs = std::filesystem;
-    const auto root = skillRoot(ctx,grant,database);
+    const auto root = skillRoot(ctx,resource,database);
     const auto relative = relativeToolPath(args.contains("path") ? toolText(args,"path",1024) : "SKILL.md");
     const auto resolved = fs::weakly_canonical(root / relative);
     if (relative == "." || resolved != root / relative || fs::is_symlink(resolved) ||
@@ -167,18 +167,18 @@ Json toolFailure(std::string_view error) {
     return {{"ok",false},{"error",error}};
 }
 
-std::optional<Scope> Store::Impl::authorizedBotToolScope(std::string_view bot, const Decision& call) {
-    const Access access(*this);
-    auto grant = scope(bot,call);
-    if (!access.permits(bot,grant,true)) return std::nullopt;
+std::optional<Resource> Store::Impl::authorizedBotToolScope(std::string_view bot, const Decision& call) {
+    const Policy policy(*this);
+    auto resource = scope(bot,call);
+    if (policy.forbidden(bot,resource.action,resource.target)) return std::nullopt;
     if ((call.tool == "workspace_run_command" || call.tool == "workspace_command_status") &&
-        !access.permits(bot,{"workspace",std::string(bot),"read"},true)) return std::nullopt;
-    return grant;
+        !policy.allows(bot,Action::workspace_read,std::string(bot))) return std::nullopt;
+    return resource;
 }
 
 void Store::Impl::authorizeBotToolHistory(std::string_view bot, Id message, ModelInput& input) {
     std::lock_guard lock(mutex);
-    const Access access(*this);
+    const Policy policy(*this);
     auto& steps = input.event.at("turn");
     for (auto& step : steps) {
         const auto& tool = step.at("tool").get_ref<const std::string&>();
@@ -190,7 +190,7 @@ void Store::Impl::authorizeBotToolHistory(std::string_view bot, Id message, Mode
         } else if (tool == "skill_list" && result.at("ok").get<bool>()) {
             auto& skills = result.at("data").get_ref<Json::array_t&>();
             std::erase_if(skills,[&](const auto& skill) {
-                return !access.permits(bot,{"skill",field(skill,"name"),"read"},true);
+                return !policy.allows(bot,Action::skill_read,field(skill,"name"));
             });
         }
     }
@@ -238,17 +238,17 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
             if (!value.is_object() || value.dump().size() > 8192) throw Conflict("Invalid MCP tool arguments");
         } else toolText(args,key,argumentLimit(key),key == "text");
     }
-    const auto grant = authorizedBotToolScope(ctx.bot,call);
-    if (!grant) throw Conflict("Bot tool access denied");
+    const auto resource = authorizedBotToolScope(ctx.bot,call);
+    if (!resource) throw Conflict("Bot tool access denied");
     if (call.tool.starts_with("workspace_")) validateWorkspace(ctx,call);
     if (call.tool.starts_with("web_") && !ctx.settings.web) throw Conflict("Web tools are unavailable");
-    if (call.tool.starts_with("mcp_") && (!ctx.settings.mcp || !ctx.settings.mcp->hasServer(grant->resource)))
+    if (call.tool.starts_with("mcp_") && (!ctx.settings.mcp || !ctx.settings.mcp->hasServer(resource->target)))
         throw Conflict("MCP server is unavailable");
     if (call.tool == "mcp_discover" && args.at("collection") != "tools" && args.at("collection") != "resources")
         throw Conflict("MCP collection must be tools or resources");
     if (call.tool == "skill_read") {
-        if (!ctx.settings.skills.contains(grant->resource)) throw Conflict("Skill is unavailable");
-        skillFile(ctx,*grant,args,path);
+        if (!ctx.settings.skills.contains(resource->target)) throw Conflict("Skill is unavailable");
+        skillFile(ctx,*resource,args,path);
     }
     if (call.tool == "inspect_attachment" && !scopedAttachment(ctx.bot,ctx.messageId,args).next())
         throw Conflict("Attachment is unavailable in this conversation");
@@ -259,11 +259,11 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     {
         std::lock_guard lock(mutex);
         const auto message = loadTurnMessage(ctx.messageId);
-        if (!message.channelScope.empty() || !Access(*this).permitsPerson(turnActor(message),ctx.bot,Role::decide))
+        if (!message.channelScope.empty() || !Policy(*this).allows(turnActor(message),Action::bot_decide,ctx.bot))
             throw DecisionDenied{};
     }
-    const auto grant = authorizedBotToolScope(ctx.bot,call);
-    if (!grant) throw Conflict("Bot tool access denied");
+    const auto resource = authorizedBotToolScope(ctx.bot,call);
+    if (!resource) throw Conflict("Bot tool access denied");
     if (call.tool.starts_with("workspace_")) {
         auto result = workspaceTool(ctx,call);
         result["untrustedData"] = true;
@@ -275,21 +275,21 @@ Json Store::Impl::executeBotTool(const ToolContext& ctx, const Decision& call) {
     else if (call.tool == "web_fetch") content = ctx.settings.web->fetch(toolText(args,"url",2048));
     else if (call.tool == "mcp_discover") {
         const auto collection = args.at("collection") == "tools" ? McpCollection::tools : McpCollection::resources;
-        content = ctx.settings.mcp->discover(ctx.bot,grant->resource,collection,field(args,"cursor"));
+        content = ctx.settings.mcp->discover(ctx.bot,resource->target,collection,field(args,"cursor"));
     } else if (call.tool == "mcp_call_tool") {
-        auto result = ctx.settings.mcp->invoke(grant->resource,toolText(args,"name",128),args.at("arguments"));
+        auto result = ctx.settings.mcp->invoke(resource->target,toolText(args,"name",128),args.at("arguments"));
         failed = result.isError;
         content = std::move(result.data);
     } else if (call.tool == "mcp_read_resource")
-        content = ctx.settings.mcp->readResource(grant->resource,toolText(args,"uri",2048));
+        content = ctx.settings.mcp->readResource(resource->target,toolText(args,"uri",2048));
     else if (call.tool == "skill_list") {
         content = Json::array();
         for (const auto& [name,root] : ctx.settings.skills) {
-            if (Access(*this).permits(ctx.bot,{"skill",name,"read"},true))
+            if (Policy(*this).allows(ctx.bot,Action::skill_read,name))
                 content.push_back({{"name",name}});
         }
     } else if (call.tool == "skill_read") {
-        const auto [root,relative] = skillFile(ctx,*grant,args,path);
+        const auto [root,relative] = skillFile(ctx,*resource,args,path);
         content = readToolFile(root,relative,sharedRedactor());
     } else content = inspectAttachment(ctx.bot,ctx.messageId,args);
     const auto scrub = call.tool == "inspect_attachment" ? redactor(ctx.bot) : sharedRedactor();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 #include <compare>
 #include <condition_variable>

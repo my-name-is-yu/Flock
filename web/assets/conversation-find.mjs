@@ -3,6 +3,18 @@ import { timelineMessages } from './event-history.mjs';
 const pagesPerSearch = 4;
 const matchesPerView = 5;
 const dateFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium' });
+const clockFormat = new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const monthDayFormat = new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' });
+const fullFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' });
+
+// Match the timeline's clock: today's results show the time, recent ones a short date.
+export function matchTimeLabel(date, now = new Date()) {
+  const startOfDay = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((startOfDay(now) - startOfDay(date)) / 86400000);
+  if (days === 0) return clockFormat.format(date);
+  if (days === 1) return 'Yesterday';
+  return date.getFullYear() === now.getFullYear() ? monthDayFormat.format(date) : dateFormat.format(date);
+}
 const textFields = new Map([
   ['conversation_message', 'text'], ['conversation_reply', 'text'], ['request', 'text'],
   ['user_answer', 'text'], ['waiting', 'text'], ['report', 'report'], ['completed', 'text'], ['pr_review_requested', 'text'],
@@ -88,8 +100,9 @@ export function mountConversationFind({ toggle, panel, readPage, describeAuthor,
     const button = element('button', 'find-match');
     button.type = 'button';
     const date = new Date(result.time * 1000);
-    const time = element('time', '', dateFormat.format(date));
+    const time = element('time', '', matchTimeLabel(date));
     time.dateTime = date.toISOString();
+    time.title = fullFormat.format(date);
     const meta = element('span', 'find-match-meta');
     meta.append(element('span', 'find-match-name', result.author), time);
     const snippet = element('span', 'find-snippet');
