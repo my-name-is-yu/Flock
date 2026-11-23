@@ -88,7 +88,7 @@ for the requested `shared_memory` operation.
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 login ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
 build/app/flock access grant release environment ENVIRONMENT_ID launch
 build/app/flock run
 ```
@@ -97,14 +97,14 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
-For T3, approve Operate access and check that `flock t3 login` reports
-`canOperate: true`. Use the same environment ID for the Bot configuration,
-login, and launch grant. For T3 on this machine, use the loopback MCP URL
+For T3, approve Operate access. Use the same environment ID for the Bot configuration,
+connection, and launch grant. For T3 on this machine, use the loopback MCP URL
 published by T3. If a Task already stopped for missing launch access, grant
 access and reconcile the Task to retry the unsent launch.
 
 The foreground process prints the local Web URL. Use `flock run --no-web`
-for headless operation. Once the daemon is running, submit work with the Web
+for headless operation. T3 skills require the Web listener on the port saved by
+`flock t3 connect`. Once the daemon is running, submit work with the Web
 conversation or with CLI commands such as the following.
 
 ```sh

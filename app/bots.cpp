@@ -395,6 +395,26 @@ Json Bots::cards() const {
     return items;
 }
 
+Json Bots::skillCards() const {
+    std::lock_guard lock(mutex_);
+    auto items = Json::array();
+    const auto botIds = ids();
+    if (botIds.empty()) return items;
+    // A cached skill may still carry this ID after the profile directory is removed.
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
+    for (const auto& id : botIds) {
+        writeNewFile(issued / id,"");
+        try {
+            const auto card = cardLocked(id);
+            items.push_back({{"id",id},{"name",card.at("name")},{"role",card.value("role",std::string("custom"))}});
+        } catch (const Conflict&) {
+            items.push_back({{"id",id},{"name",id},{"role","custom"}});
+        }
+    }
+    return items;
+}
+
 void Bots::apply(const BotChange& change) {
     if (change.operation == "rename_bot") {
         updateProfile(change.target,{{"name",change.name}});
@@ -411,6 +431,9 @@ void Bots::apply(const BotChange& change) {
         if (existing.value("creationRequest","") == change.requestKey) return;
         throw Conflict("Target Bot already exists");
     }
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
+    if (std::filesystem::exists(issued / change.target)) throw Conflict("This Bot ID has already been used");
     const auto staging = directory_ / (".create-" + change.requestKey);
     if (!std::filesystem::create_directory(staging) &&
         (std::filesystem::is_symlink(staging) || !std::filesystem::is_directory(staging)))
@@ -419,6 +442,7 @@ void Bots::apply(const BotChange& change) {
                       {"avatar",{{"kind","shape"},{"example","sprout"},{"color","#69c9ac"}}}};
     writeAtomic(staging / "config.json",config.dump(2) + "\n");
     std::filesystem::rename(staging,destination);
+    writeNewFile(issued / change.target,"");
 }
 
 Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) {
@@ -434,11 +458,13 @@ Json Bots::create(const Json& profile, const std::optional<AvatarImage>& image) 
 
     std::lock_guard lock(mutex_);
     std::filesystem::create_directories(directory_);
+    const auto issued = directory_ / ".flock-issued-ids";
+    std::filesystem::create_directories(issued);
     const auto base = slugForName(name);
     std::string id = base;
     for (unsigned suffix = 2; ; ++suffix) {
         std::error_code error;
-        if (std::filesystem::create_directory(directory_ / id,error)) break;
+        if (writeNewFile(issued / id,"") && std::filesystem::create_directory(directory_ / id,error)) break;
         if (error && error != std::errc::file_exists)
             throw std::filesystem::filesystem_error("Unable to create Bot directory",directory_ / id,error);
         id = base + "-" + std::to_string(suffix);

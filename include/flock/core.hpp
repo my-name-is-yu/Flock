@@ -331,7 +331,7 @@ private:
     std::unique_ptr<Impl> p_;
     friend class Runtime;
     friend class Access;
-    friend class ParticipationStore;
+    friend class T3Connections;
     friend class RootDelivery;
     friend class SessionHandoff;
 };

@@ -2583,7 +2583,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
+enum class SpecialistMode { Single, ConsultRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -2596,6 +2596,11 @@ void specialistAdmission(SpecialistMode mode) {
     std::string currentPin = pin;
     struct Session final : ThreadSession {
         std::optional<std::string> pin;
+        std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
+                                                   const Json&, std::chrono::steady_clock::time_point) override {
+            return ThreadProof{{std::string(environment),"p",std::string(thread)},0,
+                               "root-credential-generation","origin-run","tool-call"};
+        }
         std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
             return ThreadPage{origin,0,"root-credential-generation","",{}};
         }
@@ -2611,15 +2616,16 @@ void specialistAdmission(SpecialistMode mode) {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
     const auto routing = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
-    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,routing,f.runtime.get()); };
+    const auto handoffs = [&] {
+        return SessionHandoff(*f.store,session,f.specialistPerson,routing,f.runtime.get(),[&](std::string_view bot) {
+            return f.peers.at(std::string(bot));
+        });
+    };
     auto access = f.store->access();
+    access.resourceGrant(localOwner,"beta",{"environment","e","launch"},GrantChange::revoke);
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
-        access.personScope(localOwner,person.id,Scope::sessionRead("e","root-thread"),GrantChange::grant);
     }
-    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
                         mode==SpecialistMode::NestedWorkflowPause;
     if (nested) {
@@ -2627,13 +2633,15 @@ void specialistAdmission(SpecialistMode mode) {
         f.peers["beta"] = {{"Root",{"alpha","","e","p"},"reviewer"},
                            {"Nested",{"gamma","","e","p"},"reviewer"}};
         f.peers["gamma"] = {{"Too deep",{"delta","","e","p"},"reviewer"}};
-        access.resourceGrant(localOwner,"gamma",{"environment","e","launch"},GrantChange::grant);
-        access.resourceGrant(localOwner,"delta",{"environment","e","launch"},GrantChange::grant);
-        for (const auto* bot : {"beta","gamma"})
-            access.resourceGrant(localOwner,bot,Scope::workDelegate("e","root-thread"),GrantChange::grant);
+        f.peers["alpha"].push_back(f.peers["beta"].back());
     }
-    const auto pairing = handoffs().pair(person,target,"alpha",scope);
-    const auto channel = handoffs().intake(pairing.code,"request","Check the pinned project.").channel;
+    const auto route = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    T3Connections connections(*f.store);
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto channel = handoffs().invoke(*connection,
+        {{"threadId",target.threadId},{"botId","alpha"},{"requestId","request"},
+         {"text","Check the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
+        [](std::string_view) { return true; }).channel;
     bool freezeBeforeReservation = false;
     bool freezeDuringWorkflowAdmission = false;
     unsigned workspaceChecks = 0;
@@ -2648,6 +2656,15 @@ void specialistAdmission(SpecialistMode mode) {
     f.restart();
     const auto generation = handoffs().view(person,channel).generation;
     SpecialistCheck request{channel,generation,"coord/check-1","beta","Review the pinned project",Evidence,pin};
+    if (mode==SpecialistMode::Single) {
+        session.pin = pin;
+        f.model.script = [](const ModelInput& input) -> Decision {
+            check(hasTool(input,"delegate_specialist") && input.event.at("specialists").at(0).at("botId")=="beta",
+                  "coordination did not offer the specialist without an environment grant");
+            return {"wait_for_root",Json::object(),""};
+        };
+        handoffs().step(person,channel,f.model,[](std::string_view) { return std::string{}; });
+    }
     const auto first = f.runtime->startSpecialist(person,request);
     check(first.senderTaskId!=first.recipientTaskId && f.task(first.senderTaskId)["activeRun"].is_null() &&
           f.task(first.recipientTaskId)["inputArtifactVersion"]==pin,"delegation did not bind two distinct tasks to the pin");
@@ -2662,6 +2679,23 @@ void specialistAdmission(SpecialistMode mode) {
     auto changed = request;
     changed.commitSha = std::string(40,'b');
     denied(changed);
+    if (mode==SpecialistMode::ConsultRevoked || mode==SpecialistMode::Disconnected) {
+        f.model.script = [](const ModelInput&) { return work("delegate",false); };
+        f.reach(first.recipientTaskId,"sending");
+        f.t3.onPreflight = [&] {
+            T3Connections connections(*f.store);
+            if (mode==SpecialistMode::ConsultRevoked)
+                connections.connect(target.environmentId,person.id,T3ConnectionMode::Consult,4173);
+            else connections.disconnect(target.environmentId);
+        };
+        f.reach(first.recipientTaskId,"completed");
+        auto later = request;
+        later.delegationId = "coord/check-2";
+        denied(later);
+        check(f.t3.launches==0 && f.logs(first.recipientTaskId,"specialist_launch_blocked")==1,
+              "a revoked connection still launched unadmitted specialist work");
+        return;
+    }
     if (nested) {
         f.model.script = [&](const ModelInput& input) -> Decision {
             if (input.task.at("botId")=="beta") {
@@ -3203,6 +3237,11 @@ void exhaustedSavedSpecialistEffect() {
     const std::string pin(40,'a');
     struct Session final : ThreadSession {
         std::optional<std::string> pin = std::string(40,'a');
+        std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view thread,
+                                                   const Json&, std::chrono::steady_clock::time_point) override {
+            return ThreadProof{{std::string(environment),"p",std::string(thread)},0,
+                               "root-credential-generation","origin-run","tool-call"};
+        }
         std::optional<ThreadPage> read(const ThreadTarget& origin, std::optional<Id>) override {
             return ThreadPage{origin,0,"root-credential-generation","",{}};
         }
@@ -3219,13 +3258,13 @@ void exhaustedSavedSpecialistEffect() {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
     f.restart();
-    auto access=f.store->access();
-    access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
-    access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
-    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
-    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson,route).pair(person,target,"alpha",scope);
-    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson,route).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
+    const auto route = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    T3Connections connections(*f.store);
+    const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,T3ConnectionMode::Full,4173));
+    const auto channel = SessionHandoff(*f.store,session,f.specialistPerson,route).invoke(*connection,
+        {{"threadId",target.threadId},{"botId","alpha"},{"requestId","budget-effect"},
+         {"text","Review the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
+        [](std::string_view) { return true; }).channel;
     const auto generation=SessionHandoff(*f.store,session,f.specialistPerson,route).view(person,channel).generation;
     int modelCalls=0;
     f.model.script=[&](const ModelInput& input)->Decision {
@@ -3379,7 +3418,17 @@ int main() {
             {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
             {"Queued Bot handoff cancellation",peerCancelWhileQueued},
             {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
-            {"pinned specialist admission, restart and freeze",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"pinned specialist admission without a launch grant",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"consult mode blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::ConsultRevoked); }},
+            {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
+            {"ordinary launch still needs a grant with a full connection",[] {
+                Fixture f;
+                f.store->access().resourceGrant(localOwner,"alpha",{"environment","e","launch"},GrantChange::revoke);
+                T3Connections(*f.store).connect("e",localOwner.id,T3ConnectionMode::Full,4173);
+                f.model.script = [](const ModelInput&) { return work(); };
+                f.wait(f.submit(),"settings");
+                check(f.t3.launches==0,"the connector granted an ordinary Bot launch");
+            }},
             {"direct specialist rejects missing findings",[] { specialistAdmission(SpecialistMode::MissingFindings); }},
             {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},
             {"direct specialist rejects more than eight findings",[] { specialistAdmission(SpecialistMode::TooManyFindings); }},

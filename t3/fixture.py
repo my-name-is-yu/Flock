@@ -3,6 +3,9 @@ import base64
 import hashlib
 import json
 import os
+import re
+import selectors
+import socket
 import signal
 import sqlite3
 import subprocess
@@ -193,7 +196,7 @@ class Fixture(BaseHTTPRequestHandler):
         if self.server.stock_thread:
             return self.stock_tool(name, args)
         if name == "t3_environment_read":
-            return {"environmentId": "env-1", "serverVersion": "0.1.11"}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"), "serverVersion": "0.1.11"}
         if name == "t3_project_read":
             if args["projectId"] == "slow-search-project":
                 time.sleep(4)
@@ -476,6 +479,26 @@ class Fixture(BaseHTTPRequestHandler):
         if thread == "pinned-worker":
             rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
                     {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
+        if is_root and args["view"] == "activity" and state.get("stockInvocation"):
+            mode = state["stockInvocation"]
+            summary["activeRunId"] = None if mode == "finished" else "root-run"
+            arguments = state["stockArguments"]
+            tool_name = "mcp__flock__invoke_flock_bot" if mode == "claude" else "flock.invoke_flock_bot"
+            body = json.dumps({"toolName": tool_name, "input": arguments}, ensure_ascii=False)
+            source = "other" if mode == "wrong-thread" else "human"
+            item = self.item(source, 2 if state.get("stockRootRecovery") else 7, "old-run" if mode == "old-run" else "root-run",
+                             "dynamic_tool", body, status="running") | {"itemId": "invocation"}
+            if mode == "inherited":
+                item["visibility"] = "inherited"
+            if args.get("itemId") is None or args["itemId"] == item["itemId"]:
+                offset = args.get("textOffset", 0)
+                bounded = body[offset:offset + args["maxCharsPerItem"]]
+                item["text"] = bounded
+                item["textTruncated"] = offset + len(bounded) < len(body)
+                item["nextTextOffset"] = offset + len(bounded) if item["textTruncated"] else None
+                rows = [item]
+            else:
+                rows = []
         if args.get("beforePosition") is not None:
             rows = [row for row in rows if row["position"] < args["beforePosition"]]
         else:
@@ -564,11 +587,236 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
+def test_connection_setup(server, flock, temp):
+    directory = Path(temp)
+    state = directory / "flock"
+    codex_config = directory / "config.toml"
+    claude_skills = directory / "claude-skills"
+    codex_skills = directory / "codex-skills"
+    claude_config = directory / ".claude.json"
+    original_claude = b'{ "z-last" : [1,  2], "mcpServers":{}, "a-first" : true }\n'
+    claude_config.write_bytes(original_claude)
+    claude = directory / "claude"
+    claude.write_text(
+        f"#!{sys.executable}\n"
+        + """import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print(os.environ.get("FIXTURE_CLAUDE_VERSION", "2.1.327") + " (Claude Code)")
+    sys.exit(0)
+
+directory = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.environ["HOME"]))
+path = directory / ".claude.json"
+config = path.read_bytes()
+servers = json.loads(config)["mcpServers"]
+before = json.dumps(servers).encode()
+if args == ["mcp", "add-json", "--scope", "user", "flock", "-"]:
+    assert "flock" not in servers
+    server = json.load(sys.stdin)
+    if server["headers"]["Authorization"] != os.environ.get(
+        "FIXTURE_CLAUDE_ALLOW_BEARER", server["headers"]["Authorization"]
+    ):
+        sys.exit(1)
+    servers["flock"] = server
+else:
+    assert args == ["mcp", "remove", "--scope", "user", "flock"]
+    del servers["flock"]
+marker = b'"mcpServers":'
+old = marker + before
+assert old in config
+path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
+"""
+    )
+    claude.chmod(0o700)
+    env = dict(os.environ, HOME=str(directory), FLOCK_CODEX_CONFIG=str(codex_config),
+               FLOCK_CLAUDE_CONFIG=str(claude_config),
+               FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true",
+               FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
+    codex_config.write_text(original)
+    profile = state / "bots" / "reviewer"
+    profile.mkdir(parents=True)
+    (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+    command = [flock, "--home", str(state)]
+
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", 0))
+        port = choose_port.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+
+    def connect(environment, expected_mode, flags, restart=False, expected_error=None):
+        server.state["claimedEnvironment"] = environment
+        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
+                                         *flags], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "T3 connect did not display the OAuth URL"
+                    assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
+                authorization = process.stderr.readline().strip()
+                request = urllib.request.Request(server.origin + "/fixture",
+                    data=json.dumps({"authorization": authorization}).encode(),
+                    headers={"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+                output, errors = process.communicate(timeout=8)
+                if expected_error:
+                    assert process.returncode != 0 and expected_error in errors, (output, errors)
+                    return
+                assert process.returncode == 0, errors
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        details = json.loads(output)
+        assert details["mode"] == expected_mode and details["port"] == port
+        has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
+        assert details["configuredProviders"] == (["codex", "claude"] if has_claude else ["codex"])
+        assert ("Restart 'flock run'" in errors) == restart
+        codex = codex_config.read_text()
+        assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
+        assert codex_config.stat().st_mode & 0o777 == 0o600
+        token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
+        assert token not in output and token not in errors
+        if has_claude:
+            assert json.loads(claude_config.read_text())["mcpServers"]["flock"] == {
+                "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
+            }
+        assert token.encode() not in (state / "flock.sqlite3").read_bytes()
+        for root in ([codex_skills, claude_skills] if has_claude else [codex_skills]):
+            assert (root / "flock" / "SKILL.md").is_file()
+            skill = (root / "flock-reviewer" / "SKILL.md").read_text()
+            assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
+        return token
+
+    working_command = command
+    command = [flock, "--home", str(directory / "rejected-flock")]
+    for reserved in [
+        '[mcp_servers . flock]\nurl = "https://example.com/mcp"\n',
+        'mcp_servers.flock.url = "https://example.com/mcp"\n',
+        'mcp_servers = { flock = { url = "https://example.com/mcp" } }\n',
+    ]:
+        codex_config.write_text(reserved)
+        connect("env-1", "full", ["--port", str(port)],
+                expected_error="Remove the existing Codex MCP server named flock")
+        assert codex_config.read_text() == reserved
+    command = working_command
+    codex_config.write_text(original)
+
+    env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+    old = connect("env-1", "full", ["--port", str(port)], restart=True)
+    assert claude_config.read_bytes() == original_claude
+    env["FLOCK_CLAUDE_CLI"] = str(claude)
+    token = connect("env-2", "consult", ["--mode", "consult"])
+    assert token != old
+    credential_dir = state / "credentials" / "t3"
+    credentials = {path.name: path.read_bytes() for path in credential_dir.glob("*.json")}
+    previous_config = codex_config.read_bytes()
+    def connector():
+        with sqlite3.connect(state / "flock.sqlite3") as db:
+            return db.execute("SELECT * FROM t3_connector").fetchone()
+    previous_connector = connector()
+    previous_claude = claude_config.read_bytes()
+    for setting, value in [
+        ("FIXTURE_CLAUDE_VERSION", "2.1.326"),
+        ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
+    ]:
+        env[setting] = value
+        connect("env-2", "consult", [], expected_error="Claude Code 2.1.327 or later is required")
+        del env[setting]
+        assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
+        assert codex_config.read_bytes() == previous_config and connector() == previous_connector
+        assert claude_config.read_bytes() == previous_claude
+
+    previous_port = port
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", previous_port))
+        with socket.socket() as replacement:
+            replacement.bind(("127.0.0.1", 0))
+            port = replacement.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+    before_port_change = token
+    token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], restart=True)
+    assert token != before_port_change
+
+    with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(headless.stderr, selectors.EVENT_READ)
+                assert selector.select(5), "headless startup did not warn about the MCP endpoint"
+                assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+        finally:
+            headless.terminate()
+            headless.wait(timeout=8)
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", port))
+        busy.listen()
+        result = subprocess.run(command + ["run"], env=env, capture_output=True, text=True, timeout=8)
+        assert result.returncode != 0 and f"port {port}" in result.stderr and "in use" in result.stderr
+
+    def ping(value):
+        request = urllib.request.Request(endpoint, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                    headers={"Content-Type":"application/json", "Authorization":"Bearer " + value})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as result:
+                return result.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    with subprocess.Popen(command + ["run"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(daemon.stdout, selectors.EVENT_READ)
+                assert selector.select(8), "Flock did not listen on the saved port"
+                assert daemon.stdout.readline().rstrip().endswith(f":{port}")
+            assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+            subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]
+            subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 401
+            assert codex_config.read_text() == original and claude_config.read_bytes() == original_claude
+
+            connect("env-1", "full", ["--port", str(port)], restart=True)
+            second = [flock, "--home", str(directory / "second-flock")]
+            command = second
+            # Setup only needs OAuth and provider files. The Web port remains with the first home.
+            profile = directory / "second-flock" / "bots" / "reviewer"
+            profile.mkdir(parents=True)
+            (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+            connect("env-1", "full", ["--port", str(port)], restart=True)
+            configs = codex_config.read_bytes(), claude_config.read_bytes()
+            subprocess.run(working_command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert (codex_config.read_bytes(), claude_config.read_bytes()) == configs
+
+            # A leftover Claude Code config must not strand the Codex registration once Claude Code is gone.
+            env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+            claude_config.write_text("{ not json")
+            subprocess.run(second + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert codex_config.read_text() == original and claude_config.read_text() == "{ not json"
+            env["FLOCK_CLAUDE_CLI"] = str(claude)
+        finally:
+            daemon.terminate()
+            daemon.wait(timeout=8)
+
+
 def test_headless_handoff(server, flock, temp):
     home = Path(temp)
     args = [flock, "--home", str(home)]
     env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCK_")}
-    subprocess.run(args + ["access", "grant", "release", "consult", '["env-1","human"]', "reply-once"],
+    subprocess.run(args + ["access", "list", "release"],
                    env=env, check=True, capture_output=True, timeout=5)
     identities = home / "identities.json"
     identities.write_text(json.dumps([
@@ -592,9 +840,11 @@ def test_headless_handoff(server, flock, temp):
     server.state.update(handoffText=handoff_text, finalized=True)
 
     with sqlite3.connect(home / "flock.sqlite3") as db:
+        db.execute("INSERT INTO t3_connector VALUES(1,'fixture','alice','full','fixture-digest',4173)")
+        db.execute("INSERT INTO t3_connected_environments VALUES('env-1')")
         # Simulate a daemon exit after T3 accepted the reply and before Flock saved the receipt.
         db.execute("INSERT INTO return_channels VALUES(1,'env-1','project','human','','request-1','',"
-                   "'release','alice','{\"request\":\"Review the release\"}')")
+                   "'release','alice','{\"request\":\"Review the release\"}','client-1','digest')")
         db.execute("INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor) "
                    "VALUES(1,'active',?,'null','command-1',4)", (generation,))
         db.execute("INSERT INTO thread_deliveries(command_id,channel_id,generation,text,state,cursor) "
@@ -605,9 +855,9 @@ def test_headless_handoff(server, flock, temp):
             delegation = f"delegation-{channel}"
             sender, recipient = channel * 2 - 1, channel * 2
             db.execute("INSERT INTO return_channels VALUES(?,'env-1','project',?,'',?,'',"
-                       "'release',?,?)",
+                       "'release',?,?,?,'digest')",
                        (channel, f"paused-{channel}", f"request-{channel}", owner,
-                        json.dumps({"request": "Review the paused release"})))
+                        json.dumps({"request": "Review the paused release"}), f"client-{channel}"))
             db.execute("INSERT INTO session_controls(channel_id,state,generation,auth_generation,permission,consult_command,event_cursor) "
                        "VALUES(?,'paused',2,?,?,'',0)",
                        (channel, generation, json.dumps({"goal": "Review", "allowDelegation": True})))
@@ -689,6 +939,9 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif sys.argv[2:] == ["connection-setup"]:
+            test_connection_setup(server, sys.argv[1], temp)
             code = 0
         elif headless_handoff:
             test_headless_handoff(server, sys.argv[1], temp)

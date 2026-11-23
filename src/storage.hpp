@@ -94,7 +94,7 @@ private:
 };
 
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
-std::string redactPairingCodes(std::string);
+std::string redactT3Tokens(std::string);
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -134,7 +134,7 @@ struct Store::Impl {
     void initializeParticipationSchema();
     void initializeRootDeliverySchema();
     void initializeSessionHandoffSchema();
-    Participation authorizeParticipation(const Person&, Id channel, bool requireBot = true);
+    Participation authorizeParticipation(const Person&, Id channel, bool requireConnection = true);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);

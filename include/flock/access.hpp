@@ -18,9 +18,6 @@ inline const Person localOwner{"local-owner",true};
 struct Scope {
     std::string kind, resource, operation;
     static Scope sessionRead(std::string_view environment, std::string_view thread);
-    static Scope consultReply(std::string_view environment, std::string_view thread);
-    static Scope sessionCoordinate(std::string_view environment, std::string_view thread);
-    static Scope workDelegate(std::string_view environment, std::string_view thread);
     bool valid() const;
 };
 struct SecretRef { std::string name; bool valid() const; };

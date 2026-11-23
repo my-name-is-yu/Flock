@@ -40,7 +40,7 @@ endif()
 
 add_library(flock_core src/store.cpp src/conversation.cpp src/conversation_agent.cpp src/conversation_actions.cpp src/conversation_projection.cpp
                        src/workflow.cpp src/context_compaction.cpp src/session_read.cpp src/model_budget.cpp src/channels.cpp src/local_machine.cpp
-                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/root_delivery.cpp
+                       src/runtime.cpp src/access.cpp src/access_tools.cpp src/identity.cpp src/secrets.cpp src/participation.cpp src/skill_export.cpp src/root_delivery.cpp
                        src/session_handoff.cpp src/board_inbox.cpp
                        src/memory_store.cpp src/automation.cpp src/cron.cpp
                        src/bot_workspace.cpp src/bot_tools_external.cpp src/parallel_tools.cpp src/attachments.cpp src/base64.cpp
@@ -107,6 +107,10 @@ add_subdirectory(web)
 target_link_libraries(flock PRIVATE flock_web flock_t3)
 
 if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME flock_t3_connection_setup COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> connection-setup)
+  set_tests_properties(flock_t3_connection_setup PROPERTIES TIMEOUT 45)
   add_executable(flock_live_t3 tests/live_t3.cpp)
   target_link_libraries(flock_live_t3 PRIVATE flock_t3)
   add_executable(flock_live_conversation tests/live_conversation.cpp)

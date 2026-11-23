@@ -1,13 +1,10 @@
 #pragma once
 
 #include "flock/root_delivery.hpp"
+#include "flock/t3_connection.hpp"
 
 namespace flockv0 {
 
-struct PairingTicket {
-    std::string code;
-    Seconds expiresAt;
-};
 struct HandoffAck {
     Id channel;
     std::string requestId;
@@ -39,9 +36,10 @@ public:
 
     void recover();
 
-    PairingTicket pair(const Person&, const ThreadTarget&, std::string_view bot,
-                       std::optional<CoordinationRequest>);
-    HandoffAck intake(std::string_view code, std::string_view requestId, std::string_view text);
+    std::optional<Person> person(const T3Connection&) const;
+    HandoffAck invoke(const T3Connection&, const Json& arguments,
+                      const std::function<bool(std::string_view)>& botExists,
+                      std::chrono::milliseconds proofTimeout = std::chrono::seconds(3));
     SessionHandoffView resume(const Person&, Id channel);
     SessionHandoffView pause(const Person&, Id channel);
     SessionHandoffView freeze(const Person&, Id channel);
@@ -56,6 +54,9 @@ public:
     std::vector<std::pair<Id,std::string>> pending(Id after) const;
 
 private:
+    HandoffAck openChannel(const T3Connection&, const ThreadProof&, std::string_view bot,
+                           std::string_view requestId, std::string_view text, std::string_view payloadDigest,
+                           const std::optional<CoordinationRequest>&);
     SessionHandoffView freezeAs(const Person&, Id channel, std::string_view state);
     Intake resolveBot(std::string_view bot) const;
     Store& store_;

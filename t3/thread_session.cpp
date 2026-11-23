@@ -144,6 +144,37 @@ void verifyEnvironment(Client& client, const ThreadTarget& target) {
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
 }
 
+std::optional<Json> completeInvocationItem(Client& client, const ThreadTarget& target, const std::string& run,
+                                           const Json& item) {
+    if (!boolean(item,"textTruncated")) return item;
+    const auto itemId = str(item,"itemId");
+    auto content = str(item,"text");
+    auto offset = position(member(item,"nextTextOffset"));
+    // The double-escaped text and goal fit within eight 20,000-character chunks.
+    for (int part = 0; part < 7; ++part) {
+        const auto tail = readThread(client,target.threadId,"activity",1,20000,
+                                     {{"itemId",itemId},{"textOffset",offset}});
+        const auto& current = member(tail,"thread");
+        if (str(current,"activeRunId") != run || !validDestination(current,target)) return {};
+        const auto& rows = array(tail,"items");
+        if (rows.empty()) return {};
+        const auto& chunk = rows.front();
+        if (str(chunk,"itemId") != itemId || !localItem(chunk,target.threadId) ||
+            str(chunk,"runId") != run || str(chunk,"type") != "dynamic_tool") return {};
+        content += str(chunk,"text");
+        if (!boolean(chunk,"textTruncated")) {
+            auto complete = item;
+            complete["text"] = std::move(content);
+            complete["textTruncated"] = false;
+            return complete;
+        }
+        const auto next = position(member(chunk,"nextTextOffset"));
+        if (next <= offset) return {};
+        offset = next;
+    }
+    return {};
+}
+
 class StockThreadSession final : public ThreadSession {
 public:
     explicit StockThreadSession(std::filesystem::path directory) : directory_(std::move(directory)) {}
@@ -187,6 +218,51 @@ public:
         } catch (const Failure&) {
             return {};
         }
+    }
+
+    std::optional<ThreadProof> proveInvocation(std::string_view environment, std::string_view threadId,
+                                              const Json& arguments,
+                                              std::chrono::steady_clock::time_point deadline) override {
+        try {
+            auto credential = loadCredential(directory_,std::string(environment));
+            if (!credential.operate) return {};
+            const auto generation = credential.generation;
+            Client client(std::move(credential),deadline);
+            ThreadTarget target{std::string(environment),{},std::string(threadId)};
+            verifyEnvironment(client,target);
+            Id before = maxHistoryPosition;
+            std::string run;
+            for (int scan = 0; scan < 4; ++scan) {
+                const auto page = readThread(client,threadId,"activity",24,20000,{{"beforePosition",before}});
+                const auto& thread = member(page,"thread");
+                const auto active = str(thread,"activeRunId");
+                if (scan == 0) {
+                    run = active;
+                    target.projectId = str(thread,"projectId");
+                }
+                if (active.empty() || active != run || target.projectId.empty() || !validDestination(thread,target))
+                    return {};
+                for (const auto& item : array(page,"items")) {
+                    if (str(item,"type") != "dynamic_tool" || !localItem(item,threadId) || str(item,"runId") != run)
+                        continue;
+                    const auto itemId = str(item,"itemId");
+                    if (itemId.empty()) continue;
+                    const auto complete = completeInvocationItem(client,target,run,item);
+                    if (complete && matchesThreadInvocation(*complete,threadId,run,arguments))
+                        return ThreadProof{target,position(member(item,"position")),generation,run,itemId};
+                }
+                const auto& earlier = member(page,"earlierPosition");
+                if (earlier.is_null()) return {};
+                const auto next = position(earlier);
+                if (next >= before) return {};
+                before = next;
+            }
+        } catch (const Failure&) {
+            return {};
+        } catch (const SessionReadTimeout&) {
+            return {};
+        }
+        return {};
     }
 
     std::optional<ThreadPage> dispatchHistory(const ThreadTarget& target, Id after) override {

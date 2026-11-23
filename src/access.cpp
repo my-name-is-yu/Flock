@@ -13,7 +13,7 @@ bool identifier(std::string_view id) {
 const Json& resourceOperations() {
     static const Json catalog{
         {"service",{"read","use","manage"}},{"repository",{"read","write","pr","review","issues"}},
-        {"secret",{"use"}},{"session",{"read","coordinate"}},{"consult",{"reply-once"}},{"work",{"delegate"}},
+        {"secret",{"use"}},{"session",{"read"}},
         {"mcp_server",{"discover","invoke","read_resource"}},
         {"environment",{"inspect","configure","launch"}},{"shared_memory",{"read","write"}},
         {"workspace",{"read","write","exec"}},{"web",{"search","fetch"}},{"skill",{"list","read"}},{"attachment",{"inspect"}},{"bot_admin",{"create_bot","rename_bot"}}};
@@ -40,23 +40,11 @@ Scope Scope::sessionRead(std::string_view environment, std::string_view thread) 
     return {"session",Json::array({environment,thread}).dump(),"read"};
 }
 
-Scope Scope::consultReply(std::string_view environment, std::string_view thread) {
-    return {"consult",Json::array({environment,thread}).dump(),"reply-once"};
-}
-
-Scope Scope::sessionCoordinate(std::string_view environment, std::string_view thread) {
-    return {"session",Json::array({environment,thread}).dump(),"coordinate"};
-}
-
-Scope Scope::workDelegate(std::string_view environment, std::string_view thread) {
-    return {"work",Json::array({environment,thread}).dump(),"delegate"};
-}
-
 bool Scope::valid() const {
     const auto& catalog = resourceOperations();
     const auto it = catalog.find(kind);
     if (it==catalog.end() || std::find(it->begin(),it->end(),operation)==it->end()) return false;
-    if (kind=="session" || kind=="consult" || kind=="work") {
+    if (kind=="session") {
         if (resource.size()>8192) return false;
         const auto ref = Json::parse(resource,nullptr,false);
         return ref.is_array() && ref.size()==2 && ref[0].is_string() && ref[1].is_string() &&

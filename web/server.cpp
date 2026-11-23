@@ -217,7 +217,7 @@ public:
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionHandoffRoutes(server_,callbacks_);
+        web::sessionHandoffRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);
@@ -280,7 +280,9 @@ public:
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
-        if (bound <= 0) throw std::runtime_error("Could not bind the Flock Web loopback listener");
+        if (bound <= 0) throw std::runtime_error(port ?
+            "Could not bind the Flock Web loopback listener on port " + std::to_string(port) + ". Check whether the port is in use." :
+            "Could not bind the Flock Web loopback listener");
         port_ = static_cast<unsigned>(bound);
         try {
             worker_ = std::thread([this] { server_.listen_after_bind(); });
@@ -366,7 +368,7 @@ private:
         }
         if (req.path == "/mcp/flock") {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
-            else if (req.method != "POST") {
+            else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow","POST");
                 error(res,405,"method_not_allowed");
             }

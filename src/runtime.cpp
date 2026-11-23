@@ -240,13 +240,13 @@ struct Runtime::Impl {
 
     struct SpecialistOrigin {
         Id channel, generation, senderTask;
-        std::string delegation, person, requester, commit, purpose, doneWhen, requestId, parent, rootBot, thread;
+        std::string delegation, person, requester, commit, purpose, doneWhen, requestId, parent, rootBot;
     };
 
     std::optional<SpecialistOrigin> specialistOrigin(Id taskId) const {
         auto row = db.query(R"SQL(
 SELECT d.channel_id,d.generation,d.sender_task,d.id,c.person_id,t.bot_id,d.commit_sha,d.purpose,d.done_when,
-       c.request_id,d.parent_id,c.bot_id,c.thread_id
+       c.request_id,d.parent_id,c.bot_id
 FROM specialist_delegations d JOIN return_channels c ON c.id=d.channel_id JOIN tasks t ON t.id=d.sender_task
 WHERE d.recipient_task=?1 OR d.id=(
  SELECT w.delegation_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?1)
@@ -254,7 +254,7 @@ WHERE d.recipient_task=?1 OR d.id=(
         if (!row.next()) return {};
         return SpecialistOrigin{row.number(0),row.number(1),row.number(2),row.string(3),row.string(4),
                                 row.string(5),row.string(6),row.string(7),row.string(8),row.string(9),
-                                row.string(10),row.string(11),row.string(12)};
+                                row.string(10),row.string(11)};
     }
 
     bool specialistAdmission(const SpecialistOrigin& origin, const Command& command, const Json& task) {
@@ -271,10 +271,12 @@ WHERE d.recipient_task=?1 OR d.id=(
             const auto& target = grant->channel.origin.invitation.target;
             const auto peer = allowedPeer(origin.requester,command.ownerBotId);
             if (!origin.parent.empty()) {
+                const auto rootPeer = allowedPeer(origin.rootBot,command.ownerBotId);
+                if (!validBotRole(rootPeer.role) || rootPeer.intake.environmentId != target.environmentId ||
+                    rootPeer.intake.projectId != target.projectId) return false;
                 const auto parent = allowedPeer(origin.rootBot,origin.requester);
                 if (!validBotRole(parent.role) || parent.intake.environmentId!=target.environmentId ||
                     parent.intake.projectId!=target.projectId ||
-                    !access.permits(origin.requester,Scope::workDelegate(target.environmentId,target.threadId),true) ||
                     !db.query("SELECT 1 FROM specialist_delegations d JOIN tasks t ON t.id=d.recipient_task"
                               " WHERE d.id=? AND d.channel_id=? AND d.generation=? AND d.parent_id IS NULL"
                               " AND t.bot_id=? AND t.state='specialist_waiting' AND json_extract(t.data,'$.nestedDelegationId')=?",
@@ -283,8 +285,7 @@ WHERE d.recipient_task=?1 OR d.id=(
             }
             if (!validBotRole(peer.role) || peer.intake.environmentId != target.environmentId ||
                 peer.intake.projectId != target.projectId || command.environmentId != target.environmentId ||
-                command.projectId != target.projectId ||
-                !access.permits(command.ownerBotId,{"environment",command.environmentId,"launch"},true)) return false;
+                command.projectId != target.projectId) return false;
             const auto session = command.config.at("session");
             if (session.at("workspaceStrategy") != specialistWorkspace(origin.commit) ||
                 field(session,"runtimeMode") != "approval-required") return false;
@@ -1093,8 +1094,10 @@ AND s.status NOT IN ('completed','failed','stopped')
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
         Delivery outcome;
+        // A scoped launch must pass the live coordination check when reserving its slot.
+        const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
         const auto launchAllowed = [&] {
-            return (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
+            return specialistLaunch || (cmd.tool != "delegate" && cmd.tool != "follow_up") ||
                    access.permits(cmd.ownerBotId,{"environment",cmd.environmentId,"launch"},true);
         };
         const Delivery denied{Delivery::Kind::Settings,{},"Approve launch access in Access Settings (/settings/" +
@@ -1134,7 +1137,6 @@ AND s.status NOT IN ('completed','failed','stopped')
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
             std::optional<SpecialistOrigin> origin;
             if (specialistLaunch) {
                 std::lock_guard lock(db.mutex);
@@ -1750,8 +1752,7 @@ FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
             throw Conflict("Session coordination is not active at the expected generation");
         if (observedPin!=command.commitSha) throw Conflict("The current immutable input could not be verified");
         auto peer = allowedPeer(invitation.botId,command.peerBotId);
-        if (!validBotRole(peer.role) || peer.intake.environmentId!=target.environmentId || peer.intake.projectId!=target.projectId ||
-            !access.permits(peer.intake.botId,{"environment",target.environmentId,"launch"},true))
+        if (!validBotRole(peer.role) || peer.intake.environmentId!=target.environmentId || peer.intake.projectId!=target.projectId)
             throw Conflict("The specialist is not authorized to check this project");
         if (db.query("SELECT 1 FROM peer_exchanges WHERE id=?",{command.delegationId}).next())
             throw Conflict("The specialist delegation identifier is already in use");
@@ -1763,15 +1764,32 @@ FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
     }
 
     bool canDelegateNested(const SpecialistOrigin& origin, const Json& task) const {
-        return origin.parent.empty() && !task.contains("nestedDelegationId") &&
-            task.at("activeRun").is_null() && task.at("lastRun").is_null() &&
-            access.permits(field(task,"botId"),Scope::workDelegate(field(task,"environmentId"),origin.thread),true);
+        if (!origin.parent.empty() || task.contains("nestedDelegationId") ||
+            !task.at("activeRun").is_null() || !task.at("lastRun").is_null() ||
+            !activeSpecialistCoordination(origin.channel,origin.generation)) return false;
+        try {
+            const auto person = specialistPerson(origin.person);
+            if (!person) return false;
+            const auto participation = db.authorizeParticipation(*person,origin.channel);
+            const auto* activation = std::get_if<CoordinationActivation>(&participation);
+            return activation && activation->binding.request.allowDelegation;
+        } catch (const Conflict&) {
+            return false;
+        }
     }
 
     bool scopedPeer(const SpecialistOrigin& origin, const Json& task, const PeerBot& peer) const {
-        return validBotRole(peer.role) && peer.intake.botId!=origin.rootBot && peer.intake.botId!=field(task,"botId") &&
-            peer.intake.environmentId==field(task,"environmentId") && peer.intake.projectId==field(task,"projectId") &&
-            access.permits(peer.intake.botId,{"environment",peer.intake.environmentId,"launch"},true);
+        const auto matchesScope = [&](const PeerBot& candidate) {
+            return validBotRole(candidate.role) && candidate.intake.environmentId==field(task,"environmentId") &&
+                candidate.intake.projectId==field(task,"projectId");
+        };
+        if (peer.intake.botId==origin.rootBot || peer.intake.botId==field(task,"botId") || !matchesScope(peer))
+            return false;
+        try {
+            return matchesScope(allowedPeer(origin.rootBot,peer.intake.botId));
+        } catch (const Conflict&) {
+            return false;
+        }
     }
 
     void startNestedSpecialist(const Json& task, const Json& event, const TaskDecision& decision) {

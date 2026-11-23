@@ -12,32 +12,11 @@
   <a href="/">Conversations</a>
   <h1>Session handoffs</h1>
   <p id="status" role="status"></p>
-  <section aria-labelledby="new-heading">
-    <h2 id="new-heading">Pair a T3 Session</h2>
-    <form id="pair" autocomplete="off">
-      <div class="pair-fields">
-        <label>Environment ID <input name="environmentId" required spellcheck="false" maxlength="1024"></label>
-        <label>Project ID <input name="projectId" required spellcheck="false" maxlength="1024"></label>
-        <label>Thread ID <input name="threadId" required spellcheck="false" maxlength="1024"></label>
-        <label>Bot <select name="botId" required><option value="">Select a Bot</option></select></label>
-        <label>Permission
-          <select name="mode">
-            <option value="consult">One consultation reply</option>
-            <option value="coordinate">Ongoing coordination</option>
-          </select>
-        </label>
-      </div>
-      <div id="coordination-scope" hidden>
-        <label>Coordination goal <textarea name="goal" rows="3" maxlength="8192"></textarea></label>
-        <label class="check-label"><input type="checkbox" name="allowDelegation"> Allow specialist checks</label>
-      </div>
-      <button>Create pairing code</button>
-    </form>
-    <div id="pairing" hidden>
-      <label>Single-use code <input id="pairing-code" readonly spellcheck="false" autocomplete="off"></label>
-      <button id="copy-code" type="button">Copy code</button>
-      <p id="pairing-help"></p>
-    </div>
+  <section aria-labelledby="connections-heading">
+    <h2 id="connections-heading">T3 connections</h2>
+    <p id="connect-hint" hidden>Run <code>flock t3 connect</code> to connect a T3 environment.</p>
+    <p id="connection-mode" hidden></p>
+    <ul id="connections" hidden></ul>
   </section>
   <section id="recent" aria-labelledby="recent-heading" hidden>
     <h2 id="recent-heading">Recent handoffs</h2>

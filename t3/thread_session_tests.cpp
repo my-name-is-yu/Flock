@@ -65,6 +65,33 @@ int main(int argc, char** argv) {
         check(!session->dispatchHistory(target,0),"an incomplete bounded history scan was treated as complete");
         fixture({{"stockHistory","default"},{"stockIncomplete",false}});
 
+        Json arguments{{"threadId","human"},{"botId","planner"},{"requestId","running-tool"},
+                       {"text","Review the pinned project"}};
+        const auto prove = [&](const Json& input) {
+            return session->proveInvocation(target.environmentId,target.threadId,input,
+                std::chrono::steady_clock::now()+std::chrono::seconds(3));
+        };
+        for (const auto* format : {"codex","claude"}) {
+            fixture({{"stockInvocation",format},{"stockArguments",arguments}});
+            const auto proof = prove(arguments);
+            check(proof && proof->target == target && proof->activeRunId == "root-run" &&
+                  proof->itemId == "invocation" && proof->cursor == 7,"active invocation did not yield its exact origin");
+        }
+        for (const auto* condition : {"wrong-thread","inherited","old-run","finished"}) {
+            fixture({{"stockInvocation",condition}});
+            check(!prove(arguments),"activity from an invalid Thread or Run yielded an origin");
+        }
+        fixture({{"stockInvocation","codex"}});
+        auto different = arguments;
+        different["text"] = "Different text";
+        check(!prove(different),"activity accepted different arguments");
+        arguments["mode"] = "coordinate";
+        arguments["text"] = std::string(8000,'\x01');
+        arguments["goal"] = "Observe the pinned project";
+        fixture({{"stockArguments",arguments}});
+        check(prove(arguments).has_value(),"truncated tool activity was not verified through item text paging");
+        fixture({{"stockInvocation",nullptr}});
+
         const auto generation = page->authGeneration;
         const auto send = [&](const ThreadTarget& destination, std::string_view auth = "") {
             return session->send(destination,auth.empty() ? generation : auth,"command-1","[Flock result] Complete.");
@@ -141,7 +168,10 @@ int main(int argc, char** argv) {
               stock.at("stockPromptSends").at("pinned-worker:pinned-worker:start").at("replays")==0,
               "same-key provision recovery created another thread, resent the first prompt, or sent to invalid work");
 
-        fixture({{"stockRootRecovery",true},{"stockDropSendReply",true}});
+        const Json invocation{{"threadId",target.threadId},{"botId","planner"},
+                              {"requestId","failed-root-run"},{"text","Check the fixture."}};
+        fixture({{"stockRootRecovery",true},{"stockDropSendReply",true},
+                 {"stockInvocation","codex"},{"stockArguments",invocation}});
         const auto database = directory.parent_path() / "root-recovery.sqlite3";
         const Person owner{"owner",true};
         const auto people = [&](std::string_view person) -> std::optional<Person> {
@@ -155,11 +185,11 @@ int main(int argc, char** argv) {
         Id channel;
         {
             Store store(database);
-            store.access().resourceGrant(owner,"planner",Scope::consultReply(target.environmentId,target.threadId),
-                                         GrantChange::grant);
+            T3Connections connections(store);
+            const auto token = connections.connect(target.environmentId,owner.id,T3ConnectionMode::Full,4173);
             SessionHandoff handoff(store,*session,people,intake);
-            const auto pair = handoff.pair(owner,target,"planner",{});
-            channel = handoff.intake(pair.code,"failed-root-run","Check the fixture.").channel;
+            channel = handoff.invoke(*connections.authenticate(token),invocation,
+                                     [](std::string_view bot) { return bot == "planner"; }).channel;
             handoff.consult(owner,channel,bot,soul);
             check(handoff.view(owner,channel).deliveries.front().state == RootDeliveryState::Unknown,
                   "a dropped send response was reported as confirmed");
