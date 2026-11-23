@@ -188,8 +188,18 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
         if (conversation) conversation_storage::projectToolHistory(safe.event.at("turn"),revision);
         auto turn = model.decide(safe);
         checked.calls.reserve(turn.calls.size());
-        for (auto& call : turn.calls)
-            checked.calls.push_back(checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent")));
+        for (std::size_t i = 0; i < turn.calls.size(); ++i) {
+            auto& call = turn.calls[i];
+            const auto rejected = turn.rejections.find(i);
+            if (rejected != turn.rejections.end()) {
+                call.args = Json::object();
+                call.reason.clear();
+            }
+            auto result = checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent"));
+            if (rejected != turn.rejections.end() && result.rejection.empty())
+                result.rejection = scrub.text(rejected->second);
+            checked.calls.push_back(std::move(result));
+        }
         checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
         throw ModelError(scrub.text(error.what()),error.transient,scrub.payload(error.usage),error.code);
@@ -213,8 +223,13 @@ WHERE j.conversation_bot_id=? AND t.status='paused' ORDER BY j.id DESC
 }
 
 void Store::Impl::approveMessageModelCall(Id message, Id waitMessageId) {
-    const bool toolPending = query("SELECT 1 FROM conversation_steps WHERE message_id=?"
-                                   " AND result IS NULL AND json_type(effect)='array'",{message}).next();
+    auto slots = query(R"SQL(
+SELECT json_extract(s.decision,'$[' || slot.key || '].tool')
+FROM conversation_steps s, json_each(s.effect) slot
+WHERE s.message_id=? AND s.result IS NULL AND json_type(s.effect)='array' AND slot.type='null'
+)SQL",{message});
+    bool toolPending = false;
+    while (!toolPending && slots.next()) toolPending = isBotTool(slots.string(0));
     const auto attempt = reserveExtraModelCall(messageModelBudget(message),toolPending ? "bot_tool" : "conversation_turn",message,0,0);
     exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
              {attempt,message});

@@ -87,9 +87,6 @@ struct Provider : Model {
             emit(call("delegate",{{"instruction","Read private history"},{"doneWhen","Private fixture checked"}}));
         } else {
             if (beforeTurn) beforeTurn(input);
-            check(request.at("parallel_tool_calls") == false,"ChatGPT conversation schema allowed parallel calls");
-            // This fixture exercises the runtime contract for adapters that can return Bot-tool batches.
-            request["parallel_tool_calls"] = true;
             check(request.at("instructions").get<std::string>().find("untrustedData") != std::string::npos,
                   "Tool output trust was not explained in the prompt");
             const auto& steps = input.event.at("turn");

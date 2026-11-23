@@ -242,7 +242,7 @@ void Store::Impl::validateBotTool(const ToolContext& ctx, const Decision& call) 
     if (!resource) throw Conflict("Bot tool access denied");
     if (call.tool.starts_with("workspace_")) validateWorkspace(ctx,call);
     if (call.tool.starts_with("web_") && !ctx.settings.web) throw Conflict("Web tools are unavailable");
-    if (call.tool.starts_with("mcp_") && (!ctx.settings.mcp || !ctx.settings.mcp->hasServer(resource->target)))
+    if (call.tool.starts_with("mcp_") && !ctx.settings.mcp)
         throw Conflict("MCP server is unavailable");
     if (call.tool == "mcp_discover" && args.at("collection") != "tools" && args.at("collection") != "resources")
         throw Conflict("MCP collection must be tools or resources");

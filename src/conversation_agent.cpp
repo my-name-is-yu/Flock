@@ -658,6 +658,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     releaseModelCall(takeReservedConversationCall(message.id));
     exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
+    std::erase_if(unpersistedToolResults,[&](const auto& entry) { return entry.first.first == message.id; });
     if (const auto receipt = sessionSendReceipts.find(message.id); receipt != sessionSendReceipts.end()) {
         recordSessionSendRun(message.id,receipt->second);
         sessionSendReceipts.erase(receipt);
@@ -833,7 +834,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     for (int step = 1; step <= maxSteps && !shutdown.stop_requested(); ++step) {
         if (!message.channelScope.empty()) deliverChannels(shutdown);
         std::vector<ModelCall> calls;
-        bool botEffects = false, sessionEffect = false;
+        std::string effectType;
         bool hasWebEvidence = false;
         {
             std::lock_guard lock(mutex);
@@ -843,8 +844,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                              {id,step});
             if (row.next()) {
                 if (!row.string(1).empty()) continue;
-                botEffects = row.string(2) == "array";
-                sessionEffect = row.string(2) == "object";
+                effectType = row.string(2);
                 if (!row.string(0).empty()) {
                     const auto [offered,machines] = available();
                     bool rejectionChanged = false;
@@ -909,7 +909,8 @@ WHERE f.message_id=? AND f.step=? AND f.repair_attempt_id IS NOT NULL
                         return;
                     }
                     feedback = "The previous model response was rejected before executing any of its tools. "
-                               "Reason: " + repair.string(2) + ". Return exactly one offered tool with valid arguments.";
+                               "Reason: " + repair.string(2) + ". Return offered tools with valid arguments. "
+                               "Batch independent reads, and propose replies or actions that make changes on their own.";
                 }
                 if (!query(R"SQL(
 SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
@@ -950,8 +951,6 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 calls = std::move(response.calls);
                 if (calls.empty() || calls.size() > maxToolCalls)
                     throw ModelError("Invalid Flock call count",ModelErrorCode::invalid_tool_count);
-                if (calls.size() > 1 && !std::ranges::all_of(calls,[](const auto& call) { return isBotTool(call.tool); }))
-                    throw ModelError("Parallel calls must be independent Bot tools",ModelErrorCode::invalid_tool_count);
                 checkpoint.outcome = calls;
             } catch (const ModelError& error) {
                 if (!error.usage.empty()) checkpoint.usage = error.usage;
@@ -968,15 +967,10 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
         }
 
         if (shutdown.stop_requested()) return;
-        const auto& decision = calls.front();
-        if (botEffects || isBotTool(decision.tool)) {
-            if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
-            continue;
-        }
-        const auto outcome = executeConversationCall(message,step,decision,
+        const auto outcome = executeConversationStep(message,step,calls,effectType,settings,
             {.t3 = t3,.clock = clock,.gitHost = gitHost,.applyBotChange = applyBotChange,
              .reconcileBotCreation = reconcileBotCreation,.intake = intake,.peers = peers,.shutdown = shutdown,
-             .sessionEffect = sessionEffect,.hasWebEvidence = hasWebEvidence});
+             .hasWebEvidence = hasWebEvidence});
         if (outcome != CallOutcome::advance) return;
     }
     if (shutdown.stop_requested()) return;

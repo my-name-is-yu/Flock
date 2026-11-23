@@ -1,6 +1,7 @@
 #include "bots.hpp"
 #include "demo.hpp"
 #include "model.hpp"
+#include "flock/workspace_tools.hpp"
 #include "tests/fixtures.hpp"
 #include "../tests/task_history.hpp"
 
@@ -443,19 +444,30 @@ void responseContract() {
     check(responseDecision(modelCall("flock_session_search",searchArgs),turn).calls.at(0).args.at("project") == "Release" &&
           responseDecision(modelCall("flock_session_events",eventArgs),turn).calls.at(0).args.at("attachmentRef") == "opaque-attachment",
           "model Session calls were not decoded using the live schemas");
-    auto mixedInput = input;
-    mixedInput.tools.push_back("workspace_read_file");
-    const auto mixedRequest = responseRequest(mixedInput);
-    check(mixedRequest.at("parallel_tool_calls") == false,"A conversation with Bot tools allowed mixed calls");
+    auto batchInput = input;
+    batchInput.tools = {"flock_session_search","reply"};
+    check(responseRequest(batchInput).at("parallel_tool_calls") == false,"One batchable tool enabled parallel calls");
+    batchInput.tools.push_back("check_environment_readiness");
+    const auto batchRequest = responseRequest(batchInput);
+    check(batchRequest.at("parallel_tool_calls") == true,"Two batchable reads did not enable parallel calls");
     auto mixedCalls = modelCall("flock_session_search",searchArgs);
     mixedCalls.push_back(modelCall("check_environment_readiness",{{"reason","Check the connection"}}).front());
-    try {
-        responseDecision(mixedCalls,mixedRequest);
-        check(false,"Mixed Session search and connection check were accepted");
-    } catch (const ModelError& error) {
-        check(error.code == ModelErrorCode::invalid_tool_count && !error.transient,
-              "The mixed response lost its rejection code");
-    }
+    const auto mixed = responseDecision(mixedCalls,batchRequest);
+    check(mixed.calls.size() == 2 && mixed.calls[0].tool == "flock_session_search" &&
+          mixed.calls[1].tool == "check_environment_readiness" && mixed.rejections.empty(),
+          "Mixed Session and readiness reads were not decoded in order");
+    mixedCalls.push_back(modelCall("start_task",{{"reason","Start work"}}).front());
+    mixedCalls.push_back(modelCall("reply",{{"reason","Reply"},{"unexpected","Sensitive data"}}).front());
+    const auto partial = responseDecision(mixedCalls,batchRequest);
+    check(partial.calls.size() == 4 && partial.rejections.size() == 2 && partial.rejections.contains(2) &&
+          partial.rejections.contains(3) && partial.calls[2].args.empty() && partial.calls[3].args.empty(),
+          "Invalid batch calls were not rejected individually");
+    auto malformed = mixedCalls;
+    malformed[1]["status"] = "incomplete";
+    rejects<ModelError>([&] { responseDecision(malformed,batchRequest); },"Malformed output was accepted in a batch");
+    const auto firstCall = mixedCalls.front();
+    while (mixedCalls.size() <= flockv0::maxToolCalls) mixedCalls.push_back(firstCall);
+    rejects<ModelError>([&] { responseDecision(mixedCalls,batchRequest); },"Oversized batch was accepted");
     auto spoofed = eventArgs;
     spoofed["botId"] = "someone-else";
     rejects<ModelError>([&] { responseDecision(modelCall("flock_session_events",spoofed),turn); },

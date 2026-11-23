@@ -15,11 +15,8 @@ bool filenamesMayMatch(const Decision& a, const Decision& b) {
     const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c; };
     return std::ranges::equal(left,right,[&](char m, char n) { return fold(m) == fold(n); });
 }
-}
-
 bool validatedCallsConflict(const Decision& a, const Decision& b) {
     if (a.tool.starts_with("workspace_") && b.tool.starts_with("workspace_")) {
-        if (a.tool == "workspace_run_command" || b.tool == "workspace_run_command") return true;
         if (a.args.contains("commandId") && b.args.contains("commandId"))
             return a.args["commandId"] == b.args["commandId"] &&
                 (a.tool == "workspace_stop_command" || b.tool == "workspace_stop_command");
@@ -30,6 +27,7 @@ bool validatedCallsConflict(const Decision& a, const Decision& b) {
     }
     return (a.tool == "mcp_call_tool" || b.tool == "mcp_call_tool") &&
            a.args.contains("server") && b.args.contains("server") && a.args["server"] == b.args["server"];
+}
 }
 
 CallClass classify(const Decision& call) {
@@ -56,21 +54,26 @@ CallClass classify(const Decision& call) {
     return CallClass::exclusive;
 }
 
-bool batchable(const Decision& call) {
-    return isBotTool(call.tool) ||
-           std::ranges::find(conversationBatchReads,call.tool) != std::end(conversationBatchReads);
+bool batchable(std::string_view tool) {
+    return (isBotTool(tool) && tool != "workspace_run_command") ||
+           std::ranges::find(conversationBatchReads,tool) != std::end(conversationBatchReads);
 }
 
-std::vector<std::vector<std::size_t>> planWaves(const std::vector<Decision>& validatedCalls) {
-    std::vector<std::vector<std::size_t>> waves;
+std::vector<std::vector<PlannedCall>> planWaves(std::span<const Candidate> validatedCalls) {
+    std::vector<std::vector<PlannedCall>> waves;
     std::vector<std::size_t> waveForCall(validatedCalls.size());
     for (std::size_t i = 0; i < validatedCalls.size(); ++i) {
         auto& wave = waveForCall[i];
-        for (std::size_t earlier = 0; earlier < i; ++earlier)
-            if (validatedCallsConflict(validatedCalls[i],validatedCalls[earlier]))
-                wave = std::max(wave,waveForCall[earlier] + 1);
+        const auto& candidate = validatedCalls[i];
+        PlannedCall call{candidate.slot,{}};
+        for (std::size_t earlier = 0; earlier < i; ++earlier) {
+            const auto& predecessor = validatedCalls[earlier];
+            if (!validatedCallsConflict(candidate.decision,predecessor.decision)) continue;
+            wave = std::max(wave,waveForCall[earlier] + 1);
+            call.predecessors.push_back(predecessor.slot);
+        }
         if (wave == waves.size()) waves.emplace_back();
-        waves[wave].push_back(i);
+        waves[wave].push_back(std::move(call));
     }
     return waves;
 }
