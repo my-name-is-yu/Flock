@@ -154,13 +154,19 @@ void RootDelivery::reconcile(const Person& person, Id channel) {
         auto rows = db.query(R"SQL(
 SELECT d.command_id,d.text,d.message_id,d.observed_run_id,d.state,d.cursor,d.input_position
 FROM thread_deliveries d
-WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
-)SQL",{channel,static_cast<int>(State::Accepted),static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
+WHERE d.channel_id=? AND d.state IN (?,?,?,?) ORDER BY d.rowid LIMIT 16
+)SQL",{channel,static_cast<int>(State::Dispatching),static_cast<int>(State::Accepted),
+        static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
         while (rows.next())
             pending.push_back({rows.string(0),rows.string(1),rows.string(2),rows.string(3),
                                static_cast<State>(rows.number(4)),rows.number(5),rows.number(6)});
     }
     for (auto& delivery : pending) {
+        // T3 can move a queued input to a different Run before it appears in history.
+        const auto run = delivery.observedRun;
+        // Check before reading so that any response already written by a failed Run
+        // is still visible to reconciliation.
+        const bool failed = !run.empty() && session_.runFailed(target,run);
         const auto page = session_.read(target,delivery.cursor);
         if (!page || page->target != target || page->cursor < delivery.cursor) continue;
         // History is read-only. Even after reauthentication it cannot create a
@@ -181,6 +187,8 @@ WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
                 if (state != delivery.state) break;
             }
         }
+        if (state == delivery.state && failed && delivery.observedRun == run && !page->hasMore)
+            state = State::Failed;
         std::lock_guard lock(db.mutex);
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,cursor=?,observed_run_id=?,input_position=?

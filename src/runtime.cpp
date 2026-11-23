@@ -77,6 +77,14 @@ struct TaskDecision : Decision {
     Json usage = Json::object();
     Id attemptId = 0;
     bool argumentsChecked = true;
+    std::string rejection{};
+};
+
+struct TaskInference {
+    Id generation, eventId, attemptId;
+    Json revisionId;
+    Json usage = Json::object();
+    std::variant<ModelCall,ModelError> outcome{};
 };
 
 std::string gitInvocation(const TaskDecision& decision, const Json& event) {
@@ -171,6 +179,8 @@ struct Runtime::Impl {
     std::stop_source shutdown;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
+    // Keep provider outcomes until the Task decision and attempt usage are committed together.
+    std::map<Id,TaskInference> taskInferences;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
@@ -214,6 +224,10 @@ struct Runtime::Impl {
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
+        try { persistTaskInferences(); }
+        catch (const std::exception& error) {
+            std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
+        }
         try { db.stopWorkspace(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock workspace shutdown: %s\n",error.what());
@@ -1279,15 +1293,19 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
         if (canSend) tools.push_back("send_bot_message");
         return tools;
     }
+    void recordFailure(Json& task, const Json& event, std::string_view detail, bool transient) {
+        const auto attempts = event["failures"].get<int>() + 1;
+        const auto why = bounded(db.redactor(field(task,"botId")).text(std::string(detail)),2048);
+        db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
+                {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
+        db.journal(task["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
+        task["feedback"] = why;
+        if (attempts >= 3) db.wait(task,"model_failure",{{"text",why}});
+    }
+
     void failure(const Json& task, const Json& event, std::string_view detail, bool transient) {
         change(task,[&](Json& current) {
-            const auto attempts = event["failures"].get<int>() + 1;
-            const auto why = bounded(db.redactor(field(task,"botId")).text(std::string(detail)),2048);
-            db.exec("UPDATE events SET failures=?,retry_at=? WHERE id=?",
-                    {attempts, transient ? options.clock() + (1 << (attempts - 1)) : 0,event["id"]});
-            db.journal(current["id"],"model_failure",{{"eventId",event["id"]},{"attempt",attempts},{"text",why}});
-            current["feedback"] = why;
-            if (attempts >= 3) db.wait(current,"model_failure",{{"text",why}});
+            recordFailure(current,event,detail,transient);
             return true;
         });
     }
@@ -2501,7 +2519,42 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             saved->at("generation") != task.at("generation") || saved->at("revisionId") != revision(task))
             return std::nullopt;
         return TaskDecision{{saved->at("tool"),saved->at("args"),saved->at("reason")},saved->at("usage"),
-                            saved->value("attemptId",Id{0}),saved->value("argumentsChecked",false)};
+                            saved->value("attemptId",Id{0}),saved->value("argumentsChecked",false),
+                            saved->value("rejection",std::string{})};
+    }
+
+    std::optional<TaskDecision> persistTaskInference(Id id) {
+        const auto found = taskInferences.find(id);
+        const auto& inference = found->second;
+        Transaction transaction(db.db);
+        auto current = db.load(id);
+        if (!inference.usage.empty())
+            db.exec("UPDATE model_attempts SET usage=? WHERE id=?",{inference.usage,inference.attemptId});
+        std::optional<TaskDecision> decision;
+        if (current.at("state") == "deciding" && current.at("generation") == inference.generation &&
+            current.at("eventId") == inference.eventId && revision(current) == inference.revisionId) {
+            if (const auto* error = std::get_if<ModelError>(&inference.outcome)) {
+                recordFailure(current,db.currentEvent(current),error->what(),error->transient);
+                saveTask(current);
+            } else {
+                const auto& call = std::get<ModelCall>(inference.outcome);
+                decision = TaskDecision{call,inference.usage,inference.attemptId,true,call.rejection};
+                // Bookkeeping must not advance the generation observed by conversation turns.
+                Json saved{{"generation",inference.generation},{"eventId",inference.eventId},{"revisionId",inference.revisionId},
+                    {"tool",call.tool},{"args",call.args},{"reason",call.reason},{"usage",inference.usage},
+                    {"attemptId",inference.attemptId},{"argumentsChecked",true}};
+                if (!call.rejection.empty()) saved["rejection"] = call.rejection;
+                db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?)) WHERE id=?",{saved,id});
+            }
+        }
+        transaction.commit();
+        taskInferences.erase(found);
+        return decision;
+    }
+
+    void persistTaskInferences() {
+        std::lock_guard lock(db.mutex);
+        while (!taskInferences.empty()) persistTaskInference(taskInferences.begin()->first);
     }
 
     std::optional<TaskDecision> inferDecision(const Json& task, Json event, const Json& history,
@@ -2546,10 +2599,8 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
             if (current["generation"] != task["generation"] || current["eventId"] != event["id"] ||
                 revision(current) != revision(task) || current["state"] != "deciding")
                 return std::nullopt;
-            auto reserved = db.query("SELECT reserved_attempt FROM events WHERE id=?",{event["id"]});
-            if (reserved.next()) attempt = reserved.number(0);
-            if (attempt) db.exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event["id"]});
-            else attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
+            attempt = db.takeReservedTaskCall(event["id"]);
+            if (!attempt) attempt = db.reserveModelCall(db.taskModelBudget(current),"task_decision",0,task["id"],event["id"]);
             if (!attempt) {
                 db.wait(current,"model_budget",{{"text",
                     "The model call limit is exhausted. Approve one more model call to continue."}});
@@ -2560,30 +2611,22 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         if (!attempt) return std::nullopt;
         if (options.gitHost && event.at("kind") == "result")
             db.projectTaskGitReads(*options.gitHost,task,event);
-        auto turn = db.callModel(field(task,"botId"),model,
-            {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
-             needsDoneWhen(task),summary.contains("forwardableUserMessage")},attempt);
-        if (turn.calls.size() != 1) throw Conflict("Return one task action");
-        auto& call = turn.calls.front();
-        const TaskDecision decision{std::move(call),std::move(turn.usage),attempt};
-        if (!call.rejection.empty()) {
-            if (task["activeRun"].is_null() || questionStillOpen(task))
-                rejectDecision(task,event,decision,call.rejection);
-            return std::nullopt;
+        TaskInference inference{task.at("generation"),event.at("id"),attempt,revision(task)};
+        try {
+            auto turn = db.callModel(field(task,"botId"),model,
+                {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
+                 needsDoneWhen(task),summary.contains("forwardableUserMessage")},0);
+            inference.usage = std::move(turn.usage);
+            if (turn.calls.size() == 1) inference.outcome = std::move(turn.calls.front());
+            else inference.outcome = ModelError("Return one task action",false);
+        } catch (const ModelError& error) {
+            inference.usage = error.usage;
+            inference.outcome = error;
         }
-        // Bookkeeping must not advance the generation observed by conversation turns.
-        const Json saved = {{"generation",task["generation"]},{"eventId",event["id"]},{"revisionId",revision(task)},
-            {"tool",decision.tool},{"args",decision.args},{"reason",decision.reason},{"usage",decision.usage},
-            {"attemptId",decision.attemptId},{"argumentsChecked",true}};
+        const auto id = task.at("id").get<Id>();
         std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        db.exec("UPDATE tasks SET data=json_set(data,'$.pendingDecision',json(?))"
-                " WHERE id=? AND state='deciding' AND generation=? AND json_extract(data,'$.eventId')=?",
-                {saved,task["id"],task["generation"],event["id"]});
-        const bool savedForEvent = sqlite3_changes(db.db) != 0;
-        transaction.commit();
-        if (!savedForEvent) return std::nullopt;
-        return decision;
+        taskInferences.insert_or_assign(id,std::move(inference));
+        return persistTaskInference(id);
     }
 
     void decide(const Json& task) {
@@ -2667,6 +2710,10 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (!decision) decision = inferDecision(task,event,history,tools,pending,std::move(choices),peer);
             if (!decision || shutdown.stop_requested()) return;
             if (!task["activeRun"].is_null() && !questionStillOpen(task)) return;
+            if (!decision->rejection.empty()) {
+                rejectDecision(task,event,*decision,decision->rejection);
+                return;
+            }
             if (replay) {
                 auto call = db.checkModelCall(field(task,"botId"),*decision,tools,false,!decision->argumentsChecked);
                 if (!call.rejection.empty()) {
@@ -2786,6 +2833,7 @@ void Runtime::runConversations() {
 }
 void Runtime::tick() {
     if (p_->shutdown.stop_requested()) return;
+    p_->persistTaskInferences();
     p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
@@ -2828,7 +2876,10 @@ void Runtime::tickConcurrent() {
         }
     }
     p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
-    for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
-        p_->workers.emplace(id,std::async(std::launch::async,[impl = p_.get(),id] { impl->step(id); }));
+    p_->deferContendedWork("task scheduling",[&] {
+        p_->persistTaskInferences();
+        for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))
+            p_->workers.emplace(id,std::async(std::launch::async,[impl = p_.get(),id] { impl->step(id); }));
+    });
 }
 } // namespace flockv0

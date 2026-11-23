@@ -272,7 +272,7 @@ pairingForm.addEventListener('submit', (event) => {
       `Give this code to the agent in the paired Thread and ask it to call request_flock_bot. Expires at ${expiry.toLocaleTimeString()}.`;
     $('pairing').hidden = false;
     pairingTimer = setTimeout(clearPairing, Math.max(0, expiry.getTime() - Date.now()));
-  }, 'Could not pair this Session. Check the IDs, T3 connection, and Flock access.');
+  }, 'Could not pair this Session. Check the Bot configuration, Session IDs, T3 connection, and Flock access.');
 });
 
 $('copy-code').addEventListener('click', async () => {

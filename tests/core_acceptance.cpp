@@ -2014,6 +2014,57 @@ void peerResultWaitsForRecipientTurn() {
           "the held peer result asked the model again or was lost");
 }
 
+void cancelledPeerRefundsUnusedModelApproval() {
+    Fixture f;
+    f.allowBeta();
+    constexpr auto request = "Check the release policy";
+    f.store->receive(localOwner,{"alpha",request,"e","p",{{"modelCallLimit",3}}},"policy",request);
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event["kind"] == "conversation_turn") return converse(input,"start_task",0,Json::object());
+        if (input.event["kind"] == "intake") return botRequest("beta","consult","What is the release policy?");
+        if (input.event["kind"] == "bot_request") throw std::runtime_error("Cancelled recipient reached the provider");
+        check(input.event["kind"] == "bot_result","sender did not resume on peer cancellation");
+        return ask();
+    };
+    f.runtime->runConversations();
+    const Id sender = f.store->tasks("alpha").front().at("id");
+    f.reach(sender,"peer_waiting");
+    const Id recipient = f.store->tasks("beta").front().at("id");
+    const auto recipientWait = f.wait(recipient,"model_budget");
+    f.store->operate(localOwner,TaskTarget::from(f.task(recipient),recipientWait),"approve");
+    check(f.model.calls == 3,"shared approval was not reserved");
+    f.store->operate(localOwner,TaskTarget::from(f.task(recipient),0),"cancel");
+    f.reach(recipient,"cancelled");
+    f.reach(sender,"waiting");
+    const auto wait = f.task(sender).at("wait").at("reason");
+    check(wait == "user_question" && f.model.calls == 4,
+          "cancelled recipient lost the unused approved attempt from the sender's shared budget");
+}
+
+void revisedTaskRefundsUnusedModelApproval() {
+    Fixture f;
+    const auto taskId = f.store->submit({"alpha","Original criteria","e","p",{{"modelCallLimit",1}}});
+    bool first = true;
+    f.model.script = [&](const ModelInput& input) -> Decision {
+        if (input.event.at("kind") == "conversation_turn") return converse(input,"change_task",taskId,
+            {{"intent","Use revised criteria"}});
+        if (std::exchange(first,false)) throw ModelError("Fixture failure",true);
+        return work();
+    };
+    f.reach(taskId,"deciding");
+    f.runtime->tick();
+    f.now += 5;
+    const auto approval = f.wait(taskId,"model_budget");
+    f.store->operate(localOwner,TaskTarget::from(f.task(taskId),approval),"approve");
+    check(f.model.calls == 1,"provider already reached the new approval");
+    f.store->receive(localOwner,{"alpha","","e","p",Json::object()},"revise","Revise the original request.");
+    f.runtime->runConversations();
+    check(f.task(taskId).value("replanning",false),"conversation did not revise the task");
+    f.reach(taskId,"running");
+    check(f.model.calls == 4 && f.t3.launches == 1,
+          "replanning the task consumed the approval without a call");
+}
+
 void modelBudgetCountsFailedAttempts() {
     Fixture f;
     const auto id = f.store->submit({"alpha","Retry a decision","e","p",{{"modelCallLimit",2}}});
@@ -2051,6 +2102,51 @@ void modelBudgetCountsFailedAttempts() {
     f.store->operate(localOwner,TaskTarget::from(f.store->task(id),wait),"approve");
     f.wait(id,"user_question");
     check(f.model.calls == 4 && f.task(id)["remaining"] == 3,"approval did not resume the saved retry event");
+}
+
+void taskInferenceSurvivesWriterContention(bool modelFails, bool restart = false) {
+    Fixture f;
+    const auto taskId = f.store->submit({"alpha","Check the fixture","e","p",{{"modelCallLimit",1}}});
+    sqlite3* connection = nullptr;
+    const auto opened = sqlite3_open((f.directory/"state.db").c_str(),&connection);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(connection,sqlite3_close);
+    check(opened == SQLITE_OK,"Could not open the fixture writer");
+    f.model.usage = {{"input_tokens",7}};
+    f.model.script = [&](const ModelInput&) {
+        check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not acquire the fixture write lock");
+        if (modelFails) throw ModelError("Temporary fixture failure",true,f.model.usage);
+        return work();
+    };
+    f.reach(taskId,"deciding");
+    bool contended = false;
+    try { f.runtime->tick(); }
+    catch (const std::runtime_error& error) {
+        check(std::string_view(error.what()) == "database is locked","Unexpected Task checkpoint error");
+        contended = true;
+    }
+    check(sqlite3_exec(writer.get(),"ROLLBACK",nullptr,nullptr,nullptr) == SQLITE_OK && contended,
+          "The model checkpoint did not contend with the fixture writer");
+
+    if (restart) f.restart();
+    if (modelFails) {
+        f.runtime->tick();
+        const auto task = f.task(taskId);
+        check(f.model.calls == 1 && f.t3.launches == 0 && f.logs(taskId,"model_failure") == 1 &&
+              task.at("state") == "deciding" && task.at("feedback") == "Temporary fixture failure",
+              "The Task lost the model failure or skipped its retry backoff");
+    } else {
+        f.reach(taskId,"running");
+        check(f.model.calls == 1 && f.t3.launches == 1 && f.logs(taskId,"decision") == 1,
+              "The Task repeated inference or lost the decision after the writer released its lock");
+    }
+    sqlite3_stmt* statement = nullptr;
+    check(sqlite3_prepare_v2(writer.get(),"SELECT json_extract(usage,'$.input_tokens') FROM model_attempts WHERE task_id=?",
+                             -1,&statement,nullptr) == SQLITE_OK,"Could not read the fixture model usage");
+    const std::unique_ptr<sqlite3_stmt,decltype(&sqlite3_finalize)> row(statement,sqlite3_finalize);
+    check(sqlite3_bind_int64(row.get(),1,taskId) == SQLITE_OK && sqlite3_step(row.get()) == SQLITE_ROW &&
+          sqlite3_column_int(row.get(),0) == 7 && sqlite3_step(row.get()) == SQLITE_DONE,
+          "The Task did not save the original model attempt's usage");
 }
 
 void modelBudgetAllowsT3ObservationAndRecovery() {
@@ -2540,7 +2636,8 @@ void specialistAdmission(SpecialistMode mode) {
     f.specialistPerson = [&](std::string_view id) -> std::optional<Person> {
         return id==person.id ? std::optional(person) : std::nullopt;
     };
-    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,f.runtime.get()); };
+    const auto routing = [](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    const auto handoffs = [&] { return SessionHandoff(*f.store,session,f.specialistPerson,routing,f.runtime.get()); };
     auto access = f.store->access();
     if (!person.adminRoot) {
         access.personGrant(localOwner,"alpha",person.id,Role::decide,GrantChange::grant);
@@ -2906,11 +3003,8 @@ void specialistAdmission(SpecialistMode mode) {
             check(hasTool(input,"complete_handoff"),"the cancelled prelaunch assignment blocked queue progress");
             return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
-        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+        check(handoffs().step(person,channel,f.model,soul).state=="completed" && f.t3.launches==0,
               "the unrelated coordinator queue did not progress after prelaunch cancellation");
         return;
     }
@@ -2932,11 +3026,8 @@ void specialistAdmission(SpecialistMode mode) {
             check(hasTool(input,"complete_handoff"),"the recovered cancellation blocked queue progress");
             return {"complete_handoff",{{"text","Cancelled before launch"}},"The queue can continue"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
-        check(handoffs().step(person,channel,f.model,routing,soul).state=="completed" && f.t3.launches==0,
+        check(handoffs().step(person,channel,f.model,soul).state=="completed" && f.t3.launches==0,
               "queue progress was stranded after recovered prelaunch cancellation");
         return;
     }
@@ -3080,17 +3171,14 @@ void specialistAdmission(SpecialistMode mode) {
             }
             return {"complete_handoff",{{"text","Complete using the rechecked report"}},"The report is complete"};
         };
-        const IntakeResolver routing=[](std::string_view bot,std::string_view) {
-            return Intake{std::string(bot),"","e","p"};
-        };
         const auto soul=[](std::string_view) { return std::string{}; };
         const auto before=handoffs().view(person,channel);
-        const auto stale=handoffs().step(person,channel,f.model,routing,soul);
+        const auto stale=handoffs().step(person,channel,f.model,soul);
         check(stale.state=="active" && stale.eventCursor==before.eventCursor && stale.latestDecision.is_null() && decisions==1 &&
               stale.work.front().contains("result"),
               "a completion decision consumed evidence after the root pin changed during inference");
         session.pin=pin;
-        const auto completed=handoffs().step(person,channel,f.model,routing,soul);
+        const auto completed=handoffs().step(person,channel,f.model,soul);
         check(completed.state=="completed" && decisions==2,
               "the unconsumed specialist result was not reconsidered after the pin became available");
         return;
@@ -3161,9 +3249,10 @@ void exhaustedSavedSpecialistEffect() {
     access.resourceGrant(localOwner,"alpha",Scope::sessionRead("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::sessionCoordinate("e","root-thread"),GrantChange::grant);
     access.resourceGrant(localOwner,"alpha",Scope::workDelegate("e","root-thread"),GrantChange::grant);
-    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson).pair(person,target,"alpha",scope);
-    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
-    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson).view(person,channel).generation;
+    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
+    const auto pairing=SessionHandoff(*f.store,session,f.specialistPerson,route).pair(person,target,"alpha",scope);
+    const auto channel=SessionHandoff(*f.store,session,f.specialistPerson,route).intake(pairing.code,"budget-effect","Review the pinned project.").channel;
+    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson,route).view(person,channel).generation;
     int modelCalls=0;
     f.model.script=[&](const ModelInput& input)->Decision {
         ++modelCalls;
@@ -3175,22 +3264,21 @@ void exhaustedSavedSpecialistEffect() {
         return {"delegate_specialist",{{"botId","beta"},{"text","Review the pinned project"},
             {"doneWhen","Report the result"}},"Delegate the scoped review"};
     };
-    const auto route=[](std::string_view bot,std::string_view) { return Intake{std::string(bot),"","e","p"}; };
     const auto soul=[](std::string_view) { return std::string{}; };
     {
         const auto peers=[&](std::string_view bot) { return f.peers.at(std::string(bot)); };
-        SessionHandoff handoff(*f.store,session,f.specialistPerson,f.runtime.get(),peers);
-        const auto waiting=handoff.step(person,channel,f.model,route,soul);
+        SessionHandoff handoff(*f.store,session,f.specialistPerson,route,f.runtime.get(),peers);
+        const auto waiting=handoff.step(person,channel,f.model,soul);
         check(waiting.state=="active" && !waiting.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
               "a transient unavailable input pin settled an outstanding specialist effect");
         session.pin=pin;
-        const auto view=handoff.step(person,channel,f.model,route,soul);
+        const auto view=handoff.step(person,channel,f.model,soul);
         check(view.state=="budget_exhausted" && view.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
               "a permanent saved delegation refusal left coordination active or retried its model action");
     }
     f.restart();
-    SessionHandoff restarted(*f.store,session,f.specialistPerson,f.runtime.get());
-    const auto view=restarted.step(person,channel,f.model,route,soul);
+    SessionHandoff restarted(*f.store,session,f.specialistPerson,route,f.runtime.get());
+    const auto view=restarted.step(person,channel,f.model,soul);
     check(view.state=="budget_exhausted" && modelCalls==1 && f.t3.launches==0,
           "a saved budget refusal admitted work again after restart");
 }
@@ -3299,7 +3387,12 @@ int main() {
             {"Requested criteria for first peer work",requestedCriteriaApplyToFirstPeerWork},
             {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
             {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
+            {"Cancelled peer refunds its unused model approval",cancelledPeerRefundsUnusedModelApproval},
+            {"Task revision refunds its unused model approval",revisedTaskRefundsUnusedModelApproval},
             {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
+            {"Task model decision survives SQLite writer contention",[] { taskInferenceSurvivesWriterContention(false); }},
+            {"Task model failure survives SQLite writer contention",[] { taskInferenceSurvivesWriterContention(true); }},
+            {"Shutdown saves a buffered Task decision",[] { taskInferenceSurvivesWriterContention(false,true); }},
             {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
             {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
             {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},

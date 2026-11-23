@@ -32,9 +32,10 @@ class SessionHandoff {
 public:
     using Peers = std::function<std::vector<PeerBot>(std::string_view)>;
     using People = std::function<std::optional<Person>(std::string_view)>;
-    SessionHandoff(Store& store, ThreadSession& session, People people, Runtime* runtime = nullptr,
-                   Peers peers = {})
-        : store_(store), session_(session), people_(std::move(people)), runtime_(runtime), peers_(std::move(peers)) {}
+    SessionHandoff(Store& store, ThreadSession& session, People people, IntakeResolver intake,
+                   Runtime* runtime = nullptr, Peers peers = {})
+        : store_(store), session_(session), people_(std::move(people)), intake_(std::move(intake)),
+          runtime_(runtime), peers_(std::move(peers)) {}
 
     void recover();
 
@@ -50,15 +51,17 @@ public:
                                   std::string_view stage, Id wait, std::string_view text);
     SessionHandoffView view(const Person&, Id channel) const;
     std::vector<SessionHandoffView> recent(const Person&) const;
-    void consult(const Person&, Id channel, Model&, const IntakeResolver&, const Runtime::SoulLoader&);
-    SessionHandoffView step(const Person&, Id channel, Model&, const IntakeResolver&, const Runtime::SoulLoader&);
+    void consult(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
+    SessionHandoffView step(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
     std::vector<std::pair<Id,std::string>> pending(Id after) const;
 
 private:
     SessionHandoffView freezeAs(const Person&, Id channel, std::string_view state);
+    Intake resolveBot(std::string_view bot) const;
     Store& store_;
     ThreadSession& session_;
     People people_;
+    IntakeResolver intake_;
     Runtime* runtime_;
     Peers peers_;
 };

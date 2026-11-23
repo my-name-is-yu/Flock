@@ -51,9 +51,10 @@ Already accepted handoffs continue to run with `flock run --no-web` when the
 daemon uses the same Flock home, T3 connection and identity file.
 
 1. In Flock, open **Session handoffs**, enter the destination environment,
-   project, and Thread IDs, and select a Bot. The T3 Session link contains the
-   environment and Thread IDs. Run `t3 thread list --json` from the T3 project
-   directory to find its project ID and Threads.
+   project, and Thread IDs, and select a Bot with a model, environment ID, and
+   project ID configured. The T3 Session link contains the environment and
+   Thread IDs. Run `t3 thread list --json` from the T3 project directory to find
+   its project ID and Threads.
 2. Choose **One consultation reply** or **Ongoing coordination**. Coordination
    requires a goal and can separately permit specialist checks.
 3. Copy the short-lived pairing code and give it to the agent in that Thread.

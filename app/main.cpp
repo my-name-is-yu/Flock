@@ -139,10 +139,12 @@ int t3Command(Arguments& args, const std::filesystem::path& home) {
     const auto url = args.pop("T3 MCP URL");
     args.end();
 #ifdef FLOCK_WITH_T3
-    loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
+    const auto canOperate = loginT3(home / "credentials" / "t3",environment,url,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
-    print({{"environmentId",environment},{"connected",true}});
+    print({{"environmentId",environment},{"connected",true},{"canOperate",canOperate}});
+    if (!canOperate)
+        std::cerr << "This T3 connection is read-only. Sign in again with T3 Operate access to launch Sessions.\n";
     return 0;
 #else
     (void)home;
@@ -225,7 +227,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     });
 #ifdef FLOCK_WITH_T3
     if (handoffSession) {
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,identities.resolvePerson,&runtime,options.peers);
+        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,identities.resolvePerson,intake,&runtime,options.peers);
         handoffs->recover();
     }
     std::jthread handoffWorker;
@@ -281,8 +283,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
                                 continue;
                             }
                             const auto view = handoffs->view(*actor,channel);
-                            if (view.coordination) handoffs->step(*actor,channel,*model,intake,soul);
-                            else handoffs->consult(*actor,channel,*model,intake,soul);
+                            if (view.coordination) handoffs->step(*actor,channel,*model,soul);
+                            else handoffs->consult(*actor,channel,*model,soul);
                             reportedFailures.erase(channel);
                         } catch (const std::exception&) {
                             if (reportedFailures.insert(channel).second)

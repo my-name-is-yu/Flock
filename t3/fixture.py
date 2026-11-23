@@ -158,6 +158,9 @@ class Fixture(BaseHTTPRequestHandler):
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
                 return
+            if tool["name"] == "t3_thread_send" and state.get("stockDropSendReply"):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -400,7 +403,11 @@ class Fixture(BaseHTTPRequestHandler):
             assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
             thread = args["threadId"]
             if thread == "human":
-                assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+                if state.get("stockRootRecovery"):
+                    assert args["message"].startswith("[Flock Bot planner | ")
+                    state["stockRootInput"] = args["message"]
+                else:
+                    assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
             else:
                 assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
                 assert "Check fixture" in args["message"]
@@ -416,6 +423,14 @@ class Fixture(BaseHTTPRequestHandler):
             return {"threadId": "wrong" if state.get("badReceipt") else thread,
                     "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
         if name == "t3_thread_wait":
+            if args["threadId"] == "human":
+                assert args["runId"] == "next-run" and args["timeoutMs"] == 1
+                assert not args["untilDelegatedWorkSettled"]
+                wait = state["stockRootWait"]
+                return {"threadId": "other" if wait == "wrong-thread" else "human",
+                        "runId": "other-run" if wait == "wrong-run" else "next-run",
+                        "status": "cancelled" if wait == "cancelled" else "failed",
+                        "timedOut": wait == "timed-out"}
             assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
             return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
                     "resultRun": {"runId": "next-run", "status": "completed"}}
@@ -448,6 +463,16 @@ class Fixture(BaseHTTPRequestHandler):
         elif is_root and state.get("stockHistory") == "streaming-late-human":
             rows = [self.item("human", 1, "root-run", "assistant_message", "Unfinished response", status="running"),
                     self.item("human", 2, "root-run", "user_message", "Human after unfinished response", "web")]
+        if is_root and state.get("stockRootRecovery"):
+            rows = rows[:1]
+            if "stockRootInput" in state:
+                rows.append(self.item(thread, 4, "next-run", "user_message", state["stockRootInput"], "mcp") |
+                            {"messageId": "sent-id"})
+                summary["activeRunId"] = None
+                summary["latestRunId"] = "next-run"
+                if state.get("stockRootExtraHistory"):
+                    rows.extend(self.item(thread, position, "later-run", "assistant_message", "Later progress")
+                                for position in range(5, 26))
         if thread == "pinned-worker":
             rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
                     {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]

@@ -333,7 +333,7 @@ WHERE c.person_id=? ORDER BY s.channel_id DESC LIMIT 25
 }
 
 void SessionHandoff::consult(const Person& person, Id channel, Model& model,
-                              const IntakeResolver& intake, const Runtime::SoulLoader& soul) {
+                              const Runtime::SoulLoader& soul) {
     RootDelivery delivery(store_,session_);
     delivery.reconcile(person,channel);
     const auto current = view(person,channel);
@@ -346,8 +346,7 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
     }();
     const auto& origin = permit.channel.origin.invitation;
     if (current.deliveries.empty()) {
-        const auto routing = intake(origin.botId,"");
-        if (routing.botId != origin.botId) throw Conflict("Consultation Bot is unavailable");
+        const auto routing = resolveBot(origin.botId);
         auto notes = db.loadNotes(origin.botId,soul,unixTime());
         Id attempt = 0;
         ModelAttemptState attemptState;
@@ -384,7 +383,7 @@ void SessionHandoff::consult(const Person& person, Id channel, Model& model,
 }
 
 SessionHandoffView SessionHandoff::step(const Person& person, Id channel, Model& model,
-                                        const IntakeResolver& intake, const Runtime::SoulLoader& soul) {
+                                        const Runtime::SoulLoader& soul) {
     RootDelivery delivery(store_,session_);
     delivery.reconcile(person,channel);
     const auto current = view(person,channel);
@@ -508,8 +507,7 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
 )SQL",{page->cursor,channel,current.generation,current.eventCursor});
         return view(person,channel);
     }
-    const auto routing = intake(bot,"");
-    if (routing.botId != bot) throw Conflict("Coordinator Bot is unavailable");
+    const auto routing = resolveBot(bot);
     auto note = db.loadNotes(bot,soul,unixTime());
     note.soul = clean(note.soul);
     note.memory = clean(note.memory);
