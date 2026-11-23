@@ -139,9 +139,9 @@ struct Store::Impl {
     void createMemory(std::string_view key, std::string_view bot, std::string_view id,
                       std::string_view content, Seconds now);
     std::string seedPrivateMemory(std::string_view key, std::string_view bot, const SecretRedactor&, Seconds now);
-    Json memory(std::string_view bot, const Person*, std::string_view operation, const Json&,
-                Seconds now);
-    Json automationTool(std::string_view bot, const Json& routing, const Decision&, Seconds now);
+    Json memory(std::string_view bot, const Person&, std::string_view operation, const Json&,
+                Seconds now, bool fromBot = false);
+    Json automationTool(std::string_view bot, const Person&, const Json& routing, const Decision&, Seconds now);
     Json createAutomation(const Intake&, const Json&, std::string_view author, Seconds now);
     void syncSchedule(const ConfiguredSchedule&, Seconds now, const SecretRedactor&);
     Json automations(std::string_view bot, Id before) const;

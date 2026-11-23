@@ -143,7 +143,7 @@ PolicyResult Policy::check(Id task, Action action, std::string_view target) cons
 PolicyResult Policy::check(const Person& actor, Action action, std::string_view target) const {
     if (!identifier(actor.id)) return PolicyResult::deny;
     if (action == Action::bot_create) return PolicyResult::allow;
-    if (action == Action::rules_manage) return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
+    if (action == Action::rules_manage || action == Action::shared_memory_read || action == Action::shared_memory_write) return actor.adminRoot ? PolicyResult::allow : PolicyResult::deny;
     if (!validBotId(target)) return PolicyResult::deny;
     std::lock_guard lock(db_.mutex);
     if (actor.adminRoot || db_.query("SELECT 1 FROM bot_owners WHERE bot=? AND person=?",{target,actor.id}).next())

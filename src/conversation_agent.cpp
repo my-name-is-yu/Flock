@@ -217,7 +217,11 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (!Policy(*this).allows(message.bot,reading ? Action::shared_memory_read : Action::shared_memory_write,field(args,"docId"))) {
+                const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+                const auto document = field(args,"docId");
+                const auto policy = Policy(*this);
+                if (!policy.allows(turnActor(message),action,document) ||
+                    !policy.allows(message.bot,action,document)) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -416,8 +420,9 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             return {{"ok",true},{"changeId",id},{"status","applied"}};
         }
         auto result = accessTool(bot,message.id,routing,decision);
-        if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
-        if (result.is_null()) result = automationTool(bot,routing,decision,now);
+        const auto actor = turnActor(message);
+        if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
+        if (result.is_null()) result = automationTool(bot,actor,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;

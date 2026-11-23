@@ -282,12 +282,13 @@ WHERE status IN ('active','failed') AND bot_id NOT IN (SELECT value FROM json_ea
 )SQL",{Json(configuredBots).dump()});
 }
 
-Json Store::Impl::automationTool(std::string_view bot, const Json& routing, const Decision& decision, Seconds now) {
+Json Store::Impl::automationTool(std::string_view bot, const Person& actor, const Json& routing, const Decision& decision, Seconds now) {
     const auto& name = decision.tool;
     const auto& args = decision.args;
     if (name == "list_schedules") return automations(bot,args.contains("before") ? requiredInteger(args,"before") : 0);
     if (name == "remove_schedule") {
-        if (!Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
+        if (!Policy(*this).allows(actor,Action::bot_settings,bot) ||
+            !Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
         return cancelAutomation(bot,requiredInteger(args,"id"));
     }
     std::string_view kind;
@@ -295,7 +296,8 @@ Json Store::Impl::automationTool(std::string_view bot, const Json& routing, cons
     else if (name == "create_reminder") kind = "reminder";
     else if (name == "create_trigger") kind = "trigger";
     else return nullptr;
-    if (!Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
+    if (!Policy(*this).allows(actor,Action::bot_settings,bot) ||
+            !Policy(*this).allows(bot,Action::automation_change,bot)) throw AccessDenied("Automation change denied");
     auto definition = args;
     definition["kind"] = kind;
     return createAutomation(intake(bot,field(args,"request"),routing),definition,"bot:" + std::string(bot),now);
