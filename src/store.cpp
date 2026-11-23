@@ -740,19 +740,29 @@ Json Store::Impl::sessionTask(Id id) const {
     // A settled report identifies the assigned Run even when its result came from a later Run.
     auto reports = query(R"SQL(
 SELECT coalesce(nullif(json_extract(data,'$.run.environmentId'),''),json_extract(data,'$.environmentId')),
-       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status')
+       json_extract(data,'$.run.threadId'),json_extract(data,'$.run.runId'),json_extract(data,'$.status'),
+       json_extract(data,'$.sessionCreatedAt')
 FROM journal WHERE task_id=? AND kind IN ('report','run_settled') ORDER BY id
 )SQL",{id});
+    using SessionKey = std::pair<std::string,std::string>;
     using RunKey = std::tuple<std::string,std::string,std::string>;
     std::map<RunKey,std::string> statuses;
+    std::map<SessionKey,std::string> createdAt;
     while (reports.next()) {
+        const auto environment = reports.string(0);
+        const auto thread = reports.string(1);
         auto status = reports.string(3);
         if (!status.empty())
-            statuses.insert_or_assign(RunKey{reports.string(0),reports.string(1),reports.string(2)},std::move(status));
+            statuses.insert_or_assign(RunKey{environment,thread,reports.string(2)},std::move(status));
+        auto timestamp = reports.string(4);
+        if (!timestamp.empty()) createdAt.try_emplace(SessionKey{environment,thread},std::move(timestamp));
     }
     for (auto& run : task.at("runs")) {
-        const auto status = statuses.find({field(run,"environmentId"),field(run,"threadId"),field(run,"runId")});
+        const SessionKey session{field(run,"environmentId"),field(run,"threadId")};
+        const auto status = statuses.find({session.first,session.second,field(run,"runId")});
         if (status != statuses.end()) run["status"] = status->second;
+        const auto timestamp = createdAt.find(session);
+        if (timestamp != createdAt.end()) run["sessionCreatedAt"] = timestamp->second;
     }
     return task;
 }

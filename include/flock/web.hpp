@@ -24,13 +24,12 @@ struct WebCallbacks {
     WebIdentityResolver resolveIdentity = {};
     T3* sessionT3 = nullptr;
     std::function<std::optional<Person>(std::string_view)> configuredPerson = {};
-    // Optional model connection status for Flock settings: connected, account, planUsage, demo.
+    // Optional local model status for installation roots.
     std::function<Json()> modelStatus = {};
     // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
-    std::function<void(bool reconsent)> modelLogin = {};
-    // Optional: connects a T3 environment in the background; t3Setup reports running, authorizationUrl and error.
-    std::function<void(const std::string& environment, const std::string& mcpUrl)> t3Connect = {};
-    std::function<Json()> t3Setup = {};
+    std::function<bool(bool reconsent)> modelLogin = {};
+    std::function<bool(const Person&, const std::string& environmentId, const std::string& mcpUrl)> t3Connect = {};
+    std::function<Json(const Person&)> t3Setup = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { handleComposerEnter } from '../assets/composer-shortcuts.mjs';
+import { handleComposerEnter, isComposerSuggestionKey } from '../assets/composer-shortcuts.mjs';
 
 function press(keys = {}, { disabled = false, browser = { navigator: {} } } = {}) {
   const event = Object.assign(new Event('keydown', { cancelable: true }), {
@@ -63,4 +63,19 @@ test('Touch keyboard Return stays a newline, with hardware shortcuts where detec
 
   browser.navigator.virtualKeyboard = { boundingRect: { height: 250 } };
   assert.deepEqual(press({}, { browser }), kept);
+});
+
+test('Suggestions use plain physical Enter or plain Tab once', () => {
+  const desktop = { navigator: {} };
+  const enter = { key: 'Enter', code: 'Enter' };
+  const tab = { key: 'Tab', code: 'Tab' };
+  assert.equal(isComposerSuggestionKey(enter, desktop), true);
+  assert.equal(isComposerSuggestionKey(tab, desktop), true);
+  for (const key of [enter, tab]) {
+    for (const flag of ['shiftKey', 'altKey', 'ctrlKey', 'metaKey', 'repeat', 'isComposing', 'defaultPrevented'])
+      assert.equal(isComposerSuggestionKey({ ...key, [flag]: true }, desktop), false, flag);
+    assert.equal(isComposerSuggestionKey({ ...key, keyCode: 229 }, desktop), false);
+  }
+  const touch = { navigator: { maxTouchPoints: 5 } };
+  assert.equal(isComposerSuggestionKey({ ...enter, code: '' }, touch), false);
 });
