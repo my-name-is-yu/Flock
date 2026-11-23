@@ -1,37 +1,12 @@
 #include "storage.hpp"
 #include "conversation_storage.hpp"
+#include "tool_batch.hpp"
 
 #include <algorithm>
 #include <future>
 #include <utility>
 
 namespace flockv0 {
-namespace {
-bool filenamesMayMatch(const Decision& a, const Decision& b) {
-    const auto left = relativeToolPath(field(a.args,"path")).generic_string();
-    const auto right = relativeToolPath(field(b.args,"path")).generic_string();
-    const auto nonAscii = [](unsigned char c) { return c >= 128; };
-    if (std::ranges::any_of(left,nonAscii) || std::ranges::any_of(right,nonAscii)) return true;
-    const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? c + ('a'-'A') : c; };
-    return std::ranges::equal(left,right,[&](char m, char n) { return fold(m) == fold(n); });
-}
-
-bool conflict(const Decision& a, const Decision& b) {
-    if (a.tool.starts_with("workspace_") && b.tool.starts_with("workspace_")) {
-        if (a.tool == "workspace_run_command" || b.tool == "workspace_run_command") return true;
-        if (a.args.contains("commandId") && b.args.contains("commandId"))
-            return a.args["commandId"] == b.args["commandId"] &&
-                (a.tool == "workspace_stop_command" || b.tool == "workspace_stop_command");
-        if (a.tool == "workspace_write_file" || b.tool == "workspace_write_file")
-            return a.tool == "workspace_search" || b.tool == "workspace_search" ||
-                (a.args.contains("path") && b.args.contains("path") &&
-                 filenamesMayMatch(a,b));
-    }
-    return (a.tool == "mcp_call_tool" || b.tool == "mcp_call_tool") &&
-           a.args.contains("server") && b.args.contains("server") && a.args["server"] == b.args["server"];
-}
-}
-
 bool allowedAfterWebEvidence(const Decision& call) {
     if (gitOperation(call) == "read") return true;
     constexpr std::string_view readOnly[]{
@@ -90,7 +65,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             try {
                 validateBotTool(ctx,calls[i]);
                 for (const auto index : reserved)
-                    if (conflict(calls[i],calls[index])) throw Conflict("Tool calls must be independent");
+                    if (tool_batch::validatedCallsConflict(calls[i],calls[index]))
+                        throw Conflict("Tool calls must be independent");
             } catch (const Conflict& error) {
                 result = toolFailure(scrub.text(error.what()));
                 continue;
@@ -103,7 +79,7 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             auto resource = authorizedBotToolScope(ctx.bot,calls[i]);
             if (resource->action == Action::mcp_invoke)
                 resource->routine = ctx.settings.mcp->readOnlyHint(resource->target,field(calls[i].args,"name"));
-            const auto key = "turn/" + std::to_string(ctx.messageId) + "/" + std::to_string(step) + "/" + std::to_string(i);
+            const auto key = tool_batch::turnCallKey(ctx.messageId,step,i);
             const auto payload = Json::array({calls[i].tool,calls[i].args});
             const auto now = policyClock();
             const auto gate = approveAction(origin,*resource,key,payload,now,false);
