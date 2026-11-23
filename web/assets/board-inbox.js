@@ -1,4 +1,5 @@
 import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
+import { actionLabel, approvalSummary } from './action-labels.mjs';
 
 const labels = {
   user_question: 'Question', extra_run: 'One more run', deadline: 'Deadline extension',
@@ -156,7 +157,8 @@ function decisionCard(item, submit, source, question, saving) {
   const prInfo = item.prUrl ? parsePrInfo(item.prUrl) : null;
 
   const titleGroup = element('div', '', 'board-inbox-title-group');
-  titleGroup.append(element('h3', item.requestTitle));
+  const approval = item.itemKind === 'policy_approval' && item.action;
+  titleGroup.append(element('h3', approval ? actionLabel(item.action) : item.requestTitle));
 
   const submeta = element('div', '', 'board-inbox-submeta');
   const parts = [];
@@ -164,6 +166,7 @@ function decisionCard(item, submit, source, question, saving) {
   if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
+  if (approval && item.target) parts.push(element('span', item.target, 'board-inbox-target'));
   if (item.status === 'expired') parts.push(element('span', 'Expired'));
   const rel = relativeTime(item.createdAt);
   if (rel) parts.push(element('span', rel));
@@ -177,7 +180,8 @@ function decisionCard(item, submit, source, question, saving) {
 
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
-  if (item.prompt && item.prompt !== item.requestTitle && item.prompt !== item.request) bodyLines.push(item.prompt);
+  const prompt = approval ? approvalSummary(item.prompt) : item.prompt;
+  if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   // A bare pull request URL in the text repeats the card, so drop that line.
   const text = bodyLines.join('\n').split('\n')
     .filter((line) => !prInfo || ![item.prUrl, prInfo.href].includes(line.trim())).join('\n').trim();

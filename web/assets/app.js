@@ -1,5 +1,6 @@
 import { handleComposerEnter } from '/composer-shortcuts.mjs';
 import { accentColor, presenceMotion, showAvatar } from '/avatars.js';
+import { actionLabel } from '/action-labels.mjs';
 import { refreshEventHistory, timelineMessages } from '/event-history.mjs';
 import { coalescedRefresh, createLiveUpdates } from '/live-updates.js';
 import { createBotEditor } from '/bot-editor.js';
@@ -82,6 +83,7 @@ const stateLabels = {
 const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for one more run', 'This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.'],
+  policy_approval: ['Approval needed', 'The Bot needs your OK before it continues. Allow or deny the request above.'],
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
   model_failure: ['The Bot got stuck', 'The Bot could not choose its next step after several attempts. Try again to continue.'],
   t3_input: ['Action in T3', 'Open the session in T3 to approve or answer.'],
@@ -94,6 +96,7 @@ const waitLabels = {
 const pendingActionLabels = {
   budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
   deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
+  policy_approval: 'Allow or deny…',
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
@@ -1009,7 +1012,7 @@ const decisionKindLabels = {
   conversation_model_budget: 'Approve another model call',
   unknown_delivery: 'Message to T3 unconfirmed',
   protected_input: 'Secret needed',
-  policy_approval: 'Approval',
+  policy_approval: 'Approval needed',
 };
 let activityBotId = null;
 let activitySeen = false;
@@ -1028,7 +1031,9 @@ function renderActivity() {
     elements['wait-list'].setAttribute('aria-busy', loading);
     const rows = pending.map((item) => {
       const status = decisionKindLabels[item.itemKind] ?? 'Needs you';
-      const row = activityRow('button', 'wait-row', item.requestTitle || item.request, status, 'waiting');
+      const title = item.itemKind === 'policy_approval' && item.action
+        ? [actionLabel(item.action), item.target].filter(Boolean).join(' · ') : item.requestTitle || item.request;
+      const row = activityRow('button', 'wait-row', title, status, 'waiting');
       row.type = 'button';
       row.title = item.prompt || item.requestTitle;
       row.addEventListener('click', () => {

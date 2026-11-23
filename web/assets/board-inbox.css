@@ -303,3 +303,4 @@
   border-radius: var(--radius-lg);
   background: var(--raised);
 }
+.board-inbox-target { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; }
