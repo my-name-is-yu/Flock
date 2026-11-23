@@ -1434,13 +1434,15 @@ function eventCard(event, context, place, report, approval) {
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 Session “${session.title || session.threadId}”`;
-    const explanation = {
-      finished: 'Run finished',
-      failed: 'Run did not complete successfully',
-      waiting_for_person: 'Run needs input',
-      unknown: 'Run status is unavailable',
-    }[session.reason] ?? 'Run status is unavailable';
-    const text = data.sessionWake ? `${explanation} in ${name}` : `Invited by ${session.inviterName} to ${name}`;
+    const wakeText = {
+      finished: `Work finished in ${name}`,
+      failed: `Work stopped before finishing in ${name}`,
+      waiting_for_person: `Work in ${name} needs your input`,
+      unknown: `Flock couldn’t check the status of work in ${name}`,
+    };
+    const text = data.sessionWake
+      ? (Object.hasOwn(wakeText, session.reason) ? wakeText[session.reason] : wakeText.unknown)
+      : `Invited by ${session.inviterName} to ${name}`;
     const note = node('article', 'system-note session-event', `${text} · `);
     note.id = `event-${event.id}`;
     note.tabIndex = -1;
@@ -1551,7 +1553,7 @@ function eventCard(event, context, place, report, approval) {
     }
     replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
-    copy = data.evidenceStatus === 'report_unavailable' ? 'The Run ended and its report is unavailable.'
+    copy = data.evidenceStatus === 'report_unavailable' ? 'The work ended, but its report couldn’t be loaded.'
       : data.report || 'The session submitted a report.';
     text.textContent = copy;
     text.classList.add('foldable-text');
@@ -1559,8 +1561,9 @@ function eventCard(event, context, place, report, approval) {
     if (link) text.append(link);
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
-    if (data.status && data.status !== 'completed') {
-      bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
+    if (typeof data.status === 'string' && data.status && data.status !== 'completed') {
+      const status = Object.hasOwn(stateLabels, data.status) ? stateLabels[data.status] : data.status;
+      bubble.append(node('p', 'event-reason', `Work ${status.toLowerCase()}`));
     }
     if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));
