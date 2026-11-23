@@ -242,6 +242,17 @@ int main(int argc, char** argv) {
         check(ownerOnly(home), "credential directory is owner-only");
         for (const auto& entry : std::filesystem::recursive_directory_iterator(home))
             check(ownerOnly(entry.path()), "stored credentials are owner-only");
+        const auto discoveredHome = home / "discovered";
+        fixture({{"claimedEnvironment", "env-discovered"}});
+        check(loginT3Environment(discoveredHome,std::nullopt,endpoint,[&](const std::string& authorization) {
+            fixture({{"authorization", authorization}});
+        },true,[](const std::string& environment, const std::function<void()>& save) {
+            check(environment == "env-discovered", "connection uses the authenticated environment identity");
+            save();
+        }), "URL-only login reports Operate approval");
+        check(!makeT3Mcp(discoveredHome)->authGeneration("env-discovered",Json::object()).empty(),
+              "URL-only login saves credentials under the discovered environment ID");
+        fixture({{"claimedEnvironment", "env-1"}});
         auto adapter = makeT3Mcp(home);
         Command launch;
         launch.actionId = "flock-action-0123";

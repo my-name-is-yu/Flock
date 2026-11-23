@@ -41,7 +41,7 @@ async function exercise(mountBoardInbox) {
     prompt: 'Which examples, and how many?', choices: ['Quickstart', { options: ['1', '2'] }] };
 
   const approval = { ...question, itemKind: 'policy_approval', itemId: 10, status: 'pending',
-    action: 'repository.pr', target: 'team/guide' };
+    action: 'repository.pr', target: 'team/guide', canSaveRule: false };
   const calls = [];
   const sources = [];
   const outcomes = [];
@@ -255,6 +255,42 @@ async function exercise(mountBoardInbox) {
   board.setContext('release', 'approver');
   await board.refresh();
   const inline = board.inlinePolicyCard(approval);
+  const approvalActions = (card) => [...card.querySelectorAll('.board-inbox-actions button')].map(
+    (control) => [control.value, control.textContent],
+  );
+  const expectApprovalActions = (entry, expected) => {
+    for (const card of [board.inlinePolicyCard(entry), item]) {
+      check(JSON.stringify(approvalActions(card)) === JSON.stringify(expected),
+        'The inline card and Needs you must show the same authorized approval options');
+    }
+  };
+  board.open(trigger);
+  expectApprovalActions(approval, [['allow_once', 'Allow once'], ['deny', 'Deny']]);
+  const adminApproval = { ...approval, canSaveRule: true };
+  questions = [adminApproval];
+  await board.refresh();
+  expectApprovalActions(adminApproval, [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']]);
+  const staleAdminCard = board.inlinePolicyCard(adminApproval);
+  conversation.append(staleAdminCard);
+  const expired = { ...approval, status: 'expired', canDecide: false };
+  questions = [expired];
+  await board.refresh();
+  check(approvalActions(board.inlinePolicyCard(expired)).length === 0 && board.itemsFor('release').length === 1,
+    'A requester must still see a read-only expired inline card');
+  check(board.count('release') === 0 && trigger.hidden && layer.hidden,
+    'An expired approval must leave the requester’s Needs you queue');
+  const adminExpired = { ...adminApproval, status: 'expired' };
+  questions = [adminExpired];
+  await board.refresh();
+  board.open(trigger);
+  expectApprovalActions(adminExpired, [['allow_next_time', 'Allow next time for this Flock']]);
+  questions = [approval];
+  await board.refresh();
+  const beforeRule = submissions().length;
+  staleAdminCard.querySelector('button[value=always_allow]').click();
+  check(submissions().length === beforeRule, 'A stale admin card could still send a rule decision after permission changed');
+  staleAdminCard.remove();
+  board.close();
   conversation.append(inline);
   const allowOnce = inline.querySelector('button[value=allow_once]');
   const beforeApproval = outcomes.length;
@@ -277,7 +313,7 @@ function liveFixture() {
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
-    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, status: 'pending' };
+    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, canSaveRule: false, status: 'pending' };
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
   const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
   const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
@@ -344,12 +380,14 @@ async function exerciseLiveRetry() {
   const approvalCard = () => document.querySelector('#event-4.policy-inline-card');
   await waitFor(approvalCard, 'A late Inbox response did not replace the first waiting event with its approval');
   if (document.querySelectorAll('.policy-inline-card').length !== 1 || !approvalCard().textContent.includes('Pull request: 42') ||
+      approvalCard().querySelector('button[value=always_allow]') ||
       ![...approvalCard().querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The approval card duplicated the request or displayed the wrong action');
   const review = [...document.querySelectorAll('#wait-list .wait-row')].find(row => row.textContent.includes('Approval needed'));
   if (!review) throw new Error('The approval disappeared from Needs you');
   review.click();
   if (panel.hidden || !panel.textContent.includes('Pull request: 42') || !panel.textContent.includes('State: closed') ||
+      panel.querySelector('button[value=always_allow]') ||
       ![...panel.querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The wait did not open the exact approval with its requested change');
   fixture.updated = true;

@@ -417,12 +417,18 @@ void validateT3ConnectTarget(const std::string& environmentId, const std::string
     }
 }
 
-bool loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
+void validateT3McpUrl(const std::string& mcpUrl) {
+    try { (void)checkedResource(mcpUrl); }
+    catch (const t3detail::Failure&) { throw Conflict("Use a valid T3 connection URL ending in /mcp"); }
+}
+
+bool loginT3Environment(const std::filesystem::path& credentialDirectory,
+             const std::optional<std::string>& expectedEnvironmentId,
              const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
-             const std::function<void(const std::function<void()>&)>& install, std::stop_token stop) {
+             const std::function<void(const std::string&, const std::function<void()>&)>& install, std::stop_token stop) {
     using namespace t3detail;
     checkCancelled(stop);
-    const auto name = credentialName(environmentId);
+    if (expectedEnvironmentId) (void)credentialName(*expectedEnvironmentId);
     const auto resource = checkedResource(mcpUrl);
     const Fd directory(openDirectory(credentialDirectory, true));
     const auto oauth = discover(resource);
@@ -467,13 +473,24 @@ bool loginT3(const std::filesystem::path& credentialDirectory, const std::string
     checkCancelled(stop);
     Credential credential{resource.full, token, randomValue(), unixTime() + expires, operateScope};
     Client client(credential);
-    const auto identity = client.call("t3_environment_read", Json::object());
-    if (str(identity, "environmentId") != environmentId)
+    const auto environmentId = str(client.call("t3_environment_read", Json::object()), "environmentId");
+    if (expectedEnvironmentId && environmentId != *expectedEnvironmentId)
         throw Failure(Failure::Kind::Settings, "The OAuth endpoint belongs to a different T3 environment");
+    const auto name = credentialName(environmentId);
     checkCancelled(stop);
     const auto save = [&] { saveCredential(directory.get(), name, environmentId, credential); };
-    if (install) install(save);
+    if (install) install(environmentId, save);
     else save();
     return operateScope;
+}
+
+bool loginT3(const std::filesystem::path& credentialDirectory, const std::string& environmentId,
+             const std::string& mcpUrl, const std::function<void(const std::string&)>& showAuthorizationUrl, bool requireOperate,
+             const std::function<void(const std::function<void()>&)>& install, std::stop_token stop) {
+    return loginT3Environment(credentialDirectory, environmentId, mcpUrl, showAuthorizationUrl, requireOperate,
+        [&](const std::string&, const std::function<void()>& save) {
+            if (install) install(save);
+            else save();
+        }, stop);
 }
 }

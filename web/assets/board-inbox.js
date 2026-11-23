@@ -10,8 +10,8 @@ const labels = {
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Checked again', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Rejected',
-  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Always allowed',
-  allow_next_time: 'Allow rule saved',
+  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Allowed for this Flock',
+  allow_next_time: 'Allow rule saved for this Flock',
 };
 const actions = {
   extra_run: [['approve', 'Approve one run']],
@@ -21,7 +21,7 @@ const actions = {
   unknown_delivery: [['reconcile', 'Check T3 again']],
   protected_input: [['supply', 'Save secret']],
   pr_reconciliation: [['reject_pr', 'Reject']],
-  policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Always allow'], ['deny', 'Deny']],
+  policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Allow for this Flock'], ['deny', 'Deny']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
@@ -37,6 +37,7 @@ const svgIcons = {
 
 const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
 const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices, item.status]);
+const savesFlockRule = (decision) => decision === 'always_allow' || decision === 'allow_next_time';
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -207,7 +208,8 @@ function decisionCard(item, submit, source, question, saving) {
   }
   for (const pr of item.candidates || []) article.append(prPreviewCard(pr.url, `Pull request #${pr.prNumber}`));
 
-  if (!item.canDecide) {
+  const expiredApproval = item.itemKind === 'policy_approval' && item.status === 'expired';
+  if (!item.canDecide || (expiredApproval && item.canSaveRule !== true)) {
     if (item.itemKind !== 'policy_approval') article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
   }
@@ -237,12 +239,13 @@ function decisionCard(item, submit, source, question, saving) {
     btn.dataset.prNumber = pr.prNumber;
     buttons.append(btn);
   }
-  const choices = item.itemKind === 'policy_approval' && item.status === 'expired'
-    ? [['allow_next_time', 'Always allow next time']]
+  const choices = expiredApproval
+    ? [['allow_next_time', 'Allow next time for this Flock']]
     : actions[item.itemKind];
   for (const [decision, title] of choices) {
+    if (savesFlockRule(decision) && item.canSaveRule !== true) continue;
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
-      // One default per card: "Allow once" leads; the lasting "Always allow" stays a deliberate second choice.
+      // Keep the Flock-wide rule secondary to an available one-time approval.
       : (['deny', 'reject_pr', 'always_allow'].includes(decision) ? 'secondary' : 'primary');
     const btn = element('button', title, style);
     btn.value = decision;
@@ -300,9 +303,11 @@ export function mountBoardInbox({
   let morphCleanup = null;
 
   const scoped = (botId = bot) => items.filter((item) => item.botId === botId || item.conversationBotId === botId);
-  const current = () => mode === 'pending' ? scoped().find((item) => itemKey(item) === selected) : undefined;
+  const pending = (botId) => scoped(botId).filter((item) =>
+    item.itemKind !== 'policy_approval' || item.status !== 'expired' || item.canSaveRule === true);
+  const current = () => mode === 'pending' ? pending().find((item) => itemKey(item) === selected) : undefined;
   const isOpen = () => !!mode;
-  const count = (botId) => scoped(botId).length;
+  const count = (botId) => pending(botId).length;
   const saveKey = (item) => JSON.stringify([viewer, itemKey(item)]);
   const draftKey = (item, choice) => JSON.stringify([viewer, item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
 
@@ -439,7 +444,7 @@ export function mountBoardInbox({
         void openHistory(origin);
       });
       actionsList.push(histBtn);
-    } else if (mode === 'history' && scoped().length) {
+    } else if (mode === 'history' && pending().length) {
       const pendingBtn = element('button', '', 'decision-more-item');
       pendingBtn.type = 'button';
       pendingBtn.append(iconSpan(svgIcons.history), element('span', 'Needs you'));
@@ -538,7 +543,7 @@ export function mountBoardInbox({
   function renderPending() {
     syncTrigger();
     if (mode !== 'pending') return;
-    const list = scoped();
+    const list = pending();
     const item = current();
     const index = list.indexOf(item);
     position.textContent = `${index + 1}/${list.length}`;
@@ -584,7 +589,7 @@ export function mountBoardInbox({
   }
 
   function open(opener, targetItem) {
-    const list = scoped();
+    const list = pending();
     const item = targetItem ? list.find((entry) => itemKey(entry) === itemKey(targetItem)) : list[0];
     if (!item) return;
     if (mode === 'pending' && itemKey(item) === selected) return;
@@ -656,7 +661,7 @@ export function mountBoardInbox({
   }
 
   function move(direction) {
-    const list = scoped();
+    const list = pending();
     const index = list.indexOf(current());
     if (!list[index + direction]) return;
     const focused = document.activeElement;
@@ -671,10 +676,10 @@ export function mountBoardInbox({
   }
 
   function apply(nextItems) {
-    const old = scoped().indexOf(current());
+    const old = pending().indexOf(current());
     items = nextItems;
     if (mode === 'pending' && !current()) {
-      const list = scoped();
+      const list = pending();
       const nextEntry = list[Math.max(0, Math.min(old, list.length - 1))];
       if (!nextEntry) {
         close({ focus: panel.contains(document.activeElement) || document.activeElement?.disabled });
@@ -728,7 +733,8 @@ export function mountBoardInbox({
   async function submit(item, decision, data, answer, inline = false) {
     const save = saveKey(item);
     const active = inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
-    if (!item.canDecide || saving.has(save) || !active || decisionTarget(active) !== decisionTarget(item)) return;
+    if (!item.canDecide || !active?.canDecide || saving.has(save) || decisionTarget(active) !== decisionTarget(item) ||
+        (savesFlockRule(decision) && active.canSaveRule !== true)) return;
     const owner = viewer;
     const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
     const fingerprint = decisionTarget(item);
@@ -818,7 +824,7 @@ export function mountBoardInbox({
   });
 
   return {
-    setContext, refresh, count, itemsFor: (botId) => scoped(botId), open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    setContext, refresh, count, itemsFor: scoped, pendingItemsFor: pending, open, openItem, openHistory, close, isOpen, composer, reviewReply,
     inlinePolicyCard(item) {
       const card = decisionCard(item, (entry, decision, data) => submit(entry, decision, data, undefined, true),
         null, null, saving.get(saveKey(item)));

@@ -819,6 +819,13 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
+    def approve(authorization):
+        request = urllib.request.Request(server.origin + "/fixture",
+            data=json.dumps({"authorization": authorization}).encode(),
+            headers={"Content-Type":"application/json"})
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+
     def connect(environment, flags, restart=False, expected_error=None, rewritten=True):
         server.state["claimedEnvironment"] = environment
         with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
@@ -830,11 +837,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                     assert selector.select(5), "T3 connect did not display the OAuth URL"
                     assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
                 authorization = process.stderr.readline().strip()
-                request = urllib.request.Request(server.origin + "/fixture",
-                    data=json.dumps({"authorization": authorization}).encode(),
-                    headers={"Content-Type":"application/json"})
-                with urllib.request.urlopen(request, timeout=5):
-                    pass
+                approve(authorization)
                 output, errors = process.communicate(timeout=8)
                 if expected_error:
                     assert process.returncode != 0 and expected_error in errors, (output, errors)
@@ -879,8 +882,12 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     command = working_command
     codex_config.write_text(original)
 
+    system_settings = state / "system-settings.json"
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
     env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
-    old = connect("env-1", ["--port", str(port)], restart=True)
+    old = connect("env-1", [], restart=True)
+    system_settings.unlink()
     assert claude_config.read_bytes() == original_claude
     env["FLOCK_CLAUDE_CLI"] = str(claude)
     token = connect("env-2", [])
@@ -921,6 +928,15 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     token = connect("env-2", ["--port", str(port)], restart=True)
     assert token != before_port_change
 
+    system_settings.write_text(json.dumps({"port": port}))
+    system_settings.chmod(0o600)
+    configured = codex_config.read_bytes(), claude_config.read_bytes(), connector()
+    conflict = subprocess.run(command + ["t3", "connect", "env-2", server.origin + "/mcp",
+                                        "--port", str(previous_port)],
+                              env=env, text=True, capture_output=True, timeout=5)
+    assert conflict.returncode != 0 and "Flock System settings select Web port" in conflict.stderr
+    assert (codex_config.read_bytes(), claude_config.read_bytes(), connector()) == configured
+
     with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
         try:
@@ -947,6 +963,35 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         except urllib.error.HTTPError as error:
             return error.code
 
+    admin_credential = "Bearer fixture-local-owner-admin"
+    member_credential = "Bearer fixture-local-owner-member"
+    identities = directory / "web-identities.json"
+    identities.write_text(json.dumps([
+        {"person": "local-owner", "authorization": admin_credential, "adminRoot": True},
+        {"person": "local-owner", "authorization": member_credential},
+    ]))
+    identities.chmod(0o600)
+    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+
+    def settings(path="", body=None, credential=admin_credential):
+        origin = f"http://127.0.0.1:{port}"
+        request = urllib.request.Request(origin + "/api/settings" + path,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Origin":origin, "Content-Type":"application/json", "X-Flock-Action":"1",
+                     "Authorization":credential})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.load(response)
+
+    def await_t3_settings(predicate):
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            _, value = settings()
+            if predicate(value):
+                return value
+            assert not value["t3Setup"]["error"], value["t3Setup"]
+            time.sleep(0.05)
+        raise AssertionError("Flock did not finish the Web T3 connection")
+
     with subprocess.Popen(command + ["run"], env=env, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
         try:
@@ -955,6 +1000,23 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
                 assert selector.select(8), "Flock did not listen on the saved port"
                 assert daemon.stdout.readline().rstrip().endswith(f":{port}")
             assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+
+            server.state["claimedEnvironment"] = "env-from-url"
+            try:
+                settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"}, member_credential)
+            except urllib.error.HTTPError as error:
+                assert error.code == 403
+            else:
+                raise AssertionError("non-admin credential started Web T3 setup")
+            status, _ = settings("/t3-connect", {"mcpUrl": server.origin + "/mcp"})
+            assert status == 202
+            pending = await_t3_settings(lambda value: value["t3Setup"]["authorizationUrl"])
+            approve(pending["t3Setup"]["authorizationUrl"])
+            await_t3_settings(lambda value: not value["t3Setup"]["running"] and
+                              "env-from-url" in value["t3"]["environments"])
+            assert settings("/t3-disconnect", {"environmentId":"env-from-url"})[0] == 200
+            assert "env-from-url" not in settings()[1]["t3"]["environments"] and ping(token) == 200
+
             subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]

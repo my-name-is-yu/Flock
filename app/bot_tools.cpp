@@ -475,39 +475,62 @@ std::string mcpUrl(const std::string& url) {
 }
 }
 
-std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home) {
-    auto result = std::make_shared<BotTools>();
-    result->web = std::make_shared<PublicWeb>(environmentToken("FLOCK_WEB_SEARCH_KEY"));
+Json readBotToolSettings(const std::filesystem::path& home) {
+    auto settings = Json{{"searchKey",environmentToken("FLOCK_WEB_SEARCH_KEY")}};
     const auto file = home / "bot-tools.json";
-    if (!std::filesystem::exists(file)) return result;
+    if (!std::filesystem::exists(file)) return settings;
     if (!std::filesystem::is_regular_file(file) || std::filesystem::file_size(file) > 65536)
         throw Conflict("Invalid Bot tools configuration file");
     std::ifstream input(file);
     const auto config = parse(std::string(std::istreambuf_iterator<char>(input),{}));
-    const auto resolve = [&](const std::string& value) {
-        if (value.empty() || value.find('\0') != value.npos) throw Conflict("Invalid Bot tools directory");
-        return home / value;
-    };
     for (const auto& [key,value] : config.items())
         if (key != "skills" && key != "mcpServers") throw Conflict("Unknown Bot tools setting " + key);
+    settings.update(config);
+    if (!settings.contains("mcpServers")) return settings;
+    auto& servers = settings.at("mcpServers");
+    if (!servers.is_object()) throw Conflict("Invalid MCP servers configuration");
+    for (auto& value : servers) {
+        if (!value.is_object()) throw Conflict("Invalid configured MCP server");
+        const auto tokenEnv = value.value("tokenEnv","");
+        const auto token = tokenEnv.empty() ? "" : environmentToken(tokenEnv);
+        if (!tokenEnv.empty() && token.empty()) throw Conflict("MCP server credential is missing");
+        value["token"] = token;
+        value.erase("tokenEnv");
+    }
+    return settings;
+}
+
+std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home, const Json& config) {
+    auto result = std::make_shared<BotTools>();
+    const auto searchKey = config.value("searchKey","");
+    if (!searchKey.empty() && !safeHeaderValue(searchKey)) throw Conflict("Invalid web search credential");
+    result->web = std::make_shared<PublicWeb>(searchKey);
     const auto skills = config.value("skills",Json::object());
     if (!skills.is_object() || skills.size() > 128) throw Conflict("Invalid skills configuration");
     for (const auto& [id,value] : skills.items()) {
         if (!validBotId(id) || id == "catalog" || !value.is_string()) throw Conflict("Invalid configured skill");
-        result->skills.emplace(id,std::filesystem::canonical(resolve(value.get<std::string>())));
+        const auto directory = value.get<std::string>();
+        if (directory.empty() || directory.find('\0') != directory.npos) throw Conflict("Invalid Bot tools directory");
+        std::error_code error;
+        const auto resolved = std::filesystem::canonical(home / directory,error);
+        if (error || !std::filesystem::is_directory(resolved,error)) throw Conflict("Skill folder was not found");
+        result->skills.emplace(id,resolved);
     }
     const auto servers = config.value("mcpServers",Json::object());
     if (!servers.is_object() || servers.size() > 64) throw Conflict("Invalid MCP servers configuration");
     std::map<std::string,Server,std::less<>> configured;
     for (const auto& [id,value] : servers.items()) {
         if (!validBotId(id) || !value.is_object()) throw Conflict("Invalid configured MCP server");
-        const auto tokenEnv = value.value("tokenEnv","");
-        const auto token = tokenEnv.empty() ? "" : environmentToken(tokenEnv);
-        if (!tokenEnv.empty() && token.empty()) throw Conflict("MCP server credential is missing");
+        const auto token = value.value("token","");
+        if (!token.empty() && !safeHeaderValue(token)) throw Conflict("Invalid MCP credential");
         auto url = mcpUrl(value.at("url").get<std::string>());
         configured.emplace(id,Server{std::move(url),token});
     }
     result->mcp = std::make_shared<ConfiguredMcp>(std::move(configured));
     return result;
+}
+
+std::shared_ptr<const BotTools> loadBotTools(const std::filesystem::path& home) {
+    return loadBotTools(home,readBotToolSettings(home));
 }
 }

@@ -52,7 +52,9 @@ root authority only when all of those credentials currently have `adminRoot`.
 
 ## Ask a Bot from a T3 Session
 
-In **Flock settings → Connections**, enter the environment ID and T3 MCP URL and choose **Connect**, or run `flock t3 connect ENVIRONMENT MCP_URL` on the machine running Flock.
+In **Flock settings → Connections**, paste the connection URL from T3 Code
+and choose **Connect**. From a terminal, run `flock t3 connect ENVIRONMENT MCP_URL`
+on the machine running Flock.
 Approve T3 OAuth read and operate access for each connected environment.
 Flock registers a loopback MCP server with installed Codex and Claude Code and
 exports their Flock skills. For shared Web identities, include `local-owner` in
@@ -64,8 +66,11 @@ and queues each Bot reply with the Bot's name. If the Bot asks you a question,
 the coding agent shows it to you and forwards your reply. Ask the coding agent
 to stop the Bot when you want it to leave the Session.
 
-The first connection saves port 4173 by default. To change it, pass
-`--port PORT` and restart `flock run`. Keep the Web listener enabled to accept
+The first connection from the Web uses the running Flock port. The CLI uses
+the port saved in **Flock settings → System**, or port 4173 if there is no
+saved port or existing connection. An explicit CLI port must match the System
+setting when one is set. To change the System port, save it and restart Flock.
+Keep the Web listener enabled to accept
 MCP calls. An accepted ask can finish when the Runtime restarts with
 `flock run --no-web` and uses the same home, connection, and identity file.
 
@@ -84,18 +89,34 @@ environment's OAuth endpoint.
 
 ## Flock settings
 
-**Flock settings** shows the theme for this browser, the installation mode, rules, and the read-only T3
-connection details for the person who connected T3 and installation roots.
-Installation roots can choose **Full** or **Supervised**, add rules, and remove rules. **Full** is
+Use **Appearance** to set the theme for the current browser. Use **Permissions**
+to set the installation's permission mode and rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
 [category defaults](../README.md#installation-policy).
 
-An action that asks appears in the Decision Inbox, and inline when it has
-a conversation message. **Allow once** resumes that action. **Always allow**
-also saves an exact Allow rule. **Deny** blocks another attempt from that
-request. The requester or installation root answers the card. Background
-cards expire after 30 minutes and then offer **Always allow next time**.
+Installation administrators manage ChatGPT, T3, and other integrations in
+**Connections**. Copy the connection URL from T3, paste it into Flock, and
+approve access in T3. Flock confirms the environment before registering it.
+Set up the corresponding external service or local bridge before connecting it.
+
+Use **Access** to enable shared sign-in and manage accounts for this Flock.
+Keep the initial administrator password before confirming shared access. Bot
+sharing and channel sender links are managed from each Bot's **Sharing and connections** page.
+If the host provides a Web identities file, Access shows those users as host-managed.
+
+**System** shows the running and next-start values for the Web port and when
+Flock reads T3 Sessions. Changes
+marked for restart take effect the next time the host starts Flock. The same
+applies to GitHub credentials, channel configuration, and shared tools.
+
+An action that asks appears in the Decision Inbox and alongside its
+conversation message. The requester or an installation administrator can
+choose **Allow once** to resume the action or **Deny** to block another attempt
+from that request. An installation administrator can choose **Allow for this
+Flock** to resume the action and save an exact Allow rule for the installation.
+Background cards expire after 30 minutes. An administrator can choose
+**Allow next time for this Flock** to save a rule for future requests.
 Cards prompted by a person's message stay open, including messages from a
 linked Slack or iMessage sender. The approval is answered in Flock. Changing
 modes closes pending approvals for the prior mode.
@@ -113,7 +134,8 @@ These endpoints require an installation root.
   Set `add` to `false` to remove the matching rule.
 - `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in
   the browser on the machine running Flock.
-- `POST /api/settings/t3-connect` takes `environmentId` and `mcpUrl`. The person
+- `POST /api/settings/t3-connect` takes `mcpUrl`. An optional `environmentId` must
+  match the authenticated environment. The person
   who starts the connection receives the approval link in `t3Setup.authorizationUrl`.
 - `POST /api/settings/t3-disconnect` takes `environmentId`. Pass `null` to retry
   removing the provider registration after access has been revoked.

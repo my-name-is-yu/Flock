@@ -125,11 +125,15 @@ form .button { min-height: 2.1rem; }
 .settings-nav a[aria-current="page"] { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
 .settings-nav a:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-6); }
-.settings-crumb { display: flex; align-items: baseline; gap: .55rem; margin: 0 0 var(--space-5); font-size: var(--text-lg); font-weight: 600; }
+.settings-header { margin-block-end: var(--space-5); }
+.settings-crumb { display: flex; align-items: baseline; gap: .55rem; margin: 0; font-size: var(--text-lg); font-weight: 600; }
 .settings-crumb > :first-child { color: var(--text-3); font-weight: 500; }
 .settings-crumb-sep { color: var(--text-3); font-weight: 400; }
+.settings-scope, .settings-help { color: var(--text-2); font-size: var(--text-sm); }
+.settings-scope { margin: .25rem 0 0; }
+.settings-help { margin: var(--space-3) .1rem 0; }
 .settings-panel:not([hidden]) > section { animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards; }
-.row-actions { display: flex; gap: .4rem; }
+.row-actions { display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
 .row-actions .button { text-decoration: none; }
 #rules:empty { display: none; }
 :is(#rules, #connections):not(:empty) + .rule-form:not([hidden]) { border-block-start: 1px solid var(--hairline); }
@@ -143,7 +147,7 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 @media (max-width: 760px) {
   .settings-shell { grid-template-columns: minmax(0, 1fr); }
   .settings-nav {
-    position: sticky; z-index: 1; height: auto; display: flex; flex-wrap: nowrap; align-items: center; overflow-x: auto;
+    position: sticky; z-index: 1; height: auto; display: flex; flex-wrap: wrap; align-items: center;
     padding: var(--space-2) var(--space-3); border-inline-end: 0; border-block-end: 1px solid var(--hairline);
   }
   .settings-nav .settings-back { margin: 0 var(--space-2) 0 0; }
@@ -153,6 +157,8 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 }
 .settings-page section { margin-block-end: var(--space-6); }
 .settings-page h2 { margin-block-end: .6rem; padding-inline: .1rem; font-size: var(--text-md); color: var(--text); }
+.connection-provider:not([hidden]) + .connection-provider { margin-block-start: var(--space-4); }
+.connection-provider h3 { margin: 0 0 .45rem; padding-inline: .1rem; font-size: var(--text-sm); color: var(--text-2); }
 .settings-group {
   border: 1px solid var(--hairline); border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--raised) 45%, transparent); overflow: hidden;
@@ -198,4 +204,69 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-group :is(#rule-form, #t3-form) { border-radius: 0; }
+.settings-group #t3-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.settings-group #t3-form button { align-self: end; }
 .settings-row a.button { text-decoration: none; }
+
+.settings-row .connection-actions, .connection-states {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .6rem;
+  max-width: 100%;
+}
+.setting-state {
+  display: inline-flex; align-items: center; gap: .35rem;
+  color: var(--text-3); font-size: var(--text-xs); white-space: nowrap;
+}
+.setting-state::before { content: ""; width: .4rem; height: .4rem; border-radius: 50%; background: currentColor; }
+.setting-state[data-state="checked"] { color: var(--success); }
+.setting-state[data-state="pending"] { color: var(--warning); }
+.setting-state[data-state="error"] { color: var(--danger); }
+.row-label .system-values { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.system-values b { font-weight: 550; }
+.restart-notice .row-label strong { color: var(--warning); }
+
+.installation-dialog {
+  width: min(34rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); margin: auto;
+  overflow: auto; padding: var(--space-5); border: 1px solid var(--hairline); border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg); background: var(--overlay); color: var(--text); font-family: var(--font-sans);
+}
+.installation-dialog::backdrop { background: light-dark(rgb(10 10 14 / .42), rgb(0 0 0 / .58)); }
+.installation-dialog-head { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); }
+.installation-dialog-head h2 { margin: 0; padding: 0; color: var(--text); font-size: var(--text-lg); }
+.installation-dialog-head .icon-button { flex: none; }
+.installation-dialog .installation-description {
+  margin: .35rem 0 var(--space-4); color: var(--text-2); font-size: var(--text-sm); line-height: 1.5;
+}
+.installation-form {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end; gap: var(--space-3); padding: var(--space-4); background: transparent;
+}
+.installation-dialog .installation-form { padding: var(--space-3) 0 0; }
+.installation-dialog .settings-group + .installation-form { margin-block-start: var(--space-3); }
+.installation-form .span-form { grid-column: 1 / -1; }
+.installation-form :is(input, select) { width: 100%; }
+.installation-form-actions {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2);
+}
+.installation-form-actions .primary, .installation-dialog .button.primary {
+  background: var(--accent-fill); color: var(--on-accent);
+}
+.installation-form-actions .primary:hover:not(:disabled), .installation-dialog .button.primary:hover:not(:disabled) {
+  background: var(--accent-fill-hover);
+}
+.installation-feedback {
+  margin: var(--space-3) 0 0; padding: .55rem .7rem; border-radius: var(--radius-md);
+  background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); overflow-wrap: anywhere;
+}
+.invite-credential { margin-block: var(--space-3); }
+.invite-credential input { width: 100%; }
+.connection-test-result {
+  margin: var(--space-3) 0 0; color: var(--text-2); font-size: var(--text-sm); overflow-wrap: anywhere;
+}
+.connection-test-result[data-result="ready"] { color: var(--success); }
+.connection-test-result[data-result="error"] { color: var(--danger); }
+
+@media (max-width: 560px) {
+  .installation-dialog { padding: var(--space-4); }
+  .installation-form { grid-template-columns: minmax(0, 1fr); }
+  .settings-row .connection-actions, .connection-states { justify-content: flex-start; }
+}

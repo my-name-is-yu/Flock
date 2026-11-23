@@ -104,8 +104,8 @@ async function jsonResponse(response) {
   }
 }
 
-async function discover() {
-  const response = await request(`${issuer}/.well-known/openid-configuration`);
+async function discover(timeout) {
+  const response = await request(`${issuer}/.well-known/openid-configuration`, {}, timeout);
   const data = await jsonResponse(response);
   if (!response.ok) throw remoteFailure("ChatGPT sign-in", response.status, data);
   if (data?.issuer !== issuer || ["authorization_endpoint", "token_endpoint", "jwks_uri"].some((key) => {
@@ -248,12 +248,15 @@ async function showBrowserOrPrintUrl(url, printUrl, callbackSettled, browserRequ
   } else if (printUrl || (!await openBrowser(url) && !callbackSettled())) console.error(url);
 }
 
-async function login({ printUrl = false, reconsent = false, browserRequired = false } = {}) {
-  let profile = readProfile();
-  if (!profile.hostId) {
-    profile = { hostId: `urn:uuid:${randomUUID()}` };
-    saveProfile(profile);
+async function login({ printUrl = false, reconsent = false, browserRequired = false, switchAccount = false } = {},
+    save = true) {
+  const active = readProfile();
+  if (!active.hostId) {
+    active.hostId = `urn:uuid:${randomUUID()}`;
+    if (save) saveProfile(active);
   }
+  // A different account has its own client registration, under the same host ID.
+  const profile = switchAccount ? { hostId: active.hostId } : active;
   const discovery = await discover();
   const state = random(), nonce = random(), verifier = random();
   const listener = await listen(state, profile.clientId);
@@ -282,7 +285,7 @@ async function login({ printUrl = false, reconsent = false, browserRequired = fa
     const [{ code, clientId }] = await Promise.all([
       callback, showBrowserOrPrintUrl(url.toString(), printUrl, () => callbackSettled, browserRequired),
     ]);
-    if (!profile.clientId) {
+    if (save && !profile.clientId && !switchAccount) {
       profile.clientId = clientId;
       saveProfile(profile);
     }
@@ -295,20 +298,61 @@ async function login({ printUrl = false, reconsent = false, browserRequired = fa
       throw new Failure("Sign in to the ChatGPT account already registered with this Flock home");
     }
     const next = { hostId: profile.hostId, clientId, ...account, idToken: tokens.id_token, ...credentials(tokens) };
-    saveProfile(next);
-    return status(next);
+    if (switchAccount && active.clientId === clientId && active.subject && account.subject !== active.subject) {
+      throw new Failure("ChatGPT returned a registration for a different account");
+    }
+    if (switchAccount && !status(next).planUsage) {
+      throw new Failure("Approve ChatGPT plan usage to switch accounts");
+    }
+    if (save) saveProfile(next);
+    return next;
   } finally {
     listener.close();
   }
 }
 
 function status(profile) {
+  const connected = Boolean(profile.subject && !profile.signedOut);
   return {
-    connected: Boolean(profile.subject),
-    account: profile.email ?? "",
-    planUsage: Boolean(profile.refreshToken && profile.granted?.includes(directScope)),
+    connected,
+    account: connected ? profile.email ?? "" : "",
+    planUsage: Boolean(!profile.signedOut && profile.refreshToken && profile.granted?.includes(directScope)),
     manageUsage: "https://chatgpt.com/settings/usage",
   };
+}
+
+async function revokeSession(clientId, refreshToken) {
+  try {
+    const discovery = await discover(4000);
+    const endpoint = new URL(discovery.revocation_endpoint);
+    if (endpoint.origin !== issuer || endpoint.username || endpoint.password) return false;
+    const options = {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: refreshToken, token_type_hint: "refresh_token", client_id: clientId }),
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 300));
+      try {
+        const response = await request(endpoint, options, 4000);
+        if (response.status === 200) return true;
+        if (response.status < 500) return false;
+      } catch (error) {
+        if (!error.transient) return false;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+async function signOut() {
+  const profile = readProfile();
+  const { hostId, clientId, subject, email } = profile;
+  const refreshToken = profile.pending?.refreshToken ?? profile.refreshToken;
+  const revocationConfirmed = refreshToken ? Boolean(clientId && await revokeSession(clientId, refreshToken))
+    : profile.revocationConfirmed !== false;
+  saveProfile({ hostId, clientId, subject, email, signedOut: true, revocationConfirmed });
+  return { revocationConfirmed };
 }
 
 async function accessToken() {
@@ -442,18 +486,25 @@ try {
     payload += chunk;
   }
   const input = JSON.parse(payload);
-  let result;
-  if (operation === "login") result = await login(input);
+  let result, candidate;
+  if (operation === "login") result = status(await login(input));
+  else if (operation === "prepare_login") {
+    // Return the verified candidate over the private transport. The daemon
+    // will check the initiating administrator before publishing it.
+    candidate = await login(input, false);
+    result = status(candidate);
+  }
+  else if (operation === "sign_out") result = await signOut();
   else if (operation === "status") result = status(readProfile());
   else if (operation === "web_status") {
     const profile = readProfile();
-    const needsSignIn = Boolean(profile.subject && (!Array.isArray(profile.granted) ||
+    const needsSignIn = Boolean(profile.subject && !profile.signedOut && (!Array.isArray(profile.granted) ||
       (profile.granted.includes(directScope) && (!profile.accessToken || !profile.refreshToken))));
-    result = { ...status(profile), needsSignIn };
+    result = { ...status(profile), needsSignIn, registered: Boolean(profile.clientId) };
   } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
   else throw new Failure("Unknown ChatGPT transport operation");
-  console.log(JSON.stringify({ result }));
+  console.log(JSON.stringify({ result, candidate }));
 } catch (error) {
   const known = error instanceof Failure;
   // Raw browser, filesystem, fetch and parse errors can contain credentials or prompts.

@@ -45,6 +45,13 @@ std::string digest(std::string_view value) {
     return hex(bytes);
 }
 
+std::string connectorBearer() {
+    std::array<unsigned char,32> bytes{};
+    if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
+        throw std::runtime_error("Could not generate T3 connection token");
+    return std::string(tokenPrefix) + hex(bytes);
+}
+
 bool validId(std::string_view value, std::size_t max = 1024) {
     return !value.empty() && value.size() <= max &&
            std::ranges::none_of(value,[](unsigned char c) { return c <= 32 || c == 127; });
@@ -125,10 +132,7 @@ std::string T3Connections::connect(std::string_view environment, std::string_vie
     }();
     std::string token;
     if (rotate) {
-        std::array<unsigned char,32> bytes{};
-        if (RAND_bytes(bytes.data(),static_cast<int>(bytes.size())) != 1)
-            throw std::runtime_error("Could not generate T3 connection token");
-        token = std::string(tokenPrefix) + hex(bytes);
+        token = connectorBearer();
         db.exec(R"SQL(
 INSERT INTO t3_connector VALUES(1,?,?,?,?)
 ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id,
@@ -139,6 +143,21 @@ ON CONFLICT(singleton) DO UPDATE SET id=excluded.id,person_id=excluded.person_id
     if (install) install(token);
     tx.commit();
     return token;
+}
+
+void T3Connections::rebindPort(unsigned port, const std::function<void(std::string_view)>& install) {
+    if (port == 0 || port > 65535 || !install) throw Conflict("Invalid T3 connection port");
+    auto& db = *store_.p_;
+    std::lock_guard lock(db.mutex);
+    Transaction tx(db.db);
+    const auto currentPort = this->port();
+    if (currentPort && currentPort != port) {
+        const auto token = connectorBearer();
+        // The provider can verify its existing registration against the old token until its update succeeds.
+        install(token);
+        db.exec("UPDATE t3_connector SET id=?,token_digest=?,port=?",{actionId(),digest(token),static_cast<Id>(port)});
+    }
+    tx.commit();
 }
 
 bool T3Connections::ownsBearer(std::string_view token) const {

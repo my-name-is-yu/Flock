@@ -602,12 +602,15 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     const Person requester{"requester",false};
+    const Person administrator{"administrator",true};
     auto web = callbacks();
     web.authenticate = [&](std::string_view credential) {
+        if (credential == "Bearer administrator") return administrator;
         return credential == "Bearer requester" ? requester : Person{};
     };
     web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
         if (person == requester.id) return requester.adminRoot;
+        if (person == administrator.id) return administrator.adminRoot;
         return std::nullopt;
     };
     auto policy = store.policy();
@@ -627,16 +630,27 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     const auto& task = tasks.at(0);
     check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
           "the HTTP client changed routing or schedule");
-    const auto approvals = store.inbox(requester);
+    const auto approvals = browser.get("/api/inbox").at("items");
     check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") &&
-          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true,
-          "the message sender could not approve the Task they requested");
+          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true &&
+          approvals.at(0).at("canSaveRule") == false,
+          "the message sender could not approve once without access to Flock-wide rules");
+    browser.client.set_default_headers({{"Authorization","Bearer administrator"}});
+    const auto adminApprovals = browser.get("/api/inbox").at("items");
+    check(adminApprovals.size() == 1 && adminApprovals.at(0).at("itemId") == approvals.at(0).at("itemId") &&
+          adminApprovals.at(0).at("canSaveRule") == true,"the administrator could not save a rule from this approval");
+    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
     check(t3.launches.empty(),"the Task launched before approval");
     const auto& item = approvals.at(0);
-    browser.post("/api/inbox/decide",{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
+    Json decision{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
         {"itemId",item.at("itemId")},{"waitId",item.at("waitId")},{"taskId",item.at("taskId")},
         {"targetRevision",item.at("targetRevision")},{"targetGeneration",item.at("targetGeneration")},
-        {"decision","allow_once"}});
+        {"decision","always_allow"}};
+    browser.post("/api/inbox/decide",decision,403);
+    check(browser.get("/api/inbox").at("items") == approvals && policy.rules().empty(),
+          "a denied Flock-wide rule changed the request or policy");
+    decision["decision"] = "allow_once";
+    browser.post("/api/inbox/decide",decision);
     tick(runtime,4);
     check(t3.launches["release"] == 1,"the Task could not launch with approval");
 }
@@ -1396,14 +1410,25 @@ void settingsEndpoints(const std::filesystem::path& path) {
         connections.providerRemoved();
     };
     std::atomic<bool> unavailable = false;
+    std::atomic<bool> signedOut = false;
+    std::atomic<bool> registeredAccount = false;
     std::atomic<unsigned> statusCalls = 0;
     std::atomic<bool> reconsentRequested = false;
-    cb.modelLogin = [&](bool reconsent) { return reconsent && !reconsentRequested.exchange(true); };
+    std::atomic<bool> switchRequested = false;
+    cb.modelLogin = [&](const Person& actor, bool reconsent) {
+        check(actor == Person{"owner",true},"model sign-in lost the initiating administrator");
+        return reconsent && !reconsentRequested.exchange(true);
+    };
     cb.modelStatus = [&] {
         ++statusCalls;
         if (unavailable) throw std::runtime_error("private credential detail");
+        if (signedOut) return Json{{"connected",false},{"registered",registeredAccount.load()}};
         return Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
                     {"needsSignIn",true},{"accessToken","internal fixture token"}};
+    };
+    cb.modelSwitch = [&](const Person& actor) {
+        check(actor == Person{"owner",true},"model switch lost the initiating administrator");
+        return !switchRequested.exchange(true);
     };
     cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
         auto intake = original(bot,request);
@@ -1447,12 +1472,23 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Flock settings lost the installation policy");
     check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
                                       {"demo",false},{"needsSignIn",true},{"unavailable",false},
-                                      {"signingIn",false},{"signInError",""},{"canSignIn",true}},
+                                      {"signingIn",false},{"signInError",""},{"canSignIn",true},{"canSwitch",true}},
           "Flock settings lost model status or exposed credential fields");
     unavailable = true;
     check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
           "A failed credential check exposed details or broke the rest of settings");
     unavailable = false;
+    signedOut = true;
+    check(!browser.get("/api/settings").at("model").contains("canSwitch"),
+          "Initial sign-in exposed an account switch without a saved registration");
+    registeredAccount = true;
+    const auto signedOutModel = browser.get("/api/settings").at("model");
+    check(signedOutModel.at("connected") == false && signedOutModel.at("canSignIn") == true &&
+          signedOutModel.at("canSwitch") == true,
+          "The signed-out account lost the normal sign-in or switch action");
+    browser.post("/api/settings/model-login",{{"reconsent",false},{"switchAccount",true}},202);
+    check(switchRequested,"an administrator could not switch the signed-out account");
+    signedOut = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&

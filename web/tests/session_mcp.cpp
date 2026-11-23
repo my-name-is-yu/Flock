@@ -22,6 +22,41 @@ PeerBot peer(std::string_view bot) {
     return {std::string(bot),{std::string(bot),"","env-1","bot-project",Json::object()}};
 }
 
+void listenerRebind() {
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    T3Connections connections(store);
+    constexpr unsigned oldPort = 4173;
+    const auto oldToken = connections.connect("env-1",alice.id,oldPort);
+    connections.connect("env-2",alice.id,oldPort);
+
+    unsigned replacementPort = 0;
+    try {
+        startWeb(store,0,callbacks(),[&](unsigned port) {
+            replacementPort = port;
+            connections.rebindPort(port,[](std::string_view) { throw Conflict("Provider registration failed"); });
+        });
+        check(false,"A listener started with a failed provider registration");
+    } catch (const Conflict&) {
+        check(replacementPort && connections.port() == oldPort && connections.authenticate(oldToken),
+              "A failed port change invalidated the original T3 registration");
+    }
+
+    std::string replacementToken;
+    const auto server = startWeb(store,replacementPort,callbacks(),[&](unsigned port) {
+        connections.rebindPort(port,[&](std::string_view token) {
+            check(connections.ownsBearer(oldToken),"The old provider registration cannot be verified during replacement");
+            replacementToken = token;
+        });
+    });
+    const auto settings = connections.settings(alice.id);
+    const auto connection = connections.authenticate(replacementToken);
+    check(server->port() == replacementPort && settings && settings->port == replacementPort &&
+          settings->environments == std::vector<std::string>{"env-1","env-2"} &&
+          connection && connection->personId == alice.id && !connections.authenticate(oldToken),
+          "The port change did not replace the bearer and preserve the connected environments and owner");
+}
+
 std::string participationState(const std::filesystem::path& database, const char* bot) {
     sqlite3* raw = nullptr;
     const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READONLY,nullptr);
@@ -1208,6 +1243,8 @@ int main(int argc, char** argv) {
     const char* scenario = "setup";
     try {
         check(argc == 3,"Expected fixture URL and credentials directory");
+        scenario = "listener port change";
+        listenerRebind();
         scenario = "Session asks";
         sessionAsks(argv[1],argv[2]);
         scenario = "Session stops";

@@ -118,11 +118,13 @@ flock rules remove ask repository.pr 'github.com/acme/*'
 ```
 
 The requester's cards appear in the Decision Inbox and inline with their
-originating conversation when there is one. The requester or installation
-root can choose **Allow once**, **Always allow**, or **Deny**. Always allow
-saves an exact rule. Deny blocks another attempt until a new message from a
-person. Work requested by a person stays open. Background approvals expire
-after 30 minutes and offer **Always allow next time** for future work. A
+originating conversation when there is one. The requester or an installation
+administrator can choose **Allow once** or **Deny**. Deny blocks another attempt
+until a new message from a person. An installation administrator can choose
+**Allow for this Flock** to approve the action and save an exact rule for all
+Bots in the installation. Work requested by a person stays open. Background
+approvals expire after 30 minutes. An administrator can choose **Allow next time
+for this Flock** on an expired card to save a rule for future work. A
 card-requiring action without an eligible requester is recorded and denied.
 
 A message from a linked Flock person can start work that needs approval. Flock

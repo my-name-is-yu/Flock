@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "settings_file.hpp"
 #include "flock/git_host.hpp"
 #include "flock/workspace_tools.hpp"
 #include "flock/policy.hpp"
@@ -24,6 +25,7 @@ namespace flockv0::app {
 namespace {
 constexpr int childCredentialLock = 9;
 constexpr std::size_t maxTransport = 8 * 1024 * 1024;
+constexpr std::size_t maxProfile = 4 * 1024 * 1024;
 
 class Descriptor {
 public:
@@ -98,8 +100,8 @@ void checkPrivate(int fd, bool directory) {
     }
 }
 
-std::string invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input,
-                   std::stop_token stop) {
+Json invoke(const std::filesystem::path& directory, std::string_view operation, std::string_view input,
+            std::stop_token stop, const CommitModelLogin& commit) {
     const auto checkStop = [&] {
         if (stop.stop_requested()) throw ModelError("ChatGPT sign-in was cancelled",true);
     };
@@ -178,7 +180,9 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     Child child(pid);
     childSocket.close();
     transport.close();
-    lock.close();
+    // For Web login, retain our share of the inherited lock until the
+    // authorized profile replacement completes.
+    if (!commit) lock.close();
     childLock.close();
 
     while (!input.empty()) {
@@ -190,7 +194,7 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     shutdown(parent.get(), SHUT_WR);
     std::string output;
     char buffer[8192];
-    const auto timeout = webStatus ? 1s : operation == "login" ? 365s : 150s;
+    const auto timeout = webStatus ? 1s : (operation == "login" || commit) ? 365s : 150s;
     const auto deadline = Clock::now() + timeout;
     for (;;) {
         checkStop();
@@ -211,7 +215,21 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
         if (output.size() > maxTransport) throw ModelError("ChatGPT transport response exceeded the local limit", false);
     }
     if (!child.wait()) throw ModelError("ChatGPT transport exited unexpectedly", true);
-    return output;
+    auto response = Json::parse(output,nullptr,false);
+    if (commit && response.is_object() && response.contains("result") && !response.contains("error")) {
+        const auto candidate = response.find("candidate");
+        if (candidate == response.end() || !candidate->is_object())
+            throw ModelError("Flock's ChatGPT transport did not prepare a profile",true);
+        const auto profile = candidate->dump();
+        if (profile.size() > maxProfile)
+            throw ModelError("Flock's ChatGPT profile exceeded the local limit",false);
+        commit([&] {
+            checkStop();
+            writePrivateFile(directory / "profile.json",profile);
+        });
+        response.erase(candidate);
+    }
+    return response;
 }
 
 Json textParameter(std::string description) {
@@ -593,11 +611,12 @@ Json tokenUsage(const Json& response) {
 
 ChatGPTModel::ChatGPTModel(std::filesystem::path directory) : directory_(std::move(directory)) {}
 
-Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop_token stop) {
+Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop_token stop,
+                        const CommitModelLogin& commit) {
     const auto serialized = input.dump(-1, ' ', false, Json::error_handler_t::replace);
     if (serialized.size() > maxTransport)
         throw ModelError("Flock's ChatGPT request exceeded the local transport limit",false);
-    const auto response = Json::parse(invoke(directory_, operation, serialized, stop), nullptr, false);
+    const auto response = invoke(directory_,operation,serialized,stop,commit);
     if (!response.is_object() || (!response.contains("result") && !response.contains("error")))
         throw ModelError("Flock's ChatGPT transport returned an invalid result", true);
     if (response.contains("error"))
@@ -609,9 +628,12 @@ Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop
 Json ChatGPTModel::login(bool printUrl, bool reconsent) {
     return call("login",{{"printUrl",printUrl},{"reconsent",reconsent}});
 }
-Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop) {
-    return call("login",{{"reconsent",reconsent},{"browserRequired",true}},stop);
+Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop, bool switchAccount, const CommitModelLogin& commit) {
+    if (!commit) throw ModelError("Flock needs permission to save a ChatGPT profile",false);
+    return call("prepare_login",{{"reconsent",reconsent},{"browserRequired",true},{"switchAccount",switchAccount}},
+                stop,commit);
 }
+Json ChatGPTModel::signOut() { return call("sign_out"); }
 Json ChatGPTModel::status() { return call("status"); }
 Json ChatGPTModel::webStatus() { return call("web_status"); }
 Json ChatGPTModel::models() { return call("models"); }

@@ -106,7 +106,7 @@ const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
   approve: 'Approved', extend: 'Deadline extended', reconcile: 'Check requested', supply: 'Secret saved',
-  allow_once: 'Allowed once', always_allow: 'Always allowed', deny: 'Denied', expired: 'Approval expired',
+  allow_once: 'Allowed once', always_allow: 'Allowed for this Flock', deny: 'Denied', expired: 'Approval expired',
   stale: 'No longer needed', delivery_confirmed: 'Delivery confirmed', connection_restored: 'Connection restored',
   superseded: 'Replaced', superseded_instruction: 'Replaced by a newer instruction',
 };
@@ -114,8 +114,8 @@ const closedLabels = {
 const decisionConfirmations = {
   answer: (name) => `Answer recorded for ${name}.`,
   allow_once: () => 'Allowed once.',
-  always_allow: () => 'Allowed and saved as a rule.',
-  allow_next_time: () => 'Allow rule saved.',
+  always_allow: () => 'Allowed and saved as a rule for this Flock.',
+  allow_next_time: () => 'Allow rule saved for this Flock.',
   deny: () => 'Denied.',
   approve: () => 'Approved.',
   request_changes: (name) => `Change request recorded for ${name}.`,
@@ -1056,7 +1056,7 @@ let previousSessionsLoading = false;
 function renderActivity() {
   const data = view?.data;
   const loading = !!view && !data;
-  const pending = view?.id ? decisions.itemsFor(view.id) : [];
+  const pending = view?.id ? decisions.pendingItemsFor(view.id) : [];
   if (changed('waits', view?.id, loading, pending)) {
     const revealedWaits = previousWaitsLoading && !loading;
     previousWaitsLoading = loading;

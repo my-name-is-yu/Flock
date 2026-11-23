@@ -122,6 +122,7 @@ struct Store::Impl {
     std::map<std::string,std::shared_ptr<LocalMachine>,std::less<>> localMachines;
     std::vector<std::string> rootPeople;
     WebIdentityResolver resolveWebIdentity;
+    bool liveInteractiveRoles = false;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
     std::shared_mutex sessionDispatchMutex;

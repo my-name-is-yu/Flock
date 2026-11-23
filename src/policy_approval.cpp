@@ -19,6 +19,15 @@ std::string fingerprint(const Json& payload) {
     }
     return hex;
 }
+
+Person currentApprovalActor(const Policy& policy, const WebIdentityResolver& resolve,
+                            bool liveInteractiveRoles, const Person& actor) {
+    // Managed accounts can be edited after the HTTP request authenticates.
+    // Host-managed credentials may have different roles for the same person.
+    if (!liveInteractiveRoles || !resolve || !policy.requiresIdentity()) return actor;
+    const auto role = resolve(actor.id);
+    return role ? Person{actor.id,actor.adminRoot && *role} : Person{};
+}
 }
 
 std::string_view approvalError(ApprovalGate result) {
@@ -219,16 +228,20 @@ SELECT a.requester,a.action,a.target,a.status,a.turn,a.task,a.revision,a.generat
 FROM policy_approvals a CROSS JOIN policy_settings s WHERE a.id=? AND a.bot=?
 )SQL",{item.itemId,item.botId});
     if (!row.next()) throw DecisionUnavailable{};
-    if (actor.id.empty() || (!actor.adminRoot && actor.id != row.string(0))) throw DecisionDenied{};
-    const auto status = row.string(3);
+    Policy policy(*this);
+    const auto currentActor = currentApprovalActor(policy,resolveWebIdentity,liveInteractiveRoles,actor);
+    const bool canSaveRule = policy.allows(currentActor,Action::rules_manage,"installation");
     const bool nextTime = choice == "allow_next_time";
+    const bool saveRule = nextTime || choice == "always_allow";
+    if (!canSaveRule && (saveRule || currentActor.id.empty() || currentActor.id != row.string(0))) throw DecisionDenied{};
+    const auto status = row.string(3);
     if (item.waitId != row.number(9) || item.taskId != row.number(5) || item.targetRevision != row.number(6) ||
         item.targetGeneration != row.number(10)) throw RequestChanged{};
     if (nextTime ? status != "expired" : status != "pending") throw DecisionUnavailable{};
     if (!nextTime && (!row.number(8) || !currentPolicyApproval(row.number(4),row.number(5),row.number(6),row.number(7))))
         throw RequestChanged{};
-    if (nextTime || choice == "always_allow")
-        Policy(*this).writeRule(actor,RuleKind::allow,*parseAction(row.string(1)),row.string(2),true,true);
+    if (saveRule)
+        policy.writeRule(currentActor,RuleKind::allow,*parseAction(row.string(1)),row.string(2),true,true);
     exec("UPDATE policy_approvals SET status=? WHERE id=?",
          {nextTime ? "rule_saved" : choice == "deny" ? "denied" : "approved",item.itemId});
     exec(R"SQL(
@@ -237,8 +250,8 @@ AND 'channel-task-update/' || id=(SELECT operation FROM policy_approvals WHERE i
 )SQL",{item.itemId});
     releasePolicyTurn(row.number(4));
     releasePolicyTask(item.itemId,choice);
-    recordInboxDecision(actor,item,choice);
-    Policy(*this).audit(actor,item.botId,"approval_decided",{{"itemId",item.itemId},{"decision",choice}});
+    recordInboxDecision(currentActor,item,choice);
+    policy.audit(currentActor,item.botId,"approval_decided",{{"itemId",item.itemId},{"decision",choice}});
 }
 
 Json Store::Impl::policyApprovalCards(const Person& actor, std::string_view bot) {
@@ -246,23 +259,27 @@ Json Store::Impl::policyApprovalCards(const Person& actor, std::string_view bot)
 SELECT id,action,target,preview,requester,anchor,task,revision,generation,created_at,expires_at,status,scope,turn,wait_id,card_generation
 FROM policy_approvals WHERE bot=? AND status IN ('pending','expired') ORDER BY id DESC
 )SQL",{bot});
+    const Policy policy(*this);
+    const auto currentActor = currentApprovalActor(policy,resolveWebIdentity,liveInteractiveRoles,actor);
+    const bool canSaveRule = policy.allows(currentActor,Action::rules_manage,"installation");
     auto cards = Json::array();
     while (rows.next()) {
         const bool expired = rows.string(11) == "expired";
         if (!expired && !currentPolicyApproval(rows.number(13),rows.number(6),rows.number(7),rows.number(8))) continue;
-        const bool canDecide = actor.adminRoot || actor.id == rows.string(4);
+        const bool requester = !currentActor.id.empty() && currentActor.id == rows.string(4);
+        const bool canDecide = canSaveRule || (!expired && requester);
         const auto label = rows.string(1) + " · " + rows.string(2);
         Json item{{"botId",bot},{"itemKind","policy_approval"},{"itemId",rows.number(0)},{"waitId",rows.number(14)},
             {"taskId",rows.number(6)},{"targetRevision",rows.number(7)},{"targetGeneration",rows.number(15)},
             {"botName",bot},{"requestTitle",label},{"action",rows.string(1)},{"target",rows.string(2)},
             {"prompt",rows.string(3)},{"status",rows.string(11)},
-            {"canDecide",canDecide},{"createdAt",rows.number(9)},{"expiresAt",rows.number(10)}};
-        if (!canDecide && !Policy(*this).allows(actor,Action::bot_view,bot)) continue;
+            {"canDecide",canDecide},{"canSaveRule",canSaveRule},{"createdAt",rows.number(9)},{"expiresAt",rows.number(10)}};
+        if (!canSaveRule && !requester && !policy.allows(currentActor,Action::bot_view,bot)) continue;
         if (rows.number(5)) {
             auto source = query("SELECT bot_id FROM messages m JOIN journal j ON j.id=m.id"
                                 " WHERE m.id=? AND j.kind='conversation_message'"
                                 " AND NOT EXISTS (SELECT 1 FROM channel_messages WHERE message_id=m.id)",{rows.number(5)});
-            if (source.next() && Policy(*this).allows(actor,Action::bot_view,source.string(0))) {
+            if (source.next() && policy.allows(currentActor,Action::bot_view,source.string(0))) {
                 item["conversationEventId"] = rows.number(5);
                 item["conversationBotId"] = source.string(0);
             }

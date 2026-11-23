@@ -8,16 +8,19 @@ if(NOT TARGET tomlplusplus::tomlplusplus)
 endif()
 
 configure_file(chatgpt.mjs chatgpt.mjs COPYONLY)
-add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp t3_setup.cpp)
+add_library(flock_app_support bots.cpp model.cpp bot_tools.cpp git_github.cpp t3_setup.cpp settings_file.cpp)
 target_link_libraries(flock_app_support PUBLIC flock_core PRIVATE CURL::libcurl tomlplusplus::tomlplusplus)
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(flock main.cpp demo.cpp)
-target_link_libraries(flock PRIVATE flock_app_support)
+add_executable(flock main.cpp demo.cpp settings_system.cpp settings_access.cpp settings_connections.cpp)
+target_link_libraries(flock PRIVATE flock_app_support CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
 
 if(BUILD_TESTING)
+  add_executable(flock_app_settings_access tests/settings_access.cpp settings_access.cpp)
+  target_link_libraries(flock_app_settings_access PRIVATE flock_core OpenSSL::Crypto)
+  add_test(NAME flock_app_settings_access COMMAND flock_app_settings_access)
   add_executable(flock_app_tests tests.cpp session_tests.cpp tests/schedules.cpp demo.cpp)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
@@ -33,6 +36,9 @@ if(BUILD_TESTING)
     add_test(NAME flock_app_headless_settings
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/headless-settings.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_headless_settings PROPERTIES TIMEOUT 20)
+    add_test(NAME flock_app_installation_system
+      COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/installation-system.mjs" "$<TARGET_FILE:flock>")
+    set_tests_properties(flock_app_installation_system PROPERTIES TIMEOUT 20)
     add_test(NAME flock_app_login
       COMMAND "${FLOCK_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/login.mjs" "$<TARGET_FILE:flock>")
     set_tests_properties(flock_app_login PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 25)
