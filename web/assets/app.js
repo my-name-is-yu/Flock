@@ -216,7 +216,7 @@ function setConnection(state) {
   if (connection === state) return;
   connection = state;
   elements.connection.dataset.state = state;
-  elements['connection-text'].textContent = state === 'offline' ? 'Could not connect to the runtime' : '';
+  elements['connection-text'].textContent = state === 'offline' ? 'Can’t reach Flock. Reconnecting…' : '';
   renderHeader();
 }
 let themeSwitchTimer = 0;
@@ -897,7 +897,7 @@ function renderHeader() {
   }
   profileMotion = motion;
   const offline = connection === 'offline';
-  const status = offline ? 'Runtime disconnected' : presenceLabels[presence] ?? presence;
+  const status = offline ? 'Offline' : presenceLabels[presence] ?? presence;
   const showStatus = offline || (presence !== 'idle' && !(presence === 'waiting' && decisions.count(bot.id)));
   const settingsLabel = `${bot.name} settings`;
   const name = elements['profile-name'];
