@@ -2301,6 +2301,12 @@ function openDetail(selection) {
   elements.detail.showModal();
   if (!detailNav.hidden) detailNav.querySelector('[aria-selected="true"]')?.focus();
 }
+elements.detail.addEventListener('cancel', (event) => {
+  const keep = elements.detail.querySelector('.wait-stop-keep');
+  if (!keep || keep.disabled) return;
+  event.preventDefault();
+  keep.click();
+});
 elements.detail.addEventListener('close', () => {
   if (elements.detail.open) return;
   clearDetailSectionTransition();
@@ -2634,16 +2640,13 @@ function waitContent(context, task) {
     const prompt = node('p', 'wait-stop-text');
     prompt.id = 'wait-stop-text';
     prompt.append(node('strong', null, 'Stop this request?'),
-      ` ${botName} stops working on it and interrupts its T3 Session if one is running.`);
+      ` This requests a stop for ${botName}’s work on this request, including any T3 work assigned to it.`);
     confirm.setAttribute('aria-labelledby', prompt.id);
-    const keep = button('Keep working', 'dialog-button quiet', () => {
+    const keep = button('Keep working', 'dialog-button quiet wait-stop-keep', () => {
       actions.replaceChildren(stop, primary);
       stop.focus();
     });
-    const confirmStop = button('Stop request', 'dialog-button danger', () => {
-      keep.disabled = confirmStop.disabled = true;
-      perform('cancel');
-    });
+    const confirmStop = button('Stop request', 'dialog-button danger', () => perform('cancel'));
     const choices = node('div', 'wait-primary');
     choices.append(keep, confirmStop);
     confirm.append(prompt, choices);
