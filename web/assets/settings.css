@@ -107,7 +107,48 @@ form .button { min-height: 2.1rem; }
 
 /* Flock settings: section headings over bordered groups of divided rows, each with its name and
    description on the left and its control on the right. */
-.settings-page { max-width: 46rem; }
+/* A settings window: section list on the left, one section's grouped rows on the right. */
+.settings-shell { display: grid; grid-template-columns: 15rem minmax(0, 1fr); min-height: 100dvh; }
+.settings-nav {
+  position: sticky; top: 0; align-self: start; display: grid; align-content: start; gap: 2px; height: 100dvh; overflow-y: auto;
+  padding: var(--space-4) var(--space-3); border-inline-end: 1px solid var(--hairline); background: var(--raised);
+  font-family: var(--font-sans);
+}
+.settings-nav .settings-back { justify-self: start; margin: 0 0 var(--space-3); }
+.settings-nav a[data-section] {
+  display: flex; align-items: center; gap: .6rem; padding: .45rem .6rem; border-radius: var(--radius-md);
+  color: var(--text-2); font-size: var(--text-sm); font-weight: 500; text-decoration: none;
+  transition: background-color .15s ease, color .15s ease;
+}
+.settings-nav a[data-section] svg { width: 1.05rem; height: 1.05rem; flex: none; }
+.settings-nav a[data-section]:hover { background: var(--hover, color-mix(in srgb, var(--text) 6%, transparent)); color: var(--text); }
+.settings-nav a[aria-current="page"] { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
+.settings-nav a:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-6); }
+.settings-crumb { display: flex; align-items: baseline; gap: .55rem; margin: 0 0 var(--space-5); font-size: var(--text-lg); font-weight: 600; }
+.settings-crumb > :first-child { color: var(--text-3); font-weight: 500; }
+.settings-crumb-sep { color: var(--text-3); font-weight: 400; }
+.settings-panel:not([hidden]) > section { animation: settings-section-in 220ms cubic-bezier(0.23, 1, 0.32, 1) backwards; }
+.row-actions { display: flex; gap: .4rem; }
+.row-actions .button { text-decoration: none; }
+#rules:empty { display: none; }
+#rules:not(:empty) + .rule-form:not([hidden]) { border-block-start: 1px solid var(--hairline); }
+.settings-group form.rule-form { align-items: end; justify-content: flex-start; border-radius: 0; background: transparent; padding: .8rem 1rem; }
+.rule-form label { flex: 0 1 auto; }
+.rule-form .rule-target { flex: 1 1 12rem; }
+.rule-form .rule-target input { width: 100%; }
+.rule-form select { max-width: 15rem; }
+@media (max-width: 760px) {
+  .settings-shell { grid-template-columns: minmax(0, 1fr); }
+  .settings-nav {
+    position: sticky; z-index: 1; height: auto; display: flex; flex-wrap: nowrap; align-items: center; overflow-x: auto;
+    padding: var(--space-2) var(--space-3); border-inline-end: 0; border-block-end: 1px solid var(--hairline);
+  }
+  .settings-nav .settings-back { margin: 0 var(--space-2) 0 0; }
+  .settings-nav a[data-section] { flex: none; }
+  .settings-nav a[data-section] svg { display: none; }
+  main.settings-page { padding: var(--space-4) var(--space-4) var(--space-6); }
+}
 .settings-page section { margin-block-end: var(--space-6); }
 .settings-page h2 { margin-block-end: .6rem; padding-inline: .1rem; font-size: var(--text-md); color: var(--text); }
 .settings-group {

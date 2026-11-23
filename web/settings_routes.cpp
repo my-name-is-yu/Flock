@@ -47,7 +47,10 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                 const auto action = parseAction(args.at("action").get<std::string>());
                 const auto kind = parseRuleKind(args.at("kind").get<std::string>());
                 if (!action || !kind) return reply(res,400,{{"error","invalid_input"}});
-                policy.changeRule(actor,*kind,*action,args.at("target").get<std::string>(),false);
+                const auto target = args.at("target").get<std::string>();
+                const auto add = args.at("add").get<bool>();
+                if (add && target.empty()) return reply(res,400,{{"error","invalid_input"}});
+                policy.changeRule(actor,*kind,*action,target,add);
             }
             reply(res,200,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }

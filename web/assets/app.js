@@ -434,6 +434,12 @@ function selectLocation() {
     return;
   }
   selectBot(selectedBot, peerId, { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
+  // Flock settings links here with settings=1 to open a Bot's own settings.
+  if (bot && params.get('settings') === '1') {
+    params.delete('settings');
+    history.replaceState(history.state, '', `${location.pathname}?${params}`);
+    openBotSettings(bot.id);
+  }
 }
 function peerLink(botId, peerId, label, className, anchor = 0) {
   const link = node('a', className, label);

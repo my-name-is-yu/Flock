@@ -1,4 +1,4 @@
-import { actionLabel } from '/action-labels.mjs';
+import { actionLabel, actionLabels } from '/action-labels.mjs';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -77,7 +77,7 @@ async function load() {
     const remove = document.createElement('button');
     remove.textContent = 'Remove';
     remove.className = 'button quiet-danger';
-    remove.onclick = () => void submit('rule', {kind, action, target}, [remove]);
+    remove.onclick = () => void submit('rule', {kind, action, target, add: false}, [remove]);
     item.append(remove);
   }
   $('connections').replaceChildren();
@@ -90,8 +90,60 @@ async function load() {
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
-  $('policy').hidden = false;
+  $('rule-form').hidden = !canManagePolicy;
 }
+
+// One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
+const sectionNames = { general: 'General', permissions: 'Permissions', bots: 'Bots', connections: 'Connections' };
+function showSection() {
+  const section = Object.hasOwn(sectionNames, location.hash.slice(1)) ? location.hash.slice(1) : 'general';
+  for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== section;
+  for (const link of document.querySelectorAll('[data-section]')) {
+    if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  $('crumb').textContent = sectionNames[section];
+  document.title = `${sectionNames[section]} · Flock settings`;
+}
+addEventListener('hashchange', showSection);
+showSection();
+
+for (const [action, label] of Object.entries(actionLabels)) {
+  const option = document.createElement('option');
+  option.value = action;
+  option.textContent = label;
+  $('rule-action').append(option);
+}
+$('rule-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  if (await submit('rule', { ...data, target: data.target.trim(), add: true }, [...form.elements])) form.reset();
+};
+
+function link(label, href) {
+  const anchor = document.createElement('a');
+  anchor.className = 'button';
+  anchor.textContent = label;
+  anchor.href = href;
+  return anchor;
+}
+async function loadBots() {
+  const response = await fetch('/api/bots');
+  if (!response.ok) throw new Error();
+  const bots = await response.json();
+  $('bots').replaceChildren();
+  if (!bots.length) row('bots', emptyLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
+  for (const bot of bots) {
+    const item = row('bots', emptyLabel(bot.name, 'Name, look, role and recurring requests'));
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+    actions.append(link('Edit', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`),
+      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`));
+    item.append(actions);
+  }
+}
+loadBots().catch(() => row('bots', emptyLabel('Could not load Bots', 'Reload the page to try again.')));
 
 async function submit(path, data, controls) {
   for (const control of controls) control.disabled = true;
@@ -103,6 +155,7 @@ async function submit(path, data, controls) {
     });
     saved = response.ok;
   } catch {}
+  for (const control of controls) control.disabled = false;
   try {
     await load();
     $('status').textContent = saved ? 'Saved.' : 'Could not save this change.';
@@ -111,6 +164,7 @@ async function submit(path, data, controls) {
     describeMode(currentMode);
     $('status').textContent = saved ? 'Saved. Reload to see the current settings.' : 'Could not reload settings.';
   }
+  return saved;
 }
 
 for (const input of modeInputs) {
