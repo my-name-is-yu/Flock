@@ -273,6 +273,29 @@ void mismatch(Scenario& fixture) {
     fixture.checkResult(fixture.mini,Scenario::result(task,fixture.mini),"failed",otherCommit);
 }
 
+void commitEvidence(Scenario& fixture) {
+    fixture.start();
+    fixture.awaitBothRunning();
+    const Json config{{"commitVerification",{{"projectId",fixture.local.project()},
+                                            {"expectedCommit",fixture.model.commit}}}};
+    const RunRef run{threadId,runId,fixture.local.link()};
+    for (const auto* mode : {"missing-post","duplicate-pre","unmarked","reversed","foreign-post",
+                             "failed-post","truncated-post","post-then-work","missing-report",
+                             "truncated-report","foreign-report","empty-final-report"}) {
+        fixture.local.configure({{"multiStatus","completed"},{"multiEvidence",mode}});
+        const auto observation = fixture.adapter->observe(fixture.local.id(),config,run);
+        check(observation.kind == Observation::Kind::Finished && observation.status == "completed" &&
+              observation.checkedCommit.empty() && observation.commitEvidenceUnavailable,
+              std::string("incomplete or unattributed commit evidence was accepted: ") + mode);
+    }
+    fixture.local.configure({{"multiEvidence","restarted"}});
+    const auto observation = fixture.adapter->observe(fixture.local.id(),config,run);
+    check(observation.kind == Observation::Kind::Finished && observation.status == "completed" &&
+          observation.checkedCommit == fixture.model.commit && !observation.commitEvidenceUnavailable &&
+          observation.resultRunId == "continued-run",
+          "a pre-check and a post-check in the attributable restart must establish the commit");
+}
+
 void supervised(Scenario& fixture) {
     fixture.store.policy().setMode(localOwner,"supervised");
     fixture.start();
@@ -412,6 +435,7 @@ int main(int argc, char** argv) {
             { Scenario fixture(local,mini,directory,commit,"deadlines"); deadlines(fixture); }
             { Scenario fixture(local,mini,directory,commit,"partial"); partial(fixture); }
             { Scenario fixture(local,mini,directory,commit,"mismatch"); mismatch(fixture); }
+            { Scenario fixture(local,mini,directory,commit,"commit-evidence"); commitEvidence(fixture); }
             { Scenario fixture(local,mini,directory,commit,"supervised"); supervised(fixture); }
             { Scenario fixture(local,mini,directory,commit,"stop"); stop(fixture); }
             single(local,mini,directory,commit,false);

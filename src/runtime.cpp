@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "commit_check.hpp"
 #include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/participation.hpp"
@@ -1622,9 +1623,11 @@ ORDER BY j.id
                 out["expectedCommit"] = task.at("requestedCommit");
                 out["instruction"] = field(out,"instruction") +
                     "\n\nVerify the requested commit " + field(task,"requestedCommit") +
-                    ". Use a command tool to run exactly git rev-parse --verify HEAD as a standalone command "
-                    "before doing the work and again after running the checks. Stop and report a mismatch if HEAD differs. "
-                    "Keep the checkout at the requested commit and report the checks and their outcomes.";
+                    ". As your first command, run exactly `" + commit_check::before +
+                    "`. After all work and checks, run exactly `" + commit_check::after +
+                    "` as your final command. Run each as a standalone command using a command tool. "
+                    "Stop and report a mismatch if HEAD differs. Keep the checkout at the requested commit. "
+                    "After the final command, write a report with the checks and their outcomes.";
             }
             out["instructionBase"] = db.redactor(field(task,"botId")).text(field(out,"instruction"));
             out.erase("instruction");

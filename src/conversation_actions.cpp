@@ -369,13 +369,11 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
 }
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                                      std::string_view destination, Id messageId, const Json& source,
+                                      const TaskRoute& destination, Id messageId, const Json& source,
                                       bool resume, const WorkSession* selectedSession) {
-    const auto project = selectedSession ? selectedSession->projectId
-        : destination == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
     if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
-    const auto id = submit({std::string(bot),std::string(request),std::string(destination),project,routing.at("config")},
-                           messageId,source);
+    const auto id = submit({std::string(bot),std::string(request),destination.environmentId,destination.projectId,
+                           routing.at("config")},messageId,source);
     auto task = load(id);
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
     else if (resume) {
@@ -391,7 +389,7 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
     if (task.contains("sessionOrigin"))
         task["sessionOrigin"]["title"] = redactor(bot).text(field(task.at("sessionOrigin"),"title"));
     if (selectedSession)
-        task["selectedSession"] = {{"environmentId",destination},{"projectId",project},
+        task["selectedSession"] = {{"environmentId",destination.environmentId},{"projectId",destination.projectId},
                                    {"threadId",selectedSession->threadId}};
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
@@ -440,7 +438,7 @@ WHERE t.id=? AND t.bot_id=? AND json_type(t.data,'$.sessionOrigin')='object' AND
 }
 
 bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
-                                    const Json& source, const Json& routing, const TaskChange* change) {
+                                    const Json& source, const TaskChange* change) {
     Id revision = task.value("currentRevision",Id{});
     bool conflicting = task.value("replanning",false);
     if (change) {
@@ -448,15 +446,14 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto oldDone = effectiveDoneWhen(task);
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
-        const auto& environment = change->environment;
+        const auto& environment = change->route.environmentId;
         const auto currentEnvironment = field(task,"environmentId");
         const auto pendingRoute = PendingDestination::read(task);
         const bool destinationChanged = !environment.empty() &&
             environment != (pendingRoute ? pendingRoute->environmentId : currentEnvironment);
         std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
-            auto project = environment == currentEnvironment ? field(task,"projectId")
-                : environment == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
+            auto project = change->route.projectId;
             const bool pinned = !project.empty();
             if (!pinned) project = rememberedT3Project(field(task,"botId"),environment);
             if (recipientRouteWouldCycle(task.at("id"),environment,project)) {

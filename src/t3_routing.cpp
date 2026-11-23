@@ -1,4 +1,5 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 
@@ -7,17 +8,23 @@ std::string conversationEnvironmentId(const Json& alias) {
     return alias.is_string() ? alias.get<std::string>() : field(alias,"environmentId");
 }
 
+namespace {
+std::string namedT3Project(const Json& config, std::string_view environment, std::string_view name) {
+    const auto aliases = config.find("conversationEnvironments");
+    if (aliases == config.end() || !aliases->is_object()) return {};
+    const auto alias = aliases->find(name);
+    if (alias == aliases->end() || conversationEnvironmentId(*alias) != environment) return {};
+    return field(*alias,"projectId");
+}
+}
+
 std::string configuredT3Project(const Json& routing, std::string_view environment, std::string_view name) {
     const auto& config = routing.at("config");
-    const auto aliases = config.find("conversationEnvironments");
-    const bool hasAliases = aliases != config.end() && aliases->is_object();
-    if (hasAliases) {
-        if (const auto alias = aliases->find(name); alias != aliases->end() && conversationEnvironmentId(*alias) == environment)
-            if (auto project = field(*alias,"projectId"); !project.empty()) return project;
-    }
+    if (auto project = namedT3Project(config,environment,name); !project.empty()) return project;
     if (environment == field(routing,"environmentId"))
         if (auto project = field(routing,"projectId"); !project.empty()) return project;
-    if (!hasAliases) return {};
+    const auto aliases = config.find("conversationEnvironments");
+    if (aliases == config.end() || !aliases->is_object()) return {};
     std::string selected;
     for (const auto& alias : *aliases) {
         if (conversationEnvironmentId(alias) != environment) continue;
@@ -67,18 +74,106 @@ std::string Store::Impl::defaultT3Environment(std::string_view bot, std::string_
     return connected.size() == 1 ? *connected.begin() : std::string{};
 }
 
-std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name,
-                                        const Json* movingTask) {
+std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name) {
+    return taskRoute(bot,routing,name).environmentId;
+}
+
+TaskRoute Store::Impl::taskRoute(std::string_view bot, const Json& routing, std::string_view name,
+                                const Json* movingTask) {
     const auto configured = field(routing,"environmentId");
-    if (name.empty())
-        return defaultT3Environment(bot,configured,field(routing.value("sessionOrigin",Json::object()),"environmentId"));
+    const auto resolved = [&](std::string environment, std::string project = {}) -> TaskRoute {
+        if (environment.empty()) return {};
+        if (project.empty() && movingTask) {
+            project = namedT3Project(routing.at("config"),environment,name);
+            if (project.empty()) {
+                if (environment == field(*movingTask,"environmentId")) project = field(*movingTask,"projectId");
+                else if (environment == configured) project = field(routing,"projectId");
+            }
+        } else if (project.empty()) project = configuredT3Project(routing,environment,name);
+        return {std::move(environment),std::move(project)};
+    };
+    if (name.empty()) return resolved(defaultT3Environment(bot,configured,
+        field(routing.value("sessionOrigin",Json::object()),"environmentId")));
     if (name == configured || (movingTask && name == field(*movingTask,"environmentId")))
-        return std::string(name);
-    if (movingTask && movingTask->at("projectId") != routing.at("projectId"))
-        if (auto original = resolveAlias(movingTask->at("config"),name); !original.empty()) return original;
-    if (auto alias = resolveAlias(routing.at("config"),name); !alias.empty()) return alias;
-    if (configured.empty() && registeredT3Environments(bot).contains(std::string(name))) return std::string(name);
+        return resolved(std::string(name));
+    if (movingTask && movingTask->at("projectId") != routing.at("projectId")) {
+        const auto& config = movingTask->at("config");
+        if (auto original = resolveAlias(config,name); !original.empty())
+            return resolved(original,namedT3Project(config,original,name));
+    }
+    if (auto alias = resolveAlias(routing.at("config"),name); !alias.empty()) return resolved(std::move(alias));
+    if (configured.empty() && registeredT3Environments(bot).contains(std::string(name))) return resolved(std::string(name));
     return {};
+}
+
+StartDestinations Store::Impl::startDestinations(const conversation::Message& message, const Json& args, bool resume,
+                                                const WorkSession* selectedSession) {
+    using conversation_storage::text;
+    using conversation_storage::ToolError;
+    const auto& bot = message.bot;
+    const auto& routing = message.routing;
+    const auto environment = text(args,"environment",256,false);
+    const auto sessionRef = text(args,"sessionRef",128,false);
+    StartDestinations destinations;
+    destinations.commit = text(args,"commit",64,false);
+    if (const auto environments = args.find("environments"); environments != args.end()) {
+        if (!message.channelScope.empty() || routing.contains("sessionOrigin"))
+            throw ToolError("Start work across T3 environments from a Flock conversation");
+        if (!environment.empty() || !sessionRef.empty() || selectedSession || resume)
+            throw ToolError("Choose either two environments or a single destination for this request");
+        if (!environments->is_array() || environments->size() != 2)
+            throw ToolError("Choose two distinct names or IDs from task.environments");
+        auto& commit = destinations.commit;
+        if ((commit.size() != 40 && commit.size() != 64) ||
+            commit.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+            throw ToolError("Supply the full commit SHA to verify on both environments");
+        std::ranges::transform(commit,commit.begin(),[](char ch) {
+            return ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch;
+        });
+        for (const auto& choice : *environments) {
+            const auto name = text(Json{{"environment",choice}},"environment",256,true);
+            auto route = taskRoute(bot,routing,name);
+            if (route.environmentId.empty() || route.environmentId == destinations.primary.environmentId)
+                throw ToolError("Choose two distinct names or IDs from task.environments");
+            if (route.projectId.empty()) route.projectId = rememberedT3Project(bot,route.environmentId);
+            if (route.projectId.empty())
+                throw ToolError("Choose a T3 project for " + name +
+                                " first, or configure its projectId in conversationEnvironments");
+            destinations.targets.push_back({{"environmentId",route.environmentId},{"projectId",route.projectId},{"name",name}});
+            if (destinations.primary.environmentId.empty()) destinations.primary = std::move(route);
+        }
+        redactor(bot).requirePublic({destinations.targets,commit});
+        return destinations;
+    }
+    if (!destinations.commit.empty()) throw ToolError("A pinned commit requires two T3 environments");
+    if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message,*selectedSession)))
+        throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
+    if (selectedSession) {
+        if (!environment.empty() || resume)
+            throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
+        destinations.primary = {selectedSession->environmentId,selectedSession->projectId};
+    } else destinations.primary = taskRoute(bot,routing,environment);
+    if (destinations.primary.environmentId.empty())
+        throw ToolError(environment.empty()
+            ? "Choose a connected T3 environment to start work. Use task.environments or connect T3 in Settings."
+            : "Unknown environment " + environment + "; use one of task.environments");
+    return destinations;
+}
+
+TaskChange Store::Impl::taskChange(const conversation::Message& message, const Json& args, const Json& task) {
+    using conversation_storage::text;
+    using conversation_storage::ToolError;
+    TaskChange change{text(args,"intent",8000,false),text(args,"doneWhen",8000,false),{}};
+    const auto environment = text(args,"environment",256,false);
+    if (change.intent.empty() && change.doneWhen.empty() && environment.empty())
+        throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
+    if (!environment.empty()) {
+        change.route = taskRoute(message.bot,message.routing,environment,&task);
+        if (change.route.environmentId.empty())
+            throw ToolError("Unknown environment " + environment + "; use one of task.environments");
+        redactor(message.bot).requirePublic({change.route.environmentId,change.route.projectId});
+    }
+    return change;
 }
 
 }

@@ -638,6 +638,10 @@ class Fixture(BaseHTTPRequestHandler):
         project = state["multiProject"]
         # The two environments deliberately have overlapping Run and Thread IDs.
         thread, run = "shared-thread", "shared-run"
+        evidence = state.get("multiEvidence", "full")
+        final_run = "continued-run" if evidence == "restarted" else run
+        pre_check = "git -c flock.check=before rev-parse --verify HEAD"
+        post_check = "git -c flock.check=after rev-parse --verify HEAD"
         summary = self.summary(thread) | {"projectId": project, "title": "Fixture verification"}
         terminal = ("completed", "failed", "interrupted")
         if name == "t3_environment_read":
@@ -654,7 +658,7 @@ class Fixture(BaseHTTPRequestHandler):
             if not state.get("multiSingle"):
                 assert args["workspaceStrategy"] == {"type": "worktree", "baseRef": state["multiCommit"],
                                                      "startFromOrigin": False}
-                assert "git rev-parse --verify HEAD" in prompt and state["multiCommit"] in prompt
+                assert pre_check in prompt and post_check in prompt and state["multiCommit"] in prompt
             state["multiPrompt"] = prompt
             return {"threadId": thread, "runId": run, "projectId": project, "link": summary["link"]}
         if name == "t3_thread_list":
@@ -667,32 +671,58 @@ class Fixture(BaseHTTPRequestHandler):
             assert args["runId"] == run
             delegated = args["untilDelegatedWorkSettled"]
             timed_out = status not in terminal or (delegated and state.get("multiHoldSettlement", False))
-            result = {"threadId": thread, "runId": run, "status": status, "timedOut": timed_out}
+            result = {"threadId": thread, "runId": final_run, "status": status, "timedOut": timed_out}
             if delegated and not timed_out:
-                result["resultRun"] = {"runId": run, "status": status}
+                result["resultRun"] = {"runId": final_run, "status": status}
             return result
         if name == "t3_thread_interrupt":
             assert status == "running" and args["runId"] == run
             state["multiStatus"] = "interrupted"
             return {"threadId": thread, "runId": run, "status": "interrupt_requested"}
         assert name == "t3_thread_read", name
-        summary |= {"activeRunId": run if status not in terminal else None, "latestRunId": run,
+        summary |= {"activeRunId": final_run if status not in terminal else None, "latestRunId": final_run,
                     "pendingRequestCount": 0, "archived": False, "createdAt": "2026-11-21T01:00:00.000Z"}
         recent = [{"runId": run, "ordinal": 1, "status": status, "startedAt": "2026-11-21T01:00:02.000Z"}]
         rows = [self.item(thread, 1, run, "user_message", state["multiPrompt"], source="mcp")]
+        if final_run != run:
+            recent.append({"runId": final_run, "ordinal": 2, "status": status,
+                           "startedAt": "2026-11-21T01:00:03.000Z"})
+            rows.append(self.item(thread, 3, final_run, "user_message", "Continue after restart", source="server") |
+                        {"messageId": f"message:restart-continuation:{run}"})
         if status in terminal:
-            actual = state.get("multiActualCommit", state["multiCommit"])
+            expected = state["multiCommit"]
+            actual = state.get("multiActualCommit", expected)
             if args["view"] == "activity":
-                command = "git rev-parse --verify HEAD"
-                if env == "env-mini":
-                    command = f"/bin/zsh -lc '{command}'"
-                rows.append(self.item(thread, 2, run, "command_execution", f"$ {command}\n{actual}\n"))
-                if actual != state["multiCommit"]:
-                    rows.append(self.item(thread, 3, "unrelated-run", "command_execution",
-                                          f"$ git rev-parse --verify HEAD\n{state['multiCommit']}\n"))
+                def command(position, run_id, input, output, status="completed"):
+                    if env == "env-mini":
+                        input = f"/bin/zsh -lc '{input}'"
+                    rows.append(self.item(thread, position, run_id, "command_execution",
+                                          f"$ {input}\n{output}\n", status=status))
+
+                first, last = pre_check, post_check
+                if evidence == "duplicate-pre":
+                    last = pre_check
+                elif evidence == "unmarked":
+                    first = last = "git rev-parse --verify HEAD"
+                elif evidence == "reversed":
+                    first, last = last, first
+                command(2, run, first, expected)
+                if evidence != "missing-post":
+                    command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
+                            actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
+                            status="failed" if evidence == "failed-post" else "completed")
+                command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
+                if actual != expected:
+                    command(7, "unrelated-run", post_check, expected)
                 if status == "failed":
-                    rows.append(self.item(thread, 4, run, "error", f"{env} tests failed", status="failed"))
-            rows.append(self.item(thread, 5, run, "assistant_message", f"{env} verification {status}"))
+                    rows.append(self.item(thread, 8, final_run, "error", f"{env} tests failed", status="failed"))
+            if evidence != "missing-report":
+                report = "x" * 8193 if evidence == "truncated-report" else f"{env} verification {status}"
+                rows.append(self.item(thread, 9, "unrelated-run" if evidence == "foreign-report" else final_run,
+                                      "assistant_message", report))
+            if evidence == "empty-final-report":
+                rows.append(self.item(thread, 10, final_run, "assistant_message", ""))
+        rows.sort(key=lambda row: row["position"])
         if "itemId" in args:
             rows = [row for row in rows if row["itemId"] == args["itemId"]]
         return self.history_page(summary, recent, rows, args, 2)

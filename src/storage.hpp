@@ -77,7 +77,13 @@ struct PeerExchange {
     bool allowsReplan(Id task) const { return recipient == task && kind == "work" && phase == "working"; }
 };
 
-struct TaskChange { std::string intent, doneWhen, environment; };
+struct TaskRoute { std::string environmentId, projectId; };
+struct StartDestinations {
+    TaskRoute primary;
+    Json targets = Json::array();
+    std::string commit;
+};
+struct TaskChange { std::string intent, doneWhen; TaskRoute route; };
 struct PendingDestination {
     std::string environmentId, projectId;
     bool pinned;
@@ -394,10 +400,10 @@ struct Store::Impl {
     Json ownTask(Id taskId, const conversation::Message&) const;
     Json resultReference(Id messageId, const conversation::Message&) const;
     Id startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                             std::string_view environment, Id messageId, const Json& source, bool resume,
+                             const TaskRoute&, Id messageId, const Json& source, bool resume,
                              const WorkSession* selectedSession = nullptr);
     bool acceptInstruction(Json& task, Id messageId, int step, std::string_view instruction,
-                           const Json& source, const Json& routing, const TaskChange* change);
+                           const Json& source, const TaskChange* change);
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
@@ -409,8 +415,12 @@ struct Store::Impl {
     ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
     bool applyProjectCatalog(Json& task, ProjectCatalog catalog);
     std::set<std::string> registeredT3Environments(std::string_view bot);
-    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {},
-                                const Json* movingTask = nullptr);
+    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
+    TaskRoute taskRoute(std::string_view bot, const Json& routing, std::string_view name,
+                        const Json* movingTask = nullptr);
+    StartDestinations startDestinations(const conversation::Message&, const Json& args, bool resume,
+                                       const WorkSession* selectedSession);
+    TaskChange taskChange(const conversation::Message&, const Json& args, const Json& task);
     std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
               TaskSource sourceKind = TaskSource::request, const Json& trigger = nullptr);

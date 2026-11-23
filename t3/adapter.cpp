@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "../src/commit_check.hpp"
 #include "flock/session_read.hpp"
 #include "flock/session_settings.hpp"
 
@@ -7,6 +8,7 @@
 #include <chrono>
 #include <set>
 #include <thread>
+#include <utility>
 
 namespace flockv0 {
 namespace t3detail {
@@ -629,44 +631,54 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
     }
 }
 
-bool commitCheckCommand(std::string_view input) {
-    constexpr std::string_view command = "git rev-parse --verify HEAD";
-    if (input == command) return true;
-    // Providers can record a shell wrapper around the one requested command.
-    for (auto shell : {"/bin/zsh","/bin/bash","/bin/sh"})
-        for (auto flag : {" -lc "," -c "})
-            for (auto quote : {"'","\""})
-                if (input == std::string(shell) + flag + quote + std::string(command) + quote) return true;
-    return false;
+std::string_view unwrappedCommand(std::string_view input) {
+    const auto space = input.find(' ');
+    const auto shell = input.substr(0,space);
+    if (space == input.npos || (shell != "/bin/zsh" && shell != "/bin/bash" && shell != "/bin/sh"))
+        return input;
+    auto args = input.substr(space);
+    if (args.starts_with(" -lc ")) args.remove_prefix(5);
+    else if (args.starts_with(" -c ")) args.remove_prefix(4);
+    else return input;
+    if (args.size() < 2 || (args.front() != '\'' && args.front() != '"') || args.back() != args.front())
+        return input;
+    return args.substr(1,args.size()-2);
+}
+
+std::string commitCheckOutput(const Json& item, std::string_view command) {
+    if (str(item,"status") != "completed" || boolean(item,"textTruncated")) return {};
+    const auto text = str(item,"text");
+    const auto newline = text.find('\n');
+    if (newline == text.npos || !text.starts_with("$ ") ||
+        unwrappedCommand(std::string_view(text).substr(2,newline-2)) != command) return {};
+    const auto output = trimSessionQuestionText(std::string_view(text).substr(newline+1));
+    return gitCommit(output) ? std::string(output) : std::string{};
 }
 
 std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
-                          const RunRef& result, std::string_view expected) {
+                          const RunRef& result, const RunEvidence& report, std::string_view expected) {
+    if (!gitCommit(expected) || report.itemId.empty() || report.truncated) return {};
     Scan scan;
-    Position before = maxHistoryPosition;
-    std::string actual;
-    for (;;) {
-        scan.step();
-        const auto page = readThread(client,assigned.threadId,"activity",PageSize,512,{{"beforePosition",before}});
-        const auto& items = array(page,"items");
-        for (const auto& item : items) {
-            if ((!fromRun(item,assigned) && !fromRun(item,effective) && !fromRun(item,result)) ||
-                str(item,"type") != "command_execution" ||
-                str(item,"status") != "completed" || boolean(item,"textTruncated")) continue;
-            const auto text = str(item,"text");
-            const auto newline = text.find('\n');
-            if (newline == text.npos || !text.starts_with("$ ") ||
-                !commitCheckCommand(std::string_view(text).substr(2,newline-2))) continue;
-            const auto output = trimSessionQuestionText(std::string_view(text).substr(newline+1));
-            if (!gitCommit(output)) continue;
-            if (output != expected) return std::string(output);
-            actual = output;
+    std::string before, after;
+    bool sawCommand = false, finalReport = false;
+    // The initial command belongs to the assigned work. The final command and report belong to its result.
+    walkThreadHistoryForward(client,scan,assigned.threadId,"activity",512,-1,[&](const Json& item) {
+        const bool fromResult = fromRun(item,result);
+        const bool fromWork = fromRun(item,assigned) || fromRun(item,effective);
+        if (!fromResult && !fromWork) return true;
+        const auto type = str(item,"type");
+        if (type == "command_execution") {
+            if (!std::exchange(sawCommand,true) && fromWork)
+                before = commitCheckOutput(item,commit_check::before);
+            after = fromResult ? commitCheckOutput(item,commit_check::after) : std::string{};
+            finalReport = false;
+        } else if (fromResult && type == "assistant_message") {
+            finalReport = str(item,"itemId") == report.itemId && str(item,"status") == "completed" && !after.empty();
         }
-        const auto next = cursor(page,"earlierPosition");
-        if (!next) return actual;
-        if (*next >= before || items.empty() || *next != position(member(items.front(),"position"))) invalidResponse();
-        before = *next;
-    }
+        return true;
+    });
+    if (!before.empty() && before != expected) return before;
+    return before == expected && finalReport ? after : std::string{};
 }
 
 RunEvidence unavailableReport(const Failure& failure) {
@@ -1029,19 +1041,20 @@ public:
                     source.runId = laterId;
                     observed.status = str(later, "status");
                 }
-                if (verification != config.end()) {
-                    try {
-                        observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
-                                                               str(*verification,"expectedCommit"));
-                    } catch (const Failure&) {
-                        observed.commitEvidenceUnavailable = true;
-                    }
-                }
                 auto problem = pinnedEvidenceProblem(client,config,source,observed.status,origin);
                 if (problem && problem->availability == RunEvidence::Availability::ReportUnavailable)
                     return state(Observed::Unavailable,std::move(problem->detail));
                 if (problem) observed.status = "failed";
                 auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client,source,observed.status);
+                if (verification != config.end()) {
+                    try {
+                        observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
+                                                               evidence,str(*verification,"expectedCommit"));
+                    } catch (const Failure&) {
+                        // A completed Run can be read again if its evidence has not arrived yet.
+                    }
+                    observed.commitEvidenceUnavailable = observed.status == "completed" && observed.checkedCommit.empty();
+                }
                 observed.evidence = evidence.availability;
                 observed.report = std::move(evidence.report);
                 observed.itemId = std::move(evidence.itemId);
