@@ -2682,9 +2682,8 @@ void specialistAdmission(SpecialistMode mode) {
             return f.peers.at(std::string(bot));
         });
     };
-    auto policy = f.store->policy();
     if (!person.adminRoot) {
-        policy.setMember(localOwner,"alpha",person.id,true);
+        f.store->policy().setMember(localOwner,"alpha",person.id,true);
     }
     const bool nested = mode==SpecialistMode::Nested || mode==SpecialistMode::CancelledNested ||
                         mode==SpecialistMode::NestedWorkflowPause;
@@ -2745,7 +2744,7 @@ void specialistAdmission(SpecialistMode mode) {
         f.t3.onPreflight = [&] {
             T3Connections connections(*f.store);
             if (mode==SpecialistMode::PolicyRevoked)
-                policy.changeNeverRule(localOwner,Action::t3_coordinate,target.environmentId,true);
+                f.store->policy().changeNeverRule(localOwner,Action::t3_coordinate,target.environmentId,true);
             else connections.disconnect(target.environmentId);
         };
         f.reach(first.recipientTaskId,"completed");
