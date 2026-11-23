@@ -79,9 +79,7 @@ void ChangeFeed::stop() {
     if (worker_.joinable()) worker_.join();
 }
 
-std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes,
-                                                const Store::ConversationChanges& changes) {
-    std::set<Scope> failed;
+void ChangeFeed::refresh(const std::vector<Scope>& scopes, const Store::ConversationChanges& changes) {
     std::map<Scope,std::optional<Json>> snapshots;
     for (const auto& scope : scopes) {
         auto& snapshot = snapshots[scope];
@@ -95,25 +93,22 @@ std::set<ChangeFeed::Scope> ChangeFeed::refresh(const std::vector<Scope>& scopes
         if (item == watched_.end()) continue;
         auto& watched = item->second;
         if (const auto* view = std::get_if<BotView>(&scope.target); view && changes.messages.contains(view->bot))
-            watched.historyPending = true;
+            watched.pending = Refresh::History;
         if (!snapshot) {
-            // The shared journal cursor can advance while this scope still needs a refresh.
-            failed.insert(scope);
+            if (watched.pending == Refresh::None) watched.pending = Refresh::Projection;
             continue;
         }
-        const bool historyChanged = std::exchange(watched.historyPending,false) && !snapshot->is_null();
+        const bool historyChanged = std::exchange(watched.pending,Refresh::None) == Refresh::History && !snapshot->is_null();
         if (watched.snapshot == snapshot && !historyChanged) continue;
         watched.snapshot = std::move(snapshot);
         watched.revision = ++revision_;
     }
     if (revision_ != previousRevision) changed_.notify_all();
-    return failed;
 }
 
 void ChangeFeed::monitor() {
     std::unique_lock lock(mutex_);
     std::optional<decltype(store_.changeStamp())> lastStamp;
-    std::set<Scope> retry;
     std::optional<Id> journalCursor;
     auto checkProfiles = std::chrono::steady_clock::now();
     while (!stopping_) {
@@ -125,16 +120,20 @@ void ChangeFeed::monitor() {
         const bool requested = std::exchange(scanRequested_,false);
         const bool profileCheck = std::chrono::steady_clock::now() >= checkProfiles;
         std::vector<Scope> scopes;
-        for (const auto& [scope,watched] : watched_) scopes.push_back(scope);
+        std::vector<Scope> pending;
+        for (const auto& [scope,watched] : watched_) {
+            scopes.push_back(scope);
+            if (watched.pending != Refresh::None) pending.push_back(scope);
+        }
         lock.unlock();
         try {
             const auto stamp = store_.changeStamp();
             if (!requested && !profileCheck && stamp == lastStamp)
-                std::erase_if(scopes,[&](const Scope& scope) { return !retry.contains(scope); });
+                scopes = std::move(pending);
             if (!scopes.empty()) {
                 Store::ConversationChanges changes{journalCursor.value_or(0),{}};
                 if (!journalCursor || stamp != lastStamp) changes = store_.conversationChangesSince(journalCursor);
-                retry = refresh(scopes,changes);
+                refresh(scopes,changes);
                 journalCursor = changes.through;
             }
             lastStamp = stamp;

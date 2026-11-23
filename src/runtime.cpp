@@ -660,15 +660,12 @@ AND s.status NOT IN ('completed','failed','stopped')
             const auto reason = field(task["wait"],"reason");
             const bool connectionWait = reason == "auth" || reason == "settings";
             const bool replanning = task.value("replanning",false);
-            const bool settledRunReleasesStopBarrier =
-                observed.kind == Observation::Kind::Finished && observed.settled;
-            if (settledRunReleasesStopBarrier) {
+            if (observed.kind == Observation::Kind::Finished) {
                 closeQuestion(task,"run_finished");
-                // An ended Run cannot accept an outstanding reply. Preserve the
-                // action in history while letting the definitive Run result take precedence.
                 if (!field(task,"actionId").empty()) {
                     const auto action = db.outbox(task);
-                    if (!action.is_null() && action["tool"] == "answer_session_question") {
+                    const bool supersededAnswer = !action.is_null() && action["tool"] == "answer_session_question";
+                    if (supersededAnswer) {
                         db.exec("UPDATE outbox SET phase='closed' WHERE id=?", {task["actionId"]});
                         task["actionId"] = "";
                     }
@@ -807,7 +804,7 @@ AND s.status NOT IN ('completed','failed','stopped')
             (task["state"] == "cancelling") != (stop["intent"] == "cancel")) return;
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
-        if (observed.kind == Observation::Kind::Finished)
+        if (observed.kind == Observation::Kind::Settling)
             return stopNote(task,"Waiting for the assigned Run's delegated work to settle");
         if (observed.kind == Observation::Kind::Unavailable &&
             !(task.contains("workflowId") && stop.at("intent") == "cancel"))

@@ -51,7 +51,6 @@ struct SessionService : T3 {
         auto& observation = observations[run];
         observation.kind = Observation::Kind::Finished;
         observation.status = std::move(status);
-        observation.settled = true;
         observation.report = report.dump();
     }
 };
@@ -553,11 +552,11 @@ void stopDuringUnconfirmedStart() {
     f.ticks(2);
     require(f.t3.interrupts.contains("run-1") && !f.status()["allStopped"].get<bool>(),"recovered Run was not stopped");
     f.t3.finish("run-1",Json::object(),"interrupted");
-    f.t3.observations["run-1"].settled = false;
+    f.t3.observations["run-1"].kind = Observation::Kind::Settling;
     f.ticks(1);
     require(f.status()["stages"][0]["lastConfirmedState"]=="settling" && f.status()["allStopped"]==false,
             "unsettled delegated work was reported stopped");
-    f.t3.observations["run-1"].settled = true;
+    f.t3.observations["run-1"].kind = Observation::Kind::Finished;
     f.ticks(2);
     require(f.status()["allStopped"]==true && f.t3.commands.size()==1,"reconciled stop admitted a downstream stage");
 }

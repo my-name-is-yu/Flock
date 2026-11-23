@@ -51,7 +51,6 @@ public:
             result.kind = Observation::Kind::Finished;
             result.status = "completed";
             result.report = "Returned evidence for the original criterion";
-            result.settled = true;
         }
         return result;
     }

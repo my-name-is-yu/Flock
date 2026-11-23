@@ -123,7 +123,6 @@ int main() {
             t3.current.kind = Observation::Kind::Finished;
             t3.current.status = "completed";
             t3.current.report = "main confirmed";
-            t3.current.settled = true;
             tickUntil(runtime, [&] { return store.task(id)["state"] == "completed"; }, "restart did not complete");
             const auto task = store.task(id);
             check(task["runs"].size() == 1 && task["runs"][0]["threadId"] == "thread-1" &&

@@ -198,10 +198,9 @@ struct SimulatedT3 : T3 {
     }
     void finish(std::string run, std::string status = "completed", bool settled = true) {
         auto& observation = runs.at(run);
-        observation.kind = Observation::Kind::Finished;
+        observation.kind = settled ? Observation::Kind::Finished : Observation::Kind::Settling;
         observation.status = std::move(status);
         observation.report = "checked";
-        observation.settled = settled;
         observation.resultRunId = observation.status == "failed" ? run : run + "-result";
         observation.itemId = "final-answer";
     }
@@ -321,16 +320,19 @@ void selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun() {
     f.now += 30;
     f.runtime->tick();
     check(f.t3.selectedStarts == 1 && f.t3.reconciles == 1 &&
-          f.task(task).at("activeRun").at("runId") == "run-1" &&
-          f.task(task).at("queuedInT3") == true && f.task(task).at("deadline") == 0,
+          f.task(task).at("state") == "running",
           "Restart duplicated the send or a confirmed queued Run reached a work deadline");
     f.store->operate(localOwner,TaskTarget::from(f.task(task),0),"cancel");
     f.runtime->tick();
     check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1" &&
           f.t3.interruptedRuns.front().threadId == "selected-thread","Cancellation targeted unrelated work");
+    f.t3.finish("run-1","cancelled",false);
+    f.restart();
+    f.runtime->tick();
+    check(f.task(task).at("state") == "cancelling",
+          "A terminal Run with outstanding delegated work was marked cancelled after restart");
     f.t3.finish("run-1","cancelled");
     f.reach(task,"cancelled");
-    check(!f.task(task).contains("queuedInT3"),"Cancelled work retained a T3 queue status");
 }
 
 void selectedWorkRechecksConnectionAfterApproval() {

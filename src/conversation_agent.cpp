@@ -82,19 +82,20 @@ LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
                     {row.string(5),row.number(6) != 0},static_cast<PrincipalSource>(row.number(7)),std::nullopt};
     if (!message.replyTo || message.replyTo >= id) return message;
     auto anchor = query(R"SQL(
-WITH RECURSIVE targets(id) AS (
-  VALUES(?)
-  UNION ALL
-  SELECT m.reply_to FROM targets
-  JOIN conversation_turns turn ON turn.reply_id=targets.id
-  JOIN messages m ON m.id=turn.message_id
-  LEFT JOIN channel_messages c ON c.message_id=m.id
-  WHERE m.bot_id=? AND m.reply_to<m.id AND (?='' OR c.scope_key=?)
-)
-SELECT j.id,j.task_id FROM targets JOIN journal j ON j.id=targets.id JOIN tasks t ON t.id=j.task_id
- LEFT JOIN channel_tasks c ON c.task_id=t.id
- WHERE j.kind='waiting' AND t.bot_id=? AND (?='' OR c.scope_key=?)
- )SQL",{message.replyTo,message.bot,message.channelScope,message.channelScope,
+SELECT q.id,q.task_id FROM journal target
+LEFT JOIN conversation_turns turn ON turn.reply_id=target.id
+LEFT JOIN messages original ON original.id=turn.message_id
+LEFT JOIN channel_messages source ON source.message_id=original.id
+JOIN journal q ON q.id=CASE
+  WHEN target.kind='waiting' THEN target.id
+  WHEN target.kind='conversation_reply' AND original.bot_id=? AND (?='' OR source.scope_key=?)
+    THEN json_extract(target.data,'$.taskQuestionMessageId')
+END
+JOIN tasks t ON t.id=q.task_id
+LEFT JOIN channel_tasks c ON c.task_id=t.id
+WHERE target.id=? AND q.id<=target.id AND q.kind='waiting' AND json_extract(q.data,'$.reason')='user_question'
+  AND t.bot_id=? AND (?='' OR c.scope_key=?)
+)SQL",{message.bot,message.channelScope,message.channelScope,message.replyTo,
         message.bot,message.channelScope,message.channelScope});
     if (anchor.next())
         message.question = conversation::QuestionAnchor{anchor.number(0),anchor.number(1)};
@@ -335,6 +336,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
                 replyTo.update({{"kind",kind},{"text",bounded(field(data,"text"),2000)}});
             }
         } else replyTo = {{"messageId",message.replyTo},{"kind","unavailable"}};
+        if (message.question) replyTo["taskQuestionMessageId"] = message.question->messageId;
     }
 
     Json environments = Json::array();
@@ -570,7 +572,8 @@ AND (?=0 OR t.id<?) AND (?='' OR c.scope_key=?) ORDER BY t.id DESC LIMIT ?
     throw ToolError("Unknown tool " + tool + "; use one of the provided tools");
 }
 
-void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route) {
+void Store::Impl::finishTurn(const Message& message, std::string text, const Json& suggestions, std::string_view route,
+                             const conversation::QuestionAnchor* question) {
     Json actions = Json::array();
     std::set<Id> touched;
     Json artifacts = Json::array();
@@ -616,6 +619,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
     Json data = {{"messageId",reply},{"replyToMessageId",message.id},{"text",redactor(message.bot).text(text)},{"route",route},
                  {"status",status},{"actions",actions}};
     if (suggestions.is_array() && !suggestions.empty()) data["suggestions"] = redactor(message.bot).payload(suggestions);
+    if (question) data["taskQuestionMessageId"] = question->messageId;
     if (!artifacts.empty()) data["artifacts"] = std::move(artifacts);
     if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot))
         queueChannelReply(message.id,reply,data);
@@ -1000,6 +1004,16 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 const auto& args = decision.args;
                 if (!args.is_object()) throw ToolError("Tool arguments must be an object");
                 auto reply = text(args,"text",8000,true);
+                const auto continuesQuestion = args.find("continuesQuestion");
+                const conversation::QuestionAnchor* question = nullptr;
+                if (continuesQuestion != args.end() && !continuesQuestion->is_null()) {
+                    if (!continuesQuestion->is_boolean()) throw ToolError("continuesQuestion must be a boolean");
+                    if (continuesQuestion->get<bool>()) {
+                        if (!message.question) throw ToolError("Use continuesQuestion only for a reply about the attached task question");
+                        if (const auto error = questionAnswerError(load(message.question->taskId),message)) throw ToolError(error);
+                        question = &*message.question;
+                    }
+                }
                 Json suggestions = Json::array();
                 if (const auto list = args.find("suggestions"); list != args.end() && !list->is_null()) {
                     if (!list->is_array() || list->size() > 4) throw ToolError("suggestions must be up to 4 strings");
@@ -1014,7 +1028,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                 if (const auto resource = channelToolPolicy(id,"reply")) {
                     const auto gate = approveAction(policyOrigin(message),*resource,
                         "turn/" + std::to_string(id) + "/" + std::to_string(step),
-                        Json{{"text",reply},{"suggestions",suggestions}},clock());
+                        Json{{"text",reply},{"suggestions",suggestions},{"continuesQuestion",question != nullptr}},clock());
                     if (gate == ApprovalGate::waiting) {
                         transaction.commit();
                         return;
@@ -1022,7 +1036,7 @@ SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
                     if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
                 }
                 saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
-                finishTurn(message,std::move(reply),suggestions,"reply");
+                finishTurn(message,std::move(reply),suggestions,"reply",question);
                 transaction.commit();
                 return;
             } catch (const ToolError& error) {
