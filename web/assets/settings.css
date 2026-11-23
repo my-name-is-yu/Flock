@@ -97,29 +97,6 @@ form .button { min-height: 2.1rem; }
 }
 
 
-.mode-options { display: grid; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
-.mode-option {
-  display: flex; align-items: flex-start; gap: .75rem; padding: .8rem .9rem; cursor: pointer;
-  color: var(--text); font-size: var(--text-sm); transition: background-color .15s ease;
-}
-.mode-option + .mode-option { border-top: 1px solid var(--hairline); }
-.mode-option-text { display: grid; gap: .15rem; }
-.mode-option-text strong { font-weight: 600; }
-.mode-option-text small { color: var(--text-2); font-size: var(--text-xs); line-height: 1.45; }
-.mode-option:has(:checked) { background: var(--accent-soft); }
-.mode-option:has(:checked) strong { color: var(--accent); }
-@media (hover: hover) and (pointer: fine) {
-  .mode-options:not(.read-only) .mode-option:not(:has(:checked)):hover { background: var(--hover); }
-}
-.mode-options.read-only .mode-option { cursor: default; }
-.mode-options.read-only .mode-option:not(:has(:checked)) { display: none; }
-.mode-option input {
-  flex: none; width: 1.1rem; height: 1.1rem; min-height: 0; margin: .1rem 0 0; padding: 0;
-  accent-color: var(--accent-fill); cursor: inherit;
-}
-.mode-option:has(:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
-.mode-option input:focus-visible { outline: none; box-shadow: none; }
-
 [hidden] { display: none !important; }
 
 .not-found-home { display: inline-flex; text-decoration: none; }
@@ -127,3 +104,46 @@ form .button { min-height: 2.1rem; }
 #people:has(+ form[hidden]) > p:last-child {
   border-end-start-radius: var(--radius-lg); border-end-end-radius: var(--radius-lg); border-block-end: 0;
 }
+
+/* Flock settings: section headings over bordered groups of divided rows, each with its name and
+   description on the left and its control on the right. */
+.settings-page { max-width: 46rem; }
+.settings-page section { margin-block-end: var(--space-6); }
+.settings-page h2 { margin-block-end: .6rem; padding-inline: .1rem; font-size: var(--text-md); color: var(--text); }
+.settings-group {
+  border: 1px solid var(--hairline); border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--raised) 45%, transparent); overflow: hidden;
+}
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); flex-wrap: wrap;
+  min-height: 3.5rem; padding: .8rem 1rem;
+}
+.settings-row + .settings-row { border-block-start: 1px solid var(--hairline); }
+.settings-row .row-label { flex: 1 1 16rem; gap: .2rem; }
+.settings-row .row-label strong { font-weight: 550; }
+.settings-row .row-label small { color: var(--text-2); line-height: 1.45; }
+.settings-row > :not(.row-label) { flex: none; }
+
+.segmented { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--radius-md); background: var(--raised); }
+.segmented label {
+  position: relative; display: block; padding: .32rem .8rem; border-radius: calc(var(--radius-md) - 3px); cursor: pointer;
+  color: var(--text-2); font-size: var(--text-sm); font-weight: 500; white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease, box-shadow .15s ease;
+}
+.segmented input { position: absolute; inset: 0; opacity: 0; margin: 0; min-height: 0; cursor: inherit; }
+.segmented label:has(:checked) { background: var(--canvas); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .12), 0 0 0 1px var(--hairline); }
+.segmented label:has(:focus-visible) { outline: 2px solid var(--focus); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .segmented:not(.read-only) label:not(:has(:checked)):hover { color: var(--text); }
+}
+.segmented.read-only label { cursor: default; }
+.segmented.read-only label:not(:has(:checked)) { display: none; }
+
+.button.quiet-danger { background: transparent; color: var(--danger); }
+.button.quiet-danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+@media (max-width: 560px) {
+  .settings-row > .segmented { width: 100%; }
+  .settings-row > .segmented label { flex: 1; text-align: center; }
+}
+@media (prefers-reduced-motion: reduce) { .segmented label { transition: none; } }

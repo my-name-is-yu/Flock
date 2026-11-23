@@ -11,22 +11,38 @@
   <link rel="stylesheet" href="/settings.css">
   <script type="module" src="/settings.js"></script>
 </head>
-<body><main>
+<body><main class="settings-page">
   <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
   <h1>Flock settings</h1>
   <p id="status" role="status"></p>
+  <section aria-labelledby="appearance-heading">
+    <h2 id="appearance-heading">Appearance</h2>
+    <div class="settings-group">
+      <div class="settings-row">
+        <span class="row-label"><strong id="theme-label">Theme</strong><small>Follow your system, or keep Flock light or dark on this browser.</small></span>
+        <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
+          <label><input type="radio" name="theme" value="system">System</label>
+          <label><input type="radio" name="theme" value="light">Light</label>
+          <label><input type="radio" name="theme" value="dark">Dark</label>
+        </div>
+      </div>
+    </div>
+  </section>
   <div id="policy" hidden>
-    <section>
-      <h2 id="mode-heading">Permission mode</h2>
-      <div id="mode-options" class="mode-options" role="radiogroup" aria-labelledby="mode-heading">
-        <label class="mode-option"><input type="radio" name="mode" value="full">
-          <span class="mode-option-text"><strong>Full</strong><small>Bots use the access they’re given without asking. Never rules still apply.</small></span></label>
-        <label class="mode-option"><input type="radio" name="mode" value="supervised">
-          <span class="mode-option-text"><strong>Supervised</strong><small>By default, Bots ask before actions such as opening pull requests, posting to channels, or starting Sessions.</small></span></label>
+    <section aria-labelledby="mode-heading">
+      <h2 id="mode-heading">Permissions</h2>
+      <div class="settings-group">
+        <div class="settings-row">
+          <span class="row-label"><strong id="mode-label">Permission mode</strong><small id="mode-description"></small></span>
+          <div id="mode-options" class="segmented" role="radiogroup" aria-labelledby="mode-label" aria-describedby="mode-description">
+            <label><input type="radio" name="mode" value="full">Full</label>
+            <label><input type="radio" name="mode" value="supervised">Supervised</label>
+          </div>
+        </div>
       </div>
     </section>
-    <section><h2>Rules</h2><div id="rules"></div></section>
-    <section><h2>T3 connections</h2><div id="connections"></div></section>
+    <section aria-labelledby="rules-heading"><h2 id="rules-heading">Rules</h2><div id="rules" class="settings-group"></div></section>
+    <section aria-labelledby="connections-heading"><h2 id="connections-heading">T3 connections</h2><div id="connections" class="settings-group"></div></section>
   </div>
 </main></body>
 </html>

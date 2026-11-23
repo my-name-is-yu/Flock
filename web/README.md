@@ -60,7 +60,7 @@ environment's OAuth endpoint.
 
 ## Flock settings
 
-**Flock settings** shows the installation mode, rules, and the read-only T3
+**Flock settings** shows the theme for this browser, the installation mode, rules, and the read-only T3
 connection details for the person who connected T3 and installation roots.
 Installation roots can choose **Full** or **Supervised** and remove rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
