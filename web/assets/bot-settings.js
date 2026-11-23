@@ -75,8 +75,9 @@ async function load() {
     if (data.canManageMembers)
       note('people', 'No shared members', 'Add a person ID below to share this Bot.');
     else
-      note('people', 'Only you can use this Bot', 'To share it, set ',
-        code('FLOCK_WEB_IDENTITIES_FILE'), ' to a file listing who can sign in, then restart Flock.');
+      note('people', 'No shared members', 'Set ',
+        code('FLOCK_WEB_IDENTITIES_FILE'), ' to the path of an owner-only JSON file listing who can sign in. ',
+        'Restart Flock, then add the person’s ID here.');
   }
 }
 function code(text) {
