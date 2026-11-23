@@ -67,6 +67,11 @@ void boundary(Browser& browser) {
     check(missingPage && missingPage->status == 404 &&
           missingPage->get_header_value("Content-Type").starts_with("text/html") &&
           missingPage->body.find("Page not found") != std::string::npos,"browser navigation to a missing page did not get the HTML page");
+    const auto rejectedHtml = browser.client.Get("/settings/release/access",
+        httplib::Headers{{"Accept","text/html;q=0, application/json"}});
+    check(rejectedHtml && rejectedHtml->status == 404 &&
+          rejectedHtml->get_header_value("Content-Type").starts_with("application/json"),
+          "an explicitly rejected HTML page was rendered");
     const auto missingApi = browser.client.Get("/api/missing",httplib::Headers{{"Accept","text/html,*/*"}});
     check(missingApi && missingApi->status == 404 && missingApi->body.find("http_error") != std::string::npos,
           "a missing API route returned HTML instead of a JSON error");
