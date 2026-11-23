@@ -656,10 +656,12 @@ std::string commitCheckOutput(const Json& item, std::string_view command) {
 }
 
 std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
-                          const RunRef& result, const RunEvidence& report, std::string_view expected) {
+                          const RunRef& result, const RunEvidence& report, std::string_view expected, bool marked) {
     if (!gitCommit(expected) || report.itemId.empty()) return {};
     Scan scan;
-    std::string before, after;
+    std::string before, after, mismatch;
+    const auto preCommand = marked ? commit_check::before : commit_check::legacy;
+    const auto postCommand = marked ? commit_check::after : commit_check::legacy;
     bool sawCommand = false, finalReport = false;
     // The initial command belongs to the assigned work. The final command and report belong to its result.
     walkThreadHistoryForward(client,scan,assigned.threadId,"activity",512,-1,[&](const Json& item) {
@@ -668,16 +670,23 @@ std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& 
         if (!fromResult && !fromWork) return true;
         const auto type = str(item,"type");
         if (type == "command_execution") {
-            if (!std::exchange(sawCommand,true) && fromWork)
-                before = commitCheckOutput(item,commit_check::before);
-            after = fromResult ? commitCheckOutput(item,commit_check::after) : std::string{};
+            const bool first = !std::exchange(sawCommand,true);
+            auto initial = fromWork ? commitCheckOutput(item,preCommand) : std::string{};
+            after = fromResult && (marked || !first) ? commitCheckOutput(item,postCommand) : std::string{};
+            for (const auto* sha : {&initial,&after}) {
+                if (!sha->empty() && *sha != expected) {
+                    mismatch = *sha;
+                    return false;
+                }
+            }
+            if (first) before = std::move(initial);
             finalReport = false;
         } else if (fromResult && type == "assistant_message") {
             finalReport = str(item,"itemId") == report.itemId && str(item,"status") == "completed" && !after.empty();
         }
         return true;
     });
-    if (!before.empty() && before != expected) return before;
+    if (!mismatch.empty()) return mismatch;
     return before == expected && finalReport ? after : std::string{};
 }
 
@@ -1049,7 +1058,8 @@ public:
                 if (verification != config.end()) {
                     try {
                         observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
-                                                               evidence,str(*verification,"expectedCommit"));
+                                                               evidence,str(*verification,"expectedCommit"),
+                                                               verification->value("markedChecks",true));
                     } catch (const Failure&) {
                         // A completed Run can be read again if its evidence has not arrived yet.
                     }

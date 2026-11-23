@@ -702,16 +702,18 @@ class Fixture(BaseHTTPRequestHandler):
                 first, last = pre_check, post_check
                 if evidence == "duplicate-pre":
                     last = pre_check
-                elif evidence == "unmarked":
+                elif evidence in ("unmarked", "unmarked-missing-post"):
                     first = last = "git rev-parse --verify HEAD"
                 elif evidence == "reversed":
                     first, last = last, first
                 command(2, run, first, expected)
-                if evidence != "missing-post":
+                if evidence not in ("missing-post", "unmarked-missing-post"):
                     command(5, "unrelated-run" if evidence == "foreign-post" else final_run, last,
                             actual + ("\n" + "x" * 600 if evidence == "truncated-post" else ""),
                             status="failed" if evidence == "failed-post" else "completed")
                 command(6 if evidence == "post-then-work" else 4, final_run, "ctest", "Checks ran")
+                if evidence == "rechecked-mismatch":
+                    command(6, final_run, last, expected)
                 if actual != expected:
                     command(7, "unrelated-run", post_check, expected)
                 if status == "failed":

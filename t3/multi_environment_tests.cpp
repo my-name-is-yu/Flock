@@ -288,6 +288,18 @@ void commitEvidence(Scenario& fixture) {
               observation.checkedCommit.empty() && observation.commitEvidenceUnavailable,
               std::string("incomplete or unattributed commit evidence was accepted: ") + mode);
     }
+    const std::string wrongCommit(40,'e');
+    fixture.local.configure({{"multiEvidence","rechecked-mismatch"},{"multiActualCommit",wrongCommit}});
+    check(fixture.adapter->observe(fixture.local.id(),config,run).checkedCommit == wrongCommit,
+          "a later matching check must not overwrite an attributed mismatch");
+    auto legacy = config;
+    legacy["commitVerification"]["markedChecks"] = false;
+    fixture.local.configure({{"multiEvidence","unmarked"},{"multiActualCommit",fixture.model.commit}});
+    check(fixture.adapter->observe(fixture.local.id(),legacy,run).checkedCommit == fixture.model.commit,
+          "a saved unmarked prompt still needs two distinct Git commands");
+    fixture.local.configure({{"multiEvidence","unmarked-missing-post"}});
+    check(fixture.adapter->observe(fixture.local.id(),legacy,run).checkedCommit.empty(),
+          "legacy recovery must require the final command");
     fixture.local.configure({{"multiEvidence","truncated-report"}});
     const auto longReport = fixture.adapter->observe(fixture.local.id(),config,run);
     check(longReport.truncated && longReport.checkedCommit == fixture.model.commit && !longReport.commitEvidenceUnavailable,

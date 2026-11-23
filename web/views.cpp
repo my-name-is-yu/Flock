@@ -283,7 +283,13 @@ Json currentWait(const Json& task) {
     const auto env = field(task,"environmentId");
     auto& view = result["wait"] = waitView(wait);
     copyFields(result,wait,{"deadline"});
-    view["run"] = runView(wait.at("run"),env);
+    const Json* run = &wait.at("run");
+    if (const auto action = field(wait,"runActionId"); !action.empty()) {
+        const auto& results = task.at("runResults");
+        const auto saved = std::ranges::find_if(results,[&](const Json& item) { return field(item,"actionId") == action; });
+        if (saved != results.end()) run = &*saved;
+    }
+    view["run"] = runView(*run,env);
     if (view["run"].is_null()) view["run"] = runView(task.at("lastRun"),env);
     return result;
 }

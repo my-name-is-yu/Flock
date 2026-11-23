@@ -2750,7 +2750,7 @@ function localDateTime(timestamp) {
   const date = new Date(timestamp);
   return new Date(timestamp - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 }
-function waitContent(context, task) {
+function waitContent(context, task, deadlineDraft) {
   const wait = task.wait;
   const canDecide = context.data.canDecide === true;
   elements['detail-title'].textContent = waitLabel(wait.reason);
@@ -2788,11 +2788,12 @@ function waitContent(context, task) {
   else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
-      type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
+      type: 'datetime-local', value: deadlineDraft ?? localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
       const next = Math.floor(new Date(deadline).getTime() / 1000);
       if (next > Date.now() / 1000) perform('extend', { deadline: next });
       else showDetailError(errors.invalid_deadline);
     }, 'wait-deadline-form');
+    form.dataset.waitId = String(wait.id);
     submit.classList.add('primary');
     content.push(form);
     primary.append(submit);
@@ -2890,8 +2891,13 @@ function renderDetail() {
   }
   // Sibling Runs can advance the Task while this deadline form is still open.
   const content = task.wait.reason === 'deadline' ? { ...task, generation: undefined } : task;
-  if (changed('detail', detail, content, waitLabel(task.wait.reason), waitText(task.wait)))
-    replaceDetail(() => waitContent(view, task));
+  if (changed('detail', detail, content, waitLabel(task.wait.reason), waitText(task.wait))) {
+    const input = elements['detail-body'].querySelector('#wait-deadline-form input');
+    const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
+    const restoreFocus = sameWait && input === document.activeElement;
+    replaceDetail(() => waitContent(view, task, sameWait ? input.value : undefined));
+    if (restoreFocus) elements['detail-body'].querySelector('#wait-deadline-form input')?.focus();
+  }
   const busy = pendingWaits.has(task.wait.id);
   for (const control of elements['detail-body'].querySelectorAll('button, input')) {
     if (!control.closest('.question-choice-form')) control.disabled = busy;

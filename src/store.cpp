@@ -624,11 +624,15 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
                                 task.at("request").get_ref<const std::string&>());
     const auto environment = field(task,"environmentId");
     const auto destinations = current.config.value("conversationEnvironments",Json::object());
-    if ((!current.projectId.empty() && environment == current.environmentId && task.at("projectId") != current.projectId) ||
-        (!current.environmentId.empty() && environment != current.environmentId &&
-         std::ranges::none_of(destinations,[&](const Json& alias) {
-             return conversationEnvironmentId(alias) == environment;
-         })))
+    const auto project = field(task,"projectId");
+    const bool namedRoute = std::ranges::any_of(destinations,[&](const Json& alias) {
+        return conversationEnvironmentId(alias) == environment &&
+            (environment != current.environmentId || field(alias,"projectId") == project);
+    });
+    const bool settingsMatch = environment == current.environmentId
+        ? (current.projectId.empty() || project == current.projectId)
+        : current.environmentId.empty();
+    if (!settingsMatch && !namedRoute)
         throw Conflict("The project route changed. Cancel this task and submit a new request.");
     target["session"] = current.config.value("session",Json::object());
     return target;

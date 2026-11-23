@@ -417,9 +417,11 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     } model(commit);
     struct VerifyT3 : FixedT3 {
         const std::string& commit;
-        bool localFinished = false, miniFinished = false;
+        bool localFinished = false, miniFinished = false, miniReceipt = false;
         explicit VerifyT3(const std::string& revision) : commit(revision) {}
-        Delivery send(const Command&) override {
+        Delivery send(const Command& command) override { return reconcile(command); }
+        Delivery reconcile(const Command& command) override {
+            if (command.environmentId == "mini-env" && !miniReceipt) return {Delivery::Kind::Unknown,{},{}};
             return {Delivery::Kind::Accepted,{"verification-thread","verification-run","javascript:unexpected"},{}};
         }
         Observation observe(const std::string& environment,const Json&,const RunRef&) override {
@@ -430,7 +432,8 @@ void parallelVerificationInView(const std::filesystem::path& path) {
         }
     } t3(commit);
     Store store(path);
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
+    Seconds now = unixTime();
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{[&] { return now; }});
     auto config = callbacks();
     const auto configuredIntake = config.intake;
     config.intake = [configuredIntake](std::string_view bot, std::string_view request) {
@@ -445,7 +448,21 @@ void parallelVerificationInView(const std::filesystem::path& path) {
     tick(runtime,3);
     t3.localFinished = true;
     runtime.tick();
+    const auto saved = store.tasks("release").at(0);
+    const auto prior = store.task(saved.at("id")).at("runResults").at(1);
+    now = prior.at("deadline").get<Seconds>() + 1;
+    runtime.tick();
+    const auto overdue = browser.get("/api/view?bot=release").at("waits").at(0);
+    check(overdue.at("wait").at("reason") == "deadline" && overdue.at("wait").at("run").is_null(),
+          "an unconfirmed overdue launch must omit the missing Session link");
+    t3.miniReceipt = true;
+    now += 6;
+    tick(runtime,2);
     const auto running = browser.get("/api/view?bot=release");
+    const auto recovered = running.at("waits").at(0).at("wait");
+    check(recovered.at("id") == overdue.at("wait").at("id") &&
+          recovered.at("run").at("link") == "https://app.t3.codes/threads/mini-env/verification-thread",
+          "recovering a Run must refresh its link on the original deadline");
     const auto task = running.at("parallelTasks").at(0);
     const auto& runs = task.at("runs");
     check(runs.at(0).at("state") == "completed" && runs.at(0).at("commit") == commit &&

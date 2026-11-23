@@ -729,7 +729,8 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         if (action.contains("expectedCommit")) {
             const auto& commit = action.at("expectedCommit");
             c.config["session"]["workspaceStrategy"] = {{"type","worktree"},{"baseRef",commit},{"startFromOrigin",false}};
-            c.config["commitVerification"] = {{"expectedCommit",commit},{"projectId",c.projectId}};
+            c.config["commitVerification"] = {{"expectedCommit",commit},{"projectId",c.projectId},
+                {"markedChecks",action.value("markedCommitChecks",false)}};
         }
         c.target = runRef(action.value("target",Json::object()));
         c.questionId = field(action,"questionId");
@@ -1646,6 +1647,7 @@ ORDER BY j.id
         if (tool == "delegate" || tool == "start_in_session") {
             if (check) {
                 out["expectedCommit"] = task.at("requestedCommit");
+                out["markedCommitChecks"] = true;
                 out["instruction"] = field(out,"instruction") +
                     "\n\nVerify the requested commit " + field(task,"requestedCommit") +
                     ". As your first command, run exactly `" + commit_check::before +
