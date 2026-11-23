@@ -44,7 +44,6 @@ std::size_t conversation_storage::boundExpandedContext(Json& turn) {
 }
 
 void Store::Impl::initializeCompactionSchema() {
-    Transaction tx(db);
     exec(R"SQL(CREATE TABLE IF NOT EXISTS conversation_compactions(
         id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, start_message_id INTEGER NOT NULL REFERENCES journal(id),
         end_message_id INTEGER NOT NULL REFERENCES journal(id), summary TEXT NOT NULL, original_count INTEGER NOT NULL,
@@ -74,7 +73,6 @@ void Store::Impl::initializeCompactionSchema() {
             j.kind IN ('completed','cancelled','report')
             OR (j.kind='waiting' AND json_extract(j.data,'$.reason')='user_question')
             OR (j.kind='user_answer' AND json_extract(j.data,'$.conversation') IS NOT 1))))SQL");
-    tx.commit();
 }
 
 Json Store::Impl::compactions(std::string_view bot, Id before, unsigned limit, Id beforeMessage) const {
@@ -186,42 +184,30 @@ Json Store::Impl::contextTool(std::string_view tool, const Json& args, const con
     Json revision;
     const auto scrub = redactor(bot,&revision);
     Id start = args.contains("startMessageId") ? identifier(args,"startMessageId",true) : 1;
-    Id offset = identifier(args,"offset",false,0);
+    Id offset = 0;
     Id queryMessage = message.id, queryStep = step;
     auto needle = conversation_storage::text(args,"query",512,false);
-    if (args.contains("cursor") || offset) {
-        const bool exactCursor = args.contains("cursor");
-        if (!exactCursor && !args.contains("startMessageId")) throw Conflict("Byte cursor needs its message ID");
-        const std::string lookup = R"SQL(
+    if (args.contains("cursor")) {
+        auto saved = query(R"SQL(
 SELECT c.message_id,c.byte_offset,c.redaction_revision,c.end_message_id,c.query_message_id,c.query_step,
        coalesce(json_extract(s.decision,'$[0].args.query'),'') AS search_query
 FROM conversation_expansion_cursors c
 JOIN conversation_steps s ON s.message_id=c.query_message_id AND s.step=c.query_step
-WHERE c.bot_id=?1
-)SQL";
-        auto saved = exactCursor
-            ? query((lookup + " AND c.id=?2").c_str(),{bot,identifier(args,"cursor",true)})
-            : query((lookup + R"SQL(
- AND c.message_id=?2 AND c.byte_offset=?3
-GROUP BY c.redaction_revision,c.end_message_id,search_query
-LIMIT 2
-)SQL").c_str(),{bot,start,offset});
+WHERE c.bot_id=? AND c.id=?
+)SQL",{bot,identifier(args,"cursor",true)});
         if (!saved.next() || saved.json(2)!=revision)
             throw Conflict("Expansion cursor is stale or unknown. Read again from the start of the message.");
         auto originalNeedle = saved.string(6);
         if (!conversation_storage::hasText(originalNeedle)) originalNeedle.clear();
         if ((args.contains("startMessageId") && start!=saved.number(0)) ||
-            (args.contains("offset") && offset!=saved.number(1)) ||
             (args.contains("query") && needle!=originalNeedle) || end<saved.number(3))
-            throw Conflict("Cursor does not match the requested range, offset or search");
+            throw Conflict("Cursor does not match the requested range or search");
         start = saved.number(0);
         offset = saved.number(1);
         end = saved.number(3);
         queryMessage = saved.number(4);
         queryStep = saved.number(5);
         needle = std::move(originalNeedle);
-        if (!exactCursor && saved.next())
-            throw Conflict("Expansion offset is ambiguous. Use nextCursor from the original search.");
     }
     if (end<start) throw Conflict("No compacted messages in this range");
     auto rows = query("SELECT id,kind,text FROM compactable_messages WHERE bot_id=? AND id BETWEEN ? AND ? ORDER BY id",
@@ -230,8 +216,6 @@ LIMIT 2
     constexpr std::size_t chunkBytes = 2000, cursorBytes = 128;
     const std::size_t limit = args.contains("limit") ? std::min<Id>(identifier(args,"limit",true),8) : 8;
     const auto continueAt = [&](Id id, Id next) {
-        result["nextMessageId"] = id;
-        if (next) result["nextOffset"] = next;
         auto saved = query(R"SQL(
 INSERT INTO conversation_expansion_cursors(bot_id,message_id,byte_offset,redaction_revision,end_message_id,query_message_id,query_step)
 VALUES(?,?,?,?,?,?,?)

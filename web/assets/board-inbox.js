@@ -3,12 +3,14 @@ import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from
 const labels = {
   user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
   model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
-  unknown_delivery: 'Delivery confirmation', grant_request: 'Access request',
-  protected_input: 'Protected input', bot_change: 'Bot change', pr_review: 'Pull request review',
+  unknown_delivery: 'Delivery confirmation',
+  protected_input: 'Protected input', pr_review: 'Pull request review',
   pr_reconciliation: 'Pull request reconciliation',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Reconciliation requested', request_changes: 'Changes requested',
   link_pr: 'Pull request linked', reject_pr: 'Operation rejected',
+  policy_approval: 'Approval', allow_once: 'Allowed once', always_allow: 'Always allowed',
+  allow_next_time: 'Allow rule saved',
 };
 const actions = {
   extra_run: [['approve', 'Approve one run']],
@@ -16,10 +18,9 @@ const actions = {
   model_budget: [['approve', 'Approve one call']],
   conversation_model_budget: [['approve', 'Approve one call']],
   unknown_delivery: [['reconcile', 'Reconcile delivery']],
-  grant_request: [['approve', 'Approve access'], ['deny', 'Deny']],
   protected_input: [['supply', 'Save protected value']],
-  bot_change: [['approve', 'Approve change'], ['deny', 'Deny']],
   pr_reconciliation: [['reject_pr', 'Reject operation']],
+  policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Always allow'], ['deny', 'Deny']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
 };
 const identity = ['botId', 'itemKind', 'itemId', 'waitId', 'taskId', 'targetRevision', 'targetGeneration'];
@@ -34,7 +35,7 @@ const svgIcons = {
 };
 
 const itemKey = (item) => JSON.stringify([item.botId, item.itemKind, item.itemId]);
-const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices]);
+const decisionTarget = (item) => JSON.stringify([...identity.map((field) => item[field]), item.request, item.prompt, item.choices, item.status]);
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -165,9 +166,10 @@ function decisionCard(item, submit, source, question, saving) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     parts.push(link);
-  } else if (labels[item.itemKind]) {
+  } else if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
+  if (item.status === 'expired') parts.push(element('span', 'Expired'));
   const rel = relativeTime(item.createdAt);
   if (rel) parts.push(element('span', rel));
   if (source) parts.push(source);
@@ -200,7 +202,7 @@ function decisionCard(item, submit, source, question, saving) {
   for (const pr of item.candidates || []) article.append(prPreviewCard(pr.url, `Pull request #${pr.prNumber}`));
 
   if (!item.canDecide) {
-    article.append(element('p', 'View only', 'board-inbox-meta'));
+    if (item.itemKind !== 'policy_approval') article.append(element('p', 'View only', 'board-inbox-meta'));
     return article;
   }
   if (item.itemKind === 'user_question') {
@@ -229,7 +231,10 @@ function decisionCard(item, submit, source, question, saving) {
     btn.dataset.prNumber = pr.prNumber;
     buttons.append(btn);
   }
-  for (const [decision, title] of actions[item.itemKind]) {
+  const choices = item.itemKind === 'policy_approval' && item.status === 'expired'
+    ? [['allow_next_time', 'Always allow next time']]
+    : actions[item.itemKind];
+  for (const [decision, title] of choices) {
     const style = item.itemKind === 'pr_review' ? (decision === 'approve' ? 'primary' : 'secondary')
       : (decision === 'deny' || decision === 'reject_pr' ? 'secondary' : 'primary');
     const btn = element('button', title, style);
@@ -285,10 +290,9 @@ export function mountBoardInbox({
   let items = [];
   let epoch = 0;
   let historyRequest;
-  let composerSuppressed = false;
   let morphCleanup = null;
 
-  const scoped = (botId = bot) => items.filter((item) => item.botId === botId);
+  const scoped = (botId = bot) => items.filter((item) => item.botId === botId || item.conversationBotId === botId);
   const current = () => mode === 'pending' ? scoped().find((item) => itemKey(item) === selected) : undefined;
   const isOpen = () => !!mode;
   const count = (botId) => scoped(botId).length;
@@ -442,19 +446,6 @@ export function mountBoardInbox({
     moreList.replaceChildren(...actionsList);
   }
 
-  function storedDraft(item, choice) {
-    const key = draftKey(item, choice);
-    if (viewer === 'null' && !drafts.has(key)) {
-      const legacy = JSON.stringify([item.botId, item.taskId, ...(choice ? ['choice'] : [])]);
-      if (drafts.has(legacy)) {
-        const draft = drafts.get(legacy);
-        drafts.delete(legacy);
-        remember(key, draft);
-      }
-    }
-    return drafts.get(key);
-  }
-
   function remember(key, draft) {
     if (draft?.text || draft?.stale) drafts.set(key, draft);
     else drafts.delete(key);
@@ -463,10 +454,10 @@ export function mountBoardInbox({
 
   function composer() {
     const item = current();
-    if (composerSuppressed || item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
+    if (item?.itemKind !== 'user_question' || !item.canDecide || !canCompose()) return null;
     const key = draftKey(item, false);
     const target = decisionTarget(item);
-    const saved = storedDraft(item, false);
+    const saved = drafts.get(key);
     return { item, key: target, text: saved?.text ?? '', busy: saving.has(saveKey(item)),
       blocked: !!saved && (saved.target !== target || saved.stale), draftKey: key };
   }
@@ -479,7 +470,7 @@ export function mountBoardInbox({
   }
 
   function reviewDraft(item, targetHost) {
-    const saved = storedDraft(item, false);
+    const saved = drafts.get(draftKey(item, false));
     const target = decisionTarget(item);
     if (!saved || (saved.target === target && !saved.stale)) {
       targetHost.replaceChildren();
@@ -492,7 +483,6 @@ export function mountBoardInbox({
       targetHost.append(button('Use draft for this question', 'text-button', () => {
         if (!canCompose()) return;
         remember(draftKey(item, false), { target, text: saved.text });
-        composerSuppressed = false;
         reviewDraft(item, targetHost);
         onChange();
         focusComposer();
@@ -503,7 +493,7 @@ export function mountBoardInbox({
   function questionControls(item, busy) {
     const group = element('div', '', 'board-inbox-question');
     const target = decisionTarget(item);
-    const saved = storedDraft(item, true);
+    const saved = drafts.get(draftKey(item, true));
     const same = saved?.target === target;
     let selectedAnswer = same && !saved.stale ? saved.text : undefined;
     const stale = same && saved.stale;
@@ -521,8 +511,6 @@ export function mountBoardInbox({
     }
     const write = button('Write an answer', 'text-button question-reply', () => {
       if (!canCompose()) return;
-      composerSuppressed = false;
-      onChange();
       focusComposer();
     });
     write.disabled = busy;
@@ -553,7 +541,7 @@ export function mountBoardInbox({
     if (!item) return;
     const pendingWrite = saving.get(saveKey(item));
     const questionState = item.itemKind === 'user_question' && [!!pendingWrite,
-      storedDraft(item, false)?.stale, storedDraft(item, true)?.stale];
+      drafts.get(draftKey(item, false))?.stale, drafts.get(draftKey(item, true))?.stale];
     const text = JSON.stringify([item, questionState]);
     if (rendered === text) return;
     rendered = text;
@@ -594,7 +582,6 @@ export function mountBoardInbox({
     if (!item) return;
     if (mode === 'pending' && itemKey(item) === selected) return;
     selected = itemKey(item);
-    composerSuppressed = false;
     const pillRect = openLayer('pending', opener);
     renderPending();
     onChange();
@@ -640,7 +627,6 @@ export function mountBoardInbox({
     closeMoreMenu();
     mode = null;
     selected = rendered = null;
-    composerSuppressed = false;
     historyRequest?.abort();
     historyRequest = null;
     host?.getAnimations?.().forEach((anim) => anim.cancel());
@@ -670,7 +656,6 @@ export function mountBoardInbox({
     const focused = document.activeElement;
     closeMoreMenu();
     selected = itemKey(list[index + direction]);
-    composerSuppressed = false;
     message.textContent = '';
     panel.scrollTop = 0;
     renderPending();
@@ -690,7 +675,6 @@ export function mountBoardInbox({
         return;
       }
       selected = itemKey(nextEntry);
-      composerSuppressed = false;
     }
     renderPending();
     onChange();
@@ -735,9 +719,10 @@ export function mountBoardInbox({
     invalid_input: 'Check the decision and its input.',
   };
 
-  async function submit(item, decision, data, answer) {
+  async function submit(item, decision, data, answer, inline = false) {
     const save = saveKey(item);
-    if (!item.canDecide || saving.has(save) || !current() || decisionTarget(current()) !== decisionTarget(item)) return;
+    const active = inline ? items.find((entry) => itemKey(entry) === itemKey(item)) : current();
+    if (!item.canDecide || saving.has(save) || !active || decisionTarget(active) !== decisionTarget(item)) return;
     const owner = viewer;
     const target = Object.fromEntries(identity.map((field) => [field, item[field]]));
     const fingerprint = decisionTarget(item);
@@ -763,14 +748,13 @@ export function mountBoardInbox({
       epoch++;
       if (isCurrent()) message.textContent = '';
       apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
-      onAccepted(item, response.status === 'approved'
-        ? 'Decision saved. Apply the Bot change in Access settings.'
-        : 'Decision saved.');
+      onAccepted(item, 'Decision saved.');
       void refresh();
     } catch (error) {
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
         remember(answer, { target: fingerprint, text: data.text, stale: true });
       }
+      if (inline) onAccepted(item, errors[error.message] ?? 'Could not confirm the decision.');
       if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm the decision. Check before trying again.';
       if (owner === viewer) await refresh();
     } finally {
@@ -829,6 +813,12 @@ export function mountBoardInbox({
 
   return {
     setContext, refresh, count, itemsFor: (botId) => scoped(botId), open, openItem, openHistory, close, isOpen, composer, reviewReply,
+    inlinePolicyCard(item) {
+      const card = decisionCard(item, (entry, decision, data) => submit(entry, decision, data, undefined, true),
+        null, null, saving.get(saveKey(item)));
+      card.classList.add('policy-inline-card');
+      return card;
+    },
     edit(text) {
       const draft = composer();
       if (!draft || draft.busy || draft.text === text) return;
@@ -841,11 +831,6 @@ export function mountBoardInbox({
       if (draft && !draft.blocked && draft.text.trim()) {
         return submit(draft.item, 'answer', { text: draft.text }, draft.draftKey);
       }
-    },
-    suppressComposer() {
-      composerSuppressed = true;
-      onChange();
-      focusComposer();
     },
   };
 }

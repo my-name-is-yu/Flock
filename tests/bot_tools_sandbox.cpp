@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/workspace_tools.hpp"
 #include "bot_tools.hpp"
@@ -209,8 +209,8 @@ struct Fixture {
         return {std::move(bot),"","test-environment","private-project",
                 {{"modelCallLimit",limit},{"model","test"},{"modelProvider","chatgpt"}}};
     }
-    void grant(Scope scope, std::string_view bot = "alpha") {
-        store->access().resourceGrant(owner,bot,scope,GrantChange::grant);
+    void block(Action action, std::string_view target, bool blocked = true) {
+        store->policy().changeNeverRule(owner,action,target,blocked);
     }
     Json batch(std::vector<Decision> calls, Id budget = 20, std::string bot = "alpha") {
         model.next = std::move(calls);
@@ -273,22 +273,23 @@ struct Fixture {
 
 void workspaceAndLifecycle(Fixture& f) {
     const auto normal = call("workspace_write_file",{{"path","allowed.txt"},{"text","workspace-only-marker"}});
-    check(!f.run(normal).at("ok").get<bool>(),"Workspace write occurred without a grant");
-    f.grant({"workspace","alpha","write"});
-    f.grant({"workspace","alpha","read"});
-    check(f.run(normal).at("ok") == true,"Granted workspace write failed");
+    f.block(Action::workspace_write,"alpha");
+    check(!f.run(normal).at("ok").get<bool>(),"Workspace write bypassed a Never rule");
+    f.block(Action::workspace_write,"alpha",false);
+    check(f.run(normal).at("ok") == true,"Allowed workspace write failed");
     const auto root = f.home/"workspaces"/"alpha";
     const auto marker = f.run(call("workspace_search",{{"query","workspace-only-marker"}}));
-    check(marker.at("files") == Json::array({"allowed.txt"}),"Workspace search missed its marker");
+    check(marker.value("files",Json::array()) == Json::array({"allowed.txt"}),"Workspace search missed its marker: " + marker.dump());
     check(f.run(call("workspace_read_file",{{"path","allowed.txt"}})).at("text") == "workspace-only-marker",
           "Workspace read missed its content");
     write(root/"script","#!/bin/sh\n");
     check(chmod((root/"script").c_str(),0700) == 0,"Could not make fixture script executable");
     check(f.run(call("workspace_write_file",{{"path","script"},{"text","#!/bin/sh\nprintf updated"}})).at("ok") == true &&
           access((root/"script").c_str(),X_OK) == 0,"Workspace edit lost executable permissions");
+    f.block(Action::workspace_exec,"alpha");
     check(!f.run(call("workspace_run_command",{{"argv",Json::array({"pwd"})}})).at("ok").get<bool>(),
-          "Workspace command ran without an exec grant");
-    f.grant({"workspace","alpha","exec"});
+          "Workspace command bypassed a Never rule");
+    f.block(Action::workspace_exec,"alpha",false);
     const auto finished = [](const Json& state) { return state.at("state") == "exited"; };
     const auto commandSchema = botToolSchema("workspace_run_command").at("parameters");
     check(commandSchema.at("properties").contains("argv") && commandSchema.at("properties").contains("pipeline"),
@@ -396,8 +397,8 @@ void workspaceAndLifecycle(Fixture& f) {
     check(absolute.at("stdout") == "workspace-only-marker" && absolute.at("exitCode") == 0,absolute.dump());
 #endif
 
-    const auto secret = f.store->access().requestSecret("beta",{"fixture-key"});
-    f.store->access().submitSecret(owner,"beta",secret,secretMarker);
+    const auto secret = f.store->policy().requestSecret("beta",{"fixture-key"});
+    f.store->policy().submitSecret(owner,"beta",secret,secretMarker);
     const auto secretFile = fs::directory_iterator(f.home/"secrets")->path();
     fs::create_directories(f.home/"workspaces"/"beta");
     const auto peer = f.home/"workspaces"/"beta"/"private";
@@ -406,15 +407,13 @@ void workspaceAndLifecycle(Fixture& f) {
     write(history,historyMarker);
     auto privateIntake = f.intake("beta");
     privateIntake.request = dbMarker;
-    f.grant({"environment","test-environment","launch"},"beta");
     f.store->submit(privateIntake);
     for (int i = 0; i < 12 && !f.t3.launched; ++i) f.runtime->tick();
     check(f.t3.launched,"Private T3 fixture did not start");
-    const auto sessionScope = Scope::sessionRead("test-environment","private-thread");
-    f.grant(sessionScope);
+    const auto sessionScope = Resource::sessionRead("test-environment","private-thread");
     const auto searchSession = call("flock_session_search");
-    check(f.run(searchSession).at("sessions").size() == 1,"Session fixture did not appear with its grant");
-    f.store->access().resourceGrant(owner,"alpha",sessionScope,GrantChange::revoke);
+    check(f.run(searchSession).at("sessions").size() == 1,"Session fixture did not appear after removing the Never rule");
+    f.block(sessionScope.action,sessionScope.target);
     check(f.run(searchSession).at("sessions").empty(),"Revoked Session was still readable");
     f.sql("SELECT 1 FROM tasks WHERE data LIKE '%state-only-marker%'");
     check(read(secretFile) == secretMarker,"Secret marker was not persisted in the vault");
@@ -434,7 +433,11 @@ void workspaceAndLifecycle(Fixture& f) {
         check(f.run(call("workspace_read_file",{{"path","escape"}})).at("ok") == false,"Symlink read escaped");
         check(f.run(call("workspace_write_file",{{"path","escape"},{"text","overwritten"}})).at("ok") == false,
               "Symlink write escaped");
-        check(f.run(call("workspace_search",{{"query",markers[i]}})).at("files").empty(),"Symlink search escaped");
+        const auto result = f.run(call("workspace_search",{{"query",markers[i]}}));
+        if (i == 1)
+            check(result.value("ok",true) == false && result.dump().find(secretMarker) == std::string::npos,
+                  "Protected query text entered a workspace search");
+        else check(result.value("ok",false) && result.at("files").empty(),"Symlink search escaped or failed: " + result.dump());
         const auto linked = f.run(call("workspace_run_command",{{"argv",Json::array({"cat","escape"})}}));
         check(linked.at("ok") == false,"Command accepted a symlink to private files");
         fs::remove(alias);
@@ -443,10 +446,10 @@ void workspaceAndLifecycle(Fixture& f) {
     const auto hardlink = f.until(f.command(Json::array({"ln",peer.string(),"private-link"})),finished);
     check(hardlink.at("exitCode") != 0 && !fs::exists(root/"private-link"),"Command linked a private file into its workspace");
 
-    f.store->access().resourceGrant(owner,"alpha",{"workspace","alpha","write"},GrantChange::revoke);
-    const auto readonly = f.until(f.command(Json::array({"touch","ungranted-write"})),finished);
-    check(readonly.at("exitCode") != 0 && !fs::exists(root/"ungranted-write"),"Workspace exec bypassed its write grant");
-    f.grant({"workspace","alpha","write"});
+    f.block(Action::workspace_write,"alpha");
+    const auto readonly = f.until(f.command(Json::array({"touch","blocked-write"})),finished);
+    check(readonly.at("exitCode") != 0 && !fs::exists(root/"blocked-write"),"Workspace exec bypassed the workspace write restriction");
+    f.block(Action::workspace_write,"alpha",false);
 
     setenv("FLOCK_SECRET_WORKSPACE_TEST","must-not-be-inherited",1);
     const auto env = f.until(f.command(Json::array({"printenv"})),finished);
@@ -454,8 +457,8 @@ void workspaceAndLifecycle(Fixture& f) {
     check(env.at("exitCode") == 0 && env.dump().find("must-not-be-inherited") == std::string::npos,
           "Workspace command inherited Flock's environment");
 
-    const auto capturedSecret = f.store->access().requestSecret("alpha",{"capture-proof"});
-    f.store->access().submitSecret(owner,"alpha",capturedSecret,"command-redaction-fixture");
+    const auto capturedSecret = f.store->policy().requestSecret("alpha",{"capture-proof"});
+    f.store->policy().submitSecret(owner,"alpha",capturedSecret,"command-redaction-fixture");
     write(root/"captured","command-redaction-fixture");
     const auto secretCommand = f.command(Json::array({"cat","captured"}));
     check(f.until(secretCommand,finished).at("stdout") == "[redacted]" &&
@@ -468,7 +471,6 @@ void workspaceAndLifecycle(Fixture& f) {
     check(large.at("state") == "running","Command was not running while output was captured");
     check(large.at("stdout").get<std::string>().size()+large.at("stderr").get<std::string>().size() <= workspaceOutputLimit,
           "Command output exceeded its byte ceiling");
-    f.grant({"workspace","beta","exec"},"beta");
     check(f.status(streaming,"beta").at("ok") == false,"Another Bot could read an active command");
     const auto stop = f.run(call("workspace_stop_command",{{"commandId",streaming}}));
     check(stop.at("state") == "stop_requested","Stop did not record stop_requested");
@@ -539,9 +541,9 @@ void mountedWorkspaceDirectoryIdentity() {
 void externalTools(Fixture& f) {
     const auto search = call("web_search",{{"query","public fixture"}});
     const auto fetch = call("web_fetch",{{"url","https://example.com/evidence"}});
-    check(f.run(search).at("ok") == false && f.web->searches == 0,"Ungranted web search reached its adapter");
-    f.grant({"web","public","search"});
-    f.grant({"web","example.com","fetch"});
+    f.block(Action::web_search,"public");
+    check(f.run(search).at("ok") == false && f.web->searches == 0,"Blocked web search reached its adapter");
+    f.block(Action::web_search,"public",false);
     f.web->synchronize = true;
     const auto paired = f.batch({search,fetch});
     f.web->synchronize = false;
@@ -550,8 +552,9 @@ void externalTools(Fixture& f) {
     for (const auto& step : paired)
         check(step.at("result").at("ok") == true && step.at("result").at("untrustedData") == true,
               "Concurrent web result was invalid or untagged");
+    f.block(Action::web_fetch,"other.example");
     check(f.run(call("web_fetch",{{"url","https://other.example/evidence"}})).at("ok") == false && f.web->fetches == 1,
-          "Web fetch bypassed its host grant");
+          "Web fetch bypassed the host restriction");
     check(f.run(call("web_fetch",{{"url","https://example.com@127.0.0.1/"}})).at("ok") == false,
           "An invalid or internal fetch target was accepted");
     const auto redacted = f.run(call("web_fetch",{{"url","https://example.com/vault-"}})).at("data");
@@ -562,7 +565,6 @@ void externalTools(Fixture& f) {
     check(link.at("url") == "https://example.com/vault-" && link.at("title") == std::string(250,'x') + "[redac",
           "Search did not preserve complete URLs and redact titles before bounding them");
 
-    for (const auto* op : {"discover","invoke","read_resource"}) f.grant({"mcp_server","fixture",op});
     const auto discovery = call("mcp_discover",{{"server","fixture"},{"collection","tools"}});
     const auto discover = f.run(discovery);
     const auto invoke = call("mcp_call_tool",{{"server","fixture"},{"name","lookup"},{"arguments",{{"query","x"}}}});
@@ -578,7 +580,7 @@ void externalTools(Fixture& f) {
     check(readResource.at("data").at("uri") == "fixture://data" && readResource.at("untrustedData") == true,
           "MCP resource read failed");
     for (const auto* op : {"discover","invoke","read_resource"})
-        f.store->access().resourceGrant(owner,"alpha",{"mcp_server","fixture",op},GrantChange::revoke);
+        f.block(*parseAction(std::string("mcp.") + op),"fixture");
     check(f.run(discovery).at("ok") == false && f.mcp->discoveries == 2,
           "Revoked MCP discovery reached the adapter");
     check(f.run(invoke).at("ok") == false && f.mcp->calls == 1,"Revoked MCP invocation reached the adapter");
@@ -589,9 +591,9 @@ void externalTools(Fixture& f) {
     write(skill/"SKILL.md","Read this fixture skill.");
     fs::create_symlink(f.home/"state.db",skill/"escape");
     f.tools->skills.emplace("fixture",skill);
-    f.grant({"skill","catalog","list"});
+    f.block(Action::skill_read,"fixture");
     check(f.run(call("skill_list")).at("data").empty(),"Skill catalog leaked a denied skill");
-    f.grant({"skill","fixture","read"});
+    f.block(Action::skill_read,"fixture",false);
     check(f.run(call("skill_list")).at("data") == Json::array({{{"name","fixture"}}}),"Skill catalog omitted an allowed skill");
     const auto instructions = f.run(call("skill_read",{{"skill","fixture"}}));
     check(instructions.at("data").at("text") == "Read this fixture skill." && instructions.at("untrustedData") == true,
@@ -607,13 +609,13 @@ void externalTools(Fixture& f) {
     });
     f.model.next = {call("reply",{{"text","Message received."}})};
     const auto message = f.store->receive(owner,f.intake(),"media","Please inspect these photos and audio",0,media).at("messageId");
+    f.block(Action::attachment_inspect,"alpha");
     f.runtime->runConversations();
     const auto image = call("inspect_attachment",{{"messageId",message},{"attachmentId","1"}});
     const auto audio = call("inspect_attachment",{{"messageId",message},{"attachmentId","2"}});
-    check(f.run(image).at("ok") == false,"Attachment was inspected without its grant");
-    check(f.model.content.size() == 1,"Ungranted image reached the model request");
-    f.grant({"attachment","alpha","inspect"});
-    f.grant({"attachment","beta","inspect"},"beta");
+    check(f.run(image).at("ok") == false,"Attachment inspection bypassed the Never rule");
+    check(f.model.content.size() == 1,"Blocked image reached the model request");
+    f.block(Action::attachment_inspect,"alpha",false);
     const auto metadata = f.batch({image,audio});
     check(metadata[0].at("result").at("data").at("kind") == "image" &&
           metadata[0].at("result").at("data").at("width") == 1 &&
@@ -629,8 +631,8 @@ void externalTools(Fixture& f) {
     check(corrupt.at("ok") == false && f.model.content.size() == 1,
           "A corrupt image reached the model or interrupted the turn");
     const auto opaque = f.run(call("inspect_attachment",{{"messageId",message},{"attachmentId","4"}}));
-    check(opaque.at("ok") == true && opaque.at("data").at("name") == secretMarker,
-          "Attachment upload or inspection revealed a match against another Bot's vault");
+    check(opaque.at("ok") == true && opaque.at("data").at("name") == "[redacted]",
+          "Attachment inspection exposed a shared secret value");
     check(f.store->receipt(owner,"alpha","media","Please inspect these photos and audio",0,media).has_value(),
           "Attachment receipt was not idempotent");
     const auto jpeg = Json::array({
@@ -661,7 +663,7 @@ void externalTools(Fixture& f) {
           f.sql("SELECT CAST(count(*) AS TEXT) FROM model_attempts WHERE purpose='bot_tool' AND message_id="+id) == "1",
           "Action budget reservation was not durable");
     f.restart();
-    f.store->access().resourceGrant(owner,"alpha",{"web","public","search"},GrantChange::revoke);
+    f.block(Action::web_search,"public");
     f.approve();
     check(f.web->searches == searches+1 && f.web->fetches == fetches+1,
           "Approval did not execute exactly the pending call");
@@ -671,9 +673,6 @@ void externalTools(Fixture& f) {
 }
 
 void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
-    f.grant({"web","example.com","fetch"});
-    f.grant({"workspace","alpha","write"});
-    f.grant({"workspace","alpha","read"});
     const auto fetch = call("web_fetch",{{"url","https://example.com/evidence"}});
     const auto write = call("workspace_write_file",{{"path","unapproved.txt"},{"text","blocked"}});
     const auto read = call("workspace_read_file",{{"path","allowed.txt"}});
@@ -695,7 +694,6 @@ void webEvidenceCannotAuthorizeAnAction(Fixture& f) {
 
 void escapedToolHistoryFitsBridgeAndCanBeReread() {
     Fixture f;
-    f.grant({"workspace","alpha","read"});
     const auto root = f.home/"workspaces"/"alpha";
     fs::create_directories(root);
     const auto data = [](unsigned i) {
@@ -752,7 +750,7 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
     f.approve();
     f.restart();
     f.approve();
-    f.store->access().resourceGrant(owner,"alpha",{"workspace","alpha","read"},GrantChange::revoke);
+    f.block(Action::workspace_read,"alpha");
     f.approve();
     check(recovered && revoked && requests == batches+3,"The paused turn did not finish all recovery checks");
     f.model.followStep = {};
@@ -762,10 +760,8 @@ void escapedToolHistoryFitsBridgeAndCanBeReread() {
 void protectedArgumentsDoNotChangeToolTargets() {
     Fixture f;
     const std::string marker = "protected-model-argument-fixture";
-    auto access = f.store->access();
-    access.submitSecret(owner,"alpha",access.requestSecret("alpha",{"argument-fixture"}),marker);
-    f.grant({"workspace","alpha","write"});
-    f.grant({"mcp_server","fixture","invoke"});
+    auto policy = f.store->policy();
+    policy.submitSecret(owner,"alpha",policy.requestSecret("alpha",{"argument-fixture"}),marker);
     const auto calls = f.mcp->calls.load();
     const auto workspace = f.home/"workspaces"/"alpha";
     const auto writeFile = [](std::string path) {
@@ -813,7 +809,7 @@ void freshConversationStepArrays(Fixture& f) {
 void mcpSessionPagination(McpTools& adapter) {
     const auto first = adapter.discover("alpha","one",McpCollection::tools,{});
     const auto cursor = first.at("nextCursor").get<std::string>();
-    check(first.at("tools") == Json::array({"first"}) && cursor != "session-bound",
+    check(first.at("tools").at(0).at("name") == "extension" && cursor != "session-bound",
           "The first page did not return an opaque continuation");
     const auto expectDenied = [&](std::string_view bot, std::string_view server, McpCollection collection) {
         try { adapter.discover(bot,server,collection,cursor); }
@@ -824,9 +820,12 @@ void mcpSessionPagination(McpTools& adapter) {
     expectDenied("alpha","two",McpCollection::tools);
     expectDenied("alpha","one",McpCollection::resources);
     const auto next = adapter.discover("alpha","one",McpCollection::tools,cursor);
-    check(next.at("tools") == Json::array({"second"}) && !next.contains("nextCursor"),
+    check(next.at("tools").size() == 2 && !next.contains("nextCursor"),
           "MCP continuation did not reach the original session");
     expectDenied("alpha","one",McpCollection::tools);
+    check(adapter.readOnlyHint("one","extension") && !adapter.readOnlyHint("two","extension") &&
+          !adapter.readOnlyHint("one","tool-failure") && !adapter.readOnlyHint("one","untyped-hint") &&
+          !adapter.readOnlyHint("one","compatible-content"),"MCP tool hints were lost, misread, or shared across servers");
 }
 
 void mcpToolOutcomes(Fixture& f) {
@@ -838,7 +837,6 @@ void mcpToolOutcomes(Fixture& f) {
               "Malformed MCP result was exposed as evidence: " + std::string(name));
     };
 
-    f.grant({"mcp_server","one","invoke"});
     f.batch({invoke("numeric-content")},2);
     f.restart();
     f.approve();
@@ -848,6 +846,7 @@ void mcpToolOutcomes(Fixture& f) {
                              "invalid-annotations","invalid-structured-content","invalid-is-error"})
         expectUnknown(f.run(invoke(name)),name);
 
+    f.store->policy().setMode(owner,"supervised");
     const auto success = f.run(invoke("extension"));
     check(success.at("ok") == true && success.at("untrustedData") == true &&
           success.at("data").at("content").at(0).at("text") == "Tool evidence" &&
@@ -855,20 +854,37 @@ void mcpToolOutcomes(Fixture& f) {
           success.at("data").at("structuredContent").at("count") == 1,
           "Valid MCP content and extensions did not reach the model");
 
-    const auto compatible = f.run(invoke("compatible-content"));
+    const auto approveMcp = [&](std::string_view name) {
+        check(f.batch({invoke(name)}).is_null(),"An MCP tool that required approval ran before approval");
+        const auto items = f.store->inbox(owner);
+        check(items.size() == 1 && items.at(0).at("itemKind") == "policy_approval","MCP tool did not create an approval");
+        const auto& item = items.at(0);
+        f.store->decideInbox(owner,{"alpha",InboxKind::policy_approval,item.at("itemId"),item.at("waitId"),0,0,0},"allow_once");
+        f.runtime->runConversations();
+        return f.model.seen.at(0).at("result");
+    };
+    f.store->policy().changeRule(owner,RuleKind::ask,Action::mcp_invoke,"one",true);
+    check(approveMcp("extension").at("ok") == true,"Ask first did not take precedence over a read-only hint");
+    f.store->policy().changeNeverRule(owner,Action::mcp_invoke,"one",true);
+    check(f.run(invoke("extension")).at("ok") == false && f.store->inbox(owner).empty(),
+          "Never did not take precedence over a read-only hint and Ask first");
+    f.store->policy().changeNeverRule(owner,Action::mcp_invoke,"one",false);
+    f.store->policy().changeRule(owner,RuleKind::ask,Action::mcp_invoke,"one",false);
+
+    const auto compatible = approveMcp("compatible-content");
     check(compatible.at("ok") == true && compatible.at("data").at("content").size() == 3,
           "Valid resource alternatives or legacy extensions were rejected");
 
-    const auto failure = f.run(invoke("tool-failure"));
+    const auto failure = approveMcp("tool-failure");
     check(failure.at("ok") == false && !failure.contains("delivery") && failure.at("untrustedData") == true &&
           failure.at("data").at("content").at(0).at("text") == "Tool failed" &&
           !failure.at("data").contains("isError"),"Definite MCP tool failure did not survive credential redaction");
 
+    f.store->policy().setMode(owner,"full");
     const auto rejected = f.run(invoke("rejected"));
     check(rejected.at("ok") == false && !rejected.contains("delivery") && rejected.contains("error"),
           "JSON-RPC rejection was classified as an ambiguous dispatch");
 
-    f.grant({"mcp_server","failed-init","invoke"});
     const auto initFailure = f.run(invoke("never-dispatched","failed-init"));
     check(initFailure.at("ok") == false && !initFailure.contains("delivery") && initFailure.contains("error"),
           "MCP initialization failure was classified as an ambiguous dispatch");
@@ -886,7 +902,8 @@ void mcpLoopback(Fixture& f, std::string_view url) {
 }
 
 void approvalWhileAnotherTurnIsInferring(Fixture& f) {
-    f.grant({"web","public","search"});
+    f.block(Action::web_search,"public",false);
+    f.block(Action::web_search,"public",false);
     const auto search = [](std::string query) { return call("web_search",{{"query",query}}); };
     f.batch({search("older")},1);
     const auto paused = f.store->pausedConversations("alpha").at(0);

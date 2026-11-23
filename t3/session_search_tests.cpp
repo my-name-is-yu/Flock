@@ -1,4 +1,4 @@
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 using namespace flockv0;
 
@@ -28,8 +28,8 @@ struct SearchConversation {
     SearchConversation(T3& t3, const std::filesystem::path& database)
         : store(database), runtime(store,model,t3,[](std::string_view) { return std::string{}; }) {}
 
-    void share(std::string_view thread, GrantChange change = GrantChange::grant) {
-        store.access().resourceGrant({"root",true},"release",Scope::sessionRead("env-1",thread),change);
+    void blockSession(std::string_view thread, bool blocked = false) {
+        store.policy().changeNeverRule(localOwner,Action::session_read,Resource::sessionRead("env-1",thread).target,blocked);
     }
 
     Json call(std::string tool, Json args, std::string bot = "release") {
@@ -49,7 +49,6 @@ struct SearchConversation {
 
 void deletedSessionSearch(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture) {
     SearchConversation conversation(t3,database);
-    for (const auto* thread : {"deleted","manual"}) conversation.share(thread);
     const auto call = [&](std::string tool, Json args) {
         return conversation.call(std::move(tool),std::move(args));
     };
@@ -80,7 +79,6 @@ void deletedSessionSearch(T3& t3, const std::filesystem::path& database, const s
 void boundedSessionSearch(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture,
                           const std::function<Json(std::string_view)>& effects) {
     SearchConversation conversation(t3,database);
-    for (int i = 0; i < 130; ++i) conversation.share("candidate-"+std::to_string(1000+i));
     fixture({{"scenario","sparse-session-search"},{"missingSearchThreads",{"candidate-1063"}},
              {"searchTitles",{{"candidate-1064","Staging failure A"},{"candidate-1128","Staging failure B"},
                               {"candidate-1129","Staging failure C"}}}});
@@ -108,20 +106,19 @@ void boundedSessionSearch(T3& t3, const std::filesystem::path& database, const s
     check(effects("t3_thread_read").at(reads.size()).at("threadId") == "candidate-1064",
           "continuation did not resume immediately after the last scanned candidate");
     resume["cursor"] = second.at("nextCursor");
-    conversation.share("candidate-1128",GrantChange::revoke);
+    conversation.blockSession("candidate-1128",true);
     const auto last = conversation.search(resume);
     check(last.at("sessions").size() == 1 && last.at("sessions").at(0).at("title") == "Staging failure C" &&
-          last.at("nextCursor").is_null(),"continuation used a revoked grant or missed the end of the search");
-    conversation.share("candidate-1128");
+          last.at("nextCursor").is_null(),"continuation included a blocked Session or missed the end of the search");
+    conversation.blockSession("candidate-1128");
     const auto restored = conversation.search(resume);
     check(restored.at("sessions").size() == 2 && restored.at("sessions").at(0).at("title") == "Staging failure B" &&
           restored.at("sessions").at(1).at("title") == "Staging failure C" && restored.at("nextCursor").is_null(),
-          "continuation did not preserve order or see the live grant");
+          "continuation did not preserve order or reflect the current Session filter");
 }
 
 void sessionSearchDeadline(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture) {
     SearchConversation conversation(t3,database);
-    for (const auto* thread : {"deadline-1","deadline-2","deadline-3"}) conversation.share(thread);
     fixture({{"slowSearchThread","deadline-2"},{"searchTitles",{{"deadline-2","Staging failure A"},
                                                                {"deadline-3","Staging failure B"}}}});
     const Json query{{"query","staging failure"}};

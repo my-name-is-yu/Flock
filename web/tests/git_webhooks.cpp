@@ -81,9 +81,6 @@ void run() {
     Id task;
     {
         Store store(database);
-        grant(store,"owner","environment","sandbox","launch");
-        grant(store,"owner","repository",repoGrant,"pr");
-        grant(store,"owner","repository",repoGrant,"read");
         task = store.submit(intake());
         Runtime runtime(store,model,sessions,[](std::string_view) { return std::string{}; },options(host));
         for (int i = 0; i < 8; ++i) runtime.tick();

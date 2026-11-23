@@ -33,15 +33,10 @@ const std::vector<std::string> turnTools{"start_task","send_to_task","change_tas
                                          "find_tasks","flock_session_search","flock_session_events","read_tool_result","reply"};
 const std::vector<std::string> webTools{"start_workflow","workflow_status","instruct_workflow_stage",
     "stop_workflow_stage","stop_workflow","compact_conversation","expand_context","continue_fresh_session",
-    "list_grants","request_access","list_secrets","request_secret_input",
+    "list_secrets","request_secret_input",
     "list_connections","check_environment_readiness","update_bot_settings","request_bot_change",
     "read_memory","propose_memory_edit","apply_memory_edit","revert_memory_edit","memory_history",
     "create_schedule","list_schedules","remove_schedule","create_reminder","create_trigger"};
-
-bool isOfferedAnswerTool(std::string_view tool) {
-    return tool == "answer_task_question" || tool == "reply" ||
-           tool == "inspect_attachment" || tool == "read_channel_attachment";
-}
 
 bool japanese(std::string_view text) {
     return std::any_of(text.begin(),text.end(),[](unsigned char byte) {
@@ -85,8 +80,6 @@ LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
     if (!row.next()) throw Conflict("Conversation message is missing");
     Message message{id,row.number(0),row.string(1),row.string(2),row.string(3),row.json(4),
                     {row.string(5),row.number(6) != 0},static_cast<PrincipalSource>(row.number(7)),std::nullopt};
-    if (message.principalSource == PrincipalSource::legacy && !message.channelScope.empty())
-        message.principalSource = PrincipalSource::channel;
     if (!message.replyTo || message.replyTo >= id) return message;
     auto anchor = query(R"SQL(
 WITH RECURSIVE targets(id) AS (
@@ -98,23 +91,13 @@ WITH RECURSIVE targets(id) AS (
   LEFT JOIN channel_messages c ON c.message_id=m.id
   WHERE m.bot_id=? AND m.reply_to<m.id AND (?='' OR c.scope_key=?)
 )
-SELECT j.id,j.task_id,j.data FROM targets JOIN journal j ON j.id=targets.id JOIN tasks t ON t.id=j.task_id
+SELECT j.id,j.task_id FROM targets JOIN journal j ON j.id=targets.id JOIN tasks t ON t.id=j.task_id
  LEFT JOIN channel_tasks c ON c.task_id=t.id
  WHERE j.kind='waiting' AND t.bot_id=? AND (?='' OR c.scope_key=?)
  )SQL",{message.replyTo,message.bot,message.channelScope,message.channelScope,
         message.bot,message.channelScope,message.channelScope});
-    if (anchor.next()) {
-        const auto wait = anchor.json(2);
-        const auto choices = wait.find("choices");
-        const bool matchesChoice = field(wait,"reason") == "user_question" && choices != wait.end() &&
-            choices->is_array() && std::ranges::find(*choices,Json(message.text)) != choices->end();
-        const bool newerSuggestion = matchesChoice && query(R"SQL(
-SELECT 1 FROM journal j, json_each(j.data,'$.suggestions') s
-WHERE j.id=? AND j.conversation_bot_id=? AND j.kind='conversation_reply' AND s.value=?
-)SQL",{message.replyTo,message.bot,message.text}).next();
-        if (!newerSuggestion)
-            message.question = conversation::QuestionAnchor{anchor.number(0),anchor.number(1),integer(wait,"id"),matchesChoice};
-    }
+    if (anchor.next())
+        message.question = conversation::QuestionAnchor{anchor.number(0),anchor.number(1)};
     return message;
 }
 
@@ -140,6 +123,7 @@ Json Store::Impl::taskState(const Json& task, const Message& message, bool fullC
     Json view = {{"generation",task.at("generation")},{"revisionId",task.value("currentRevision",Id{0})},
                  {"state",task.at("state")},
                  {"replanning",task.value("replanning",false)},{"wait",std::move(wait)}};
+    if (task.value("queuedInT3",false)) view["queuedInT3"] = true;
     const auto project = [&](const char* key, const std::string& value, std::size_t limit) {
         view[key] = fullContract ? value : bounded(value,limit);
         if (view[key].get_ref<const std::string&>().size() < value.size())
@@ -185,7 +169,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
             {"runId",field(data,"resultRunId")},{"itemId",field(data,"itemId")}};
     } else if (data.contains("source")) provenance = data.at("source");
     Json result = {{"taskId",row.number(0)},{"messageId",messageId},{"revisionId",integer(data,"revisionId")},
-                   {"text",field(data,kind == "report" ? "report" : "text")},{"option",0},
+                   {"text",field(data,kind == "report" ? "report" : "text")},
                    {"kind",kind},{"taskState",row.string(1)},{"request",row.string(4)},
                    {"currentRevision",row.number(5)},{"truncated",data.value("truncated",false)}};
     if (!provenance.is_null()) result["run"] = provenance;
@@ -195,8 +179,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
 namespace {
 Json sourceRef(const Json& result) {
     Json source = {{"taskId",result.at("taskId")},{"messageId",result.at("messageId")},
-                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)},
-                   {"option",0}};
+                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)}};
     if (result.contains("run")) source["run"] = result.at("run");
     return source;
 }
@@ -217,7 +200,11 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             auto result = channelToolStatus(message.id,message.bot,results.at(i),&images);
             if (args.is_object() && args.contains("docId")) {
                 const bool reading = decision.at("tool") == "read_memory" || decision.at("tool") == "memory_history";
-                if (!Access(*this).permits(message.bot,{"shared_memory",field(args,"docId"),reading ? "read" : "write"},true)) {
+                const auto action = reading ? Action::shared_memory_read : Action::shared_memory_write;
+                const auto document = field(args,"docId");
+                const auto policy = Policy(*this);
+                if (!policy.allows(turnActor(message),action,document) ||
+                    policy.forbidden(message.bot,action,document)) {
                     args = Json::object();
                     result = {{"ok",false},{"error","Memory access denied"}};
                 } else {
@@ -228,8 +215,9 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             }
             const auto tool = field(decision,"tool");
             if ((decision.contains("rejection") && result.value("untrustedData",false)) ||
-                modelArgumentsContainProtected(modelCallRedactor(message.bot,tool,args,message.routing.contains("gitEvent")),
-                                               tool,args)) {
+                modelArgumentsContainProtected(
+                    modelCallRedactor(message.bot,tool,args,message.principalSource == PrincipalSource::gitWebhook),
+                    tool,args)) {
                 args = Json::object();
                 result = toolFailure("Saved tool history is unavailable. Check the target before retrying.");
             }
@@ -241,7 +229,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
 }
 
 Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images) {
-    if (message.routing.contains("gitEvent")) {
+    if (message.principalSource == PrincipalSource::gitWebhook) {
         auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
             {"currentTime",now},{"replyTo",nullptr},{"turn",conversationSteps(message,step,images)},
             {"gitEvent",sharedRedactor().record(message.routing.at("gitEvent"))}};
@@ -381,7 +369,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
 }
 
 Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision& decision,
-                                Seconds now) {
+                                Seconds now, const WorkSession* selectedSession) {
     const auto& args = decision.args;
     if (!args.is_object()) throw ToolError("Tool arguments must be an object");
     const auto& tool = decision.tool;
@@ -409,9 +397,10 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
-        auto result = accessTool(bot,message.id,routing,decision);
-        if (result.is_null()) result = memory(bot,nullptr,tool,args,now);
-        if (result.is_null()) result = automationTool(bot,routing,decision,now);
+        const auto actor = turnActor(message);
+        auto result = botSettingsTool(bot,actor,message.id,routing,decision);
+        if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
+        if (result.is_null()) result = automationTool(bot,actor,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
         result["ok"] = true;
         return result;
@@ -442,7 +431,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         const auto doneWhen = text(args,"doneWhen",8000,false);
         const auto environment = text(args,"environment",256,false);
         const bool resume = args.value("resume",false);
-        if (field(routing,"environmentId").empty() || field(routing,"projectId").empty())
+        const auto sessionRef = text(args,"sessionRef",128,false);
+        if (!sessionRef.empty() && (!selectedSession || !permitsWorkSession(message,*selectedSession)))
+            throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
+        if (selectedSession && (!environment.empty() || resume))
+            throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
+        if (!selectedSession && (field(routing,"environmentId").empty() || field(routing,"projectId").empty()))
             throw ToolError("This Bot needs an execution environment and project before it can start work");
         if (!environment.empty() && verifiedEnvironment(routing,routing,environment).empty())
             throw ToolError("Unknown environment " + environment + "; use one of task.environments");
@@ -450,14 +444,16 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
         const auto id = startConversationTask(routing,bot,request,environment,message.id,
-                                              result.is_null() ? Json(nullptr) : sourceRef(result),resume);
+                                              result.is_null() ? Json(nullptr) : sourceRef(result),resume,selectedSession);
         if (!doneWhen.empty()) {
             auto task = load(id);
             task["requestedDoneWhen"] = doneWhen;
             task["criteriaSourceMessageId"] = message.id;
             save(task);
         }
-        return {{"ok",true},{"effect","started"},{"taskId",id}};
+        Json receipt{{"ok",true},{"effect","started"},{"taskId",id}};
+        if (selectedSession) receipt["existingSession"] = true;
+        return receipt;
     }
     if (tool == "send_to_task" || tool == "change_task") {
         auto task = ownTask(identifier(args,"taskId",true),message);
@@ -485,11 +481,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
     if (tool == "answer_task_question") {
         const auto taskId = identifier(args,"taskId",true);
         const auto waitId = identifier(args,"waitId",true);
-        const bool offeredAnswer = message.question && message.question->matchesChoice;
-        if (offeredAnswer && (taskId != message.question->taskId || waitId != message.question->waitId))
-            throw ToolError("This choice can only answer the question it replies to");
         const auto task = ownTask(taskId,message);
-        const auto answer = offeredAnswer ? message.text : text(args,"text",8000,true);
+        const auto answer = text(args,"text",8000,true);
         if (integer(task.at("wait"),"id") != waitId)
             throw ToolError("That question is no longer open",{{"taskId",task.at("id")},{"current",taskState(task,message)}});
         if (const auto error = questionAnswerError(task,message))
@@ -500,7 +493,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         return {{"ok",true},{"effect","answered"},{"taskId",task.at("id")}};
     }
     if (tool == "record_task_blocker" || tool == "withdraw_task_question") {
-        if (!Access(*this).permitsPerson(turnActor(message),bot,Role::decide)) throw DecisionDenied{};
+        if (!Policy(*this).allows(turnActor(message),Action::bot_decide,bot)) throw DecisionDenied{};
         auto task = ownTask(identifier(args,"taskId",true),message);
         expectGeneration(task);
         active(task);
@@ -615,8 +608,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         }
     }
     const auto status = effectStatus(actions);
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
-    const Json linked = webhook.is_object() ? webhook.at("taskId") :
+    const Json linked = message.principalSource == PrincipalSource::gitWebhook ? message.routing.at("gitEvent").at("taskId") :
         touched.size() == 1 ? Json(*touched.begin()) : Json(nullptr);
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linked,unixTime(),message.bot});
@@ -629,16 +621,17 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
-    exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
-         {reply,message.id});
+    releaseModelCall(takeReservedConversationCall(message.id));
+    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
     const bool ja = japanese(message.text);
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
+    const Json task = message.principalSource == PrincipalSource::gitWebhook
+        ? message.routing.at("gitEvent").at("taskId") : Json(nullptr);
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
-         {webhook.is_object() ? webhook.at("taskId") : Json(nullptr),unixTime(),message.bot});
+         {task,unixTime(),message.bot});
     const auto reply = last();
     const Json data{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
                     {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
@@ -653,8 +646,7 @@ Person Store::Impl::turnActor(const Message& message) {
     switch (message.principalSource) {
         case PrincipalSource::trusted: return admitted;
         case PrincipalSource::channel: return {admitted.id,false};
-        case PrincipalSource::legacy:
-            return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
+        case PrincipalSource::gitWebhook: return {};
         case PrincipalSource::web: {
             if (!resolveWebIdentity) return {};
             try {
@@ -670,57 +662,28 @@ Person Store::Impl::turnActor(const Message& message) {
 
 bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id)) return false;
-    if (message.routing.contains("gitEvent")) {
+    if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
+        releaseModelCall(takeReservedConversationCall(message.id));
+        exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
-    } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
+    } else if (Policy(*this).allows(turnActor(message),Action::bot_talk,message.bot)) return true;
+    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
     else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
     return false;
 }
 
-void Store::Impl::resolveOfferedAnswer(const Message& message) {
-    const auto& question = *message.question;
-    const auto task = ownTask(question.taskId,message);
-    bool answered = false;
-    if (integer(task.at("wait"),"id") == question.waitId && !questionAnswerError(task,message)) {
-        try {
-            operate(turnActor(message),TaskTarget::from(task,question.waitId),"answer",{{"text",message.text}},
-                    message.id,InboxKind::user_question);
-            answered = true;
-        } catch (const RequestChanged&) {
-        } catch (const DecisionUnavailable&) {
-        } catch (const DecisionDenied&) {
-            finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
-            return;
-        }
-    }
-    const bool ja = japanese(message.text);
-    if (answered) {
-        const Json decision = Json::array({{{"tool","answer_task_question"},{"args",{{"taskId",question.taskId},
-            {"waitId",question.waitId},{"text",message.text}}},{"reason","The reply exactly matches an offered choice"}}});
-        const Json result = Json::array({{{"ok",true},{"effect","answered"},{"taskId",question.taskId}}});
-        exec("INSERT INTO conversation_steps(message_id,step,decision,result)"
-             " SELECT ?,coalesce(max(step),0)+1,?,? FROM conversation_steps WHERE message_id=?",
-             {message.id,decision,result,message.id});
-        finishTurn(message,ja ? "回答を受け付けました。" : "I recorded your answer.",nullptr,"reply");
-    } else {
-        finishTurn(message,ja ? "この質問はすでに締め切られています。" : "That question is no longer open.",nullptr,"reply");
-    }
-}
-
 void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader& soul,
-                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost,
+                          const std::function<Seconds()>& clock, const BotTools& settings, GitHost* gitHost, const ApplyBotChange& applyBotChange,
+                          const ReconcileBotCreation& reconcileBotCreation,
                           std::stop_token shutdown) {
     Message message;
-    bool offeredAnswer = false;
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -728,30 +691,14 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
             query("SELECT 1 FROM conversation_retries WHERE message_id=? AND retry_at>?",{id,clock()}).next())
             return;
         message = loadTurnMessage(id);
-        offeredAnswer = message.question && message.question->matchesChoice;
-        if (offeredAnswer &&
-            !query(R"SQL(
-SELECT 1 FROM message_attachments WHERE message_id=?1
-UNION ALL SELECT 1 FROM channel_attachments WHERE message_id=?1
-UNION ALL SELECT 1 FROM conversation_steps WHERE message_id=?1 AND result IS NULL
-    AND (decision IS NOT NULL OR effect IS NOT NULL)
-LIMIT 1
-)SQL",{id}).next()) {
-            if (authorizeTurn(message)) {
-                if (const auto attempt = takeReservedConversationCall(id)) releaseModelCall(messageModelBudget(id),attempt);
-                resolveOfferedAnswer(message);
-            }
-            transaction.commit();
-            return;
-        }
         transaction.commit();
     }
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
-    const bool notification = webhook.is_object();
+    const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply","read_tool_result"} : turnTools;
+    if (!t3.supportsRunTargetedSteer()) std::erase(tools,"message_session");
     if (gitHost && notification) {
-        appendGitNotificationTools(webhook,tools);
+        appendGitNotificationTools(message.routing.at("gitEvent"),tools);
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
     if (web) {
         tools.insert(tools.end(),webTools.begin(),webTools.end());
@@ -761,9 +708,7 @@ LIMIT 1
     const auto available = [&] {
         auto offered = tools;
         auto machines = Json::array();
-        if (offeredAnswer) {
-            std::erase_if(offered,[](const auto& tool) { return !isOfferedAnswerTool(tool); });
-        } else if (!notification) {
+        if (!notification) {
             for (const auto& [machineId,machine] : localMachines)
                 if (permitsLocalMachineOwner(machine->owner(),message.bot)) machines.push_back(machineId);
             if (!machines.empty()) offered.push_back("request_local_machine_connection");
@@ -782,7 +727,7 @@ LIMIT 1
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
-            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason},{"argumentsChecked",true}};
+            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason}};
             if (!call.rejection.empty()) entry["rejection"] = call.rejection;
             saved.push_back(std::move(entry));
         }
@@ -839,8 +784,7 @@ LIMIT 1
                         if (auto rejection = saved.value("rejection",std::string{}); !rejection.empty())
                             calls.push_back({std::move(call),std::move(rejection)});
                         else {
-                            auto checked = checkModelCall(message.bot,std::move(call),offered,notification,
-                                                          !saved.value("argumentsChecked",false));
+                            auto checked = checkModelCall(message.bot,std::move(call),offered,notification);
                             rejectionChanged |= !checked.rejection.empty();
                             calls.push_back(std::move(checked));
                         }
@@ -875,37 +819,44 @@ LIMIT 1
                 return;
             }
             ModelInput input;
-            Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (shutdown.stop_requested()) return;
                 if (!authorizeTurn(message)) { transaction.commit(); return; }
+                if (!query(R"SQL(
+SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
+ SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
+)SQL",{messageModelBudget(id),id}).next()) {
+                    pauseTurn(message);
+                    transaction.commit();
+                    return;
+                }
                 std::vector<ModelImage> images;
                 auto [offered,machines] = available();
                 const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
-                attempt = takeReservedConversationCall(id);
-                if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
-                if (!attempt) pauseTurn(message);
-                else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                          " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                 transaction.commit();
             }
-            if (!attempt) return;
-            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
+            ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
-                authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
+                authorizeSessionHistory(message,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);
-                    const bool allowed = authorizeTurn(message) && !shutdown.stop_requested();
-                    if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
+                    if (shutdown.stop_requested()) return;
+                    if (!authorizeTurn(message)) { transaction.commit(); return; }
+                    auto& attempt = checkpoint.attempt;
+                    attempt = takeReservedConversationCall(id);
+                    if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                    if (!attempt) pauseTurn(message);
+                    else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
+                              " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                     transaction.commit();
-                    if (!allowed) return;
+                    if (!attempt) return;
                 }
                 auto response = callModel(message.bot,model,input,0);
                 checkpoint.usage = std::move(response.usage);
@@ -934,8 +885,9 @@ LIMIT 1
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        const bool sessionControl = decision.tool == "message_session" || decision.tool == "interrupt_session";
-        if (sessionControl && (decision.rejection.empty() || sessionEffect)) {
+        const bool steer = decision.tool == "message_session";
+        const bool sessionControl = steer || decision.tool == "interrupt_session";
+        if (sessionControl && (decision.rejection.empty() || sessionEffect || (steer && !t3.supportsRunTargetedSteer()))) {
             if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
             continue;
         }
@@ -975,13 +927,71 @@ LIMIT 1
         }
         if (git) {
             result = gitConversationTool(gitHost,message,step,decision);
+            if (result.value("policyWaiting",false)) return;
         } else if (readSession) {
-            result = sessionReadTool(message.bot,message.channelScope,decision,t3);
+            result = sessionReadTool(message,step,decision,t3);
+            if (result.value("policyWaiting",false)) return;
         } else if (checkEnvironment) {
             try {
                 result = readiness(message.bot,message.routing,decision.args,t3);
                 result["ok"] = true;
             } catch (const Conflict& error) { result = {{"ok",false},{"error",error.what()}}; }
+        }
+        if (decision.tool == "request_bot_change") {
+            std::lock_guard lock(mutex);
+            try {
+                if (!message.channelScope.empty()) throw ToolError("Use Flock Web for this action");
+                const auto& args = decision.args;
+                const auto operation = toolText(args,"operation",32);
+                const auto target = toolText(args,"targetBotId",128);
+                const auto name = toolText(args,"name",128);
+                const auto actor = turnActor(message);
+                const auto action = operation == "create_bot" ? Action::bot_create : Action::bot_rename;
+                if ((operation != "create_bot" && operation != "rename_bot") || !validBotId(target) ||
+                    !Policy(*this).allows(actor,operation == "create_bot" ? Action::bot_create : Action::bot_settings,target))
+                    throw ToolError("Bot change denied by policy");
+                const auto key = "turn/" + std::to_string(id) + "/" + std::to_string(step);
+                const auto payload = Json::array({decision.tool,args});
+                {
+                    Transaction authorization(db);
+                    if (!authorizeTurn(message) || shutdown.stop_requested()) {
+                        authorization.commit();
+                        return;
+                    }
+                    const auto gate = approveAction(policyOrigin(message),{action,target},key,payload,clock(),false);
+                    authorization.commit();
+                    if (gate == ApprovalGate::waiting) return;
+                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+                }
+                constexpr int maxCreationAttempts = 4;
+                auto retries = query("SELECT failures FROM conversation_retries WHERE message_id=?",{id});
+                const bool exhausted = retries.next() && retries.number(0) >= maxCreationAttempts - 1;
+                const auto changeId = Policy(*this).applyBotChange(message.bot,actor,operation,target,name,
+                    id,step,applyBotChange,exhausted ? &reconcileBotCreation : nullptr);
+                Transaction completed(db);
+                exec("UPDATE policy_approvals SET status='used' WHERE operation=? AND status='approved'",{key});
+                saveTurnResults(id,step,Json::array({Json{{"ok",true},{"changeId",changeId},{"status","applied"}}}));
+                completed.commit();
+                continue;
+            } catch (const Policy::BotCreationUncertain&) {
+                deferConversation(id,clock());
+                return;
+            } catch (const Conflict& error) {
+                result = toolFailure(error.what());
+            } catch (const ToolError& error) {
+                result = toolFailure(error.what());
+            }
+        }
+        std::optional<WorkSession> selectedSession;
+        if (decision.tool == "start_task" && decision.args.is_object() &&
+            !field(decision.args,"sessionRef").empty()) {
+            try {
+                selectedSession = resolveWorkSession(message,field(decision.args,"sessionRef"),t3);
+            } catch (const StorageError&) {
+                throw;
+            } catch (const std::exception&) {
+                result = toolFailure("The selected T3 Session could not be verified. Search for it again.");
+            }
         }
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -1002,6 +1012,16 @@ LIMIT 1
                         suggestions.push_back(item);
                     }
                 }
+                if (const auto resource = channelToolPolicy(id,"reply")) {
+                    const auto gate = approveAction(policyOrigin(message),*resource,
+                        "turn/" + std::to_string(id) + "/" + std::to_string(step),
+                        Json{{"text",reply},{"suggestions",suggestions}},clock());
+                    if (gate == ApprovalGate::waiting) {
+                        transaction.commit();
+                        return;
+                    }
+                    if (gate != ApprovalGate::allow) throw ToolError(std::string(approvalError(gate)));
+                }
                 saveTurnResults(id,step,Json::array({Json{{"ok",true}}}));
                 finishTurn(message,std::move(reply),suggestions,"reply");
                 transaction.commit();
@@ -1013,9 +1033,38 @@ LIMIT 1
             }
         } else if (result.is_null()) {
             if (shutdown.stop_requested()) return;
+            std::optional<Resource> resource;
+            if (decision.tool == "create_schedule" || decision.tool == "create_reminder" ||
+                       decision.tool == "create_trigger" || decision.tool == "remove_schedule") {
+                resource = Resource{Action::automation_change,message.bot};
+            } else if (decision.tool == "update_bot_settings") {
+                const auto environment = field(decision.args,"environmentId");
+                if (!Policy(*this).forbidden(message.bot,Action::environment_configure,environment))
+                    resource = Resource{Action::environment_configure,environment};
+            } else if (decision.args.contains("docId")) {
+                const auto tool = decision.tool;
+                if (tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
+                    tool == "apply_memory_edit" || tool == "revert_memory_edit")
+                    resource = Resource{tool == "read_memory" || tool == "memory_history" ?
+                                        Action::shared_memory_read : Action::shared_memory_write,field(decision.args,"docId")};
+            } else {
+                resource = channelToolPolicy(message.id,decision.tool);
+            }
+            if (resource) {
+                const auto gate = approveAction(policyOrigin(message),*resource,
+                    "turn/" + std::to_string(id) + "/" + std::to_string(step),
+                    Json::array({decision.tool,decision.args}),clock());
+                if (gate != ApprovalGate::allow) {
+                    if (gate != ApprovalGate::waiting)
+                        saveTurnResults(id,step,Json::array({toolFailure(approvalError(gate))}));
+                    transaction.commit();
+                    if (gate == ApprovalGate::waiting) return;
+                    continue;
+                }
+            }
             exec("SAVEPOINT turn_tool");
             try {
-                result = applyTurnTool(message,step,decision,clock());
+                result = applyTurnTool(message,step,decision,clock(),selectedSession ? &*selectedSession : nullptr);
                 exec("RELEASE turn_tool");
             } catch (const StorageError&) {
                 throw;
@@ -1028,6 +1077,8 @@ LIMIT 1
                 result["error"] = error.what();
             }
         }
+        if (decision.tool == "request_bot_change")
+            exec("DELETE FROM conversation_retries WHERE message_id=?",{id});
         saveTurnResults(id,step,Json::array({redactor(message.bot).record(result)}));
         transaction.commit();
     }

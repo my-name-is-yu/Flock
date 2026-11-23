@@ -1,15 +1,14 @@
 #pragma once
-#include "flock/access.hpp"
+#include "flock/policy.hpp"
 
 namespace flockv0 {
 enum class InboxKind {
     user_question, extra_run, deadline, model_budget, conversation_model_budget,
-    unknown_delivery, grant_request, protected_input, bot_change, pr_review, pr_reconciliation
+    unknown_delivery, protected_input, pr_review, pr_reconciliation, policy_approval
 };
 
 std::string_view inboxKindName(InboxKind);
 InboxKind parseInboxKind(std::string_view);
-Role inboxDecisionRole(InboxKind);
 
 struct InboxTarget {
     std::string botId;

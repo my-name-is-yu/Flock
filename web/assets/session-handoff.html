@@ -8,42 +8,15 @@
   <title>Session handoffs</title>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/access.css">
+  <link rel="stylesheet" href="/settings.css">
   <link rel="stylesheet" href="/session-handoff.css">
   <script type="module" src="/session-handoff.js"></script>
 </head>
 <body><main>
-  <a class="access-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span>Conversations</span></a>
+  <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
   <h1>Session handoffs</h1>
-  <p class="page-lede">Pair a T3 Session with a Bot so its agent can ask for a reply or ongoing coordination.</p>
+  <p class="page-lede">T3 Sessions paired with a Bot for a reply or ongoing coordination.</p>
   <p id="status" role="status"></p>
-  <section aria-labelledby="new-heading">
-    <h2 id="new-heading">Pair a T3 Session</h2>
-    <form id="pair" autocomplete="off">
-      <div class="pair-fields">
-        <label>Environment ID <input name="environmentId" required spellcheck="false" maxlength="1024"></label>
-        <label>Project ID <input name="projectId" required spellcheck="false" maxlength="1024"></label>
-        <label>Thread ID <input name="threadId" required spellcheck="false" maxlength="1024"></label>
-        <label>Bot <select name="botId" required><option value="">Select a Bot</option></select></label>
-        <label>Permission
-          <select name="mode">
-            <option value="consult">One consultation reply</option>
-            <option value="coordinate">Ongoing coordination</option>
-          </select>
-        </label>
-      </div>
-      <div id="coordination-scope" hidden>
-        <label>Coordination goal <textarea name="goal" rows="3" maxlength="8192"></textarea></label>
-        <label class="check-label"><input type="checkbox" name="allowDelegation"> Allow specialist checks</label>
-      </div>
-      <button class="button primary">Create pairing code</button>
-    </form>
-    <div id="pairing" hidden>
-      <label>Single-use code <input id="pairing-code" readonly spellcheck="false" autocomplete="off"></label>
-      <button id="copy-code" class="button" type="button">Copy code</button>
-      <p id="pairing-help"></p>
-    </div>
-  </section>
   <section id="recent" aria-labelledby="recent-heading" hidden>
     <h2 id="recent-heading">Recent handoffs</h2>
     <ul id="recent-links"></ul>

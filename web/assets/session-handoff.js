@@ -1,6 +1,5 @@
 const $ = (id) => document.getElementById(id);
 const status = $('status');
-const pairingForm = $('pair');
 const savedChannel = new URLSearchParams(location.search).get('channel') ?? '';
 const channel = /^[1-9][0-9]*$/.test(savedChannel) ? savedChannel : '';
 let busy = false;
@@ -9,7 +8,6 @@ let actionRevision = 0;
 let question;
 let rendered = '';
 let recentRendered = '';
-let pairingTimer;
 const workAnswerDrafts = new Map();
 const handoffLabels = {
   active: 'Active', paused: 'Paused', stopped: 'Stopped', completed: 'Completed', budget_exhausted: 'Out of budget',
@@ -245,51 +243,6 @@ async function pollHandoffs() {
   } finally { refreshing = false; }
 }
 
-function clearPairing() {
-  clearTimeout(pairingTimer);
-  $('pairing').hidden = true;
-  $('pairing-code').value = '';
-  $('pairing-help').textContent = '';
-}
-
-pairingForm.elements.mode.addEventListener('change', () => {
-  const coordinating = pairingForm.elements.mode.value === 'coordinate';
-  $('coordination-scope').hidden = !coordinating;
-  pairingForm.elements.goal.required = coordinating;
-});
-
-pairingForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const { environmentId, projectId, threadId, botId, mode, goal, allowDelegation } = pairingForm.elements;
-  const data = {
-    target: { environmentId: environmentId.value.trim(), projectId: projectId.value.trim(), threadId: threadId.value.trim() },
-    botId: botId.value, mode: mode.value,
-  };
-  if (mode.value === 'coordinate') Object.assign(data, { goal: goal.value.trim(), allowDelegation: allowDelegation.checked });
-  void run(async () => {
-    clearPairing();
-    const ticket = await request('/pair', data);
-    $('pairing-code').value = ticket.code;
-    const expiry = new Date(ticket.expiresAt * 1000);
-    $('pairing-help').textContent =
-      `Give this code to the agent in the paired Thread and ask it to call request_flock_bot. Expires at ${expiry.toLocaleTimeString()}.`;
-    $('pairing').hidden = false;
-    pairingTimer = setTimeout(clearPairing, Math.max(0, expiry.getTime() - Date.now()));
-  }, 'Could not pair this Session. Check the IDs, T3 connection, and Flock access.');
-});
-
-$('copy-code').addEventListener('click', async () => {
-  const code = $('pairing-code');
-  try {
-    await navigator.clipboard.writeText(code.value);
-    status.textContent = 'Pairing code copied.';
-  } catch {
-    code.focus();
-    code.select();
-    status.textContent = 'Copy the selected code.';
-  }
-});
-
 $('refresh').addEventListener('click', () => void run(async () => {
   render(await request(`/${channel}`));
   await loadRecent();
@@ -322,7 +275,6 @@ void (async () => {
   if (!Array.isArray(bots)) throw new Error('Could not load Bots');
   for (const bot of bots) {
     botNames.set(bot.id, bot.name || bot.id);
-    pairingForm.elements.botId.add(new Option(bot.name || bot.id, bot.id));
   }
   await loadRecent();
   if (channel) render(await request(`/${channel}`));
