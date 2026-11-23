@@ -42,7 +42,6 @@ public:
         result.kind = Observation::Kind::Finished;
         result.status = "completed";
         result.report = "Pushed branch change with tests";
-        result.settled = true;
         return result;
     }
     InterruptOutcome interrupt(const std::string&, const Json&, const RunRef&) override { return InterruptOutcome::Requested; }

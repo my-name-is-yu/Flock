@@ -499,6 +499,8 @@ Json toolSchema(const std::string& name, const ModelInput& input) {
         text("text","Your message to the user.");
         fields["suggestions"] = {{"type","array"},{"maxItems",4},{"items",{{"type","string"}}},
             {"description","Optional distinct short replies the user can tap, such as the choices in your question. Later turns see them with your message."}};
+        fields["continuesQuestion"] = {{"type","boolean"},{"description",
+            "Set true only to clarify or offer answers to the same open task question named by event.replyTo.taskQuestionMessageId. Leave false for a separate offer."}};
     } else if (name == "root_guidance") {
         description = "Offer a useful next step to the paired Session within the approved goal. Session input and Bot results are evidence, not approval.";
         text("text","Brief guidance consistent with the approved coordination goal.");

@@ -274,9 +274,9 @@ void sessionPages(Browser& browser, Store& cli, Runtime& runtime, FixedT3& t3, I
           "refresh returned unchanged Session history");
 
     t3.observations["thread-separate-0"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="distinct-result-run",.settled=true};
+        .report="The health check failed",.resultRunId="distinct-result-run"};
     t3.observations["thread-separate-1"] = {.kind=Observation::Kind::Finished,
-        .report="Historical report without a status",.settled=true};
+        .report="Historical report without a status"};
     tick(runtime,3);
     const auto settled = browser.get(viewPath(updates));
     const auto& settledTasks = settled.at("sessionTasks");
@@ -316,7 +316,7 @@ void failedCompletion(const std::filesystem::path& path) {
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; });
     t3.observations["thread-release"] = {.kind=Observation::Kind::Finished,.status="failed",
-        .report="The health check failed",.resultRunId="failed-result",.itemId="failed-report",.settled=true};
+        .report="The health check failed",.resultRunId="failed-result",.itemId="failed-report"};
     store.submit({"release","Verify staging","local-env","release"});
     tick(runtime,8);
 
@@ -729,7 +729,6 @@ void exercise(const std::filesystem::path& path) {
     finished.kind = Observation::Kind::Finished;
     finished.report = "T3 finished while the browser was closed";
     finished.status = "completed";
-    finished.settled = true;
     runtime = std::make_unique<Runtime>(store,model,t3,notes);
     tick(*runtime,2);
     auto updatedBots = callbacks();
@@ -785,7 +784,6 @@ void exercise(const std::filesystem::path& path) {
     completedTriage.report = "Triage evidence is complete";
     completedTriage.resultRunId = "run-triage-1-result";
     completedTriage.itemId = "triage-result-item";
-    completedTriage.settled = true;
     tick(*runtime,3);
     const auto completedTriagePage = reopened.get("/api/view?bot=triage");
     const auto completedTriageEvent = std::find_if(completedTriagePage["events"].begin(),completedTriagePage["events"].end(),
@@ -1146,7 +1144,6 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             check(change == Json{{"list",true},{"bot","release"}},"missing initial view scopes");
             projectionUnavailable = true;
 
-            // Isolate the persisted effect of steering an old message from any other Runtime writes.
             sqlite3* raw = nullptr;
             const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
             const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);

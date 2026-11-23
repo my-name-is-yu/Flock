@@ -87,7 +87,7 @@ struct Runs : T3 {
     void finish(const std::string& run, std::string report) {
         runs.at(run) = {.kind = Observation::Kind::Finished, .question = {}, .status = "completed",
                         .report = std::move(report), .resultRunId = run, .itemId = "report-" + run,
-                        .settled = true, .detail = {}};
+                        .detail = {}};
     }
 };
 
