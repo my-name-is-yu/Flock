@@ -94,7 +94,7 @@ private:
 };
 
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
-std::string redactPairingCodes(std::string);
+std::string redactT3Tokens(std::string);
 
 struct Store::Impl {
     sqlite3* db = nullptr;
@@ -109,6 +109,8 @@ struct Store::Impl {
     WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
+    void openSchema();
+    void initializeSchema();
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -132,7 +134,7 @@ struct Store::Impl {
     void initializeParticipationSchema();
     void initializeRootDeliverySchema();
     void initializeSessionHandoffSchema();
-    Participation authorizeParticipation(const Person&, Id channel, bool requireBot = true);
+    Participation authorizeParticipation(const Person&, Id channel, bool requireConnection = true);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
@@ -165,9 +167,9 @@ struct Store::Impl {
     Id gitRedactionEpoch = 0;
     void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
                       std::string_view title, std::string_view prompt);
-    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
-                      std::string_view gitKey = {}, std::string_view operationId = {},
-                      const Json& candidates = Json::array());
+    void insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                        std::string_view gitKey, std::string_view operationId = {},
+                        const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);
@@ -230,12 +232,13 @@ struct Store::Impl {
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
-    void releaseModelCall(std::string_view budget, Id attempt);
+    Id takeReservedTaskCall(Id event);
+    void releaseModelCall(Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
-                             bool gitNotification, bool legacy = false);
+                             bool gitNotification);
     CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);

@@ -6,7 +6,7 @@
 #include <limits>
 
 namespace flockv0::conversation {
-enum class PrincipalSource { legacy = 0, trusted = 1, web = 2, channel = 3 };
+enum class PrincipalSource { gitWebhook = 0, trusted = 1, web = 2, channel = 3 };
 
 struct QuestionAnchor {
     Id messageId, taskId;
@@ -17,7 +17,7 @@ struct Message {
     std::string bot, text, channelScope;
     Json routing;
     Person admittedActor;
-    PrincipalSource principalSource = PrincipalSource::legacy;
+    PrincipalSource principalSource = PrincipalSource::gitWebhook;
     std::optional<QuestionAnchor> question;
 };
 }

@@ -80,8 +80,6 @@ LEFT JOIN channel_messages c ON c.message_id=m.id WHERE m.id=?
     if (!row.next()) throw Conflict("Conversation message is missing");
     Message message{id,row.number(0),row.string(1),row.string(2),row.string(3),row.json(4),
                     {row.string(5),row.number(6) != 0},static_cast<PrincipalSource>(row.number(7)),std::nullopt};
-    if (message.principalSource == PrincipalSource::legacy && !message.channelScope.empty())
-        message.principalSource = PrincipalSource::channel;
     if (!message.replyTo || message.replyTo >= id) return message;
     auto anchor = query(R"SQL(
 WITH RECURSIVE targets(id) AS (
@@ -170,7 +168,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
             {"runId",field(data,"resultRunId")},{"itemId",field(data,"itemId")}};
     } else if (data.contains("source")) provenance = data.at("source");
     Json result = {{"taskId",row.number(0)},{"messageId",messageId},{"revisionId",integer(data,"revisionId")},
-                   {"text",field(data,kind == "report" ? "report" : "text")},{"option",0},
+                   {"text",field(data,kind == "report" ? "report" : "text")},
                    {"kind",kind},{"taskState",row.string(1)},{"request",row.string(4)},
                    {"currentRevision",row.number(5)},{"truncated",data.value("truncated",false)}};
     if (!provenance.is_null()) result["run"] = provenance;
@@ -180,8 +178,7 @@ WHERE j.id=? AND t.bot_id=? AND j.kind IN ('report','completed','cancelled') AND
 namespace {
 Json sourceRef(const Json& result) {
     Json source = {{"taskId",result.at("taskId")},{"messageId",result.at("messageId")},
-                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)},
-                   {"option",0}};
+                   {"revisionId",result.at("revisionId")},{"text",bounded(field(result,"text"),sourceSize)}};
     if (result.contains("run")) source["run"] = result.at("run");
     return source;
 }
@@ -213,8 +210,9 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
             }
             const auto tool = field(decision,"tool");
             if ((decision.contains("rejection") && result.value("untrustedData",false)) ||
-                modelArgumentsContainProtected(modelCallRedactor(message.bot,tool,args,message.routing.contains("gitEvent")),
-                                               tool,args)) {
+                modelArgumentsContainProtected(
+                    modelCallRedactor(message.bot,tool,args,message.principalSource == PrincipalSource::gitWebhook),
+                    tool,args)) {
                 args = Json::object();
                 result = toolFailure("Saved tool history is unavailable. Check the target before retrying.");
             }
@@ -226,7 +224,7 @@ Json Store::Impl::conversationSteps(const Message& message, int step, std::vecto
 }
 
 Json Store::Impl::turnInput(const Message& message, int step, Seconds now, Json machines, std::vector<ModelImage>& images) {
-    if (message.routing.contains("gitEvent")) {
+    if (message.principalSource == PrincipalSource::gitWebhook) {
         auto event = Json{{"kind","conversation_turn"},{"messageId",message.id},{"text",message.text},
             {"currentTime",now},{"replyTo",nullptr},{"turn",conversationSteps(message,step,images)},
             {"gitEvent",sharedRedactor().record(message.routing.at("gitEvent"))}};
@@ -597,8 +595,7 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         }
     }
     const auto status = effectStatus(actions);
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
-    const Json linked = webhook.is_object() ? webhook.at("taskId") :
+    const Json linked = message.principalSource == PrincipalSource::gitWebhook ? message.routing.at("gitEvent").at("taskId") :
         touched.size() == 1 ? Json(*touched.begin()) : Json(nullptr);
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
          {linked,unixTime(),message.bot});
@@ -611,16 +608,17 @@ void Store::Impl::finishTurn(const Message& message, std::string text, const Jso
         queueChannelReply(message.id,reply,data);
     exec("UPDATE journal SET data=? WHERE id=?",{data,reply});
     exec("UPDATE journal SET task_id=? WHERE id=?",{linked,message.id});
-    exec("UPDATE conversation_turns SET status='done',reply_id=?,reserved_attempt=NULL WHERE message_id=?",
-         {reply,message.id});
+    releaseModelCall(takeReservedConversationCall(message.id));
+    exec("UPDATE conversation_turns SET status='done',reply_id=? WHERE message_id=?",{reply,message.id});
     exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
 }
 
 void Store::Impl::pauseTurn(const Message& message) {
     const bool ja = japanese(message.text);
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
+    const Json task = message.principalSource == PrincipalSource::gitWebhook
+        ? message.routing.at("gitEvent").at("taskId") : Json(nullptr);
     exec("INSERT INTO journal(task_id,time,kind,data,conversation_bot_id) VALUES(?,?,'conversation_reply','{}',?)",
-         {webhook.is_object() ? webhook.at("taskId") : Json(nullptr),unixTime(),message.bot});
+         {task,unixTime(),message.bot});
     const auto reply = last();
     const Json data{{"messageId",reply},{"replyToMessageId",message.id},{"route","model_budget"},{"status","needs_you"},
                     {"text",ja ? "モデル呼び出しの上限に達しました。続けるには追加の1回を承認してください。"
@@ -635,8 +633,7 @@ Person Store::Impl::turnActor(const Message& message) {
     switch (message.principalSource) {
         case PrincipalSource::trusted: return admitted;
         case PrincipalSource::channel: return {admitted.id,false};
-        case PrincipalSource::legacy:
-            return admitted == localOwner && !Access(*this).requiresIdentity() ? localOwner : Person{};
+        case PrincipalSource::gitWebhook: return {};
         case PrincipalSource::web: {
             if (!resolveWebIdentity) return {};
             try {
@@ -652,16 +649,16 @@ Person Store::Impl::turnActor(const Message& message) {
 
 bool Store::Impl::authorizeTurn(const Message& message) {
     if (!isNextTurn(message.id)) return false;
-    if (message.routing.contains("gitEvent")) {
+    if (message.principalSource == PrincipalSource::gitWebhook) {
         if (canReceiveGitWebhook(message.bot,message.routing.at("gitEvent"))) return true;
-        exec("UPDATE conversation_turns SET status='done',reserved_attempt=NULL WHERE message_id=?",{message.id});
+        releaseModelCall(takeReservedConversationCall(message.id));
+        exec("UPDATE conversation_turns SET status='done' WHERE message_id=?",{message.id});
         exec("DELETE FROM conversation_retries WHERE message_id=?",{message.id});
         return false;
     }
     if (message.principalSource == PrincipalSource::channel) {
         if (!message.channelScope.empty() && channelMessageAuthorized(message.id,message.bot)) return true;
     } else if (Access(*this).permitsPerson(turnActor(message),message.bot,Role::decide)) return true;
-    if (const auto attempt = takeReservedConversationCall(message.id)) releaseModelCall(messageModelBudget(message.id),attempt);
     if (message.principalSource == PrincipalSource::channel)
         finishTurn(message,"This channel connection is no longer authorized.",nullptr,"channel_access");
     else finishTurn(message,"You no longer have permission to message this Bot.",nullptr,"access");
@@ -681,12 +678,12 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
         message = loadTurnMessage(id);
         transaction.commit();
     }
-    const auto webhook = message.routing.value("gitEvent",Json(nullptr));
-    const bool notification = webhook.is_object();
+    const bool notification = message.principalSource == PrincipalSource::gitWebhook;
     const bool web = message.channelScope.empty() && !notification;
     auto tools = notification ? std::vector<std::string>{"reply","read_tool_result"} : turnTools;
+    if (!t3.supportsRunTargetedSteer()) std::erase(tools,"message_session");
     if (gitHost && notification) {
-        appendGitNotificationTools(webhook,tools);
+        appendGitNotificationTools(message.routing.at("gitEvent"),tools);
     } else if (gitHost && web) tools.insert(tools.end(),gitTools().begin(),gitTools().end());
     if (web) {
         tools.insert(tools.end(),webTools.begin(),webTools.end());
@@ -715,7 +712,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
     const auto encodeCalls = [](const std::vector<ModelCall>& calls) {
         auto saved = Json::array();
         for (const auto& call : calls) {
-            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason},{"argumentsChecked",true}};
+            Json entry{{"tool",call.tool},{"args",call.args},{"reason",call.reason}};
             if (!call.rejection.empty()) entry["rejection"] = call.rejection;
             saved.push_back(std::move(entry));
         }
@@ -772,8 +769,7 @@ void Store::Impl::runTurn(Id id, Model& model, T3& t3, const Runtime::SoulLoader
                         if (auto rejection = saved.value("rejection",std::string{}); !rejection.empty())
                             calls.push_back({std::move(call),std::move(rejection)});
                         else {
-                            auto checked = checkModelCall(message.bot,std::move(call),offered,notification,
-                                                          !saved.value("argumentsChecked",false));
+                            auto checked = checkModelCall(message.bot,std::move(call),offered,notification);
                             rejectionChanged |= !checked.rejection.empty();
                             calls.push_back(std::move(checked));
                         }
@@ -808,37 +804,44 @@ LIMIT 1
                 return;
             }
             ModelInput input;
-            Id attempt = 0;
             {
                 std::lock_guard lock(mutex);
                 Transaction transaction(db);
                 if (shutdown.stop_requested()) return;
                 if (!authorizeTurn(message)) { transaction.commit(); return; }
+                if (!query(R"SQL(
+SELECT 1 FROM model_budgets WHERE id=? AND (attempts<call_limit OR EXISTS(
+ SELECT 1 FROM conversation_turns WHERE message_id=? AND reserved_attempt IS NOT NULL))
+)SQL",{messageModelBudget(id),id}).next()) {
+                    pauseTurn(message);
+                    transaction.commit();
+                    return;
+                }
                 std::vector<ModelImage> images;
                 auto [offered,machines] = available();
                 const auto context = turnInput(message,step,now,std::move(machines),images);
                 input = {.task = context.at("task"),.event = context.at("event"),.history = context.at("history"),
                          .notes = botNotes,.tools = std::move(offered),.feedback = {},.config = message.routing.at("config"),
                          .images = std::move(images)};
-                attempt = takeReservedConversationCall(id);
-                if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
-                if (!attempt) pauseTurn(message);
-                else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
-                          " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                 transaction.commit();
             }
-            if (!attempt) return;
-            ConversationModelCheckpoint checkpoint{attempt,step,Json::object(),ConversationModelFailure{}};
+            ConversationModelCheckpoint checkpoint{0,step,Json::object(),ConversationModelFailure{}};
             try {
                 authorizeSessionHistory(message.bot,message.channelScope,input.event.at("turn"),t3);
                 authorizeBotToolHistory(message.bot,id,input);
                 {
                     std::lock_guard lock(mutex);
                     Transaction transaction(db);
-                    const bool allowed = authorizeTurn(message) && !shutdown.stop_requested();
-                    if (!allowed) releaseModelCall(messageModelBudget(id),attempt);
+                    if (shutdown.stop_requested()) return;
+                    if (!authorizeTurn(message)) { transaction.commit(); return; }
+                    auto& attempt = checkpoint.attempt;
+                    attempt = takeReservedConversationCall(id);
+                    if (!attempt) attempt = reserveModelCall(messageModelBudget(id),"conversation_turn",id,0,0);
+                    if (!attempt) pauseTurn(message);
+                    else exec("INSERT INTO conversation_steps(message_id,step,attempt_id) VALUES(?,?,?)"
+                              " ON CONFLICT(message_id,step) DO UPDATE SET attempt_id=excluded.attempt_id",{id,step,attempt});
                     transaction.commit();
-                    if (!allowed) return;
+                    if (!attempt) return;
                 }
                 auto response = callModel(message.bot,model,input,0);
                 checkpoint.usage = std::move(response.usage);
@@ -867,8 +870,9 @@ LIMIT 1
             if (!runBotTools({message.bot,id,settings,hasWebEvidence},step,calls,shutdown)) return;
             continue;
         }
-        const bool sessionControl = decision.tool == "message_session" || decision.tool == "interrupt_session";
-        if (sessionControl && (decision.rejection.empty() || sessionEffect)) {
+        const bool steer = decision.tool == "message_session";
+        const bool sessionControl = steer || decision.tool == "interrupt_session";
+        if (sessionControl && (decision.rejection.empty() || sessionEffect || (steer && !t3.supportsRunTargetedSteer()))) {
             if (!runSessionEffect(message,step,decision,decision.rejection.empty(),hasWebEvidence,t3,shutdown)) return;
             continue;
         }

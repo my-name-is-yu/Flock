@@ -56,7 +56,6 @@ Json revisionView(const Statement& row) {
 }
 
 void Store::Impl::initializeMemorySchema() {
-    Transaction tx(db);
     if (sqlite3_exec(db,R"SQL(
 CREATE TABLE IF NOT EXISTS memory_documents(
   doc_key TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, owner_bot TEXT, doc_id TEXT NOT NULL,
@@ -77,7 +76,6 @@ CREATE TABLE IF NOT EXISTS memory_proposals(
   diff_summary TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS memory_proposals_document ON memory_proposals(doc_key,id DESC);
 )SQL",nullptr,nullptr,nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-    tx.commit();
 }
 
 BotNotes Store::Impl::loadNotes(std::string_view bot, const Runtime::SoulLoader& soul, Seconds now) {

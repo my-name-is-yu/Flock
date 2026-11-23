@@ -6,8 +6,6 @@
 #endif
 
 #include <httplib.h>
-#include <sqlite3.h>
-
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
@@ -190,7 +188,7 @@ public:
         return checked(client.Post(path,headers(),data.dump(),"application/json"),status);
     }
     Id request(std::string_view bot, std::string_view text) {
-        return post("/api/requests",{{"botId",bot},{"request",text}},201).at("taskId");
+        return post("/api/requests",{{"botId",bot},{"clientRequestId",actionId()},{"request",text}},201).at("taskId");
     }
     httplib::Headers headers() const { return {{"Origin",origin},{"Sec-Fetch-Site","same-origin"},{"X-Flock-Action","1"}}; }
     static Json checked(const httplib::Result& response, int status) {
@@ -224,6 +222,15 @@ Json conversationReply(const Json& page, Id messageId) {
     }
     check(!result.is_null(),"message received no Bot reply");
     return result;
+}
+
+Json conversationCompletion(const Json& page, Id taskId) {
+    const auto& events = page.at("events");
+    const auto completion = std::ranges::find_if(events,[&](const Json& event) {
+        return event.at("kind") == "completed" && event.at("taskId") == taskId;
+    });
+    check(completion != events.end(),"the conversation omitted the completion");
+    return *completion;
 }
 
 void writeWebIdentities(const std::filesystem::path& path, const Json& accounts) {
@@ -390,16 +397,13 @@ void conversationEntry(const std::filesystem::path& path) {
         .itemId = "comparison-report", .settled = true
     };
     tick(runtime,2);
-    const auto taskPath = "/api/task?bot=release&taskId=" + std::to_string(taskId);
-    const auto completed = browser.get(taskPath);
-    check(completed["id"] == taskId && completed["state"] == "completed","task details did not show the completed comparison");
-    const auto& result = completed.at("result");
-    check(result["kind"] == "completed" && result["taskId"] == taskId && result["data"]["text"] == proposedOptions,
-          "task details lost the completion report");
+    check(store.task(taskId).at("state") == "completed","the comparison did not complete");
+    const auto result = conversationCompletion(browser.get("/api/view?bot=release"),taskId);
+    check(result.at("data").at("text") == proposedOptions,"the conversation lost the completion report");
     model.comparisonResult = result.at("id");
     const auto& reportRun = result.at("data").at("run");
     check(reportRun["threadId"] == "thread-release" && reportRun["runId"] == "run-1" && reportRun["itemId"] == "comparison-report",
-          "task details did not point to the Run and report item that produced the result");
+          "the conversation did not link the Run and report item that produced the result");
 
     const Json message = {{"botId","release"},{"clientMessageId","options-more"},{"text","2案目を詳しく"}};
     const auto receipt = browser.post("/api/messages",message,201);
@@ -420,9 +424,10 @@ void conversationEntry(const std::filesystem::path& path) {
 
     tick(runtime,3);
     const auto page = browser.get("/api/view?bot=release" + since);
-    check(page.at("changedMessageIds") == Json::array({messageId}) &&
-          browser.get("/api/view?bot=triage" + since).at("changedMessageIds").empty(),
+    const auto triage = browser.get("/api/view?bot=triage" + since);
+    check(page.at("changedMessageIds") == Json::array({messageId}) && triage.at("changedMessageIds").empty(),
           "a processed message was not invalidated exclusively for its own Bot");
+    check(triage.at("events").empty() && triage.at("sessionTasks").empty(),"another Bot could see the comparison");
     unsigned questions = 0, answers = 0;
     for (const auto& event : page.at("events")) {
         if (event["kind"] == "conversation_message") {
@@ -440,10 +445,12 @@ void conversationEntry(const std::filesystem::path& path) {
           response["actions"].empty(),"answer did not explain the second option without changing work");
     check(questions == 1 && answers == 1 && store.tasks().size() == 1 && t3.launches == 1,
           "read-only conversation or retry created extra messages, Tasks or Runs");
-    const auto task = browser.get(taskPath);
-    check(task["runs"].size() == 1 && task["runs"][0]["runId"] == reportRun["runId"] && !task.contains("config"),
-          "task details omitted the comparison Run or exposed config");
-    Browser::checked(browser.client.Get("/api/task?bot=triage&taskId=" + std::to_string(taskId)),404);
+    const auto& sessionTasks = page.at("sessionTasks");
+    check(sessionTasks.size() == 1 && sessionTasks.at(0).at("id") == taskId &&
+          sessionTasks.at(0).at("sessions").size() == 1 &&
+          sessionTasks.at(0).at("sessions").at(0).at("runId") == reportRun.at("runId") &&
+          !sessionTasks.at(0).contains("config"),"the Session list omitted the comparison Run or exposed config");
+    const auto runs = store.task(taskId).at("runs");
 
     const auto summary = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","options-summary"},
         {"text","2案目を要約して"}},201);
@@ -453,7 +460,7 @@ void conversationEntry(const std::filesystem::path& path) {
     check(summarized.at("route") == "reply" && summaryText.find("ID で明細の差分を集計") != std::string::npos &&
           summaryText.size() < model.summarySourceSize,"The summary did not condense the selected option");
     check(model.explained == 1 && model.summarized == 1 && store.tasks().size() == 1 && t3.launches == 1 &&
-          browser.get(taskPath).at("runs") == task.at("runs"),"Two read-only answers added work or missed the model calls");
+          store.task(taskId).at("runs") == runs,"Two read-only answers added work or missed the model calls");
 
     const auto estimate = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","estimate"},
         {"text",missingBudgetQuestion}},201);
@@ -468,7 +475,7 @@ void conversationEntry(const std::filesystem::path& path) {
     runtime.runConversations();
     const auto estimateAnswer = conversationReply(browser.get("/api/view?bot=release"),detail.at("messageId"));
     check(estimateAnswer.at("text").get<std::string>().find("100件") != std::string::npos &&
-          store.tasks().size() == 1 && t3.launches == 1 && browser.get(taskPath).at("runs") == task.at("runs"),
+          store.tasks().size() == 1 && t3.launches == 1 && store.task(taskId).at("runs") == runs,
           "the follow-up answer created work or lost the context");
 
     const Json status = {{"botId","release"},{"clientMessageId","with-invalid-settings"},{"text","進捗どうなってる"}};
@@ -708,7 +715,6 @@ void chatGPTConversation(const std::filesystem::path& home) {
         return receipt.at("messageId");
     };
     const auto view = [&] { return browser.get("/api/view?bot=release"); };
-    const auto task = [&](Id id) { return browser.get("/api/task?bot=release&taskId=" + std::to_string(id)); };
     const auto linkedTask = [&](Id messageId) -> Id {
         const auto page = view();
         const auto& events = page.at("events");
@@ -726,7 +732,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     check(conversationReply(view(),request).at("actions").at(0).at("tool") == "start_task" && store.tasks().size() == 1,
           "ordinary composer request did not create exactly one Task");
     const auto releaseTask = linkedTask(request);
-    check(task(releaseTask).at("state") == "running" && t3.launches == 1,
+    check(store.task(releaseTask).at("state") == "running" && t3.launches == 1,
           "the Task did not start one Run");
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed",
@@ -734,9 +740,9 @@ void chatGPTConversation(const std::filesystem::path& home) {
         .itemId = "blockers-report", .settled = true
     };
     tick(runtime,3);
-    const auto completed = task(releaseTask);
+    const auto completed = store.task(releaseTask);
     check(completed.at("state") == "completed","the Session report did not become a completed result");
-    const auto& result = completed.at("result");
+    const auto result = conversationCompletion(view(),releaseTask);
     check(result.at("data").at("run").at("itemId") == "blockers-report","the result lost the report item");
     t3.observations.clear();
 
@@ -750,7 +756,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     const auto clarification = conversationReply(view(),missing);
     check(clarification.at("text") == "What is the planned certificate renewal date?",
           "missing evidence did not produce a question for the user");
-    check(store.tasks().size() == 1 && t3.launches == 1 && task(releaseTask).at("runs") == completed.at("runs"),
+    check(store.tasks().size() == 1 && t3.launches == 1 && store.task(releaseTask).at("runs") == completed.at("runs"),
           "result follow-ups created a Task or changed Runs");
 
     const auto consult = send("consult-verifier","Ask Verifier to confirm the release criteria.");
@@ -770,14 +776,14 @@ void chatGPTConversation(const std::filesystem::path& home) {
           incoming.at("exchangeId") == outgoing.at("exchangeId") && incoming.at("replyTo") == outgoing.at("messageId") &&
           incoming.at("text") == "Publish only after the certificate is renewed.",
           "Verifier's reply did not return to its original exchange");
-    check(task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
+    check(store.task(consultTask).at("state") == "completed" && store.tasks("verifier").size() == 1 && t3.launches == 1,
           "the originating Task did not resume after the consultation");
 
     const auto first = send("notes","Prepare release notes.");
     const auto second = send("checksums","Check artifact checksums in the backup environment.");
     tick(runtime,5);
-    const auto firstTask = task(linkedTask(first));
-    const auto secondTask = task(linkedTask(second));
+    const auto firstTask = store.task(linkedTask(first));
+    const auto secondTask = store.task(linkedTask(second));
     const auto& firstRuns = firstTask.at("runs");
     const auto& secondRuns = secondTask.at("runs");
     check(!firstRuns.empty() && !secondRuns.empty(),"both composer requests must launch a Run");
@@ -799,8 +805,8 @@ void chatGPTConversation(const std::filesystem::path& home) {
               return std::ranges::find(suggestions,run.at("request")) != suggestions.end();
           }),"ambiguous stop did not ask the user to choose between both running tasks");
     check(afterStop.at("activeSessions") == active && store.tasks().size() == taskCount && t3.launches == 3 &&
-          task(firstTask.at("id")).at("runs") == firstTask.at("runs") &&
-          task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
+          store.task(firstTask.at("id")).at("runs") == firstTask.at("runs") &&
+          store.task(secondTask.at("id")).at("runs") == secondTask.at("runs") && t3.interruptions == 0,
           "ambiguous stop changed a Run or created work");
 }
 #endif
@@ -887,7 +893,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
         .itemId = "comparison-report",.settled = true
     };
     tick(*runtime,2);
-    model.comparisonResult = store->latestTaskResult(task).at("id");
+    model.comparisonResult = conversationCompletion(browser.get("/api/view?bot=release"),task).at("id");
     const auto receipt = browser.post("/api/messages",{{"botId","release"},{"clientMessageId","compound"},
         {"text",compoundExplanation}},201);
     runtime->runConversations();
@@ -1067,36 +1073,6 @@ void queuedWebAuthority(const std::filesystem::path& path) {
     }
 }
 
-void legacyWebAuthority(const std::filesystem::path& path) {
-    sqlite3* raw = nullptr;
-    const auto opened = sqlite3_open(path.c_str(),&raw);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
-    check(opened == SQLITE_OK,"Could not open the legacy message fixture");
-    check(sqlite3_exec(raw,R"SQL(
-CREATE TABLE journal(id INTEGER PRIMARY KEY, task_id INTEGER, time INTEGER NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL,
-  conversation_bot_id TEXT, CHECK(task_id IS NOT NULL OR conversation_bot_id IS NOT NULL));
-CREATE TABLE messages(id INTEGER PRIMARY KEY REFERENCES journal(id), bot_id TEXT NOT NULL, client_message_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL, reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL, person_id TEXT NOT NULL,
-  person_root INTEGER NOT NULL CHECK(person_root IN (0,1)), UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
-CREATE TABLE web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
-INSERT INTO web_identity_required VALUES(1);
-INSERT INTO journal VALUES(1,NULL,1,'conversation_message','{}','release');
-INSERT INTO messages VALUES(1,'release','legacy',1,NULL,'Legacy Web request',
-  '{"environmentId":"local-env","projectId":"release","config":{}}','local-owner',1);
-)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"Could not seed the legacy message fixture");
-    Store store(path);
-    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
-        return person == localOwner.id ? std::optional{true} : std::nullopt;
-    });
-    AuthorityModel model;
-    FixedT3 t3;
-    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
-    runtime.runConversations();
-    const auto reply = conversationReply({{"events",store.conversation("release")}},1);
-    check(model.inputs.empty() && store.tasks().empty() && reply.at("route") == "access",
-          "A legacy Web receipt ran with authority inferred from the saved root flag or person ID");
-}
-
 void memoryAutomationEndpoints(const std::filesystem::path& path) {
     Store store(path,[](auto) { return "Initial convention"; });
     auto cb = callbacks();
@@ -1196,7 +1172,6 @@ int main(int argc,char** argv) {
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
         queuedWebAuthority(directory.path / "queued-web-authority.sqlite");
-        legacyWebAuthority(directory.path / "legacy-web-authority.sqlite");
         memoryAutomationEndpoints(directory.path / "automation.sqlite");
         std::cout << "web conversation behavior passed\n";
     } catch (const std::exception& error) {

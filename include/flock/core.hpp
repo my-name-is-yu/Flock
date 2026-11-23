@@ -114,6 +114,7 @@ struct Command {
     RunRef candidate; // User-specified reconciliation hint. T3 must verify ownership.
     std::string candidateQuestionId;
     std::string ownerBotId;
+    std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
@@ -179,6 +180,8 @@ struct SessionCounts {
 class T3 {
 public:
     virtual ~T3() = default;
+    // A steer must affect only the requested Run, even if another Run takes over.
+    virtual bool supportsRunTargetedSteer() const { return false; }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
@@ -252,11 +255,12 @@ public:
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
                      const Json& data = Json::object(), const ApplyBotChange& = {});
-    Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
-                       std::string_view title, std::string_view prompt);
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&);
+    // Creates an explicit Task for an authorized person. An identical retry returns its Task ID.
+    Id submitRequest(const Person&, std::string_view botId, std::string_view clientRequestId,
+                     std::string_view request, const IntakeResolver&);
     // Enqueues a Bot message for Runtime. Retrying the same key and payload returns the same receipt.
     Json receive(const Person&, const Intake& routing, std::string_view clientMessageId, std::string_view text,
                  Id replyToMessageId = 0, const Json& attachments = Json::array());
@@ -284,8 +288,6 @@ public:
     // On the initial read only the position is needed, before loading the first page.
     std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
-    // Latest completion or Session report for the Task's current revision.
-    Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,
@@ -329,7 +331,7 @@ private:
     std::unique_ptr<Impl> p_;
     friend class Runtime;
     friend class Access;
-    friend class ParticipationStore;
+    friend class T3Connections;
     friend class RootDelivery;
     friend class SessionHandoff;
 };
@@ -375,6 +377,8 @@ public:
     // Let admitted work settle while stopping further dispatch.
     void requestStop();
 private:
+    friend class SessionHandoff;
+    void freezeSpecialistWorkForRecovery(Id channel, Id generation);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

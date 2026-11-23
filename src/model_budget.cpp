@@ -16,16 +16,6 @@ bool sharedMemoryTool(std::string_view tool) {
     return tool == "read_memory" || tool == "memory_history" || tool == "propose_memory_edit" ||
            tool == "apply_memory_edit" || tool == "revert_memory_edit";
 }
-
-bool argumentsMayHaveBeenRedacted(const Decision& call) {
-    if (!call.args.is_object()) return SecretRedactor::mayContainLegacyRedaction(call.args);
-    for (const auto& [key,value] : call.args.items()) {
-        if (SecretRedactor::mayContainLegacyRedaction(key) ||
-            (!(value.is_string() && redactsProse(call.tool,key)) && SecretRedactor::mayContainLegacyRedaction(value)))
-            return true;
-    }
-    return false;
-}
 }
 
 bool modelArgumentsContainProtected(const SecretRedactor& scrub, std::string_view tool, const Json& args) {
@@ -47,7 +37,6 @@ Id modelCallLimit(const Json& config) {
 }
 
 void Store::Impl::initializeModelBudgetSchema() {
-    Transaction transaction(db);
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS model_budgets(
   id TEXT PRIMARY KEY, call_limit INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
@@ -60,7 +49,6 @@ CREATE TABLE IF NOT EXISTS model_attempts(
   message_id INTEGER REFERENCES messages(id), task_id INTEGER REFERENCES tasks(id),
   event_id INTEGER REFERENCES events(id), usage TEXT)
 )SQL");
-    transaction.commit();
 }
 
 std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) {
@@ -72,7 +60,6 @@ std::string Store::Impl::messageModelBudget(Id messageId) {
     auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
     if (!row.next()) throw Conflict("The originating message is missing");
     const auto routing = row.json(0);
-    if (auto saved = field(routing,"modelBudgetId"); !saved.empty()) return saved;
     return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
 }
 
@@ -110,9 +97,24 @@ Id Store::Impl::takeReservedConversationCall(Id message) {
     return id;
 }
 
-void Store::Impl::releaseModelCall(std::string_view budget, Id attempt) {
-    exec("DELETE FROM model_attempts WHERE id=? AND budget_id=?",{attempt,budget});
-    if (sqlite3_changes(db)) exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
+Id Store::Impl::takeReservedTaskCall(Id event) {
+    auto reserved = query("SELECT reserved_attempt FROM events WHERE id=? AND reserved_attempt IS NOT NULL",{event});
+    if (!reserved.next()) return 0;
+    const auto id = reserved.number(0);
+    exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event});
+    return id;
+}
+
+void Store::Impl::releaseModelCall(Id attempt) {
+    if (!attempt) return;
+    std::string budget;
+    {
+        auto removed = query("DELETE FROM model_attempts WHERE id=? RETURNING budget_id",{attempt});
+        if (!removed.next()) return;
+        budget = removed.string(0);
+        removed.next();
+    }
+    exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
 }
 
 Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,
@@ -133,7 +135,7 @@ SecretRedactor Store::Impl::modelCallRedactor(std::string_view bot, std::string_
 }
 
 ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const std::vector<std::string>& offered,
-                                      bool gitNotification, bool legacy) {
+                                      bool gitNotification) {
     std::string rejection;
     if (std::ranges::find(offered,call.tool) == offered.end()) {
         rejection = "Tool unavailable for this turn";
@@ -151,8 +153,6 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
         }
         if (modelArgumentsContainProtected(scrub,call.tool,call.args))
             rejection = "Tool arguments contain protected material. Use a secret reference where supported.";
-        else if (legacy && argumentsMayHaveBeenRedacted(call))
-            rejection = "Saved tool arguments may have been redacted. Submit a fresh call.";
         if (rejection.empty()) call.reason = scrub.text(call.reason);
     }
     if (!rejection.empty()) {

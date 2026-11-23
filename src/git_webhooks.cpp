@@ -1,4 +1,4 @@
-#include "storage.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 
@@ -131,9 +131,9 @@ ORDER BY id,pr_number LIMIT ?
              {taskId,unixTime(),scrub.record(event),bot});
         const auto message = last();
         exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0 FROM messages WHERE bot_id=?
-)SQL",{message,bot,key,routing,bot});
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,NULL,'',?,'git-webhook',0,? FROM messages WHERE bot_id=?
+)SQL",{message,bot,key,routing,static_cast<int>(conversation::PrincipalSource::gitWebhook),bot});
         exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{message});
     }
     transaction.commit();

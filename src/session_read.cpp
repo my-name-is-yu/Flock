@@ -84,7 +84,7 @@ public:
             const auto cursor = reference(args,"cursor");
             anchor = resolve(cursor,RefKind::search);
             if (anchor) {
-                if ((anchor->payload != scopedKey && anchor->payload != key) ||
+                if (anchor->payload != scopedKey ||
                     !permitted(anchor->target) || !readable(anchor->target,Clock::now()+searchTimeLimit))
                     return scopedResult(failure(unavailable));
                 after = anchor->target;
