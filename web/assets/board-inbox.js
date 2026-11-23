@@ -740,13 +740,13 @@ export function mountBoardInbox({
       epoch++;
       if (isCurrent()) message.textContent = '';
       apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
-      onAccepted(item, 'Done.');
+      onAccepted(item, { decision });
       void refresh();
     } catch (error) {
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
         remember(answer, { target: fingerprint, text: data.text, stale: true });
       }
-      if (inline) onAccepted(item, errors[error.message] ?? 'Could not confirm your response.');
+      if (inline) onAccepted(item, { error: errors[error.message] ?? 'Could not confirm your response.' });
       if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm your response. Check the request before trying again.';
       if (owner === viewer) await refresh();
     } finally {

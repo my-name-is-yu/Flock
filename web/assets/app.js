@@ -101,6 +101,21 @@ const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
 };
+// Confirms what the response will do, so the person isn't left with a bare "Done".
+const decisionConfirmations = {
+  answer: (name) => `Sent your answer to ${name}.`,
+  allow_once: (name) => `Allowed once. ${name} is continuing.`,
+  always_allow: (name) => `Allowed and saved as a rule. ${name} is continuing.`,
+  allow_next_time: (name) => `Saved as a rule. ${name} won’t ask about this again.`,
+  deny: (name) => `Denied. ${name} won’t try this again for this request.`,
+  approve: () => 'Approved.',
+  request_changes: (name) => `Sent your change request to ${name}.`,
+  extend: () => 'Deadline extended.',
+  reconcile: () => 'Checking with T3 again.',
+  supply: () => 'Secret saved.',
+  link_pr: () => 'Pull request linked.',
+  reject_pr: () => 'Pull request rejected.',
+};
 const errors = {
   invalid_text: 'Check the message and its length.', invalid_deadline: 'Set a deadline in the future.',
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
@@ -2964,9 +2979,10 @@ const decisions = mountBoardInbox({
     renderTimeline();
     scheduleReadCheck();
   },
-  onAccepted(item, message) {
+  onAccepted(item, { decision, error }) {
     if (view?.id !== item.botId) return;
-    setNotice(view, message);
+    const name = bots.find((bot) => bot.id === item.botId)?.name ?? 'The Bot';
+    setNotice(view, error ?? decisionConfirmations[decision]?.(name) ?? 'Response sent.', !!error);
     void view.refresh();
   },
 });
