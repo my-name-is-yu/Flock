@@ -153,12 +153,12 @@ struct Runtime::Impl {
 
     void runMaintenance(std::optional<MaintenanceCheck>& completed, std::string_view operation, const auto& work) {
         const auto now = options.clock();
-        std::optional<MaintenanceCheck> check;
-        deferContendedWork("database change stamp",[&] { check.emplace(db.changeStamp(),now); });
-        if (check && check == completed) return;
+        std::optional<MaintenanceCheck> beforeScan;
+        deferContendedWork("database change stamp",[&] { beforeScan.emplace(db.changeStamp(),now); });
+        if (beforeScan && beforeScan == completed) return;
         deferContendedWork(operation,[&] {
-            const std::optional<Seconds> second = work();
-            if (check && second) completed.emplace(check->stamp,*second);
+            const std::optional<Seconds> scannedAt = work();
+            if (beforeScan && scannedAt) completed.emplace(beforeScan->stamp,*scannedAt);
         });
     }
 

@@ -74,7 +74,7 @@ std::optional<std::string> formPercentDecode(std::string_view source) {
 }
 
 template <typename Decode>
-bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensitive, Decode decode) {
+bool requiresUrlRedactionAfterDecoding(std::string_view source, const SensitiveText& sensitive, Decode decode) {
     constexpr unsigned maxPercentDecodeLayers = 4;
     std::string current(source);
     for (unsigned layer = 0; layer <= maxPercentDecodeLayers; ++layer) {
@@ -90,12 +90,12 @@ bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensit
 
 bool sensitiveUrl(std::string_view source, const SensitiveText& sensitive) {
     if (source.empty()) return false;
-    if (sensitiveAfterDecoding(source,sensitive,percentDecode)) return true;
+    if (requiresUrlRedactionAfterDecoding(source,sensitive,percentDecode)) return true;
     const auto query = source.find('?');
     const auto fragment = source.find('#');
     if (query == source.npos || (fragment != source.npos && fragment < query)) return false;
     const auto end = fragment == source.npos ? source.size() : fragment;
-    return sensitiveAfterDecoding(source.substr(query + 1,end - query - 1),sensitive,formPercentDecode);
+    return requiresUrlRedactionAfterDecoding(source.substr(query + 1,end - query - 1),sensitive,formPercentDecode);
 }
 
 bool safeUrl(std::string_view source) {
