@@ -301,9 +301,11 @@
 }
 
 
+/* Lines up with the Bot's bubbles, whose avatar column it follows. */
 .board-inbox-card.policy-inline-card {
-  width: min(100%, 33rem);
+  width: min(100% - var(--avatar-col, 0px), 33rem);
   margin-block: .6rem;
+  margin-inline-start: var(--avatar-col, 0px);
   padding: .9rem 1rem;
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);

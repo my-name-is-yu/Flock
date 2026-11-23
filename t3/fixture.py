@@ -497,6 +497,7 @@ class Fixture(BaseHTTPRequestHandler):
             if state.get("selectedRunStatus") == "running":
                 rows.append(self.item(thread_id, 1, "selected-run", "user_message", state["selectedInput"], source="mcp"))
         if scenario == "paged-report":
+            summary["createdAt"] = state.get("reportSessionCreatedAt", "2026-11-21T01:00:00.000Z")
             rows[1]["text"] = "x" * 7000 + "end of report"
             rows.extend(self.item(thread_id, i, "other", "assistant_message", "unrelated report") for i in range(2, 5))
             if "itemId" in args and state.get("changeReportDuringRead"):

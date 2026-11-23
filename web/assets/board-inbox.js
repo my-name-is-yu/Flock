@@ -195,7 +195,7 @@ function decisionCard(item, submit, source, question, saving) {
 
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
-  const prompt = approval ? approvalSummary(item.prompt) : item.prompt;
+  const prompt = approval ? approvalSummary(item.prompt, item) : item.prompt;
   if (prompt && prompt !== item.requestTitle && prompt !== item.request) bodyLines.push(prompt);
   // A bare pull request URL in the text repeats the card, so drop that line.
   const text = bodyLines.join('\n').split('\n')
@@ -754,13 +754,13 @@ export function mountBoardInbox({
       epoch++;
       if (isCurrent()) message.textContent = '';
       apply(items.filter((entry) => decisionTarget(entry) !== fingerprint));
-      onAccepted(item, 'Done.');
+      onAccepted(item, { decision });
       void refresh();
     } catch (error) {
       if (answer && error.message === 'request_changed' && drafts.get(answer) === saved) {
         remember(answer, { target: fingerprint, text: data.text, stale: true });
       }
-      if (inline) onAccepted(item, errors[error.message] ?? 'Could not confirm your response.');
+      if (inline && owner === viewer) onAccepted(item, { error: errors[error.message] ?? 'Could not confirm your response.' });
       if (isCurrent()) message.textContent = errors[error.message] ?? 'Could not confirm your response. Check the request before trying again.';
       if (owner === viewer) await refresh();
     } finally {
