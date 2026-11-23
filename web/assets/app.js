@@ -707,7 +707,7 @@ function newBotRow() {
   const mark = node('span', 'new-bot-mark');
   mark.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
   const text = node('span', 'bot-text');
-  text.append(node('span', 'bot-name', 'New bot'), node('span', 'bot-preview', 'No Bots yet'));
+  text.append(node('span', 'bot-name', 'New Bot'), node('span', 'bot-preview', 'No Bots yet'));
   select.append(mark, text);
   emptyBotRow.append(select);
   return emptyBotRow;
@@ -2032,7 +2032,7 @@ function conversationRows(data, events, keep, source) {
         for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
         empty.append(flock, node('h2', null, 'Create your first Bot'),
           node('p', null, 'A Bot takes your requests, runs the work in T3 Sessions and reports back here.'),
-          button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+          button('New Bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
       } else {
         empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
       }
