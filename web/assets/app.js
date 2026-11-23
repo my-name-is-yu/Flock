@@ -1426,13 +1426,12 @@ function eventCard(event, context, place, report, approval) {
   if (data.sessionWake || data.sessionInvitation) {
     const session = data.sessionWake ?? data.sessionInvitation;
     const name = `T3 Session “${session.title || session.threadId}”`;
-    const explanation = {
-      finished: 'Run finished',
-      failed: 'Run did not complete successfully',
-      waiting_for_person: 'Run needs input',
-      unknown: 'Run status is unavailable',
-    }[session.reason] ?? 'Run status is unavailable';
-    const text = data.sessionWake ? `${explanation} in ${name}` : `Invited by ${session.inviterName} to ${name}`;
+    const outcome = {
+      finished: 'finished its work',
+      failed: 'stopped before finishing',
+      waiting_for_person: 'needs your input',
+    }[session.reason] ?? 'sent an update Flock couldn’t read';
+    const text = data.sessionWake ? `${name} ${outcome}` : `Invited by ${session.inviterName} to ${name}`;
     const note = node('article', 'system-note session-event', `${text} · `);
     note.id = `event-${event.id}`;
     note.tabIndex = -1;
@@ -1543,7 +1542,7 @@ function eventCard(event, context, place, report, approval) {
     }
     replyTarget = ['Reply to this review', { kind: 'message', messageId: event.id, summary: data.title }];
   } else if (event.kind === 'report') {
-    copy = data.evidenceStatus === 'report_unavailable' ? 'The Run ended and its report is unavailable.'
+    copy = data.evidenceStatus === 'report_unavailable' ? 'The Session ended, but its report couldn’t be loaded.'
       : data.report || 'The session submitted a report.';
     text.textContent = copy;
     text.classList.add('foldable-text');
@@ -1552,7 +1551,7 @@ function eventCard(event, context, place, report, approval) {
     bubble.append(text);
     if (data.report) replyTarget = ['Reply to this result', { kind: 'result', messageId: event.id, summary: data.report }];
     if (data.status && data.status !== 'completed') {
-      bubble.append(node('p', 'event-reason', `Run status: ${stateLabels[data.status] ?? data.status}`));
+      bubble.append(node('p', 'event-reason', `Session ${(stateLabels[data.status] ?? data.status).toLowerCase()}`));
     }
     if (data.evidenceStatus && data.detail) bubble.append(node('p', 'event-reason', data.detail));
     if (data.truncated) bubble.append(node('p', 'event-reason', 'Open T3 to read the full report.'));

@@ -28,9 +28,9 @@ struct SessionEffect {
             return {{"ok",true},{"effect","interrupt_requested"},{"taskId",taskId}};
         if (outcome == InterruptOutcome::AlreadyTerminal)
             return {{"ok",false},{"taskId",taskId},{"outcome","already_terminal"},
-                    {"error","The assigned Run already ended"}};
+                    {"error","The Session already finished"}};
         return {{"ok",false},{"taskId",taskId},{"outcome","no_active_run"},
-                {"error","T3 has no active Run to interrupt"}};
+                {"error","The Session has no work in progress to stop"}};
     }
 };
 }
