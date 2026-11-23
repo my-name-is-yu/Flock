@@ -67,31 +67,33 @@ AND NOT EXISTS (SELECT 1 FROM deleted_bots d WHERE d.bot=w.bot_id)
 )SQL",{repo.host,repo.repo,pr,task}).next();
 }
 
-bool Store::Impl::watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest& pr,
+bool Store::Impl::watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest& pr,
                              GitWatchStart start) {
     const auto& repo = pr.target.base;
     if (gitPrWatchUnavailable(repo,pr.number,task)) return false;
     auto prior = query("SELECT task_id,event_cursor FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)",
                        {repo.host,repo.repo,pr.number});
-    if (prior.next() && prior.number(0) != task) {
+    const bool hasPriorWatch = prior.next();
+    const auto headObservedAt = hasPriorWatch ? latestGitWebhookId() : deliveryCursor;
+    if (hasPriorWatch && prior.number(0) != task) {
         const auto previousDeliveryCursor = prior.number(1);
         exec("INSERT INTO git_pr_watch_origins VALUES(?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,repo.repo,pr.number,previousDeliveryCursor});
-        if (start == GitWatchStart::operationIntent) eventCursor = latestGitWebhookId();
+        if (start == GitWatchStart::operationIntent) deliveryCursor = headObservedAt;
         exec(R"SQL(
 UPDATE git_pr_watches SET task_id=?,bot_id=?,run=?,url=?,event_cursor=? WHERE (host,repo,pr_number)=(?,?,?)
-)SQL",{task,bot,run,pr.url,eventCursor,repo.host,repo.repo,pr.number});
+)SQL",{task,bot,run,pr.url,deliveryCursor,repo.host,repo.repo,pr.number});
     } else {
         exec(R"SQL(
 INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
  DO UPDATE SET url=excluded.url
-)SQL",{repo.host,repo.repo,pr.number,task,bot,run,pr.url,eventCursor});
+)SQL",{repo.host,repo.repo,pr.number,task,bot,run,pr.url,deliveryCursor});
     }
     if (!pr.headSha.empty()) {
         exec(R"SQL(
 INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
  DO UPDATE SET head_sha=excluded.head_sha WHERE synchronized=0
-)SQL",{repo.host,repo.repo,pr.number,eventCursor,pr.headSha});
+)SQL",{repo.host,repo.repo,pr.number,headObservedAt,pr.headSha});
     }
     gitWebhooksDrainedAt.reset();
     return true;

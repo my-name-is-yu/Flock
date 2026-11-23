@@ -30,8 +30,9 @@ bool Store::receiveGitWebhook(const GitWebhook& event) {
     std::lock_guard lock(p_->mutex);
     const auto scrub = p_->sharedRedactor();
     scrub.requirePublic({repo.host,repo.repo,event.eventId,event.action,sha});
-    const Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
+    Json data{{"kind",event.kind},{"action",event.action},{"prNumbers",event.prNumbers},
         {"headSha",sha},{"summary",bounded(scrub.text(event.summary),4000)},{"jobId",event.jobId}};
+    if (!event.requestedReviewer.empty()) data["requestedReviewer"] = bounded(scrub.text(event.requestedReviewer),100);
     Transaction transaction(p_->db);
     p_->exec("INSERT INTO git_webhook_events(host,event_id,repo,data,payload_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING",
              {repo.host,event.eventId,repo.repo,data,digest.empty() ? Json(nullptr) : Json(digest)});
@@ -52,6 +53,22 @@ void Store::Impl::gitInboxItem(const Json& task, std::string_view key, std::stri
     const auto id = task.at("id");
     if (!query("SELECT 1 FROM pr_review_items WHERE task_id=? AND git_key=?",{id,key}).next())
         insertPrReview(task,url,title,prompt,key);
+}
+
+std::string gitWebhookKey(Id event, Id pr) {
+    return "webhook/" + std::to_string(event) + "/" + std::to_string(pr);
+}
+
+Id Store::Impl::matchingReviewRequestWebhook(const GitRepository& repo, Id pr, Id after, const Json& reviewers) const {
+    auto match = query(R"SQL(
+SELECT e.id FROM git_webhook_events e
+WHERE e.host=? AND e.repo=? AND e.id>?
+ AND json_extract(e.data,'$.kind')='pull_request' AND json_extract(e.data,'$.action')='review_requested'
+ AND EXISTS (SELECT 1 FROM json_each(e.data,'$.prNumbers') p WHERE p.value=?)
+ AND lower(json_extract(e.data,'$.requestedReviewer')) IN (SELECT lower(value) FROM json_each(?))
+ORDER BY e.id LIMIT 1
+)SQL",{repo.host,repo.repo,after,pr,reviewers.dump()});
+    return match.next() ? match.number(0) : 0;
 }
 
 bool Store::Impl::canReceiveGitWebhook(std::string_view bot, const Json& event) {
@@ -122,11 +139,12 @@ ORDER BY id,pr_number LIMIT ?
         const auto task = load(taskId);
         event.erase("botId");
         event.erase("deliveryId");
+        event.erase("requestedReviewer");
         const auto kind = field(event,"kind");
         const auto action = field(event,"action");
         const auto scrub = sharedRedactor();
         event["summary"] = bounded(scrub.text(field(event,"summary")),4000);
-        const auto key = "webhook/" + std::to_string(delivery.get<Id>()) + "/" + pr.dump();
+        const auto key = gitWebhookKey(delivery.get<Id>(),pr.get<Id>());
         const auto url = field(event,"url");
         const auto prompt = field(event,"summary");
         std::string title;

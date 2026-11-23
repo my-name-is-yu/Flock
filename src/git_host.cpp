@@ -476,10 +476,12 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             result["watchAttached"] = watchGitPr(taskId,bot,runJson(context.run),eventCursor,
                                                  {{repo,repo,{},{}},pr,url,{},sha,false},GitWatchStart::mutationAdmission);
         }
-        if ((requested && result.at("watchAttached") == true) || decision.tool == "git_submit_review")
-            gitInboxItem(load(taskId),"review/" + actionId(),url,
+        if ((requested && result.at("watchAttached") == true) || decision.tool == "git_submit_review") {
+            const auto webhook = requested ? matchingReviewRequestWebhook(repo,pr,eventCursor,args.at("reviewers")) : 0;
+            gitInboxItem(load(taskId),webhook ? gitWebhookKey(webhook,pr) : "review/" + actionId(),url,
                 requested ? "Pull request awaiting review" : "Pull request review submitted",
                 requested ? "Review requested on the Git host." : field(args,"verdict"));
+        }
     }
     exec("UPDATE git_mutations SET result=?1,dedupe=CASE WHEN json_extract(?1,'$.status')='failed' THEN NULL ELSE dedupe END"
          " WHERE task_id=?2 AND invocation=?3",{result,taskId,key});

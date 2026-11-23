@@ -50,6 +50,7 @@ std::string effectiveDoneWhen(const Json& task);
 Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
+std::string gitWebhookKey(Id event, Id pr);
 
 enum class RequestJournal { record, skip };
 
@@ -212,11 +213,12 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     Id latestGitWebhookId() const;
+    Id matchingReviewRequestWebhook(const GitRepository&, Id pr, Id after, const Json& reviewers) const;
     std::set<GitPrKey> gitPrMutationsInFlight;
     class GitPrMutationClaim;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
     bool gitPrWatchUnavailable(const GitRepository&, Id pr, Id task) const;
-    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&,
+    bool watchGitPr(Id task, std::string_view bot, const Json& run, Id deliveryCursor, const GitPullRequest&,
                     GitWatchStart = GitWatchStart::operationIntent);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
     std::vector<std::string> gitCredentials;

@@ -108,6 +108,7 @@ void deletedBotWatchHandoff(std::string_view tool) {
     HandoffModel model;
     Sessions sessions;
     const std::string newHead(40,'b');
+    const bool requestsReview = tool == "git_request_review";
     Id retired, sibling, replacement;
     const auto mutation = [&](Id task) {
         Json args{{"host",hostName},{"repo",repoName},{"taskId",task},{"prNumber",1}};
@@ -168,8 +169,20 @@ void deletedBotWatchHandoff(std::string_view tool) {
         std::promise<void> releaseHost;
         host->beforeCall = [&,webhookQueued,resume = releaseHost.get_future().share()](const GitContext& context) {
             if (context.botId != "replacement") return;
-            webhookQueued->set_value(store.receiveGitWebhook({hostName,"during-handoff",repoName,"ci","completed",{1},newHead,
-                                                               "New watch before host response",0}));
+            const auto saveReviewRequests = [&] {
+                if (!requestsReview) return true;
+                return store.receiveGitWebhook({hostName,"unrelated-review",repoName,"pull_request","review_requested",{1},
+                                                newHead,"Requested Bob separately",0,{},"Bob"}) &&
+                       store.receiveGitWebhook({hostName,"matching-review",repoName,"pull_request","review_requested",{1},
+                                                newHead,"Requested Alice",0,{},"Alice"});
+            };
+            webhookQueued->set_value(
+                store.receiveGitWebhook({hostName,"shared-head-during-handoff",repoName,"ci","completed",{},sha,
+                                         "CI activity for both PRs before synchronization",0}) &&
+                store.receiveGitWebhook({hostName,"synchronize-during-handoff",repoName,"pull_request","synchronize",{1},newHead,
+                                         "New head before host response",0}) &&
+                store.receiveGitWebhook({hostName,"during-handoff",repoName,"ci","completed",{1},newHead,
+                                         "New watch before host response",0}) && saveReviewRequests());
             resume.wait();
         };
         model.queueTool(store,"replacement","claim-retired-watch",mutation(replacement),queueEventBeforeWatchTransfer);
@@ -198,11 +211,27 @@ void deletedBotWatchHandoff(std::string_view tool) {
         runtime.runConversations();
         check(historyCount(store,retired,"git_webhook") == 0 && historyCount(store,sibling,"git_webhook") == 0,
               "Handoff delivered an old event to the retired task or changed a shared commit's attribution");
+        check(webhookWasUndelivered(path,"shared-head-during-handoff"),"Handoff backdated a head change past ambiguous CI activity");
         const auto history = store.history(replacement,0,200).dump();
-        check(historyCount(store,replacement,"git_webhook") == 3 && history.find("during-handoff") != std::string::npos &&
+        check(historyCount(store,replacement,"git_webhook") == (requestsReview ? 6 : 4) &&
+              history.find("\"during-handoff\"") != std::string::npos &&
+              history.find("synchronize-during-handoff") != std::string::npos &&
               history.find("after-handoff-explicit") != std::string::npos &&
               history.find("after-handoff-commit") != std::string::npos && history.find("before-handoff") == std::string::npos,
               "The replacement watch lost new activity or replayed an old event after restart");
+        if (requestsReview) {
+            const auto inbox = store.inbox(localOwner,"replacement");
+            const auto matching = std::ranges::find_if(inbox,[](const Json& item) {
+                return item.at("prompt") == "Review requested on the Git host.";
+            });
+            check(history.find("matching-review") != std::string::npos &&
+                  history.find("unrelated-review") != std::string::npos && inbox.size() == 2 && matching != inbox.end(),
+                  "The review request lost a conversation event or created a duplicate inbox item");
+            store.decideInbox(localOwner,target(*matching),"approve");
+            const auto remaining = store.inbox(localOwner,"replacement");
+            check(remaining.size() == 1 && remaining.front().at("prompt") == "Requested Bob separately",
+                  "Review-request correlation removed an unrelated inbox item");
+        }
 
         const auto calls = host->hostCalls;
         const auto blocked = model.runTool(store,runtime,"sibling","reclaim-active-watch",mutation(sibling));
