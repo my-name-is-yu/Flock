@@ -160,13 +160,8 @@ function decisionCard(item, submit, source, question, saving) {
 
   const submeta = element('div', '', 'board-inbox-submeta');
   const parts = [];
-  if (prInfo) {
-    const link = element('a', prInfo.displayUrl, 'board-inbox-submeta-link');
-    link.href = prInfo.href;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    parts.push(link);
-  } else if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
+  // The pull request card below carries the link; the header only names the kind of decision.
+  if (item.itemKind !== 'policy_approval' && labels[item.itemKind]) {
     parts.push(element('span', labels[item.itemKind]));
   }
   if (item.status === 'expired') parts.push(element('span', 'Expired'));
@@ -183,18 +178,10 @@ function decisionCard(item, submit, source, question, saving) {
   const bodyLines = [];
   if (item.request && item.request !== item.requestTitle) bodyLines.push(item.request);
   if (item.prompt && item.prompt !== item.requestTitle && item.prompt !== item.request) bodyLines.push(item.prompt);
-  if (bodyLines.length || prInfo) {
-    const body = element('p', bodyLines.join('\n'), 'board-inbox-body');
-    if (prInfo) {
-      const inlinePr = element('a', '', 'board-inbox-inline-pr');
-      inlinePr.href = prInfo.href;
-      inlinePr.target = '_blank';
-      inlinePr.rel = 'noopener noreferrer';
-      inlinePr.append(iconSpan(svgIcons.pr), element('span', 'View PR'));
-      body.append(inlinePr);
-    }
-    article.append(body);
-  }
+  // A bare pull request URL in the text repeats the card, so drop that line.
+  const text = bodyLines.join('\n').split('\n')
+    .filter((line) => !prInfo || ![item.prUrl, prInfo.href].includes(line.trim())).join('\n').trim();
+  if (text) article.append(element('p', text, 'board-inbox-body'));
 
   if (item.prUrl) {
     article.append(prPreviewCard(item.prUrl, item.prTitle || 'Pull request'));
