@@ -73,7 +73,8 @@ Json scopedResult(Json result, Json sessions = Json::array()) {
 bool humanSessionRequest(const conversation::Message& message) {
     return message.channelScope.empty() &&
         (message.principalSource == conversation::PrincipalSource::trusted ||
-         message.principalSource == conversation::PrincipalSource::web);
+         message.principalSource == conversation::PrincipalSource::web ||
+         message.principalSource == conversation::PrincipalSource::session);
 }
 
 std::set<std::string> configuredSessionEnvironments(const Json& routing) {
@@ -97,7 +98,7 @@ public:
         const auto status = argument(args,"status",128);
         const auto limit = pageSize(args);
         const auto key = Json::array({filters.query,project,status,filters.from,filters.to});
-        auto environments = store_.connectedSearchEnvironments(message_);
+        auto environments = channelScope_.empty() ? store_.connectedSessionEnvironments(message_) : std::set<std::string>{};
         const bool connected = !environments.empty();
         const auto configuredProject = connected ? std::string{} : field(message_.routing,"projectId");
         if (!connected && channelScope_.empty()) environments = configuredSessionEnvironments(message_.routing);
@@ -166,7 +167,7 @@ public:
             if (timedOut && scanned == 0) return scopedResult(failure(searchTimedOut));
             std::lock_guard lock(store_.mutex);
             Transaction transaction(store_.db);
-            if ((connected && environments != store_.connectedSearchEnvironments(message_)) ||
+            if ((connected && environments != store_.connectedSessionEnvironments(message_)) ||
                 (anchor && !permitted(anchor->target,false,connected))) return scopedResult(failure(unavailable));
             std::erase_if(matches,[&](const Candidate& row) { return !permitted(row.target,false,connected); });
             if (matches.size() <= limit && !timedOut && scanned < scanLimit) continue;
@@ -200,6 +201,10 @@ public:
                     {"title",display(item.title,240)},{"project",display(item.project,240)},
                     {"status",display(item.status,128)},{"createdAt",display(item.createdAt,30)},
                     {"updatedAt",display(item.updatedAt,30)},{"matchExcerpt",display(match.excerpt,480)}});
+                if (connected) {
+                    items.back()["environmentId"] = display(target.environmentId,256);
+                    items.back()["threadId"] = display(target.threadId,256);
+                }
             }
             if (nextIndex < batch.size() || catalogTruncated || !progress.at("recorded").is_null()) {
                 auto remaining = Json::array();
@@ -220,7 +225,7 @@ public:
     ApprovalGate authorizeEventTool(const conversation::Message& message, int step, const Decision& call) {
         std::lock_guard lock(store_.mutex);
         Transaction tx(store_.db);
-        const auto session = resolve(reference(call.args,"sessionRef"),RefKind::session);
+        const auto session = eventSession(call.args);
         if (!session || !inSessionScope(session->target,session->payload == connectedScope)) return ApprovalGate::allow;
         const auto resource = Resource::sessionRead(session->target.environmentId,session->target.threadId);
         if (policy_.forbidden(bot_,resource.action,resource.target)) return ApprovalGate::allow;
@@ -352,17 +357,15 @@ private:
     std::optional<SessionTarget> approved_;
 
     bool inSessionScope(const SessionTarget& target, bool connected) const {
-        if (connected)
-            return policy_.allows(bot_,Action::environment_inspect,target.environmentId) &&
-                store_.connectedSearchEnvironments(message_).contains(target.environmentId);
         if (!channelScope_.empty()) {
             std::lock_guard lock(store_.mutex);
-            if (!store_.query(R"SQL(
+            return store_.query(R"SQL(
 SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN channel_tasks c ON c.task_id=t.id
+JOIN channel_messages m ON m.message_id=c.message_id AND m.person_id=?
 WHERE t.bot_id=? AND c.scope_key=? AND r.environment_id=? AND r.thread_id=?
-)SQL",{bot_,channelScope_,target.environmentId,target.threadId}).next()) return false;
+)SQL",{message_.admittedActor.id,bot_,channelScope_,target.environmentId,target.threadId}).next();
         }
-        return true;
+        return !connected || store_.connectedSessionAccess(message_,target);
     }
 
     bool permitted(const SessionTarget& target, bool dispatched, bool connected) const {
@@ -483,8 +486,16 @@ JOIN json_each(?3) target ON target.value=entry.value
         return std::move(resolved->payload);
     }
 
+    std::optional<Reference> eventSession(const Json& args) const {
+        const auto ref = reference(args,"sessionRef");
+        if (!ref.empty()) return resolve(ref,RefKind::session);
+        SessionTarget target{argument(args,"environmentId",256),argument(args,"threadId",256)};
+        if (target.environmentId.empty() || target.threadId.empty()) return {};
+        return Reference{std::move(target),connectedScope};
+    }
+
     std::optional<Reference> authorizedTarget(const Json& args) const {
-        auto session = resolve(reference(args,"sessionRef"),RefKind::session);
+        auto session = eventSession(args);
         if (!session || !permitted(*session)) return {};
         return session;
     }
@@ -635,18 +646,42 @@ void Store::Impl::authorizeSessionHistory(const conversation::Message& message, 
     SessionEvidence(*this,policy,message,t3).authorizeHistory(steps);
 }
 
-std::set<std::string> Store::Impl::connectedSearchEnvironments(const conversation::Message& message) {
-    if (!humanSessionRequest(message)) return {};
+std::set<std::string> Store::Impl::connectedSessionEnvironments(const conversation::Message& message) {
     std::lock_guard lock(mutex);
+    if (!humanSessionRequest(message) &&
+        (message.principalSource != conversation::PrincipalSource::channel || message.channelScope.empty() ||
+         !channelMessageAuthorized(message.id,message.bot))) return {};
     const auto actor = turnActor(message);
     if (!Policy(*this).allows(actor,Action::bot_settings,message.bot)) return {};
     auto rows = query(R"SQL(
 SELECT environment_id FROM t3_connector CROSS JOIN t3_connected_environments
 WHERE (? OR person_id=?) AND NOT EXISTS (SELECT 1 FROM bot_members WHERE bot=?)
-)SQL",{actor.adminRoot,actor.id,message.bot});
+)SQL",{actor.adminRoot ? 1 : 0,actor.id,message.bot});
     std::set<std::string> result;
     while (rows.next()) result.insert(rows.string(0));
     return result;
+}
+
+bool Store::Impl::connectedSessionAccess(const conversation::Message& message, const SessionTarget& target) {
+    std::lock_guard lock(mutex);
+    Policy policy(*this);
+    if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId)) return false;
+    if (const auto origin = message.routing.find("sessionOrigin"); origin != message.routing.end()) {
+        const SessionTarget parent{origin->at("environmentId"),origin->at("threadId")};
+        const auto authorized = [&] {
+            const auto actor = turnActor(message);
+            return activeSessionOrigin(message.bot,actor.id,parent,target.environmentId,message.id) &&
+                policy.allows(actor,Action::bot_decide,message.bot);
+        };
+        if (target == parent) return authorized();
+        if (query(R"SQL(
+SELECT 1 FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+WHERE t.bot_id=? AND r.environment_id=? AND r.thread_id=? AND json_extract(o.data,'$.tool')='delegate'
+  AND json_extract(t.data,'$.sessionOrigin.environmentId')=? AND json_extract(t.data,'$.sessionOrigin.threadId')=?
+)SQL",{message.bot,target.environmentId,target.threadId,parent.environmentId,parent.threadId}).next())
+            return authorized();
+    }
+    return connectedSessionEnvironments(message).contains(target.environmentId);
 }
 
 std::optional<WorkSession> Store::Impl::resolveWorkSession(const conversation::Message& message,
@@ -664,7 +699,7 @@ bool Store::Impl::permitsWorkSession(const conversation::Message& message, const
         !policy.allows(message.bot,Resource::sessionRead(session.environmentId,session.threadId)) ||
         !query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{session.environmentId}).next())
         return false;
-    if (connectedSearchEnvironments(message).contains(session.environmentId)) return true;
+    if (connectedSessionAccess(message,{session.environmentId,session.threadId})) return true;
     return field(message.routing,"projectId") == session.projectId &&
         configuredSessionEnvironments(message.routing).contains(session.environmentId);
 }

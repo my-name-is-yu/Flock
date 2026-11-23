@@ -407,7 +407,7 @@ void conversationEntry(const std::filesystem::path& path) {
     tick(runtime,3);
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed", .report = proposedOptions,
-        .itemId = "comparison-report", .settled = true
+        .itemId = "comparison-report"
     };
     tick(runtime,2);
     check(store.task(taskId).at("state") == "completed","the comparison did not complete");
@@ -790,7 +790,7 @@ void chatGPTConversation(const std::filesystem::path& home) {
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished, .status = "completed",
         .report = "The signing certificate expired on 18 November.",
-        .itemId = "blockers-report", .settled = true
+        .itemId = "blockers-report"
     };
     tick(runtime,3);
     const auto completed = store.task(releaseTask);
@@ -1055,7 +1055,7 @@ void approveModelCallBeforeTask(const std::filesystem::path& path) {
     tick(*runtime,3);
     t3.observations["thread-release"] = {
         .kind = Observation::Kind::Finished,.status = "completed",.report = proposedOptions,
-        .itemId = "comparison-report",.settled = true
+        .itemId = "comparison-report"
     };
     tick(*runtime,2);
     model.comparisonResult = conversationCompletion(browser.get("/api/view?bot=release"),task).at("id");

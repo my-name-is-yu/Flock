@@ -1,5 +1,6 @@
 #include "flock/policy.hpp"
 #include "flock/board_inbox.hpp"
+#include "flock/participation.hpp"
 #include "flock/t3_connection.hpp"
 #include "task_history.hpp"
 #include <sqlite3.h>
@@ -67,12 +68,7 @@ Step answer(Id id) {
                                                 {"text",input.event.at("text")}},"Scripted answer"};
     };
 }
-Step note(Id id) {
-    return [id](const ModelInput& input) {
-        return Decision{"message_session",{{"taskId",id},{"generation",listed(input,id).at("generation")},
-                                           {"text",input.event.at("text")}},"Scripted note"};
-    };
-}
+
 Step interrupt(Id id) {
     return [id](const ModelInput& input) {
         return Decision{"interrupt_session",{{"taskId",id},{"generation",listed(input,id).at("generation")}},"Scripted interrupt"};
@@ -130,12 +126,9 @@ struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
-    bool runTargetedSteer = true;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
-    std::function<void()> duringAuthLookup;
 
-    std::vector<Command> steered;
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view environment, std::string_view project, Id, SessionReadDeadline) override {
         std::vector<std::string> threads;
@@ -148,20 +141,10 @@ struct SimulatedT3 : T3 {
         const auto item = sessions.find({target.environmentId,target.threadId});
         return item == sessions.end() ? std::nullopt : std::optional(item->second);
     }
-    bool supportsRunTargetedSteer() const override { return runTargetedSteer; }
     std::string authGeneration(const std::string&,const Json&) override {
-        if (auto callback = std::exchange(duringAuthLookup,{})) callback();
         return login;
     }
     Delivery send(const Command& command) override {
-        if (command.tool == "steer") {
-            steered.push_back(command);
-            check(command.authGeneration == login,"a note lacks its authentication generation");
-            const auto active = observations.find(command.target.runId);
-            if (active == observations.end() || active->second.kind != Observation::Kind::Running)
-                return {Delivery::Kind::NotAccepted,{},"The assigned Run is no longer running",true};
-            return {Delivery::Kind::Accepted,command.target,{}};
-        }
         sent.push_back(command);
         check(!command.actionId.empty(),"T3 received work without a request ID");
         check(command.authGeneration == login,"a dispatched instruction lacks its authentication generation");
@@ -188,12 +171,11 @@ struct SimulatedT3 : T3 {
     }
     void finish(std::string_view run, std::string text, bool settled = true) {
         auto& report = observations.at(std::string(run));
-        report.kind = Observation::Kind::Finished;
+        report.kind = settled ? Observation::Kind::Finished : Observation::Kind::Settling;
         report.status = "completed";
         report.report = std::move(text);
         report.resultRunId = run;
         report.itemId = "report-" + std::string(run);
-        report.settled = settled;
     }
 };
 
@@ -308,23 +290,45 @@ void durableInboxAndTargetedRevision() {
 
 void linkedResultStartsANewSession() {
     Fixture f;
-    const auto original = f.store->submit(f.routing("計測方法の提案"));
+    f.t3.sessions[{"desktop","origin"}] = {.title="Plan Session",.projectId="project"};
+    T3Connections connector(*f.store);
+    const auto token = connector.connect("desktop",localOwner.id,48123);
+    const auto connection = connector.authenticate(token);
+    SessionParticipation participation(*f.store,f.t3);
+    f.script("計測方法の提案",{start()});
+    participation.ask(*connection,{"alpha","計測方法の提案","origin","original-plan"},
+                      [&](auto,auto) { return f.routing(); });
+    f.runtime->runConversations();
+    const auto original = f.store->tasks("alpha").front().at("id").get<Id>();
     f.reach(original,"running");
     const std::string report = "1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release";
     f.t3.finish("run-1",report);
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
-    const auto resultId = lastTaskEvent(*f.store,original,"completed").at("id");
+    const Id resultId = lastTaskEvent(*f.store,original,"completed").at("id");
+    f.store->setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        return person == localOwner.id ? std::optional{true} : std::nullopt;
+    });
+    f.script("Which Session produced the plan?",{[](const ModelInput& input) {
+        check(input.event.at("sessionOrigin").at("threadId") == "origin","The result reply lost the Session origin");
+        return Decision{"reply",{{"text","The plan came from the linked child Session."}},"Report the Session"};
+    }});
+    const auto reply = f.store->receiveWeb(localOwner,f.routing(),"reply-to-plan","Which Session produced the plan?",resultId);
+    f.runtime->runConversations();
+    check(f.response(reply).at("text") == "The plan came from the linked child Session.","The explicit result reply failed");
+    participation.stop(*connection,"alpha","origin");
     f.script("2案目を実装して",{start({{"request","Implement option 2: capture a fixture trace"},
                                        {"sourceResultMessageId",resultId}})});
-    f.receive("implement","2案目を実装して");
+    f.store->receiveWeb(localOwner,f.routing(),"implement","2案目を実装して");
+    f.runtime->runConversations();
     const auto task = f.store->tasks("alpha").front();
     const auto id = task["id"].get<Id>();
     check(id != original && task["sourceTaskId"] == original && task["sourceResultRefs"].size() == 1 &&
           task["sourceResultRefs"][0]["messageId"] == resultId && task["sourceResultRefs"][0]["text"] == report,
           "implementation was not linked to the earlier result");
     f.reach(id,"running");
-    check(f.t3.sent.size() == 2 && f.t3.sent.back().tool == "delegate" &&
+    check(f.t3.sent.size() == 2 && f.t3.sent.front().sessionOrigin && !f.t3.sent.back().sessionOrigin &&
+          f.t3.sent.back().tool == "delegate" &&
           f.task(original)["runs"][0]["threadId"] != f.task(id)["runs"][0]["threadId"] &&
           f.event(original,"completed") == earlier,"linked implementation changed prior work or reused its Thread");
     const auto& instruction = f.t3.sent.back().instruction;
@@ -395,13 +399,18 @@ void questionAnswerReachesTheBotBeforeContinuingWork() {
     f.reach(id,"waiting");
     f.script("Include the table as CSV",{send(id)});
     const auto added = f.receive("format","Include the table as CSV");
-    f.script("Which accounts can I use?",{say("Choose an account for the measurement.")});
+    f.script("Which accounts can I use?",{[](const ModelInput&) {
+        return Decision{"reply",{{"text","Choose an account for the measurement."},{"continuesQuestion",true}},
+                        "Clarify the task question"};
+    }});
     const auto clarification = f.response(f.receive("clarify","Which accounts can I use?",f.task(id)["wait"].at("messageId")));
     f.script("Which one is for testing?",{[](const ModelInput&) {
-        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}}},
+        return Decision{"reply",{{"text","Quartz-717 is the test account."},{"suggestions",{"Use account Quartz-717"}},
+                                 {"continuesQuestion",true}},
                         "Offer the test account"};
     }});
     const auto explanation = f.response(f.receive("explain","Which one is for testing?",clarification.at("messageId")));
+    f.restart();
     for (int i = 0; i < 16; ++i) f.store->submit(f.routing("Later queued task " + std::to_string(i)));
     f.script("Use account Quartz-717",{answer(id)});
     f.receive("account",explanation.at("suggestions").at(0).get<std::string>(),explanation.at("messageId"));
@@ -567,7 +576,7 @@ void latestSuggestionsTakePrecedenceOverAnInheritedQuestion() {
         return Decision{"reply",{{"text","Show a preview?"},{"suggestions",{"Yes","No"}}},"Offer a preview"};
     }});
     const auto preview = f.response(f.receive("request-preview","Can I see a preview first?",wait.at("messageId")));
-    f.script("Yes",{say("Here is a preview.")});
+    f.script("Yes",{answer(id),say("Here is a preview.")});
     const auto reply = f.response(f.receive("accept-preview","Yes",preview.at("messageId")));
     check(reply.at("text") == "Here is a preview." && f.task(id).at("wait") == wait &&
           f.event(id,"user_answer").is_null(),"a newer suggestion answered an older question");
@@ -1273,9 +1282,11 @@ void deliveryWaitsForEveryTarget() {
     const auto queued = f.store->submit(f.routing("Second measurement"));
     f.reach(running,"running");
     constexpr auto text = "Include CPU time in both measurements";
-    f.script(text,{note(running),send(queued)});
+    f.script(text,{send(running),send(queued)});
     const Id message = f.receive("both-measurements",text).at("messageId");
-    check(f.t3.steered.size() == 1 && f.conversationMessage(message)["deliveredToT3"] == false,
+    f.t3.finish("run-1","First measurement reached a safe point");
+    f.advanceUntil([&] { return f.t3.sent.size() == 2; },"the first direction did not reach T3");
+    check(f.conversationMessage(message)["deliveredToT3"] == false,
           "the first delivery marked the whole message as sent");
     f.t3.finish(f.task(running).at("activeRun").at("runId").get<std::string>(),"First measurement complete");
     f.reach(queued,"running");
@@ -1892,88 +1903,6 @@ void conversationCanReadAndChangeTheFullCurrentContract() {
           "the targeted lookup lost the identity or contract of the established revision");
 }
 
-void notesReachTheRunningSession() {
-    Fixture f;
-    const auto id = f.store->submit(f.routing());
-    const auto queued = f.store->submit(f.routing("Queued work"));
-    f.reach(id,"running");
-    constexpr auto text = "Use the staging database for the rest of this run";
-    f.script(text,{note(id),note(queued)});
-    const auto message = f.receive("steer",text);
-    const auto turn = f.lastTurn();
-    check(f.t3.steered.size() == 1 && f.t3.steered[0].instruction == text &&
-          Json(f.t3.steered[0].target.runId) == f.task(id)["activeRun"]["runId"] && f.t3.sent.size() == 1 &&
-          turn[0]["result"]["effect"] == "delivered" && turn[1]["result"]["ok"] == false &&
-          f.event(id,"instruction_steered")["text"] == text && f.task(id)["pendingInstructions"].is_null() &&
-          f.conversationMessage(message["messageId"])["deliveredToT3"] == true &&
-          f.response(message)["status"] == "working",
-          "a note did not reach the running Run directly, or one reached a task without a Run");
-    f.t3.finish("run-1","Finished");
-    f.reach(id,"completed");
-    f.script("One more note",{[&](const ModelInput&) {
-        return Decision{"message_session",{{"taskId",id},{"generation",f.task(id)["generation"]},{"text","late"}},"Late"};
-    }});
-    f.receive("late-note","One more note");
-    check(f.lastTurn()[0]["result"]["ok"] == false && f.t3.steered.size() == 1,
-          "a note for a finished task reached T3");
-}
-
-void notesWaitForTheNextSafePointWithoutTargetedSteering() {
-    Fixture f;
-    f.t3.runTargetedSteer = false;
-    const auto id = f.store->submit(f.routing());
-    f.reach(id,"running");
-    constexpr auto text = "Use the staging database for the next measurement";
-    f.script(text,{[id](const ModelInput& input) {
-        check(std::ranges::find(input.tools,"message_session") == input.tools.end() &&
-              std::ranges::find(input.tools,"send_to_task") != input.tools.end(),"the wrong note tools were offered");
-        return note(id)(input);
-    },send(id,Json::object())});
-    const auto message = f.receive("pending-note",text);
-    const auto turn = f.lastTurn();
-    check(turn.at(0).at("result")["ok"] == false &&
-          turn.at(0).at("result").at("error").get<std::string>().find("next safe point") != std::string::npos &&
-          turn.at(1).at("result")["ok"] == true && f.t3.steered.empty() && f.t3.sent.size() == 1 &&
-          f.task(id)["pendingInstructions"][0]["text"] == text &&
-          f.conversationMessage(message["messageId"])["deliveredToT3"] == false &&
-          f.event(id,"instruction_steered").is_null(),
-          "an unsupported steer ran, or its safe-point replacement was reported as delivered");
-}
-
-void notesRejectStoppingTasks() {
-    for (const bool replanning : {false,true}) {
-        Fixture f;
-        const auto id = f.store->submit(f.routing());
-        f.reach(id,"running");
-        const auto run = f.task(id).at("activeRun");
-        constexpr auto request = "Change the work and send a note";
-        f.script(request,{replanning ? change(id,{{"doneWhen","Include CPU time"}}) : stop(id),note(id)});
-        f.receive("stopping",request);
-        const auto task = f.task(id);
-        check((replanning ? task.value("replanning",false) : task["state"] == "cancelling") &&
-              task.at("activeRun") == run && f.lastTurn().at(1).at("result")["ok"] == false &&
-              f.t3.steered.empty() && f.event(id,"instruction_steered").is_null(),
-              "a note reached T3 after the Task had started stopping");
-    }
-}
-
-void cancellationDuringSteerPreparation() {
-    Fixture f;
-    const auto id = f.store->submit(f.routing());
-    f.reach(id,"running");
-    Store writer(f.dir/"state.db");
-    f.t3.duringAuthLookup = [&] {
-        writer.operate(localOwner,TaskTarget::from(writer.task(id),0),"cancel");
-    };
-    constexpr auto request = "Add a chart to the current Run";
-    f.script(request,{note(id)});
-    f.receive("stop-before-dispatch",request);
-    const auto result = f.lastTurn().at(0).at("result");
-    check(f.task(id)["state"] == "cancelling" && result["ok"] == false && result["error"] == "stale" &&
-          !result.contains("delivery") && f.t3.steered.empty() && f.event(id,"instruction_steered").is_null(),
-          "a local cancellation before dispatch was ignored or reported as a possible delivery");
-}
-
 void newSessionsReceivePersistedTaskDecisions() {
     for (const bool explicitFresh : {false,true}) {
         Fixture f;
@@ -1993,12 +1922,6 @@ void newSessionsReceivePersistedTaskDecisions() {
         f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text",userAnswer}});
         f.reach(id,"running");
 
-        constexpr auto steer = "Use nanoseconds in the exported table";
-        f.script(steer,{note(id)});
-        const auto noteReceipt = f.receive("delivered-steer",steer);
-        check(f.conversationMessage(noteReceipt.at("messageId"))["deliveredToT3"] == true,
-              "the fixture did not deliver the running Session's steer");
-        constexpr auto rejected = "Use the unconfirmed override";
         if (explicitFresh) {
             f.script("Start with fresh context",{[&](const ModelInput&) {
                 return Decision{"continue_fresh_session",{{"taskId",id},{"instruction","Use a clean checkout"}},
@@ -2011,9 +1934,6 @@ void newSessionsReceivePersistedTaskDecisions() {
             };
         }
         f.t3.finish("run-1","First evidence");
-        f.script(rejected,{note(id)});
-        f.receive("rejected-steer",rejected);
-        check(f.lastTurn().front()["result"]["ok"] == false,"the fixture accepted a steer to a settled Run");
         f.restart();
         f.reach(id,"sending");
         constexpr auto readyDirection = "Include the kernel version";
@@ -2028,16 +1948,14 @@ void newSessionsReceivePersistedTaskDecisions() {
               task["runs"][0]["revisionId"] == task["runs"][1]["revisionId"],
               "the replacement did not start a separate Session for the same revision");
         for (const std::string_view text : {std::string_view(intent),std::string_view(criteria),
-                std::string_view(direction),std::string_view(userAnswer),std::string_view(steer),
+                std::string_view(direction),std::string_view(userAnswer),
                 std::string_view(readyDirection)}) {
             const auto at = command.instruction.find(text);
             check(at != command.instruction.npos && at == command.instruction.rfind(text),
                   "the new Session lost, shortened or duplicated a task decision");
         }
-        check(command.instruction.find(rejected) == command.instruction.npos &&
-              command.instruction.find(direction) < command.instruction.find(userAnswer) &&
-              command.instruction.find(userAnswer) < command.instruction.find(steer),
-              "the new Session replayed an undelivered steer or reordered user decisions");
+        check(command.instruction.find(direction) < command.instruction.find(userAnswer),
+              "the new Session reordered user decisions");
 
         f.model.onResult = [](const ModelInput&) {
             return Decision{"follow_up",{{"instruction","Check the last measurement again"}},"Verify in the same Session"};
@@ -2048,8 +1966,7 @@ void newSessionsReceivePersistedTaskDecisions() {
         const auto& follow = f.t3.sent.back();
         check(follow.tool == "follow_up" && task["runs"][1]["threadId"] == follow.target.threadId &&
               follow.instruction.find(direction) == follow.instruction.npos &&
-              follow.instruction.find(userAnswer) == follow.instruction.npos &&
-              follow.instruction.find(steer) == follow.instruction.npos,
+              follow.instruction.find(userAnswer) == follow.instruction.npos,
               "the same-Thread follow-up replayed the new-Session handoff");
     }
 }
@@ -2066,9 +1983,6 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
     constexpr auto oldAnswer = "Use account Old-149";
     f.store->operate(localOwner,TaskTarget::from(f.task(id),wait.at("id")),"answer",{{"text",oldAnswer}});
     f.reach(id,"running");
-    constexpr auto oldSteer = "Send the retired output to Archive-25";
-    f.script(oldSteer,{note(id)});
-    f.receive("old-steer",oldSteer);
     f.script("Use the replacement suite",{change(id,{{"intent","Measure the replacement dataset"},
         {"doneWhen","Report median throughput"},{"environment","クラウドMac"}})});
     f.receive("replace-contract","Use the replacement suite");
@@ -2081,7 +1995,7 @@ void revisedSessionDoesNotReplaySupersededDecisions() {
           command.instruction.find("Report median throughput") != command.instruction.npos &&
           command.instruction.find("Use the replacement suite") != command.instruction.npos,
           "the revised Session lost its current contract or instruction");
-    for (const auto stale : {"Measure the retired dataset","Report baseline latency",oldDirection,oldAnswer,oldSteer})
+    for (const auto stale : {"Measure the retired dataset","Report baseline latency",oldDirection,oldAnswer})
         check(command.instruction.find(stale) == command.instruction.npos,
               "a superseded task decision reached the revised Session");
 }
@@ -2311,10 +2225,6 @@ int main() {
         startCriteriaAreUsedForFirstDelegation();
         conversationCanReadAndChangeTheFullCurrentContract();
         environmentsResolveByNameOrId();
-        notesReachTheRunningSession();
-        notesWaitForTheNextSafePointWithoutTargetedSteering();
-        notesRejectStoppingTasks();
-        cancellationDuringSteerPreparation();
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
         oversizedAuthoritativeHandoffBlocksDelivery();

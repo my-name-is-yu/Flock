@@ -8,7 +8,7 @@
 #include "flock/board_inbox.hpp"
 #include "flock/base64.hpp"
 #include "channel_routes.hpp"
-#include "session_handoff_routes.hpp"
+#include "session_mcp_routes.hpp"
 
 #include <httplib.h>
 
@@ -37,6 +37,21 @@ void json(Response& res, int status, const Json& body) {
 
 void error(Response& res, int status, std::string_view code) {
     json(res,status,{{"error",code}});
+}
+
+bool acceptsMissingPage(const Request& req) {
+    if (req.method != "GET" || req.path == "/api" || req.path.starts_with("/api/") ||
+        req.path == "/mcp" || req.path.starts_with("/mcp/")) return false;
+    const auto accept = httplib::detail::remove_quoted_strings(
+        httplib::detail::get_combined_header_value(req.headers,"Accept"));
+    bool html = false;
+    httplib::detail::split(accept.data(),accept.data()+accept.size(),',',[&](const char* begin, const char* end) {
+        std::string mediaType;
+        double quality;
+        if (httplib::detail::parse_quality(begin,end,mediaType,quality) && quality > 0 &&
+            httplib::detail::case_ignore::to_lower(mediaType) == "text/html") html = true;
+    });
+    return html;
 }
 
 void setViewer(Response& res, const WebCallbacks& callbacks, const Person& person) {
@@ -193,8 +208,16 @@ public:
         server_.set_exception_handler([](const Request&, Response& res, std::exception_ptr) {
             error(res,500,"server_error");
         });
-        server_.set_error_handler([](const Request&, Response& res) {
-            if (res.body.empty()) error(res,res.status,"http_error");
+        server_.set_error_handler([](const Request& req, Response& res) {
+            if (!res.body.empty()) return;
+            if (res.status == 404 && acceptsMissingPage(req)) {
+                for (const auto& asset : web::assets) {
+                    if (asset.path != "/not-found.html") continue;
+                    res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
+                    return;
+                }
+            }
+            error(res,res.status,"http_error");
         });
         for (const auto& asset : web::assets) {
             const auto path = asset.path == "/index.html" ? "/" :
@@ -210,7 +233,7 @@ public:
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionHandoffRoutes(server_,store_,callbacks_);
+        web::sessionMcpRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);

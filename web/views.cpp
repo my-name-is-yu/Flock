@@ -187,7 +187,13 @@ Json eventView(const Json& event, const markdown::SensitiveText& sensitive) {
     } else if (kind == "conversation_message" || kind == "conversation_reply") {
         copyFields(details,data,{"text","messageId","replyToMessageId","taskId","route","status","deliveredToT3"});
         details["textHtml"] = markdown::toHtml(field(data,"text"),sensitive);
-        if (kind == "conversation_message") copyFields(details,data,{"imageAttachmentCount"});
+        if (kind == "conversation_message") {
+            copyFields(details,data,{"imageAttachmentCount"});
+            if (const auto wake = data.find("sessionWake"); wake != data.end() && wake->is_object())
+                copyFields(details["sessionWake"] = Json::object(),*wake,{"threadId","title","reason","sourceMessageId"});
+            if (const auto invitation = data.find("sessionInvitation"); invitation != data.end() && invitation->is_object())
+                copyFields(details["sessionInvitation"] = Json::object(),*invitation,{"threadId","title","inviterName","note"});
+        }
         if (const auto channel = data.find("channel"); channel != data.end() && channel->is_object())
             copyFields(details["channel"] = Json::object(),*channel,{"channelKind","fromViewer"});
         for (const auto* key : {"attachments","artifacts"}) {

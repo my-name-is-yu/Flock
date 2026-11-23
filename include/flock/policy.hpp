@@ -40,7 +40,6 @@ enum class Action {
     channel_use,
     channel_read,
     channel_post,
-    t3_coordinate,
     t3_send,
     automation_change,
     email_send,
@@ -116,7 +115,6 @@ private:
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& details);
     Store::Impl& db_;
     friend class Store;
-    friend class RootDelivery;
     friend struct Store::Impl;
 };
 }

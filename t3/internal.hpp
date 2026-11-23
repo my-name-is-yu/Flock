@@ -14,7 +14,8 @@ inline Json initializeParams() {
 
 struct Failure : std::runtime_error {
     enum class Kind { Auth, Settings, Wire, Rpc, Tool };
-    enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout };
+    enum class Reason { Other, QuestionGone, WorkSettings, HistoryNotFound, ProjectNotFound, Timeout,
+                        DelegatedFromRejected, CredentialExpired };
     Kind kind;
     Reason reason;
     explicit Failure(Kind category, std::string message, Reason reason = Reason::Other)
@@ -94,8 +95,7 @@ Json readThread(Client&, std::string_view threadId, std::string_view view, unsig
 void advancePosition(const Json&, Id&);
 bool gitCommit(std::string_view sha);
 bool loopbackGitHost(std::string_view origin);
-std::optional<WorkspaceHead> workspaceHead(Client&, std::string_view projectId, const Json& thread,
-                                            bool requireSeparateWorktree);
+std::optional<WorkspaceHead> workspaceHead(Client&, std::string_view projectId, const Json& thread);
 bool moreHistory(const Json&, Id after, Id start);
 std::optional<SessionMetadata> sessionMetadata(const std::filesystem::path&, const SessionTarget&, bool includeMessages,
                                                SessionReadDeadline);

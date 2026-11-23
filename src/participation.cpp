@@ -1,10 +1,9 @@
-#include "flock/session_handoff.hpp"
-#include "storage.hpp"
+#include "flock/participation.hpp"
+#include "conversation_storage.hpp"
 
 #include <algorithm>
 #include <array>
 #include <future>
-#include <thread>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
@@ -13,6 +12,18 @@ namespace {
 
 constexpr std::string_view tokenPrefix = "flock-t3-";
 constexpr std::size_t maxRequestBytes = 8192;
+
+// An invitation gives the inviter's stop authority over the invitee in this Session.
+// Follow outgoing edges only. UNION also makes repeated invitations and cycles harmless.
+const std::string stopCascade = R"SQL(
+WITH RECURSIVE stopping(id) AS (
+ SELECT ?1
+ UNION
+ SELECT i.participation_id FROM session_invitations i
+ JOIN stopping s ON s.id=i.inviter_participation_id
+ WHERE i.message_id<?2
+)
+)SQL";
 
 template<class Bytes>
 std::string hex(const Bytes& bytes) {
@@ -39,16 +50,6 @@ bool validId(std::string_view value, std::size_t max = 1024) {
            std::ranges::none_of(value,[](unsigned char c) { return c <= 32 || c == 127; });
 }
 
-bool validText(std::string_view value) {
-    return value.size() <= maxRequestBytes && value.find('\0') == value.npos &&
-           !trimSessionQuestionText(value).empty();
-}
-
-std::optional<CoordinationRequest> permission(const Json& value) {
-    if (value.is_null()) return {};
-    return CoordinationRequest{value.at("goal").get<std::string>(),value.at("allowDelegation").get<bool>()};
-}
-
 }
 
 std::string redactT3Tokens(std::string value) {
@@ -64,26 +65,42 @@ std::string redactT3Tokens(std::string value) {
 
 void Store::Impl::initializeParticipationSchema() {
     exec(R"SQL(
-CREATE TABLE IF NOT EXISTS return_channels(
+CREATE TABLE IF NOT EXISTS session_participations(
  id INTEGER PRIMARY KEY,
- environment_id TEXT NOT NULL, project_id TEXT NOT NULL, thread_id TEXT NOT NULL, run_id TEXT NOT NULL,
- request_id TEXT NOT NULL, source_message_id TEXT NOT NULL, bot_id TEXT NOT NULL, person_id TEXT NOT NULL,
- context TEXT NOT NULL, client_request_id TEXT NOT NULL, request_digest TEXT NOT NULL,
- UNIQUE(environment_id,request_id), UNIQUE(environment_id,client_request_id))
+ bot_id TEXT NOT NULL, environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('active','removed','left')),
+ stopped_through INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(bot_id,environment_id,thread_id))
 )SQL");
-    exec("CREATE INDEX IF NOT EXISTS return_channels_thread ON return_channels(environment_id,thread_id)");
     exec(R"SQL(
-CREATE TABLE IF NOT EXISTS session_controls(
- channel_id INTEGER PRIMARY KEY REFERENCES return_channels(id),
- generation INTEGER NOT NULL DEFAULT 1,
- state TEXT NOT NULL CHECK(state IN ('active','paused','stopped','completed','failed','budget_exhausted')),
- auth_generation TEXT NOT NULL,
- permission TEXT NOT NULL,
- consult_command TEXT NOT NULL,
- event_cursor INTEGER NOT NULL,
- initial_pending INTEGER NOT NULL DEFAULT 1,
- human_input_position INTEGER NOT NULL DEFAULT 0)
+CREATE TABLE IF NOT EXISTS session_asks(
+ person_id TEXT NOT NULL, request_id TEXT NOT NULL,
+ participation_id INTEGER NOT NULL REFERENCES session_participations(id),
+ request_digest TEXT NOT NULL, message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+ PRIMARY KEY(person_id,request_id))
 )SQL");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS session_invitations(
+ source_message_id INTEGER NOT NULL, step INTEGER NOT NULL,
+ inviter_participation_id INTEGER NOT NULL REFERENCES session_participations(id),
+ participation_id INTEGER NOT NULL REFERENCES session_participations(id),
+ depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+ message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+ PRIMARY KEY(source_message_id,step),
+ FOREIGN KEY(source_message_id,step) REFERENCES conversation_steps(message_id,step))
+)SQL");
+    exec("CREATE INDEX IF NOT EXISTS session_invitations_inviter ON session_invitations(inviter_participation_id)");
+    exec("CREATE INDEX IF NOT EXISTS session_message_waits_participation ON session_message_waits(bot,environment,thread)");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS session_queue_cancellations(
+ participation_id INTEGER NOT NULL REFERENCES session_participations(id), run TEXT NOT NULL,
+ stop_id INTEGER NOT NULL REFERENCES journal(id),
+ state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','cancelled','started','unavailable')),
+ retry_at INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(participation_id,run))
+)SQL");
+    exec("CREATE INDEX IF NOT EXISTS session_queue_cancellations_due "
+         "ON session_queue_cancellations(retry_at) WHERE state='pending'");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
@@ -132,9 +149,26 @@ bool T3Connections::ownsBearer(std::string_view token) const {
 
 bool T3Connections::disconnect(std::string_view environment) {
     auto& db = *store_.p_;
+    std::lock_guard dispatch(db.sessionDispatchMutex);
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
+    auto rows = db.query(R"SQL(
+SELECT m.id FROM messages m JOIN conversation_turns t ON t.message_id=m.id WHERE t.status<>'done'
+ AND json_type(m.routing,'$.sessionWake')='object'
+ AND (json_extract(m.routing,'$.sessionWake.environmentId')=?1
+      OR json_extract(m.routing,'$.sessionOrigin.environmentId')=?1)
+)SQL",{environment});
+    std::vector<Id> wakes;
+    while (rows.next()) wakes.push_back(rows.number(0));
+    for (const auto wake : wakes)
+        db.finishTurn(db.loadTurnMessage(wake),"The T3 connection was disconnected.",nullptr,"session_access");
+    db.exec(R"SQL(
+UPDATE session_message_waits SET notified=1 WHERE notified=0 AND (environment=?1 OR message_id IN (
+ SELECT id FROM messages WHERE json_extract(routing,'$.sessionOrigin.environmentId')=?1
+))
+)SQL",{environment});
     db.exec("DELETE FROM t3_connected_environments WHERE environment_id=?",{environment});
+    db.settlePolicyApprovals();
     const bool removeProvider = db.query("SELECT 1 FROM t3_connector WHERE "
                                         "NOT EXISTS(SELECT 1 FROM t3_connected_environments)").next();
     tx.commit();
@@ -180,188 +214,596 @@ bool T3Connections::configured() const {
     return port() != 0;
 }
 
-bool matchesThreadInvocation(const Json& item, std::string_view threadId,
-                             std::string_view activeRunId, const Json& arguments) {
-    if (activeRunId.empty() || !item.is_object() ||
-        item.value("type",Json(nullptr)) != "dynamic_tool" ||
-        item.value("visibility",Json(nullptr)) != "local" ||
-        item.value("sourceThreadId",Json(nullptr)) != threadId ||
-        item.value("runId",Json(nullptr)) != activeRunId ||
-        item.value("textTruncated",Json(false)) != false) return false;
-    const auto text = item.find("text");
-    if (text == item.end() || !text->is_string()) return false;
-    const auto call = Json::parse(text->get_ref<const std::string&>(),nullptr,false);
-    if (!call.is_object()) return false;
-    const auto tool = call.find("toolName");
-    if (tool == call.end() || !tool->is_string()) return false;
-    const auto& name = tool->get_ref<const std::string&>();
-    if (name != "invoke_flock_bot" && name != "flock.invoke_flock_bot" && !name.ends_with("__invoke_flock_bot"))
-        return false;
-    auto input = call.value("input",Json(nullptr));
-    if (input.is_string()) input = Json::parse(input.get_ref<const std::string&>(),nullptr,false);
-    return input.is_object() && input == arguments;
+Person Store::Impl::sessionActor(std::string_view person) {
+    if (resolveWebIdentity) {
+        if (const auto root = resolveWebIdentity(person)) return {std::string(person),*root};
+    } else if (person == localOwner.id && !Policy(*this).requiresIdentity()) return localOwner;
+    return {};
 }
 
-Participation Store::Impl::authorizeParticipation(const Person& person, Id channel, bool requireConnection) {
-    auto row = query(R"SQL(
-SELECT c.environment_id,c.project_id,c.thread_id,c.request_id,c.bot_id,c.person_id,c.context,
-       s.permission,s.consult_command,t.id
-FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
-LEFT JOIN t3_connected_environments e ON e.environment_id=c.environment_id
-LEFT JOIN t3_connector t ON t.person_id=c.person_id AND e.environment_id IS NOT NULL WHERE c.id=?
-)SQL",{channel});
-    if (!row.next() || person.id != row.string(5) || !Policy(*this).allows(person,Action::bot_decide,row.string(4)))
-        throw Conflict("Session participation access denied");
-    ThreadTarget target{row.string(0),row.string(1),row.string(2)};
-    auto scope = permission(row.json(7));
-    if (requireConnection && row.string(9).empty())
-        throw Conflict("T3 connection no longer permits this handoff");
-    ReturnChannel result{channel,{{std::move(target),row.string(3),row.string(4)},person.id},
-                         row.json(6).at("request").get<std::string>()};
-    if (requireConnection && scope && !Policy(*this).allows(row.string(4),Action::t3_coordinate,row.string(0)))
-        throw Conflict("T3 coordination denied by installation policy");
-    if (!scope) return ConsultPermit{std::move(result),row.string(8)};
-    return CoordinationActivation{std::move(result),{std::move(*scope)}};
-}
-
-Intake SessionHandoff::resolveBot(std::string_view bot) const {
-    auto routing = intake_(bot,"");
-    if (routing.botId != bot) throw Conflict("Session Bot is unavailable");
-    return routing;
-}
-
-std::optional<Person> SessionHandoff::person(const T3Connection& connection) const {
-    return people_ ? people_(connection.personId) : std::nullopt;
-}
-
-HandoffAck SessionHandoff::invoke(const T3Connection& connection, const Json& arguments,
-                                  const std::function<bool(std::string_view)>& botExists,
-                                  std::chrono::milliseconds proofTimeout) {
-    if (!arguments.is_object()) throw Conflict("Invalid invocation arguments");
-    const auto string = [&](std::string_view key) {
-        const auto value = arguments.find(key);
-        if (value == arguments.end() || !value->is_string()) throw Conflict("Invalid invocation argument: " + std::string(key));
-        return value->get<std::string>();
-    };
-    const auto thread = string("threadId"), bot = string("botId"), request = string("requestId"), text = string("text");
-    const auto mode = arguments.contains("mode") ? string("mode") : "consult";
-    const auto goal = arguments.contains("goal") ? string("goal") : "";
-    if (arguments.size() != 4u + arguments.contains("mode") + arguments.contains("goal") ||
-        !validId(thread) || !validBotId(bot) || request.empty() || request.size() > 128 ||
-        request.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != request.npos ||
-        !validText(text) || (mode != "consult" && mode != "coordinate") ||
-        ((mode == "coordinate" || arguments.contains("goal")) && !validText(goal)))
-        throw Conflict("Invalid invocation arguments");
-    const auto coordination = mode == "coordinate" ? std::optional(CoordinationRequest{goal,true}) : std::nullopt;
-    const auto actor = person(connection);
-    if (!botExists(bot)) throw Conflict("Unknown Bot");
-    if (!actor || actor->id != connection.personId || !store_.policy().allows(*actor,Action::bot_decide,bot))
-        throw Conflict("Bot decision access is required");
-
-    const auto settings = T3Connections(store_).settings(connection.personId);
-    if (!settings) throw Conflict("T3 connection no longer permits this handoff");
-    const auto& environments = settings->environments;
-    const auto deadline = std::chrono::steady_clock::now() + proofTimeout;
-    do {
-        const auto probe = [&](std::string_view environment) -> std::optional<ThreadProof> {
-            auto proof = session_.proveInvocation(environment,thread,arguments,deadline);
-            if (proof && proof->target.environmentId == environment && proof->target.threadId == thread &&
-                validId(proof->target.projectId) && !proof->activeRunId.empty() && !proof->authGeneration.empty() &&
-                !proof->itemId.empty()) return proof;
-            return {};
-        };
-        std::optional<ThreadProof> proof;
-        if (environments.size() == 1) {
-            proof = probe(environments.front());
-        } else {
-            std::vector<std::future<std::optional<ThreadProof>>> probes;
-            for (const auto& environment : environments)
-                probes.push_back(std::async(std::launch::async,probe,std::string_view(environment)));
-            for (auto& candidate : probes) {
-                if (auto match = candidate.get()) {
-                    if (proof) throw Conflict("This invocation matched more than one T3 environment");
-                    proof = std::move(match);
-                }
-            }
-        }
-        if (proof) {
-            if (!botExists(bot)) throw Conflict("Unknown Bot");
-            return openChannel(connection,*proof,bot,request,text,digest(arguments.dump()),coordination);
-        }
-        std::this_thread::sleep_until(std::min(deadline,std::chrono::steady_clock::now()+std::chrono::milliseconds(150)));
-    } while (std::chrono::steady_clock::now() < deadline);
-    throw Conflict("Could not verify this invocation in the active T3 Thread. Use currentThreadId from t3_thread_list.");
-}
-
-HandoffAck SessionHandoff::openChannel(const T3Connection& connection, const ThreadProof& proof, std::string_view bot,
-                                       std::string_view requestId, std::string_view text, std::string_view payloadDigest,
-                                       const std::optional<CoordinationRequest>& scope) {
-    const auto& target = proof.target;
+Person SessionParticipation::person(const T3Connection& connection) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
-    Transaction tx(db.db);
-    const auto actor = person(connection);
-    auto current = db.query("SELECT id FROM t3_connector WHERE id=? AND person_id=? AND "
-                            "EXISTS(SELECT 1 FROM t3_connected_environments WHERE environment_id=?)",
-                            {connection.id,connection.personId,target.environmentId});
-    if (!actor || actor->id != connection.personId || !store_.policy().allows(*actor,Action::bot_decide,bot) ||
-        !current.next())
-        throw Conflict("T3 connection or Bot access changed");
-    if (scope && !store_.policy().allows(bot,Action::t3_coordinate,target.environmentId))
-        throw Conflict("T3 coordination denied by installation policy");
-    if (db.query(R"SQL(
-SELECT 1 FROM runs WHERE environment_id=?1 AND thread_id=?2 AND run_id=?3
-UNION ALL
-SELECT 1 FROM tasks WHERE environment_id=?1 AND state NOT IN ('completed','cancelled')
-AND json_extract(data,'$.activeRun.threadId')=?2 AND json_extract(data,'$.activeRun.runId')=?3
-LIMIT 1
-)SQL",{target.environmentId,target.threadId,proof.activeRunId}).next())
-        throw Conflict("A Run managed by Flock cannot open a handoff");
+    if (!db.query("SELECT 1 FROM t3_connector WHERE id=? AND person_id=? "
+                  "AND EXISTS(SELECT 1 FROM t3_connected_environments)",{connection.id,connection.personId}).next())
+        throw Conflict("The T3 connection is unavailable");
+    const auto actor = db.sessionActor(connection.personId);
+    if (actor.id.empty()) throw Conflict("The connected person is unavailable");
+    return actor;
+}
 
-    auto existing = db.query(R"SQL(
-SELECT id,request_id,request_digest,person_id,project_id FROM return_channels
-WHERE environment_id=? AND client_request_id=?
-)SQL",{target.environmentId,requestId});
-    if (existing.next()) {
-        if (existing.string(2) != payloadDigest || existing.string(3) != connection.personId ||
-            existing.string(4) != target.projectId)
-            throw Conflict("This requestId is already in use with different arguments");
-        HandoffAck ack{existing.number(0),existing.string(1)};
-        tx.commit();
-        return ack;
+Id SessionParticipation::ask(const T3Connection& connection, const SessionAsk& request, const IntakeResolver& intake) {
+    const auto& [bot,text,thread,requestId] = request;
+    if (!validBotId(bot) || !validId(thread,256) || text.size() > maxRequestBytes ||
+        text.find('\0') != text.npos || !conversation_storage::hasText(text) ||
+        requestId.empty() || requestId.size() > 128 ||
+        requestId.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-") != requestId.npos)
+        throw Conflict("Invalid flock_ask arguments");
+
+    auto& db = *store_.p_;
+    const auto policy = store_.policy();
+    const auto authorizedPerson = [&] {
+        const auto actor = person(connection);
+        if (!policy.allows(actor,Action::bot_decide,bot)) throw Conflict("Bot access is required");
+        return actor;
+    };
+    const auto fingerprint = digest(Json::array({bot,text,thread}).dump());
+    const auto connected = [&](std::string_view environment) {
+        return db.query("SELECT 1 FROM t3_connected_environments WHERE environment_id=?",{environment}).next() &&
+            policy.allows(bot,Action::environment_inspect,environment);
+    };
+    const auto replay = [&]() -> Id {
+        auto row = db.query(R"SQL(
+SELECT a.message_id,a.request_digest,p.environment_id FROM session_asks a
+JOIN session_participations p ON p.id=a.participation_id WHERE a.person_id=? AND a.request_id=?
+)SQL",{connection.personId,requestId});
+        if (!row.next()) return 0;
+        if (row.string(1) != fingerprint) throw Conflict("This requestId already has different arguments");
+        if (!connected(row.string(2))) throw Conflict("This Session is unavailable through your T3 connection");
+        return row.number(0);
+    };
+
+    std::vector<std::string> environments;
+    {
+        std::lock_guard lock(db.mutex);
+        authorizedPerson();
+        if (const auto message = replay()) return message;
+        const auto settings = T3Connections(store_).settings(connection.personId);
+        if (settings)
+            for (const auto& environment : settings->environments)
+                if (connected(environment)) environments.push_back(environment);
     }
-    try { resolveBot(bot); }
-    catch (const Conflict&) { throw Conflict("Session Bot is unavailable"); }
-    if (scope && db.query(R"SQL(
-SELECT 1 FROM return_channels c JOIN session_controls s ON s.channel_id=c.id
-WHERE c.environment_id=? AND c.thread_id=? AND s.permission<>'null' AND s.state IN ('active','paused')
-)SQL",{target.environmentId,target.threadId}).next())
-        throw Conflict("This Session already has a coordinator");
-
+    std::optional<SessionOrigin> origin;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    std::vector<std::future<std::optional<SessionMetadata>>> probes;
+    for (const auto& environment : environments) {
+        probes.push_back(std::async(std::launch::async,[&,environment,deadline] {
+            return t3_.sessionMetadata({environment,thread},false,deadline);
+        }));
+    }
+    for (std::size_t i = 0; i < environments.size(); ++i) {
+        std::optional<SessionMetadata> metadata;
+        try {
+            metadata = probes[i].get();
+        } catch (const std::exception&) {
+            continue;
+        }
+        if (!metadata || metadata->projectId.empty()) continue;
+        if (origin) throw Conflict("This threadId matched more than one connected T3 environment");
+        origin = SessionOrigin{{environments[i],thread},std::move(metadata->title)};
+    }
+    std::lock_guard lock(db.mutex);
+    Transaction transaction(db.db);
+    const auto actor = authorizedPerson();
+    if (const auto message = replay()) return message;
+    if (!origin || !connected(origin->target.environmentId))
+        throw Conflict("This Session is unavailable through your T3 connection");
+    if (!policy.allows(bot,Resource::sessionRead(origin->target.environmentId,thread))) origin->title.clear();
     const auto scrub = db.sharedRedactor();
-    const auto publicIds = {std::string_view(connection.personId),bot,std::string_view(target.environmentId),
-                            std::string_view(target.projectId),std::string_view(target.threadId),requestId};
-    for (const auto id : publicIds) {
+    for (const std::string_view id : {std::string_view(bot),std::string_view(origin->target.environmentId),
+                                     std::string_view(thread),std::string_view(requestId)}) {
         scrub.requirePublic(id);
-        if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid handoff identifier");
+        if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session ask identifier");
     }
-    const auto request = actionId();
-    const Json context{{"request",redactT3Tokens(scrub.text(text))}};
-    const Json scopeJson = scope ? Json{{"goal",redactT3Tokens(scrub.text(scope->goal))},
-                                       {"allowDelegation",scope->allowDelegation}} : Json(nullptr);
+    origin->title = redactT3Tokens(scrub.text(origin->title));
     db.exec(R"SQL(
-INSERT INTO return_channels(environment_id,project_id,thread_id,run_id,request_id,source_message_id,
-                            bot_id,person_id,context,client_request_id,request_digest)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)
-)SQL",{target.environmentId,target.projectId,target.threadId,proof.activeRunId,request,proof.itemId,
-        bot,connection.personId,context.dump(),requestId,payloadDigest});
-    const auto channel = db.last();
-    db.exec(R"SQL(
-INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor)
-VALUES(?,'active',?,?,?,?)
-)SQL",{channel,proof.authGeneration,scopeJson.dump(),scope ? "" : actionId(),proof.cursor});
-    tx.commit();
-    return {channel,request};
+INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
+ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
+)SQL",{bot,origin->target.environmentId,thread,actor.id});
+    auto row = db.query("SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
+                        {bot,origin->target.environmentId,thread});
+    if (!row.next() || row.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
+    const auto participation = row.number(0);
+    db.exec("UPDATE session_participations SET state='active' WHERE id=? AND state<>'active'",{participation});
+    const auto safeText = redactT3Tokens(scrub.text(text));
+    const auto routing = intake(bot,safeText);
+    if (routing.botId != bot) throw Conflict("The Bot is unavailable");
+    const auto message = db.enqueueConversation(actor,routing,conversation::PrincipalSource::session,
+                                                 "session-ask:" + requestId,safeText,0,&*origin);
+    db.exec("INSERT INTO session_asks VALUES(?,?,?,?,?)",{actor.id,requestId,participation,fingerprint,message});
+    transaction.commit();
+    return message;
+}
+
+bool Store::Impl::inviteSessionBot(const conversation::Message& message, int step, const Decision& decision,
+                                  T3& t3, const IntakeResolver& intake, const PeerResolver& peers,
+                                  std::stop_token shutdown) {
+    constexpr Id maxDepth = 3;
+    constexpr auto stopped = "This Bot's participation in the Session has stopped";
+    constexpr auto unavailable = "This Session is unavailable through your T3 connection";
+    const auto replay = [&]() -> Json {
+        auto row = query("SELECT message_id,depth FROM session_invitations WHERE source_message_id=? AND step=?",
+                         {message.id,step});
+        if (!row.next()) return nullptr;
+        return {{"ok",true},{"messageId",row.number(0)},{"depth",row.number(1)}};
+    };
+    const auto finish = [&](const auto& apply) {
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
+        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                  {message.id,step}).next()) {
+            auto result = replay();
+            if (result.is_null()) result = apply();
+            saveTurnResults(message.id,step,Json::array({result}));
+        }
+        transaction.commit();
+        return true;
+    };
+
+    try {
+        const auto& args = decision.args;
+        using conversation_storage::text;
+        if (!args.is_object() || args.size() != 4) throw Conflict("Invalid invite_bot arguments");
+        const auto bot = text(args,"botId",128,true);
+        const SessionTarget target{text(args,"environmentId",256,true),text(args,"threadId",256,true)};
+        const auto note = text(args,"note",maxRequestBytes,true);
+        if (!validBotId(bot) || !validId(target.environmentId,256) || !validId(target.threadId,256) ||
+            note.find('\0') != note.npos)
+            throw Conflict("Invalid invite_bot arguments");
+        if (bot == message.bot) throw Conflict("A Bot cannot invite itself");
+
+        struct Sender { Person actor; Id participation, depth; };
+        const auto participation = [&](std::string_view id) {
+            return query("SELECT id,person_id,state FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?",
+                         {id,target.environmentId,target.threadId});
+        };
+        const auto authorize = [&]() -> Sender {
+            const auto actor = turnActor(message);
+            Policy policy(*this);
+            if (!policy.allows(actor,Action::bot_decide,message.bot) || !policy.allows(actor,Action::bot_decide,bot))
+                throw Conflict("Bot access is required");
+            if (!peers || std::ranges::none_of(peers(message.bot),[&](const PeerBot& peer) { return peer.intake.botId == bot; }))
+                throw Conflict("The destination Bot is unavailable or not allowed");
+            const auto read = Resource::sessionRead(target.environmentId,target.threadId);
+            if (!policy.allows(message.bot,read) || !policy.allows(bot,read)) throw Conflict(unavailable);
+            if (!policy.allows(message.bot,Action::environment_inspect,target.environmentId) ||
+                !policy.allows(bot,Action::environment_inspect,target.environmentId) ||
+                !query("SELECT 1 FROM t3_connector CROSS JOIN t3_connected_environments "
+                       "WHERE person_id=? AND environment_id=?",{actor.id,target.environmentId}).next())
+                throw Conflict(unavailable);
+            if (message.routing.contains("sessionOrigin") && !activeSessionOrigin(message)) throw Conflict(stopped);
+
+            auto inviter = participation(message.bot);
+            auto depth = message.routing.value("sessionInvitationDepth",Id{0});
+            Id inviterId = 0;
+            if (inviter.next()) {
+                if (sessionParticipationStopped(message.bot,target,message.id)) throw Conflict(stopped);
+                if (inviter.string(1) != actor.id) throw Conflict(unavailable);
+                inviterId = inviter.number(0);
+            } else {
+                auto launch = query(R"SQL(
+WITH RECURSIVE ancestry(id,source) AS (
+ SELECT t.id,json_extract(t.data,'$.sourceMessageId')
+ FROM runs r JOIN tasks t ON t.id=r.task_id JOIN outbox o ON o.id=r.action_id
+ WHERE t.bot_id=?1 AND r.environment_id=?3 AND r.thread_id=?4 AND json_extract(o.data,'$.tool')='delegate'
+ UNION ALL
+ SELECT t.id,json_extract(t.data,'$.sourceMessageId')
+ FROM ancestry a JOIN peer_exchanges p ON p.recipient_task=a.id JOIN tasks t ON t.id=p.sender_task
+ WHERE a.source IS NULL AND p.sender_task<a.id
+)
+SELECT m.id,m.bot_id,json_extract(m.routing,'$.sessionInvitationDepth'),
+       json_extract(m.routing,'$.sessionOrigin.environmentId'),json_extract(m.routing,'$.sessionOrigin.threadId')
+FROM ancestry a JOIN messages m ON m.id=a.source WHERE m.person_id=?2
+)SQL",{message.bot,actor.id,target.environmentId,target.threadId});
+                if (!launch.next()) throw Conflict("Invite a Bot into a Session you participate in or launched");
+                const SessionTarget origin{launch.string(3),launch.string(4)};
+                if (!origin.environmentId.empty() &&
+                    !activeSessionOrigin(launch.string(1),actor.id,origin,target.environmentId,launch.number(0)))
+                    throw Conflict(unavailable);
+                depth = std::max(depth,launch.number(2));
+            }
+            if (depth >= maxDepth) throw Conflict("Invitations can reach a maximum depth of 3");
+
+            auto invitee = participation(bot);
+            if (invitee.next()) {
+                if (invitee.string(1) != actor.id) throw Conflict("This Session participation is unavailable");
+                if (invitee.string(2) == "removed") throw Conflict("The person removed this Bot from the Session");
+            }
+            const auto scrub = sharedRedactor();
+            for (const auto id : std::array<std::string_view,4>{bot,message.bot,target.environmentId,target.threadId}) {
+                scrub.requirePublic(id);
+                if (redactT3Tokens(std::string(id)) != id) throw Conflict("Invalid Session invitation identifier");
+            }
+            return {actor,inviterId,depth + 1};
+        };
+        {
+            std::lock_guard lock(mutex);
+            if (!replay().is_null()) return finish([] { return Json(); });
+            authorize();
+        }
+
+        std::optional<SessionMetadata> metadata;
+        try {
+            metadata = t3.sessionMetadata(target,false,std::chrono::steady_clock::now() + std::chrono::seconds(5));
+        } catch (const std::exception&) {
+            throw Conflict("Could not verify access to this T3 Session");
+        }
+        if (!metadata || metadata->projectId.empty()) throw Conflict(unavailable);
+
+        return finish([&] {
+            const auto sender = authorize();
+            const auto scrub = sharedRedactor();
+            const auto safeNote = redactT3Tokens(scrub.text(note));
+            const auto title = bounded(redactT3Tokens(scrub.text(metadata->title)),512);
+            const auto inviterName = redactT3Tokens(scrub.text(message.routing.at("config").value("botDisplayName",message.bot)));
+            const auto description = "Invited to Session " + (title.empty() ? target.threadId : title) +
+                " by " + inviterName + ", note: " + safeNote;
+            Intake routing;
+            try {
+                if (!intake) throw Conflict("Bot intake is unavailable");
+                routing = intake(bot,description);
+            } catch (const StorageError&) {
+                throw;
+            } catch (const std::exception&) {
+                throw Conflict("The invited Bot is unavailable");
+            }
+            if (routing.botId != bot) throw Conflict("The invited Bot is unavailable");
+
+            const auto admit = [&](std::string_view id) {
+                exec(R"SQL(
+INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
+ON CONFLICT(bot_id,environment_id,thread_id) DO UPDATE SET state='active' WHERE state='left'
+)SQL",{id,target.environmentId,target.threadId,sender.actor.id});
+                auto row = participation(id);
+                if (!row.next()) throw Conflict("This Session participation is unavailable");
+                return row.number(0);
+            };
+            const auto inviter = sender.participation ? sender.participation : admit(message.bot);
+            const auto invitee = admit(bot);
+            const auto key = "session-invite:" + std::to_string(message.id) + ":" + std::to_string(step);
+            const SessionOrigin origin{target,title};
+            const Json invitation{{"environmentId",target.environmentId},{"threadId",target.threadId},
+                                  {"title",title},{"inviterBotId",message.bot},{"inviterName",inviterName},
+                                  {"note",safeNote},{"depth",sender.depth}};
+            const auto invited = enqueueConversation(sender.actor,routing,conversation::PrincipalSource::session,
+                                                      key,description,0,&origin,invitation);
+            exec("INSERT INTO session_invitations VALUES(?,?,?,?,?,?)",
+                 {message.id,step,inviter,invitee,sender.depth,invited});
+            return Json{{"ok",true},{"messageId",invited},{"depth",sender.depth}};
+        });
+    } catch (const Conflict& error) {
+        return finish([&] { return toolFailure(error.what()); });
+    } catch (const conversation_storage::ToolError& error) {
+        return finish([&] { return toolFailure(error.what()); });
+    }
+}
+
+Json SessionStopResult::data() const {
+    return {{"stopped",true},{"cancelled",cancelled},{"alreadyStarted",alreadyStarted},
+            {"notCancellable",notCancellable},{"pending",pending},{"stoppedChildSessions",stoppedChildSessions}};
+}
+
+std::string SessionStopResult::summary() const {
+    auto text = "The Bot's participation in this Session has stopped. Flock cancelled " +
+        std::to_string(cancelled) + (cancelled == 1 ? " queued message. " : " queued messages. ") +
+        std::to_string(alreadyStarted) + (alreadyStarted == 1 ? " message had" : " messages had") +
+        " already started and may still be processed. Flock requested cancellation for " +
+        std::to_string(stoppedChildSessions) + (stoppedChildSessions == 1 ? " child Session." : " child Sessions.");
+    if (notCancellable)
+        text += " Flock could not check " + std::to_string(notCancellable) +
+            (notCancellable == 1 ? " Run's queue status." : " Runs' queue status.");
+    if (pending)
+        text += " Flock will retry cancellation for " + std::to_string(pending) +
+            (pending == 1 ? " message." : " messages.");
+    return text;
+}
+
+SessionStopResult SessionParticipation::stop(const T3Connection& connection, std::string_view bot, std::string_view thread) {
+    if (!validBotId(bot) || !validId(thread,256)) throw Conflict("Invalid flock_stop arguments");
+
+    auto& db = *store_.p_;
+    SessionStop stopped;
+    {
+        std::lock_guard dispatch(db.sessionDispatchMutex);
+        std::lock_guard lock(db.mutex);
+        Transaction transaction(db.db);
+        stopped = db.stopSessionParticipation(person(connection),bot,{"",std::string(thread)},SessionExit::removed);
+        transaction.commit();
+    }
+    return db.settleSessionQueueCancellations(t3_,{},stopped);
+}
+
+// Both entry points hold the exclusive dispatch lock and a write transaction here.
+SessionStop Store::Impl::stopSessionParticipation(const Person& actor, std::string_view bot, const SessionTarget& target,
+                                                  SessionExit exit, Id message) {
+    Policy policy(*this);
+    if (!policy.allows(actor,Action::bot_decide,bot)) throw Conflict("Bot access is required");
+    const bool throughConnector = exit == SessionExit::left && actor.adminRoot && message &&
+        connectedSessionAccess(loadTurnMessage(message),target);
+    auto row = query(R"SQL(
+SELECT p.id,p.environment_id,p.state,p.stopped_through FROM session_participations p
+JOIN t3_connector c ON c.person_id=p.person_id
+JOIN t3_connected_environments e ON e.environment_id=p.environment_id
+WHERE (? OR p.person_id=?) AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.environment_id=?)
+)SQL",{throughConnector ? 1 : 0,actor.id,bot,target.threadId,target.environmentId,target.environmentId});
+    if (!row.next()) throw Conflict("This Session participation is unavailable");
+    const auto id = row.number(0);
+    const auto environment = row.string(1);
+    const auto current = row.string(2);
+    const auto stoppedThrough = row.number(3);
+    if (row.next()) throw Conflict("This threadId matched more than one connected T3 environment");
+    if (!policy.allows(bot,Action::environment_inspect,environment))
+        throw Conflict("This Session is unavailable through your T3 connection");
+    // A retried leave from an earlier turn must not stop a newly reactivated participation.
+    if ((message && message <= stoppedThrough) || current == "removed" ||
+        (current == "left" && exit == SessionExit::left)) return {id,stoppedThrough};
+
+    // A send may have returned a receipt before its transaction hit SQLite contention.
+    // Include that Run in the same stop transaction even if the conversation step is retried later.
+    const SessionTarget stoppedTarget{environment,target.threadId};
+    for (const auto& [source,receipt] : sessionSendReceipts)
+        if (receipt.target == stoppedTarget) recordSessionSendRun(source,receipt);
+
+    // The journal ID identifies this stop and fences out all previously admitted turns.
+    const auto state = exit == SessionExit::removed ? "removed" : "left";
+    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'session_participation_stop',?,?)",
+         {policyClock(),Json{{"participationId",id},{"state",state}},bot});
+    const auto cutoff = last();
+    exec((stopCascade + R"SQL(
+UPDATE session_participations SET state=?3, stopped_through=?2
+WHERE id IN stopping AND state<>'removed'
+)SQL").c_str(),{id,cutoff,state});
+    exec((stopCascade + R"SQL(
+INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
+SELECT p.id,w.run,?2 FROM stopping s JOIN session_participations p ON p.id=s.id
+JOIN session_message_waits w ON w.bot=p.bot_id AND w.environment=p.environment_id AND w.thread=p.thread_id
+UNION ALL
+SELECT s.id,r.run_id,?2 FROM stopping s JOIN outbox o ON json_extract(o.data,'$.sessionParticipationId')=s.id
+JOIN runs r ON r.action_id=o.id
+)SQL").c_str(),{id,cutoff});
+    exec((stopCascade + R"SQL(
+UPDATE session_message_waits SET notified=1 WHERE notified=0 AND rowid IN (
+ SELECT w.rowid FROM stopping s JOIN session_participations p ON p.id=s.id
+ JOIN session_message_waits w ON w.bot=p.bot_id
+ JOIN messages m ON m.id=w.message_id
+ WHERE (w.environment=p.environment_id AND w.thread=p.thread_id)
+    OR (json_extract(m.routing,'$.sessionOrigin.environmentId')=p.environment_id
+        AND json_extract(m.routing,'$.sessionOrigin.threadId')=p.thread_id AND m.person_id=p.person_id)
+)
+)SQL").c_str(),{id,cutoff});
+    auto turns = query((stopCascade + R"SQL(
+SELECT DISTINCT m.id FROM stopping s JOIN session_participations p ON p.id=s.id
+JOIN messages m ON m.bot_id=p.bot_id JOIN conversation_turns t ON t.message_id=m.id
+WHERE t.status IN ('paused','policy_waiting') AND (
+ (json_extract(m.routing,'$.sessionOrigin.environmentId')=p.environment_id
+  AND json_extract(m.routing,'$.sessionOrigin.threadId')=p.thread_id AND m.person_id=p.person_id)
+ OR (json_extract(m.routing,'$.sessionWake.environmentId')=p.environment_id
+     AND json_extract(m.routing,'$.sessionWake.threadId')=p.thread_id)
+)
+)SQL").c_str(),{id,cutoff});
+    std::vector<Id> closedTurns;
+    while (turns.next()) closedTurns.push_back(turns.number(0));
+    for (const auto turn : closedTurns)
+        finishTurn(loadTurnMessage(turn),"The T3 Session participation has ended.",nullptr,"session_access");
+    // Persist each cancellation intent with the stop. Runtime recovers in-flight launches and
+    // interrupts their own assigned Runs through the ordinary task cancellation path.
+    auto children = query((stopCascade + R"SQL(
+SELECT t.id,p.id FROM stopping s JOIN session_participations p ON p.id=s.id
+JOIN tasks t ON t.bot_id=p.bot_id
+JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId') AND m.bot_id=p.bot_id AND m.person_id=p.person_id
+WHERE json_extract(t.data,'$.sessionOrigin.environmentId')=p.environment_id
+  AND json_extract(t.data,'$.sessionOrigin.threadId')=p.thread_id
+  AND t.state NOT IN ('completed','cancelled','cancelling')
+  AND json_type(t.data,'$.selectedSession') IS NULL
+  AND NOT (json_extract(t.data,'$.activeRun.threadId') IS p.thread_id AND t.environment_id=p.environment_id)
+ORDER BY t.id
+)SQL").c_str(),{id,cutoff});
+    std::vector<std::pair<Id,Id>> cancellations;
+    while (children.next()) cancellations.emplace_back(children.number(0),children.number(1));
+    for (const auto& [taskId,participation] : cancellations) {
+        auto task = load(taskId);
+        if (!terminal(task) && task.at("state") != "cancelling") requestCancellation(task,{participation,cutoff});
+    }
+    auto selected = query((stopCascade + R"SQL(
+SELECT t.id,m.id,p.person_id,p.environment_id,p.thread_id
+FROM stopping s JOIN session_participations p ON p.id=s.id
+JOIN tasks t ON t.bot_id=p.bot_id
+JOIN messages m ON m.id=json_extract(t.data,'$.sourceMessageId')
+LEFT JOIN outbox o ON o.id=json_extract(t.data,'$.actionId')
+WHERE json_extract(t.data,'$.selectedSession.environmentId')=p.environment_id
+  AND json_extract(t.data,'$.selectedSession.threadId')=p.thread_id
+  AND t.state NOT IN ('completed','cancelled','cancelling')
+  AND json_type(t.data,'$.activeRun')='null' AND o.phase IS NOT 'started'
+)SQL").c_str(),{id,cutoff});
+    std::vector<Id> unassigned;
+    while (selected.next()) {
+        const auto source = loadTurnMessage(selected.number(1));
+        if (source.admittedActor.id == selected.string(2) ||
+            connectedSessionAccess(source,{selected.string(3),selected.string(4)}))
+            unassigned.push_back(selected.number(0));
+    }
+    for (const auto taskId : unassigned) {
+        auto task = load(taskId);
+        requestCancellation(task);
+    }
+    auto approvals = query((stopCascade + R"SQL(
+UPDATE policy_approvals SET status='stale' WHERE status IN ('pending','approved') AND turn<>0
+ AND action IN ('t3.send','session.read') AND EXISTS (
+ SELECT 1 FROM stopping s JOIN session_participations p ON p.id=s.id
+ WHERE bot=p.bot_id AND target=json_array(p.environment_id,p.thread_id)
+ ) RETURNING turn
+)SQL").c_str(),{id,cutoff});
+    std::vector<Id> released;
+    while (approvals.next()) released.push_back(approvals.number(0));
+    for (const auto turn : released) releasePolicyTurn(turn);
+    settlePolicyApprovals();
+    return {id,cutoff};
+}
+
+SessionStopResult Store::Impl::settleSessionQueueCancellations(T3& t3, std::stop_token shutdown, SessionStop stop) {
+    // Serialize immediate tool results and background retries. Never hold the database
+    // or dispatch lock across T3 cancellation calls.
+    std::lock_guard cancellation(sessionQueueCancellationMutex);
+    struct Pending { Id participant; SessionTarget target; std::string run; };
+    std::vector<Pending> pending;
+    {
+        std::lock_guard lock(mutex);
+        auto rows = query((stopCascade + R"SQL(
+SELECT c.participation_id,p.environment_id,p.thread_id,c.run
+FROM session_queue_cancellations c JOIN session_participations p ON p.id=c.participation_id
+JOIN t3_connector t ON t.person_id=p.person_id
+JOIN t3_connected_environments e ON e.environment_id=p.environment_id
+WHERE c.state='pending' AND c.retry_at<=?3 AND (?1=0 OR (c.stop_id=?2 AND c.participation_id IN stopping))
+ORDER BY c.participation_id,c.run
+)SQL").c_str(),{stop.participation,stop.cutoff,policyClock()});
+        while (rows.next())
+            pending.push_back({rows.number(0),{rows.string(1),rows.string(2)},rows.string(3)});
+    }
+    for (const auto& item : pending) {
+        if (shutdown.stop_requested()) break;
+        auto outcome = QueueCancelOutcome::Retry;
+        try {
+            outcome = t3.cancelQueuedSessionMessage(item.target,item.run);
+        } catch (const std::exception&) {
+            // A lost reply can be retried for this exact Run.
+        }
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        switch (outcome) {
+        case QueueCancelOutcome::Retry:
+            exec("UPDATE session_queue_cancellations SET retry_at=? WHERE participation_id=? AND run=?",
+                 {policyClock()+5,item.participant,item.run});
+            break;
+        case QueueCancelOutcome::Cancelled:
+        case QueueCancelOutcome::AlreadyStarted:
+        case QueueCancelOutcome::NotCancellable:
+            const auto state = outcome == QueueCancelOutcome::Cancelled ? "cancelled"
+                : outcome == QueueCancelOutcome::AlreadyStarted ? "started" : "unavailable";
+            exec("UPDATE session_queue_cancellations SET state=? WHERE participation_id=? AND run=?",
+                 {state,item.participant,item.run});
+            if (outcome == QueueCancelOutcome::Cancelled) {
+                auto run = query(R"SQL(
+SELECT r.task_id FROM runs r JOIN outbox o ON o.id=r.action_id
+WHERE r.environment_id=? AND r.thread_id=? AND r.run_id=?
+ AND json_extract(o.data,'$.sessionParticipationId')=?
+)SQL",{item.target.environmentId,item.target.threadId,item.run,item.participant});
+                if (run.next()) {
+                    auto task = load(run.number(0));
+                    const auto& active = task.at("activeRun");
+                    if (!terminal(task) && active.is_object() && field(active,"runId") == item.run &&
+                        field(active,"threadId") == item.target.threadId &&
+                        field(active,"environmentId") == item.target.environmentId) {
+                        // Queue cancellation confirms this Run never started.
+                        task["activeRun"] = nullptr;
+                        if (task.at("state") == "cancelling") save(task);
+                        else requestCancellation(task);
+                    }
+                }
+            }
+            break;
+        }
+        transaction.commit();
+    }
+    SessionStopResult result;
+    if (!stop.participation) return result;
+    std::lock_guard lock(mutex);
+    auto rows = query((stopCascade + R"SQL(
+SELECT state,count(*) FROM session_queue_cancellations WHERE stop_id=?2 AND participation_id IN stopping GROUP BY state
+)SQL").c_str(),{stop.participation,stop.cutoff});
+    while (rows.next()) {
+        const auto state = rows.string(0);
+        if (state == "cancelled") result.cancelled = rows.number(1);
+        else if (state == "started") result.alreadyStarted = rows.number(1);
+        else if (state == "unavailable") result.notCancellable = rows.number(1);
+        else result.pending = rows.number(1);
+    }
+    auto children = query((stopCascade + R"SQL(
+SELECT count(*) FROM journal WHERE kind='cancel_requested'
+ AND json_extract(data,'$.sessionStopId')=?2 AND json_extract(data,'$.sessionParticipationId') IN stopping
+)SQL").c_str(),{stop.participation,stop.cutoff});
+    if (children.next()) result.stoppedChildSessions = children.number(0);
+    return result;
+}
+
+bool Store::Impl::leaveSession(const conversation::Message& message, int step, const Decision& decision,
+                               T3& t3, std::stop_token shutdown) {
+    SessionStop stop;
+    {
+        std::lock_guard dispatch(sessionDispatchMutex);
+        std::lock_guard lock(mutex);
+        Transaction transaction(db);
+        if (shutdown.stop_requested()) return false;
+        if (!authorizeTurn(message)) { transaction.commit(); return false; }
+        if (!query("SELECT 1 FROM conversation_steps WHERE message_id=? AND step=? AND result IS NULL",
+                   {message.id,step}).next()) return false;
+        try {
+            using conversation_storage::text;
+            const auto& args = decision.args;
+            if (!args.is_object() || args.size() != 2) throw Conflict("Invalid leave_session arguments");
+            const SessionTarget target{text(args,"environmentId",256,true),text(args,"threadId",256,true)};
+            if (!validId(target.environmentId,256) || !validId(target.threadId,256))
+                throw Conflict("Invalid leave_session arguments");
+            stop = stopSessionParticipation(turnActor(message),message.bot,target,SessionExit::left,message.id);
+        } catch (const Conflict& error) {
+            saveTurnResults(message.id,step,Json::array({toolFailure(error.what())}));
+        } catch (const conversation_storage::ToolError& error) {
+            saveTurnResults(message.id,step,Json::array({toolFailure(error.what())}));
+        }
+        transaction.commit();
+    }
+    if (!stop.participation) return true;
+    const auto stopped = settleSessionQueueCancellations(t3,shutdown,stop);
+    std::lock_guard lock(mutex);
+    Transaction transaction(db);
+    auto result = stopped.data();
+    result["ok"] = true;
+    saveTurnResults(message.id,step,Json::array({result}));
+    // A Session-origin turn cannot take another model step once its own origin stops.
+    if (message.principalSource == conversation::PrincipalSource::session && !activeSessionOrigin(message) &&
+        isNextTurn(message.id)) {
+        finishTurn(message,stopped.summary(),nullptr,"session_left");
+        transaction.commit();
+        return false;
+    }
+    transaction.commit();
+    return true;
+}
+
+bool Store::Impl::activeSessionOrigin(const conversation::Message& message) const {
+    const auto& origin = message.routing.at("sessionOrigin");
+    const SessionTarget target{origin.at("environmentId"),origin.at("threadId")};
+    return activeSessionOrigin(message.bot,message.admittedActor.id,target,target.environmentId,message.id);
+}
+
+bool Store::Impl::activeSessionOrigin(std::string_view bot, std::string_view person, const SessionTarget& origin,
+                                      std::string_view destinationEnvironment, Id message) const {
+    return query(R"SQL(
+SELECT 1 FROM session_participations p
+JOIN t3_connected_environments e ON e.environment_id=p.environment_id
+JOIN t3_connector c ON c.person_id=p.person_id
+JOIN t3_connected_environments destination ON destination.environment_id=?
+WHERE p.bot_id=? AND p.environment_id=? AND p.thread_id=? AND p.person_id=? AND p.state='active'
+  AND p.stopped_through<?
+)SQL",{destinationEnvironment,bot,origin.environmentId,origin.threadId,person,message}).next();
+}
+
+bool Store::Impl::sessionParticipationStopped(std::string_view bot, const SessionTarget& target, Id message) const {
+    return query(R"SQL(
+SELECT 1 FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=?
+  AND (state<>'active' OR (?<>0 AND stopped_through>=?))
+)SQL",{bot,target.environmentId,target.threadId,message,message}).next();
 }
 
 }

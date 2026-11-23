@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 3;
+constexpr Id schemaVersion = 6;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -208,18 +208,14 @@ SELECT task.id,task.environment_id,task.project_id,task.state,
          ORDER BY (COALESCE(sender.state,task.state)='queued'
                    OR COALESCE(json_extract(task.data,'$.environmentReleased'),0)),
            COALESCE(sender.id,task.id),
-           CASE WHEN json_extract(task.data,'$.delegatedWorkflowId') IS NOT NULL OR
-                     json_extract(task.data,'$.nestedDelegationId') IS NOT NULL OR
-                     (task.state='cancelling' AND json_extract(task.data,'$.specialistRole')='requester' AND EXISTS (
-                       SELECT 1 FROM peer_exchanges open WHERE open.sender_task=task.id AND open.phase<>'closed')) THEN 2
-                WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
+           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
                 WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
        ) AS position
 FROM candidates task
-LEFT JOIN peer_exchanges peer ON peer.recipient_task=COALESCE(json_extract(task.data,'$.workflowParentTaskId'),task.id)
-LEFT JOIN candidates sender ON sender.id=COALESCE(json_extract(task.data,'$.specialistQueueOwner'),peer.sender_task)
+LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
+LEFT JOIN candidates sender ON sender.id=peer.sender_task
   AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
-  AND (json_extract(task.data,'$.specialistQueueOwner') IS NOT NULL OR peer.phase<>'closed')
+  AND peer.phase<>'closed'
 WHERE COALESCE(peer.kind,'')<>'consult';
 CREATE VIEW IF NOT EXISTS project_slots AS
 WITH queue AS (
@@ -232,11 +228,8 @@ FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
     if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
     initializePolicySchema();
-    initializeParticipationSchema();
-    initializeRootDeliverySchema();
-    initializeSpecialistSchema();
-    initializeSessionHandoffSchema();
     initializeConversationSchema();
+    initializeParticipationSchema();
     initializeChannelSchema();
     initializeLocalMachineSchema();
     initializeModelBudgetSchema();
@@ -403,26 +396,34 @@ void Store::Impl::peerMessage(const PeerExchange& exchange, const Json& message)
     journal(exchange.recipient,"bot_message",message);
 }
 
-void Store::Impl::requestCancellation(Json& task) {
+void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     const Id id = task["id"];
     const auto peer = peerExchange(id);
     if (!task.value("pendingInstructions",Json::array()).empty())
         task["cancelledInstructions"] = task.at("pendingInstructions");
     clearWait(task,"cancel");
     consumeEvent(task);
-    journal(id,"cancel_requested",Json::object());
+    journal(id,"cancel_requested",stop.participation
+        ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
+        : Json::object());
     if (task["state"] == "queued" && !peer) {
         for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
-        if (task.contains("workflowParentTaskId"))
-            exec("UPDATE workflow_stages SET status='stopped' WHERE task_id=?",{id});
         journal(id,"cancelled",Json::object());
     } else task["state"] = "cancelling";
     save(task);
     if (peer && peer->sender == id) {
         auto recipient = load(peer->recipient);
-        if (!terminal(recipient) && recipient["state"] != "cancelling") requestCancellation(recipient);
+        if (stop.participation && peer->kind == "work") {
+            // The Session exit owns this task's Run, while the peer still owns its own task and Run.
+            exec("UPDATE peer_exchanges SET phase='closed' WHERE id=?",{peer->id});
+            if (recipient["state"] == "peer_waiting") {
+                event(recipient,"peer-closed/" + peer->id,{{"kind","intake"}});
+                recipient["state"] = "deciding";
+                save(recipient);
+            }
+        } else if (!terminal(recipient) && recipient["state"] != "cancelling") requestCancellation(recipient);
     }
 }
 
@@ -529,7 +530,7 @@ Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> aft
 SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId') ELSE json_extract(j.data,'$.messageId') END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_steered','instruction_delivered',
+  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered',
                  'conversation_budget_approved')
 UNION
 SELECT j.conversation_bot_id,json_extract(j.data,'$.waitMessageId') FROM journal j
@@ -619,29 +620,7 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation,
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
-    if (!Policy(*this).allows(actor,Action::bot_decide,bot)) {
-        if (operation!="answer") throw DecisionDenied{};
-        auto origin = query(R"SQL(
-SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
- JOIN specialist_delegations d ON d.id=w.delegation_id JOIN return_channels c ON c.id=d.channel_id
- JOIN tasks t ON t.id=s.task_id
- JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.state='active'
-WHERE t.id=? AND t.bot_id=? AND d.recipient_task=json_extract(t.data,'$.workflowParentTaskId') AND c.person_id=?
- AND (sc.generation=d.generation OR (sc.generation>d.generation AND json_extract(t.data,'$.activeRun') IS NOT NULL))
-UNION ALL
-SELECT d.channel_id FROM specialist_delegations d JOIN tasks t ON t.id=d.sender_task
- JOIN return_channels c ON c.id=d.channel_id
- JOIN session_controls sc ON sc.channel_id=d.channel_id AND sc.state='active'
-WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
- AND (sc.generation=d.generation OR (sc.generation>d.generation AND EXISTS (
-  SELECT 1 FROM tasks admitted WHERE admitted.id=d.recipient_task
-  AND json_extract(admitted.data,'$.activeRun') IS NOT NULL)))
-)SQL",{id,bot,actor.id,id,bot,actor.id});
-        if (!origin.next()) throw DecisionDenied{};
-        const auto participation = authorizeParticipation(actor,origin.number(0));
-        const auto* activation = std::get_if<CoordinationActivation>(&participation);
-        if (!activation || !activation->binding.request.allowDelegation) throw DecisionDenied{};
-    }
+    if (!Policy(*this).allows(actor,Action::bot_decide,bot)) throw DecisionDenied{};
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};
     const auto data = redactor(bot).payload(input);
@@ -892,7 +871,7 @@ WITH visible AS NOT MATERIALIZED (
   WHERE id<=?2
     AND (?3=0 OR kind IN ('conversation_reply','report','completed','pr_review_requested')
          OR (kind='waiting' AND json_extract(data,'$.reason')='user_question'))
-    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved'))
+    AND ((conversation_bot_id IS NOT NULL AND kind NOT IN ('git_webhook','conversation_budget_approved','session_participation_stop'))
       OR (conversation_bot_id IS NULL
         AND kind IN ('request','waiting','wait_closed','user_answer','report','completed','cancelled','bot_message','pr_review_requested')
         AND (kind!='request' OR json_extract(data,'$.source') IS NOT 'conversation')
@@ -929,11 +908,11 @@ SELECT page.id,page.task_id,page.time,page.kind,
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,json_extract(data,'$.step') AS step
-                FROM journal WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered')
+                FROM journal WHERE kind IN ('instruction_accepted','instruction_delivered')
                 -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
                 AND json_extract(data,'$.messageId')=+m.id
               )
-              SELECT min(i.kind='instruction_steered' OR EXISTS (
+              SELECT min(EXISTS (
                 SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'

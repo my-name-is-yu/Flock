@@ -86,7 +86,6 @@ class DemoT3 final : public T3 {
         observed.status = "completed";
         observed.report = "The fixed demo Session completed its assigned work.";
         observed.resultRunId = run.runId;
-        observed.settled = true;
         return observed;
     }
 

@@ -1,7 +1,7 @@
 #include "storage.hpp"
+#include "conversation_storage.hpp"
 #include "flock/bot_profile.hpp"
 #include "flock/participation.hpp"
-#include "specialist_evidence.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -16,20 +16,10 @@
 
 namespace flockv0 {
 namespace {
-constexpr Id specialistBudgetAllowance = 12;
-
 bool present(std::string_view value, std::size_t limit = 8000) {
     return value.size() <= limit && value.find_first_not_of(" \r\n\t") != std::string_view::npos;
 }
 bool hasRun(const RunRef& r) { return !r.threadId.empty() && !r.runId.empty(); }
-
-bool commitSha(std::string_view sha) {
-    return (sha.size() == 40 || sha.size() == 64) && sha.find_first_not_of("0123456789abcdef") == sha.npos;
-}
-
-Json specialistWorkspace(std::string_view sha) {
-    return {{"type","worktree"},{"baseRef",sha},{"startFromOrigin",false},{"expectedCommit",sha}};
-}
 
 Json revision(const Json& task) { return task.value("currentRevision",Json(nullptr)); }
 
@@ -106,29 +96,6 @@ void includeInstructions(std::string& instruction, const Json& pending) {
 }
 }
 
-void Store::Impl::initializeSpecialistSchema() {
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS specialist_budgets(
- channel_id INTEGER PRIMARY KEY REFERENCES return_channels(id),
- allowance INTEGER NOT NULL CHECK(allowance>0),
- used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0 AND used<=allowance)))SQL");
-    exec(R"SQL(CREATE TABLE IF NOT EXISTS specialist_delegations(
- id TEXT PRIMARY KEY REFERENCES peer_exchanges(id),
- channel_id INTEGER NOT NULL REFERENCES specialist_budgets(channel_id),
- generation INTEGER NOT NULL,
- purpose TEXT NOT NULL,
- done_when TEXT NOT NULL,
- commit_sha TEXT NOT NULL,
- parent_id TEXT UNIQUE REFERENCES specialist_delegations(id),
- sender_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id),
- recipient_task INTEGER NOT NULL UNIQUE REFERENCES tasks(id)))SQL");
-    exec(R"SQL(
-CREATE TABLE IF NOT EXISTS specialist_launches(
- action_id TEXT PRIMARY KEY REFERENCES outbox(id),
- delegation_id TEXT NOT NULL REFERENCES specialist_delegations(id),
- task_id INTEGER NOT NULL UNIQUE REFERENCES tasks(id))
-)SQL");
-}
-
 struct Runtime::Impl {
     Store::Impl& db;
     Policy policy;
@@ -136,7 +103,7 @@ struct Runtime::Impl {
     T3& t3;
     SoulLoader soul;
     RuntimeOptions options;
-    std::future<void> channelWorker;
+    std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
     std::map<Id,std::future<void>> workers;
@@ -171,7 +138,8 @@ struct Runtime::Impl {
     }
 
     void runTurn(Id id) {
-        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,options.reconcileBotCreation,shutdown.get_token());
+        db.runTurn(id,model,t3,soul,options.clock,*options.botTools,options.gitHost.get(),options.applyBotChange,
+                   options.reconcileBotCreation,options.intake,options.peers,shutdown.get_token());
     }
 
     Impl(Store& store, Model& m, T3& adapter, SoulLoader loader, RuntimeOptions opts)
@@ -196,6 +164,7 @@ struct Runtime::Impl {
         conversationWorkers.clear();
         workers.clear();
         if (channelWorker.valid()) channelWorker.wait();
+        if (sessionWakeWorker.valid()) sessionWakeWorker.wait();
         try { persistTaskInferences(); }
         catch (const std::exception& error) {
             std::fprintf(stderr,"Flock Task inference shutdown: %s\n",error.what());
@@ -225,101 +194,6 @@ struct Runtime::Impl {
         db.consumeEvent(task);
     }
 
-    std::optional<std::string> observeSpecialistInput(const Person& actor, Id channel) const {
-        if (!options.observeSpecialistInput) return {};
-        try { return options.observeSpecialistInput(actor,channel); }
-        catch (const std::exception&) { return {}; }
-    }
-
-    std::optional<Person> specialistPerson(std::string_view id) const {
-        if (!options.resolveSpecialistPerson) return Person{std::string(id)};
-        auto person = options.resolveSpecialistPerson(id);
-        if (!person || person->id != id) return {};
-        return person;
-    }
-
-    std::optional<std::string> observeSpecialistInput(std::string_view personId, Id channel) const {
-        const auto person = specialistPerson(personId);
-        return person ? observeSpecialistInput(*person,channel) : std::nullopt;
-    }
-
-    bool reserveSpecialistBudget(Id channel) {
-        db.exec("UPDATE specialist_budgets SET used=used+1 WHERE channel_id=? AND used<allowance",{channel});
-        return sqlite3_changes(db.db)!=0;
-    }
-
-    bool activeSpecialistCoordination(Id channel, Id generation) const {
-        return db.query("SELECT 1 FROM session_controls WHERE channel_id=? AND generation=? AND state='active'",
-                        {channel,generation}).next();
-    }
-
-    struct SpecialistOrigin {
-        Id channel, generation, senderTask;
-        std::string delegation, person, requester, commit, purpose, doneWhen, requestId, parent, rootBot;
-    };
-
-    std::optional<SpecialistOrigin> specialistOrigin(Id taskId) const {
-        auto row = db.query(R"SQL(
-SELECT d.channel_id,d.generation,d.sender_task,d.id,c.person_id,t.bot_id,d.commit_sha,d.purpose,d.done_when,
-       c.request_id,d.parent_id,c.bot_id
-FROM specialist_delegations d JOIN return_channels c ON c.id=d.channel_id JOIN tasks t ON t.id=d.sender_task
-WHERE d.recipient_task=?1 OR d.id=(
- SELECT w.delegation_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?1)
-)SQL",{taskId});
-        if (!row.next()) return {};
-        return SpecialistOrigin{row.number(0),row.number(1),row.number(2),row.string(3),row.string(4),
-                                row.string(5),row.string(6),row.string(7),row.string(8),row.string(9),
-                                row.string(10),row.string(11)};
-    }
-
-    bool specialistAdmission(const SpecialistOrigin& origin, const Command& command, const Json& task) {
-        if (!activeSpecialistCoordination(origin.channel,origin.generation) ||
-            policy.forbidden(command.ownerBotId,Action::environment_launch,command.environmentId) ||
-            !task.at("activeRun").is_null() || !task.at("lastRun").is_null() || hasPending(task) ||
-            taskIntent(task) != origin.purpose || field(task,"doneWhen") != origin.doneWhen ||
-            field(task,"inputArtifactVersion") != origin.commit) return false;
-        try {
-            const auto person = specialistPerson(origin.person);
-            if (!person) return false;
-            const auto participation = db.authorizeParticipation(*person,origin.channel);
-            const auto* activation = std::get_if<CoordinationActivation>(&participation);
-            if (!activation || !activation->binding.request.allowDelegation) return false;
-            const auto& target = activation->channel.origin.invitation.target;
-            const auto peer = allowedPeer(origin.requester,command.ownerBotId);
-            if (!origin.parent.empty()) {
-                const auto rootPeer = allowedPeer(origin.rootBot,command.ownerBotId);
-                if (!validBotRole(rootPeer.role) || rootPeer.intake.environmentId != target.environmentId ||
-                    rootPeer.intake.projectId != target.projectId) return false;
-                const auto parent = allowedPeer(origin.rootBot,origin.requester);
-                if (!validBotRole(parent.role) || parent.intake.environmentId!=target.environmentId ||
-                    parent.intake.projectId!=target.projectId ||
-                    !db.query("SELECT 1 FROM specialist_delegations d JOIN tasks t ON t.id=d.recipient_task"
-                              " WHERE d.id=? AND d.channel_id=? AND d.generation=? AND d.parent_id IS NULL"
-                              " AND t.bot_id=? AND t.state='specialist_waiting' AND json_extract(t.data,'$.nestedDelegationId')=?",
-                              {origin.parent,origin.channel,origin.generation,origin.requester,origin.delegation}).next())
-                    return false;
-            }
-            if (!validBotRole(peer.role) || peer.intake.environmentId != target.environmentId ||
-                peer.intake.projectId != target.projectId || command.environmentId != target.environmentId ||
-                command.projectId != target.projectId) return false;
-            const auto session = command.config.at("session");
-            if (session.at("workspaceStrategy") != specialistWorkspace(origin.commit) ||
-                field(session,"runtimeMode") != "approval-required") return false;
-        } catch (const std::exception&) { return false; }
-        return true;
-    }
-
-    bool reserveSpecialistLaunch(const SpecialistOrigin& origin, const Command& command, const Json& task,
-                                 bool pinVerified) {
-        if (!pinVerified || command.tool!="delegate" || !specialistAdmission(origin,command,task)) return false;
-        auto existing = db.query("SELECT action_id FROM specialist_launches WHERE task_id=?",{task.at("id")});
-        if (existing.next()) return existing.string(0)==command.actionId;
-        if (!reserveSpecialistBudget(origin.channel)) return false;
-        db.exec("INSERT INTO specialist_launches(action_id,delegation_id,task_id) VALUES(?,?,?)",
-                {command.actionId,origin.delegation,task.at("id")});
-        return true;
-    }
-
     template<class F> bool changeTask(Id id, F fn, Json* saved = nullptr) {
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
@@ -342,8 +216,6 @@ WHERE d.recipient_task=?1 OR d.id=(
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
 SELECT id FROM project_slots WHERE blocker_id IS NULL
-UNION
-SELECT id FROM tasks WHERE state='workflow_waiting'
 UNION
 SELECT id FROM tasks WHERE state NOT IN ('completed','cancelled') AND (
   COALESCE(json_extract(data,'$.environmentReleased'),0)=1 OR
@@ -427,97 +299,9 @@ ORDER BY id)SQL");
         task.erase("pendingInstructions");
         task["activeRun"] = nullptr;
         task["state"] = "cancelled";
-        if (task.contains("workflowParentTaskId"))
-            db.exec("UPDATE workflow_stages SET status='stopped' WHERE task_id=?",{task.at("id")});
         db.journal(task["id"],"cancelled",Json::object());
-        if (field(task,"specialistRole")=="requester") {
-            auto delegation = db.query("SELECT id,commit_sha FROM specialist_delegations WHERE sender_task=?",{task.at("id")});
-            if (delegation.next() && !db.query("SELECT 1 FROM journal WHERE task_id=? AND kind='specialist_result' LIMIT 1",
-                                                {task.at("id")}).next()) {
-                db.journal(task["id"],"specialist_result",{{"delegationId",delegation.string(0)},
-                    {"artifactVersion",delegation.string(1)},
-                    {"status","cancelled"},{"report","The specialist request was cancelled."},
-                    {"references",Json::array()}});
-            }
-        }
         if (const auto peer = db.peerExchange(task["id"]); peer && peer->recipient == task["id"])
             finishPeer(*peer,task,db.load(peer->sender),"cancelled","The receiving Bot's task was cancelled.",actionId());
-    }
-
-    bool admittedSpecialistRun(const Json& task) const {
-        if (!task.at("activeRun").is_null()) return true;
-        const auto action = field(task,"actionId");
-        return !action.empty() && db.query("SELECT 1 FROM outbox WHERE id=? AND phase='started'",{action}).next();
-    }
-
-    bool admittedSpecialistDescendant(const Json& task, std::set<Id>& visited, std::size_t& inspected) const {
-        const auto taskId = task.at("id").get<Id>();
-        if (inspected++ >= 128 || !visited.insert(taskId).second) return true;
-        if (admittedSpecialistRun(task)) return true;
-        if (const auto delegation = field(task,"nestedDelegationId"); !delegation.empty()) {
-            auto child = db.query(R"SQL(
-SELECT child.recipient_task FROM specialist_delegations parent
-JOIN specialist_delegations child ON child.parent_id=parent.id
-WHERE parent.recipient_task=? AND child.id=?
-)SQL",{taskId,delegation});
-            if (!child.next()) return true;
-            if (admittedSpecialistDescendant(db.load(child.number(0)),visited,inspected)) return true;
-        }
-        auto stages = db.query(R"SQL(
-SELECT s.task_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
-JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.recipient_task=? AND s.task_id IS NOT NULL
-)SQL",{taskId});
-        while (stages.next())
-            if (admittedSpecialistDescendant(db.load(stages.number(0)),visited,inspected)) return true;
-        return false;
-    }
-
-    bool admittedSpecialistDescendant(const Json& task) const {
-        std::set<Id> visited;
-        std::size_t inspected = 0;
-        return admittedSpecialistDescendant(task,visited,inspected);
-    }
-
-    Id specialistBudgetRemaining(Id channel) const {
-        std::lock_guard lock(db.mutex);
-        auto row = db.query("SELECT allowance-used FROM specialist_budgets WHERE channel_id=?",{channel});
-        return row.next() ? row.number(0) : specialistBudgetAllowance;
-    }
-
-    void freezeSpecialistWork(const Person* person, Id channel, Id generation) {
-        std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        if (person && !std::holds_alternative<CoordinationActivation>(
-                db.authorizeParticipation(*person,channel,false))) return;
-        auto control = db.query(R"SQL(
-SELECT s.generation,s.state FROM session_controls s JOIN return_channels r ON r.id=s.channel_id
-WHERE s.channel_id=? AND s.permission<>'null'
-)SQL",{channel});
-        if (!control.next() || control.number(0)<=generation || control.string(1)=="active") return;
-        if (!person && control.string(1)!="paused" && control.string(1)!="stopped" &&
-            control.string(1)!="budget_exhausted") return;
-        auto rows = db.query(R"SQL(
-SELECT recipient_task FROM specialist_delegations WHERE channel_id=? AND generation<=?
-UNION SELECT s.task_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
-JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.channel_id=? AND d.generation<=? AND s.task_id IS NOT NULL
-)SQL",{channel,generation,channel,generation});
-        std::vector<Id> tasks;
-        while (rows.next()) if (rows.number(0)>0) tasks.push_back(rows.number(0));
-        auto emptyStages = db.query(R"SQL(
-SELECT s.workflow_id,s.stage_id FROM specialist_delegations d JOIN workflows w ON w.delegation_id=d.id
-JOIN workflow_stages s ON s.workflow_id=w.id WHERE d.channel_id=? AND d.generation<=? AND s.task_id IS NULL
-AND s.status NOT IN ('completed','failed','stopped')
-)SQL",{channel,generation});
-        while (emptyStages.next())
-            db.exec("UPDATE workflow_stages SET status='stopped' WHERE workflow_id=? AND stage_id=? AND task_id IS NULL",
-                    {emptyStages.number(0),emptyStages.string(1)});
-        for (const auto id : tasks) {
-            auto task = db.load(id);
-            if (terminal(task) || task["state"]=="cancelling" || admittedSpecialistRun(task) ||
-                admittedSpecialistDescendant(task)) continue;
-            db.requestCancellation(task);
-        }
-        transaction.commit();
     }
 
     void stopNote(const Json& snapshot, const std::string& detail) {
@@ -574,20 +358,7 @@ AND s.status NOT IN ('completed','failed','stopped')
         return decision;
     }
 
-    void updateSpecialistVerdict(Json& task, const Json& report) {
-        if (field(task,"specialistRole")!="executor") return;
-        task.erase("specialistVerdict");
-        if (field(report,"status")!="completed" || field(report,"itemId").empty() ||
-            report.value("truncated",false) || field(report,"evidenceStatus")=="report_unavailable") return;
-        const auto check = Json::parse(field(report,"report"),nullptr,false);
-        const auto verdict = field(check,"verdict");
-        if (field(check,"artifactVersion")==field(task,"inputArtifactVersion") &&
-            (verdict=="pass" || verdict=="fail") && specialistFindings(check))
-            task["specialistVerdict"] = verdict;
-    }
-
     void writeRunReport(Json& task, const Json& data) {
-        updateSpecialistVerdict(task,data);
         const auto run = runRef(data.at("run"));
         if (task["state"] != "cancelling" && !task.value("replanning",false)) {
             db.event(task,"result/" + field(data,"environmentId") + "/" + run.threadId + "/" + run.runId,data);
@@ -660,15 +431,12 @@ AND s.status NOT IN ('completed','failed','stopped')
             const auto reason = field(task["wait"],"reason");
             const bool connectionWait = reason == "auth" || reason == "settings";
             const bool replanning = task.value("replanning",false);
-            const bool settledRunReleasesStopBarrier =
-                observed.kind == Observation::Kind::Finished && observed.settled;
-            if (settledRunReleasesStopBarrier) {
+            if (observed.kind == Observation::Kind::Finished) {
                 closeQuestion(task,"run_finished");
-                // An ended Run cannot accept an outstanding reply. Preserve the
-                // action in history while letting the definitive Run result take precedence.
                 if (!field(task,"actionId").empty()) {
                     const auto action = db.outbox(task);
-                    if (!action.is_null() && action["tool"] == "answer_session_question") {
+                    const bool supersededAnswer = !action.is_null() && action["tool"] == "answer_session_question";
+                    if (supersededAnswer) {
                         db.exec("UPDATE outbox SET phase='closed' WHERE id=?", {task["actionId"]});
                         task["actionId"] = "";
                     }
@@ -807,7 +575,7 @@ AND s.status NOT IN ('completed','failed','stopped')
             (task["state"] == "cancelling") != (stop["intent"] == "cancel")) return;
         const auto observed = observe(task);
         if (ingest(task,observed)) return;
-        if (observed.kind == Observation::Kind::Finished)
+        if (observed.kind == Observation::Kind::Settling)
             return stopNote(task,"Waiting for the assigned Run's delegated work to settle");
         if (observed.kind == Observation::Kind::Unavailable &&
             !(task.contains("workflowId") && stop.at("intent") == "cancel"))
@@ -877,7 +645,6 @@ AND s.status NOT IN ('completed','failed','stopped')
 
     void stop(Json task) {
         const bool cancel = task["state"] == "cancelling";
-        if (cancel && (requestNestedSpecialistStop(task) || requestSpecialistWorkflowStop(task))) return;
         const auto intent = cancel ? "cancel" : "replan";
         if (task.contains("pendingRunReport")) {
             if (!change(task,[&](Json& current) {
@@ -946,6 +713,10 @@ AND s.status NOT IN ('completed','failed','stopped')
         c.candidate = runRef(action.value("candidate",Json::object()));
         c.candidateQuestionId = field(action,"candidateQuestionId");
         c.launchReceiptThreadId = field(action,"launchReceiptThreadId");
+        if (c.tool == "delegate" && task.contains("sessionOrigin")) {
+            const auto& origin = task.at("sessionOrigin");
+            c.sessionOrigin = SessionOrigin{{field(origin,"environmentId"),field(origin,"threadId")},field(origin,"title")};
+        }
         return c;
     }
 
@@ -984,29 +755,14 @@ AND s.status NOT IN ('completed','failed','stopped')
 
     enum class DeliveryOutcome { Accepted, DefinitelyUnsent, Unknown };
 
-    bool scopedSpecialistLaunch(const Json& task, std::string_view tool) const {
-        const auto role = field(task,"specialistRole");
-        return (role=="workflow_stage" || role=="executor") && (tool=="delegate" || tool=="follow_up");
-    }
-
-    void failSpecialistLaunch(Json& task, const Json& action, std::string_view detail) {
-        const auto id = task.at("id").get<Id>();
-        db.exec("UPDATE outbox SET phase='closed' WHERE id=? AND phase IN ('ready','started')",{action.at("id")});
-        db.clearWait(task,"delivery_refused");
-        task["actionId"] = "";
-        task["state"] = "completed";
-        task["peerOutcome"] = "failed";
-        db.journal(id,"specialist_launch_blocked",{{"text",detail},{"actionId",action.at("id")}});
-        if (field(task,"specialistRole")=="workflow_stage")
-            db.exec("UPDATE workflow_stages SET status='failed' WHERE task_id=?",{id});
-        if (const auto peer = db.peerExchange(id); peer && peer->recipient==id)
-            finishPeer(*peer,task,db.load(peer->sender),"failed",detail,actionId());
-    }
-
     void applyDelivery(Id id, const Json& action, Delivery outcome) {
         changeTask(id,[&](Json& task) {
             if (task["actionId"] != action["id"] || terminal(task)) return false;
             const auto scrub = db.redactor(field(task,"botId"));
+            if (!outcome.launchWarning.empty()) {
+                task["launchWarning"] = scrub.text(outcome.launchWarning);
+                db.journal(id,"session_lineage_unavailable",{{"actionId",action["id"]},{"text",task["launchWarning"]}});
+            }
             if (scrub.payload(runJson(outcome.run)) != runJson(outcome.run))
                 outcome = {Delivery::Kind::Unknown,{},"T3 returned a protected Run identifier"};
             outcome.detail = scrub.text(outcome.detail);
@@ -1023,11 +779,6 @@ AND s.status NOT IN ('completed','failed','stopped')
             } else if (outcome.definitelyUnsent || outcome.kind == Delivery::Kind::NotAccepted)
                 delivery = DeliveryOutcome::DefinitelyUnsent;
 
-            if (!cancelling && outcome.kind==Delivery::Kind::NotAccepted && outcome.definitelyUnsent &&
-                scopedSpecialistLaunch(task,field(action,"tool"))) {
-                failSpecialistLaunch(task,action,bounded(outcome.detail,2048));
-                return true;
-            }
             if (delivery == DeliveryOutcome::Accepted) {
                 db.exec("UPDATE outbox SET phase='accepted' WHERE id=?", {action["id"]});
                 db.clearWait(task,"delivery_confirmed");
@@ -1035,6 +786,11 @@ AND s.status NOT IN ('completed','failed','stopped')
                 else {
                     db.exec("INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?)", {action["id"],id,
                         task["environmentId"],outcome.run.threadId,outcome.run.runId,outcome.run.link});
+                    if (const auto participation = action.value("sessionParticipationId",Id{}); participation)
+                        db.exec(R"SQL(
+INSERT OR IGNORE INTO session_queue_cancellations(participation_id,run,stop_id)
+SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_through>=?
+)SQL",{outcome.run.runId,participation,task.at("sourceMessageId")});
                     if (task.contains("workflowId")) {
                         const auto now = options.clock();
                         db.exec("UPDATE workflow_stages SET confirmed_state='running',confirmed_at=?,unreachable=0,"
@@ -1104,41 +860,28 @@ AND s.status NOT IN ('completed','failed','stopped')
         });
     }
 
-    std::optional<Delivery> replaySpecialistLaunch(Id id, const Command& command) {
-        if (command.tool != "delegate" || command.authGeneration.empty() ||
-            !command.launchReceiptThreadId.empty() || !command.candidate.threadId.empty()) return {};
-        const auto origin = [&]() -> std::optional<SpecialistOrigin> {
-            std::lock_guard lock(db.mutex);
-            if (!db.query("SELECT 1 FROM specialist_launches WHERE task_id=? AND action_id=?",
-                          {id,command.actionId}).next()) return {};
-            return specialistOrigin(id);
-        }();
-        if (!origin || t3.authGeneration(command.environmentId,command.config) != command.authGeneration ||
-            observeSpecialistInput(origin->person,origin->channel) != origin->commit) return {};
-        {
-            std::lock_guard lock(db.mutex);
-            Transaction transaction(db.db);
-            const auto current = db.load(id);
-            if (shutdown.stop_requested() || current.at("state") == "cancelling" || terminal(current) ||
-                current.at("actionId") != command.actionId ||
-                !specialistAdmission(*origin,command,current)) return {};
-            transaction.commit();
-        }
-        // The original admission is already durable. Replay uses the same OAuth namespace and keys.
-        auto replay = t3.send(command);
-        if (replay.kind==Delivery::Kind::Accepted ||
-            (replay.kind==Delivery::Kind::NotAccepted && replay.definitelyUnsent)) return replay;
-        return {};
-    }
-
     void deliver(const Json& task, Json action) {
         if (shutdown.stop_requested()) return;
         auto cmd = command(task,action);
         const auto id = task["id"].get<Id>();
         Delivery outcome;
         const bool usesExistingSession = cmd.tool == "follow_up" || cmd.tool == "start_in_session";
+        const bool sendsToSession = usesExistingSession || cmd.tool == "answer_session_question";
         const bool preparesTaskContract = cmd.tool == "delegate" || cmd.tool == "start_in_session";
-        const auto selectedSessionAllowed = [&](const Json& current) {
+        const auto sessionActionAllowed = [&](const Json& current) {
+            if (!cmd.sessionOrigin && !sendsToSession) return true;
+            std::lock_guard lock(db.mutex);
+            if (const auto origin = current.find("sessionOrigin"); origin != current.end()) {
+                const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
+                const auto actor = db.turnActor(source);
+                const SessionTarget parent{field(*origin,"environmentId"),field(*origin,"threadId")};
+                if (!db.activeSessionOrigin(cmd.ownerBotId,actor.id,parent,cmd.environmentId,source.id) ||
+                    !policy.allows(actor,Action::bot_decide,cmd.ownerBotId) ||
+                    !policy.allows(cmd.ownerBotId,Action::environment_inspect,parent.environmentId)) return false;
+                if (!sendsToSession) return true;
+            }
+            if (db.sessionParticipationStopped(cmd.ownerBotId,{cmd.environmentId,cmd.target.threadId},
+                                               current.value("sourceMessageId",Id{}))) return false;
             if (!usesExistingSession || !current.contains("selectedSession")) return cmd.tool != "start_in_session";
             const auto& selected = current.at("selectedSession");
             if (field(selected,"environmentId") != cmd.environmentId || field(selected,"threadId") != cmd.target.threadId ||
@@ -1146,11 +889,9 @@ AND s.status NOT IN ('completed','failed','stopped')
             return db.permitsWorkSession(current.value("sourceMessageId",Id{}),
                                          {cmd.environmentId,cmd.target.threadId,cmd.projectId});
         };
-        // A scoped launch must pass the live coordination check when reserving its slot.
-        const bool specialistLaunch = scopedSpecialistLaunch(task,cmd.tool);
         std::optional<Resource> resource;
         if (cmd.tool == "delegate") resource = Resource{Action::environment_launch,cmd.environmentId};
-        else if (usesExistingSession || cmd.tool == "answer_session_question") {
+        else if (sendsToSession) {
             resource = Resource{Action::t3_send,Resource::sessionRead(cmd.environmentId,cmd.target.threadId).target,
                                 cmd.tool == "answer_session_question"};
         }
@@ -1158,10 +899,6 @@ AND s.status NOT IN ('completed','failed','stopped')
         const auto refused = [&](ApprovalGate gate) {
             change(task,[&](Json& current) {
                 if (current["actionId"] != action["id"]) return false;
-                if (specialistLaunch) {
-                    failSpecialistLaunch(current,action,approvalError(gate));
-                    return true;
-                }
                 db.exec("UPDATE outbox SET phase='closed' WHERE id=? AND phase='ready'",{action["id"]});
                 if (!sqlite3_changes(db.db)) return false;
                 refundUnsentWork(current,action);
@@ -1175,8 +912,9 @@ AND s.status NOT IN ('completed','failed','stopped')
             });
         };
         const bool firstSend = action["phase"] == "ready";
+        std::shared_lock dispatch(db.sessionDispatchMutex,std::defer_lock);
         if (firstSend) {
-            if (!selectedSessionAllowed(task)) return refused(ApprovalGate::denied);
+            if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
             if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
                 return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
             if (preparesTaskContract) {
@@ -1210,9 +948,10 @@ AND s.status NOT IN ('completed','failed','stopped')
                     return applyDelivery(id,action,{Delivery::Kind::Settings,{},SessionContextLimit{}.what(),true});
                 action["instruction"] = cmd.instruction;
             }
-            const auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
+            auto payload = Json{{"tool",cmd.tool},{"instruction",cmd.instruction},{"questionId",cmd.questionId},
                                   {"answers",cmd.answers},{"run",runJson(cmd.target)},{"projectId",cmd.projectId},
                                   {"config",cmd.config},{"environmentId",cmd.environmentId}};
+            if (cmd.sessionOrigin) payload["delegatedFrom"] = task.at("sessionOrigin");
             const auto assess = [&](const Json& current, bool claim) {
                 const auto origin = db.taskPolicyOrigin(current);
                 if (usesExistingSession) {
@@ -1248,17 +987,11 @@ AND s.status NOT IN ('completed','failed','stopped')
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            std::optional<SpecialistOrigin> origin;
-            if (specialistLaunch) {
-                std::lock_guard lock(db.mutex);
-                origin = specialistOrigin(id);
-            }
-            const bool pinned = origin && observeSpecialistInput(origin->person,origin->channel)==origin->commit;
-            bool specialistBlocked = false;
+            if (sendsToSession || cmd.sessionOrigin) dispatch.lock();
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
-                if (!selectedSessionAllowed(current)) {
+                if (!sessionActionAllowed(current)) {
                     policyGate = ApprovalGate::denied;
                     return false;
                 }
@@ -1266,11 +999,15 @@ AND s.status NOT IN ('completed','failed','stopped')
                     policyGate = assess(current,true);
                     if (policyGate != ApprovalGate::allow) return false;
                 }
-                if (specialistLaunch && (!origin || !reserveSpecialistLaunch(*origin,cmd,current,pinned))) {
-                    failSpecialistLaunch(current,action,
-                        "The specialist launch could not verify active coordination, remaining allowance, or the pinned input");
-                    specialistBlocked = true;
-                    return true;
+                if (usesExistingSession && current.contains("sourceMessageId")) {
+                    const auto source = db.loadTurnMessage(current.at("sourceMessageId"));
+                    const SessionTarget target{cmd.environmentId,cmd.target.threadId};
+                    auto participant = db.query(R"SQL(
+SELECT id,person_id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND state='active'
+)SQL",{cmd.ownerBotId,target.environmentId,target.threadId});
+                    if (participant.next() && (participant.string(1) == db.turnActor(source).id ||
+                                               db.connectedSessionAccess(source,target)))
+                        action["sessionParticipationId"] = participant.number(0);
                 }
                 auto payload = action;
                 payload.erase("phase");
@@ -1282,23 +1019,18 @@ AND s.status NOT IN ('completed','failed','stopped')
                     current["deadline"] = options.clock() + db.environmentTimeout(cmd.ownerBotId,cmd.environmentId,current.at("config"));
                 db.journal(current["id"],"send_started",{{"actionId",action["id"]}});
                 return true;
-            }) || specialistBlocked) {
+            })) {
                 if (policyGate != ApprovalGate::allow && policyGate != ApprovalGate::waiting) refused(policyGate);
                 return;
             }
         } else if (action["phase"] != "started") return;
         try {
-            if (firstSend) outcome = !selectedSessionAllowed(task) ||
+            if (firstSend) outcome = !sessionActionAllowed(task) ||
                                      (resource && policy.forbidden(cmd.ownerBotId,resource->action,resource->target)) ||
                                      (usesExistingSession && policy.forbidden(cmd.ownerBotId,Action::environment_launch,cmd.environmentId))
                 ? Delivery{Delivery::Kind::NotAccepted,{},"Session action denied by installation policy.",true}
                 : t3.send(cmd);
-            else {
-                outcome = t3.reconcile(cmd);
-                if (outcome.kind == Delivery::Kind::Unknown) {
-                    if (auto replay = replaySpecialistLaunch(id,cmd)) outcome = std::move(*replay);
-                }
-            }
+            else outcome = t3.reconcile(cmd);
         } catch (const std::exception&) {
             outcome.detail = "T3 communication failed; check the saved action before retrying";
         }
@@ -1345,19 +1077,9 @@ WHERE p.id=? AND p.sender_task=? AND p.phase='closed' AND p.last_message=?
                                        const std::optional<PeerExchange>& peer, bool canSend, bool canRead) {
         const auto id = task.at("id").get<Id>();
         if (peer && peer->sender == id && peer->phase == "question") return {"reply_to_bot","ask_user"};
-        const bool specialist = field(task,"specialistRole")=="executor";
         if (!task["activeRun"].is_null() && !field(task["question"],"requestId").empty())
-            return {"answer_session_question",specialist ? "reply_to_bot" : "ask_user"};
-        if (field(task,"specialistRole")=="workflow_stage") return {};
+            return {"answer_session_question","ask_user"};
         const bool receiving = peer && peer->recipient == id && peer->phase == "working";
-        if (specialist) {
-            if (!receiving) return {};
-            if (hasSettledRun(task)) return {"reply_to_bot"};
-            std::vector<std::string> tools{"delegate","reply_to_bot"};
-            if (options.observeSpecialistInput) tools.push_back("start_peer_workflow");
-            if (canSend) tools.push_back("delegate_nested_specialist");
-            return tools;
-        }
         if (receiving && peer->kind == "consult") return {"reply_to_bot"};
         std::vector<std::string> tools{"delegate",receiving ? "reply_to_bot" : "ask_user"};
         if (hasSettledRun(task)) {
@@ -1548,8 +1270,7 @@ FROM journal j
 LEFT JOIN waits w ON j.kind='user_answer' AND w.id=json_extract(j.data,'$.waitId') AND w.task_id=j.task_id
 WHERE j.task_id=?1 AND
       (j.kind='instruction_accepted' OR
-       (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer') OR
-       (j.kind='instruction_steered' AND json_extract(j.data,'$.revisionId')=?2))
+       (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer'))
 ORDER BY j.id
 )SQL",{task.at("id"),revision(task),answersAfter});
         Json sources = Json::array();
@@ -1563,8 +1284,7 @@ ORDER BY j.id
             if (std::exchange(first,false))
                 instruction += "\n\nUser decisions for this task, oldest first. Apply later directions where they replace "
                                "earlier ones, under the current task intent and completion criteria above.";
-            instruction += answer ? "\n\nUser answer" : kind == "instruction_steered" ? "\n\nDelivered Session steer"
-                                                                                       : "\n\nAccepted instruction";
+            instruction += answer ? "\n\nUser answer" : "\n\nAccepted instruction";
             instruction += " (record " + std::to_string(rows.number(0));
             if (item.contains("messageId")) instruction += ", message " + item.at("messageId").dump();
             if (item.contains("step")) instruction += ", step " + item.at("step").dump();
@@ -1632,12 +1352,6 @@ ORDER BY j.id
         if (task.contains("workflowId")) {
             for (const auto& source : task.at("sourceResultRefs")) quoteSource(source);
             db.appendStageRequirements(instruction,task);
-        }
-        if (field(task,"specialistRole")=="executor") {
-            instruction += "\n\nCheck only this immutable commit in the assigned worktree: " +
-                field(task,"inputArtifactVersion") +
-                ". Verify HEAD before checking. Keep the worktree unchanged. Return only a JSON object with "
-                "artifactVersion, verdict (pass or fail), and findings (one nonempty JSON string).";
         }
         quotes.remaining += recentReportBudget;
         if (moved) {
@@ -1811,193 +1525,15 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
 
     Id openPeerExchange(Json& sender, const Intake& intake, const std::string& kind,
                         std::string_view note, const std::string& action, bool charge,
-                        Json forwarded = {}, const SpecialistCheck* specialist = nullptr, Id queueOwner = 0) {
+                        Json forwarded) {
         const auto id = db.submit(intake,0,nullptr,RequestJournal::skip);
         auto recipient = db.load(id);
         const PeerExchange exchange{action,kind,"working","",sender["id"],id};
         auto message = peerMessage(exchange,sender,recipient,"request",note,action);
         message["chargesBudget"] = charge;
         if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
-        if (specialist) {
-            recipient["specialistRole"] = "executor";
-            recipient["specialistDelegationId"] = specialist->delegationId;
-            recipient["inputArtifactVersion"] = specialist->commitSha;
-            if (queueOwner) recipient["specialistQueueOwner"] = queueOwner;
-            db.addRevision(recipient,specialist->purpose,specialist->doneWhen);
-            message["inputArtifactVersion"] = specialist->commitSha;
-            message["doneWhen"] = specialist->doneWhen;
-        }
         transitionPeer(exchange,sender,recipient,std::move(message));
         return id;
-    }
-
-    SpecialistDelegation createSpecialist(const SpecialistCheck& check, std::string_view requester,
-                                          PeerBot peer, const SpecialistOrigin* parent = nullptr) {
-        peer.intake.request = check.purpose;
-        auto& session = peer.intake.config["session"];
-        session["workspaceStrategy"] = specialistWorkspace(check.commitSha);
-        session["runtimeMode"] = "approval-required";
-        session["interactionMode"] = "default";
-        if (!reserveSpecialistBudget(check.channel))
-            throw SpecialistAllowanceExhausted("The coordination work allowance is exhausted");
-        const Id senderId = db.submit({std::string(requester),check.purpose,peer.intake.environmentId,peer.intake.projectId},
-                                      0,nullptr,RequestJournal::skip);
-        auto sender = db.load(senderId);
-        sender["specialistRole"] = "requester";
-        sender["specialistDelegationId"] = check.delegationId;
-        if (parent) sender["specialistQueueOwner"] = parent->senderTask;
-        db.addRevision(sender,check.purpose,check.doneWhen);
-        const auto recipientId = openPeerExchange(sender,peer.intake,"work",check.purpose,check.delegationId,
-                                                 false,{},&check,parent ? parent->senderTask : 0);
-        saveTask(sender);
-        db.exec(R"SQL(
-INSERT INTO specialist_delegations(id,channel_id,generation,purpose,done_when,commit_sha,parent_id,sender_task,recipient_task)
-VALUES(?,?,?,?,?,?,?,?,?)
-)SQL",{check.delegationId,check.channel,check.generation,check.purpose,check.doneWhen,check.commitSha,
-         parent ? Json(parent->delegation) : Json(nullptr),senderId,recipientId});
-        return {check.delegationId,senderId,recipientId};
-    }
-
-    SpecialistDelegation startSpecialist(const Person& person, const SpecialistCheck& command) {
-        if (command.channel<=0 || command.generation<=0 || !present(command.delegationId,128) ||
-            command.delegationId.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:/")!=std::string::npos ||
-            !validBotId(command.peerBotId) || !present(command.purpose) || !present(command.doneWhen) ||
-            !commitSha(command.commitSha)) throw Conflict("Invalid specialist work binding");
-        const auto observedPin = observeSpecialistInput(person,command.channel);
-        std::lock_guard lock(db.mutex);
-        Transaction transaction(db.db);
-        const auto participation = db.authorizeParticipation(person,command.channel);
-        const auto* activation = std::get_if<CoordinationActivation>(&participation);
-        if (!activation || !activation->binding.request.allowDelegation)
-            throw Conflict("The Session has no specialist delegation permission");
-        const auto& invitation = activation->channel.origin.invitation;
-        const auto& target = invitation.target;
-        const auto payload = Json::array({command.delegationId,command.peerBotId,command.purpose,command.doneWhen,command.commitSha});
-        db.sharedRedactor().requirePublic(payload);
-        auto existing = db.query(R"SQL(
-SELECT d.channel_id,d.generation,d.purpose,d.done_when,d.commit_sha,d.sender_task,d.recipient_task,r.bot_id,d.parent_id
-FROM specialist_delegations d JOIN tasks r ON r.id=d.recipient_task WHERE d.id=?
-)SQL",{command.delegationId});
-        if (existing.next()) {
-            if (existing.number(0)!=command.channel || existing.number(1)!=command.generation ||
-                existing.string(2)!=command.purpose || existing.string(3)!=command.doneWhen ||
-                existing.string(4)!=command.commitSha || existing.string(7)!=command.peerBotId || !existing.string(8).empty())
-                throw Conflict("This specialist delegation already has a different binding");
-            const SpecialistDelegation result{command.delegationId,existing.number(5),existing.number(6)};
-            transaction.commit();
-            return result;
-        }
-        if (!activeSpecialistCoordination(command.channel,command.generation))
-            throw Conflict("Session coordination is not active at the expected generation");
-        if (observedPin!=command.commitSha) throw Conflict("The current immutable input could not be verified");
-        auto peer = allowedPeer(invitation.botId,command.peerBotId);
-        if (!validBotRole(peer.role) || peer.intake.environmentId!=target.environmentId || peer.intake.projectId!=target.projectId)
-            throw Conflict("The specialist is not authorized to check this project");
-        if (db.query("SELECT 1 FROM peer_exchanges WHERE id=?",{command.delegationId}).next())
-            throw Conflict("The specialist delegation identifier is already in use");
-        db.exec("INSERT OR IGNORE INTO specialist_budgets(channel_id,allowance) VALUES(?,?)",
-                {command.channel,specialistBudgetAllowance});
-        const auto delegation = createSpecialist(command,invitation.botId,std::move(peer));
-        transaction.commit();
-        return delegation;
-    }
-
-    bool canDelegateNested(const SpecialistOrigin& origin, const Json& task) const {
-        if (!origin.parent.empty() || task.contains("nestedDelegationId") ||
-            !task.at("activeRun").is_null() || !task.at("lastRun").is_null() ||
-            !activeSpecialistCoordination(origin.channel,origin.generation)) return false;
-        try {
-            const auto person = specialistPerson(origin.person);
-            if (!person) return false;
-            const auto participation = db.authorizeParticipation(*person,origin.channel);
-            const auto* activation = std::get_if<CoordinationActivation>(&participation);
-            return activation && activation->binding.request.allowDelegation;
-        } catch (const Conflict&) {
-            return false;
-        }
-    }
-
-    bool scopedPeer(const SpecialistOrigin& origin, const Json& task, const PeerBot& peer) const {
-        const auto matchesScope = [&](const PeerBot& candidate) {
-            return validBotRole(candidate.role) && candidate.intake.environmentId==field(task,"environmentId") &&
-                candidate.intake.projectId==field(task,"projectId");
-        };
-        if (peer.intake.botId==origin.rootBot || peer.intake.botId==field(task,"botId") || !matchesScope(peer))
-            return false;
-        try {
-            return matchesScope(allowedPeer(origin.rootBot,peer.intake.botId));
-        } catch (const Conflict&) {
-            return false;
-        }
-    }
-
-    void startNestedSpecialist(const Json& task, const Json& event, const TaskDecision& decision) {
-        const auto id = task.at("id").get<Id>();
-        const auto origin = [&] {
-            std::lock_guard lock(db.mutex);
-            return specialistOrigin(id);
-        }();
-        const auto peerBot = field(decision.args,"botId");
-        if (!origin || decision.args.size()!=1 || !validBotId(peerBot)) throw Conflict("Choose a permitted nested specialist");
-        const auto pin = observeSpecialistInput(origin->person,origin->channel);
-        if (pin!=origin->commit) throw Conflict("The current immutable input could not be verified");
-        change(task,[&](Json& current) {
-            const auto peer = db.peerExchange(id);
-            const auto cmd = command(current,{{"environmentId",current.at("environmentId")}});
-            if (!peer || peer->recipient!=id || peer->id!=origin->delegation || peer->phase!="working" ||
-                !canDelegateNested(*origin,current) || !specialistAdmission(*origin,cmd,current))
-                throw Conflict("The specialist assignment cannot delegate further work");
-            auto target = allowedPeer(cmd.ownerBotId,peerBot);
-            if (!scopedPeer(*origin,current,target)) throw Conflict("The nested specialist is outside the assignment scope");
-            const auto action = actionId();
-            const SpecialistCheck request{origin->channel,origin->generation,action,peerBot,origin->purpose,
-                                          origin->doneWhen,origin->commit};
-            createSpecialist(request,cmd.ownerBotId,std::move(target),&*origin);
-            recordDecision(current,event,decision,action);
-            consumeEvent(current);
-            current["nestedDelegationId"] = request.delegationId;
-            current["state"] = "specialist_waiting";
-            return true;
-        });
-    }
-
-    void startSpecialistWorkflow(const Json& task, const Json& event, const TaskDecision& decision) {
-        const auto id = task.at("id").get<Id>();
-        const auto origin = [&] {
-            std::lock_guard lock(db.mutex);
-            return specialistOrigin(id);
-        }();
-        if (!origin || !decision.args.empty()) throw Conflict("Use the current specialist assignment for the workflow");
-        const auto pin = observeSpecialistInput(origin->person,origin->channel);
-        if (pin!=origin->commit) throw Conflict("The current immutable input could not be verified");
-        change(task,[&](Json& current) {
-            const auto peer = db.peerExchange(id);
-            const auto cmd = command(current,{{"environmentId",current.at("environmentId")}});
-            if (!peer || peer->recipient!=id || peer->id!=origin->delegation || peer->phase!="working" ||
-                current.contains("delegatedWorkflowId") || !specialistAdmission(*origin,cmd,current))
-                throw Conflict("The specialist assignment changed before workflow admission");
-            for (int i=0;i<2;++i) {
-                if (!reserveSpecialistBudget(origin->channel))
-                    throw SpecialistAllowanceExhausted("The coordination work allowance is exhausted");
-            }
-            const auto action = actionId();
-            const Json stages = Json::array({
-                {{"stageId","verify-1"},{"name","Independent check 1"},{"role","verify"},{"request",origin->purpose}},
-                {{"stageId","verify-2"},{"name","Independent check 2"},{"role","verify"},{"request",origin->purpose}}});
-            const Json routing = {{"environmentId",current.at("environmentId")},{"projectId",current.at("projectId")},
-                                  {"config",current.at("config")}};
-            const auto workflow = db.startWorkflow(ReceivedPeerWork{peer->id,origin->requestId,action},
-                {{"request",origin->purpose},{"stages",stages}},cmd.ownerBotId,routing,origin->commit);
-            db.materializeWorkflowStages(workflow);
-            auto assigned = db.query("SELECT count(*) FROM workflow_stages WHERE workflow_id=? AND task_id IS NOT NULL",{workflow});
-            if (!assigned.next() || assigned.number(0)!=2) throw Conflict("Both independent checks must be assigned together");
-            recordDecision(current,event,decision,action);
-            consumeEvent(current);
-            current["delegatedWorkflowId"] = workflow;
-            current["state"] = "workflow_waiting";
-            db.journal(id,"specialist_workflow_started",{{"workflowId",workflow},{"artifactVersion",origin->commit}});
-            return true;
-        });
     }
 
     void sendPeer(Json& sender, const Json& event, const TaskDecision& decision, PeerBot peer, const std::string& action) {
@@ -2090,7 +1626,6 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
             if (available) {
                 auto report = target->report;
                 setReportEvidence(report,evidence);
-                updateSpecialistVerdict(current,report);
                 db.exec("UPDATE journal SET data=? WHERE id=?",{report,target->journalId});
                 if (latest.at("kind") == "result") {
                     auto row = db.query("SELECT data FROM events WHERE id=? AND task_id=?",{latest.at("id"),current.at("id")});
@@ -2120,24 +1655,6 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
         const auto type = status == "completed" ? std::string_view{"result"} : status;
         auto message = peerMessage(exchange,recipient,sender,type,text,action);
         message["status"] = status;
-        if (field(recipient,"specialistRole")=="executor") {
-            message["inputArtifactVersion"] = recipient.at("inputArtifactVersion");
-            if (recipient.contains("specialistVerdict")) message["verdict"] = recipient.at("specialistVerdict");
-            if (recipient.contains("delegatedWorkflowId")) {
-                message["workflowId"] = recipient.at("delegatedWorkflowId");
-                message["workflowStatus"] = field(recipient,"delegatedWorkflowStatus");
-                message["evidence"] = recipient.value("delegatedWorkflowEvidence",Json::array());
-            }
-            if (const auto nested = recipient.find("nestedResult"); nested != recipient.end()) {
-                message["sourceExecutorBotId"] = nested->at("fromBotId");
-                message["sourceDelegationId"] = nested->at("exchangeId");
-                message["evidence"] = nested->value("references",Json::array());
-                if (nested->contains("workflowId")) {
-                    message["workflowId"] = nested->at("workflowId");
-                    message["workflowStatus"] = nested->at("workflowStatus");
-                }
-            }
-        }
         if (status != "cancelled") {
             const auto ref = sessionResultReference(settledSessionReport(recipient));
             if (!ref.is_null()) message["evidence"] = Json::array({ref});
@@ -2153,11 +1670,6 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
             task.value("newSessionRequired",false) || (!task["lastRun"].is_null() &&
                 task["lastRun"].at("revisionId") != revision(task)));
         if (!revisedWork) {
-            if (field(task,"specialistRole")=="executor") {
-                if (task["activeRun"].is_null()) kinds.push_back("failed");
-                if (hasSettledRun(task) && field(task,"specialistVerdict")=="pass") kinds.push_back("result");
-                return kinds;
-            }
             kinds.push_back("failed");
             if (field(settledSessionReport(task),"evidenceStatus") != "report_unavailable") kinds.push_back("result");
         }
@@ -2190,149 +1702,6 @@ AND json_extract(data,'$.resultRunId')=? AND json_extract(data,'$.status')=?
             transitionPeer(*peer,task,other,peerMessage(*peer,task,other,type,body,action));
         }
         return true;
-    }
-
-    void settleSpecialistRequester(const Json& task) {
-        change(task,[&](Json& current) {
-            const auto event = db.currentEvent(current);
-            const auto kind = field(event,"kind");
-            if (kind=="bot_question") {
-                if (event.contains("userAnswer")) {
-                    const TaskDecision answer{{"reply_to_bot",{{"kind","answer"},{"text",field(event,"userAnswer")}},
-                                               "Forward the person's answer to this specialist"}};
-                    return replyPeer(current,event,answer,actionId());
-                }
-                db.wait(current,"user_question",{{"text",field(event,"text")}});
-                current["wait"]["target"] = questionTarget(current);
-                return true;
-            }
-            if (kind!="bot_result") return false;
-            consumeEvent(current);
-            current["state"] = "completed";
-            current["peerOutcome"] = event.at("status");
-            Json result = {
-                {"delegationId",current.at("specialistDelegationId")},{"status",event.at("status")},
-                {"executorBotId",event.at("fromBotId")},{"report",field(event,"text")},
-                {"artifactVersion",field(event,"inputArtifactVersion")},{"verdict",field(event,"verdict")},
-                {"references",event.value("references",Json::array())}};
-            if (event.contains("workflowId")) {
-                result["workflowId"] = event.at("workflowId");
-                result["workflowStatus"] = event.at("workflowStatus");
-            }
-            if (event.contains("sourceDelegationId")) {
-                result["sourceDelegationId"] = event.at("sourceDelegationId");
-                result["sourceExecutorBotId"] = event.at("sourceExecutorBotId");
-            }
-            db.journal(current["id"],"specialist_result",result);
-            settleNestedSpecialist(current,event);
-            return true;
-        });
-    }
-
-    void settleNestedSpecialist(const Json& child, const Json& event) {
-        auto source = db.query(R"SQL(
-SELECT parent.recipient_task,parent.id,parent.commit_sha FROM specialist_delegations d
- JOIN specialist_delegations parent ON parent.id=d.parent_id WHERE d.sender_task=? AND d.id=?
-)SQL",{child.at("id"),event.at("exchangeId")});
-        if (!source.next()) return;
-        auto parent = db.load(source.number(0));
-        if (parent.at("state")!="specialist_waiting" || parent.at("nestedDelegationId")!=event.at("exchangeId")) return;
-        const auto peer = db.peerExchange(parent.at("id"));
-        if (!peer || peer->id!=source.string(1) || peer->recipient!=parent.at("id")) return;
-        const bool passed = field(event,"status")=="completed" && field(event,"verdict")=="pass" &&
-            field(event,"inputArtifactVersion")==source.string(2) && !event.value("references",Json::array()).empty();
-        if (passed) parent["specialistVerdict"] = "pass";
-        parent["nestedResult"] = event;
-        parent["peerOutcome"] = passed ? "completed" : "failed";
-        parent["state"] = "completed";
-        finishPeer(*peer,parent,db.load(peer->sender),field(parent,"peerOutcome"),field(event,"text"),actionId());
-        saveTask(parent);
-    }
-
-    bool requestNestedSpecialistStop(const Json& task) {
-        const auto delegation = field(task,"nestedDelegationId");
-        if (delegation.empty()) return false;
-        bool pending = false;
-        change(task,[&](Json& current) {
-            auto child = db.query("SELECT sender_task FROM specialist_delegations WHERE id=?",{delegation});
-            if (!child.next()) return false;
-            auto sender = db.load(child.number(0));
-            pending = !terminal(sender);
-            if (!pending || sender.at("state")=="cancelling") return false;
-            db.requestCancellation(sender);
-            db.journal(current.at("id"),"nested_specialist_stop_requested",{{"delegationId",delegation}});
-            return true;
-        });
-        return pending;
-    }
-
-    bool scopedWorkflowSettled(Id workflow) const {
-        return !db.query(R"SQL(
-SELECT 1 FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id WHERE s.workflow_id=?
- AND ((s.task_id IS NULL AND s.status NOT IN ('failed','stopped')) OR
-      (s.task_id IS NOT NULL AND (s.status NOT IN ('completed','failed','stopped') OR t.state NOT IN ('completed','cancelled'))))
-)SQL",{workflow}).next();
-    }
-
-    bool requestSpecialistWorkflowStop(const Json& task) {
-        if (!task.contains("delegatedWorkflowId")) return false;
-        const auto workflow = task.at("delegatedWorkflowId").get<Id>();
-        bool pending = false;
-        change(task,[&](Json&) {
-            pending = !scopedWorkflowSettled(workflow);
-            if (!pending) return false;
-            db.exec("UPDATE workflows SET stop_requested=1 WHERE id=? AND NOT stop_requested",{workflow});
-            auto children = db.query("SELECT t.id FROM workflow_stages s JOIN tasks t ON t.id=s.task_id"
-                                     " WHERE s.workflow_id=? AND t.state NOT IN ('cancelling','cancelled','completed')",{workflow});
-            while (children.next()) {
-                auto child = db.load(children.number(0));
-                db.requestCancellation(child);
-            }
-            return true;
-        });
-        return pending;
-    }
-
-    void settleSpecialistWorkflow(const Json& task) {
-        const auto id = task.at("id").get<Id>();
-        const auto workflow = task.at("delegatedWorkflowId").get<Id>();
-        const auto origin = [&]() -> std::optional<SpecialistOrigin> {
-            std::lock_guard lock(db.mutex);
-            if (!scopedWorkflowSettled(workflow)) return {};
-            return specialistOrigin(id);
-        }();
-        if (!origin) return;
-        const auto pin = observeSpecialistInput(origin->person,origin->channel);
-        change(task,[&](Json& current) {
-            if (!scopedWorkflowSettled(workflow)) return false;
-            const auto peer = db.peerExchange(id);
-            if (!peer || peer->id!=origin->delegation || peer->recipient!=id) return false;
-            const auto checked = db.workflowStatus(workflow,field(current,"botId"),options.clock());
-            auto evidence = Json::array();
-            for (const auto& verdict : checked.at("verdicts")) {
-                const auto& run = verdict.at("runRef");
-                Json source{{"environmentId",current.at("environmentId")},{"threadId",run.at("threadId")},
-                    {"runId",verdict.at("resultRunId")},{"itemId",verdict.at("itemId")},{"link",run.at("link")},
-                    {"stageId",verdict.at("stageId")},{"verdict",verdict.at("verdict")},
-                    {"artifactVersion",verdict.at("artifactVersion")}};
-                if (verdict.contains("findings")) source["findings"] = verdict.at("findings");
-                evidence.push_back(std::move(source));
-            }
-            const bool passed = pin==origin->commit && checked.at("status")=="completed" && evidence.size()==2;
-            const auto status = !pin ? "input_unverified" : *pin!=origin->commit ? "stale" : passed ? "completed" : "failed";
-            const auto outcome = passed ? "completed" : "failed";
-            const auto report = passed ? "Both independent checks passed for the same immutable input" :
-                !pin ? "The current immutable input could not be verified at aggregation" :
-                *pin!=origin->commit ? "The root input advanced before verification settled" : "Independent verification did not pass both checks";
-            if (passed) current["specialistVerdict"] = "pass";
-            current["delegatedWorkflowStatus"] = status;
-            current["delegatedWorkflowEvidence"] = std::move(evidence);
-            current["peerOutcome"] = outcome;
-            current["state"] = "completed";
-            finishPeer(*peer,current,db.load(peer->sender),outcome,report,actionId());
-            db.journal(id,"specialist_workflow_settled",{{"workflowId",workflow},{"status",status},{"artifactVersion",origin->commit}});
-            return true;
-        });
     }
 
     void readPeerEvidence(const Json& task, const Json& event, const TaskDecision& decision) {
@@ -2444,8 +1813,6 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
                 std::string_view approvedInvocation = {}) {
         const auto& args = decision.args;
         const auto& tool = decision.tool;
-        if (tool == "start_peer_workflow") return startSpecialistWorkflow(snapshot,event,decision);
-        if (tool == "delegate_nested_specialist") return startNestedSpecialist(snapshot,event,decision);
         if (isGitTool(tool)) {
             Json result;
             const auto invocation = approvedInvocation.empty() ? gitInvocation(decision) : std::string(approvedInvocation);
@@ -2693,7 +2060,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         try {
             auto turn = db.callModel(field(task,"botId"),model,
                 {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
-                 needsDoneWhen(task),summary.contains("forwardableUserMessage")},0);
+                 needsDoneWhen(task),summary.contains("forwardableUserMessage")});
             inference.usage = std::move(turn.usage);
             if (turn.calls.size() == 1) inference.outcome = std::move(turn.calls.front());
             else inference.outcome = ModelError("Return one task action",false);
@@ -2763,24 +2130,13 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
                         canRead = true;
                 }
             }
-            if (peer && peer->recipient==task.at("id") && peer->phase=="working" && options.observeSpecialistInput &&
-                field(task,"specialistRole")=="executor") {
-                std::lock_guard lock(db.mutex);
-                const auto origin = specialistOrigin(task.at("id"));
-                if (origin && canDelegateNested(*origin,task)) {
-                    for (const auto& candidate : peersFor(field(task,"botId"))) {
-                        if (scopedPeer(*origin,task,candidate)) choices.push_back({{"botId",candidate.intake.botId},
-                            {"name",candidate.name},{"role",candidate.role}});
-                    }
-                }
-            }
             Json pending = Json::array();
             if (hasPending(task)) {
                 std::lock_guard lock(db.mutex);
                 pending = workPrompt(task,event,0).pending;
             }
             auto tools = available(task,event,peer,!choices.empty(),canRead);
-            if (options.gitHost && !task.contains("specialistRole") && task["activeRun"].is_null() && event["kind"] == "result")
+            if (options.gitHost && task["activeRun"].is_null() && event["kind"] == "result")
                 tools.insert(tools.end(),gitTools(false).begin(),gitTools(false).end());
             if (hasPending(task) && task.at("pendingInstructions").size() != pending.size())
                 std::erase(tools,"complete");
@@ -2827,8 +2183,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
     }
 
     bool continueStage(const Json& task) {
-        if (task.contains("workflowParentTaskId") ||
-            (!task.contains("workflowId") && !task.value("freshContextRequested",false)) ||
+        if ((!task.contains("workflowId") && !task.value("freshContextRequested",false)) ||
             !hasSettledRun(task) || !hasPending(task)) return false;
         return change(task,[&](Json& current) {
             auto event = db.currentEvent(current);
@@ -2873,15 +2228,13 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         else if (shouldStop(task)) stop(task);
         else if (task.contains("pendingRunReport")) recoverRunReport(task);
         else if (state == "queued") activate(task);
-        else if (state == "workflow_waiting") settleSpecialistWorkflow(task);
         else if (state == "deciding") {
-            if (field(task,"specialistRole")=="requester") settleSpecialistRequester(task);
-            else if (!resumeGitApproval(task) && !continueStage(task)) decide(task);
+            if (!resumeGitApproval(task) && !continueStage(task)) decide(task);
         } else {
             if (!task["activeRun"].is_null() && (state == "running" || state == "waiting") &&
                 ingest(task,observe(task))) return;
             const bool reconcile = state == "waiting" &&
-                (task.contains("workflowId") || field(task,"specialistRole")=="executor" || task.contains("selectedSession")) &&
+                (task.contains("workflowId") || task.contains("selectedSession")) &&
                 !field(task,"actionId").empty();
             if (state != "sending" && !reconcile) return;
             Json action;
@@ -2893,7 +2246,7 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
             if (reconcile) {
                 const auto now = options.clock();
                 const bool selectedStart = field(action,"tool") == "start_in_session";
-                if (!selectedStart && !task.contains("workflowId") && field(task,"specialistRole")!="executor") return;
+                if (!selectedStart && !task.contains("workflowId")) return;
                 const auto key = selectedStart ? "sessionReconcileAt" : "workflowReconcileAt";
                 if (action.at("phase")!="started" || now<task.value(key,Seconds{})) return;
                 if (!change(task,[&](Json& current) { current[key] = now+5; return true; })) return;
@@ -2906,25 +2259,14 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
 Runtime::Runtime(Store& store, Model& model, T3& t3, SoulLoader soul, RuntimeOptions options)
     : p_(std::make_unique<Impl>(store,model,t3,std::move(soul),std::move(options))) {}
 Runtime::~Runtime() = default;
-SpecialistDelegation Runtime::startSpecialist(const Person& person, const SpecialistCheck& command) {
-    return p_->startSpecialist(person,command);
-}
-Id Runtime::specialistBudgetRemaining(Id channel) const {
-    return p_->specialistBudgetRemaining(channel);
-}
-void Runtime::freezeSpecialistWork(const Person& person, Id channel, Id generation) {
-    p_->freezeSpecialistWork(&person,channel,generation);
-}
-
-void Runtime::freezeSpecialistWorkForRecovery(Id channel, Id generation) {
-    p_->freezeSpecialistWork(nullptr,channel,generation);
-}
 void Runtime::requestStop() { p_->shutdown.request_stop(); }
 void Runtime::runConversations() {
     if (p_->shutdown.stop_requested()) return;
     p_->settleApprovals();
     p_->db.persistWorkspaceResults();
     p_->db.deliverGitWebhooks();
+    p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
+    p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     p_->db.deliverChannels(p_->shutdown.get_token());
     constexpr auto messagesPerTick = 20;
     for (int i = 0; i < messagesPerTick && !p_->shutdown.stop_requested(); ++i) {
@@ -2941,6 +2283,8 @@ void Runtime::tick() {
     p_->db.persistWorkspaceResults();
     p_->fireDueAutomations();
     p_->db.deliverGitWebhooks();
+    p_->db.settleSessionQueueCancellations(p_->t3,p_->shutdown.get_token());
+    p_->db.wakeSessionMessages(p_->t3,p_->shutdown.get_token());
     for (const auto& [bot,id] : p_->db.pendingConversations(Impl::batchLimit,p_->options.clock()))
         p_->runTurn(id);
     p_->db.advanceWorkflows(p_->options.clock());
@@ -2970,6 +2314,14 @@ void Runtime::tickConcurrent() {
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async,[db = &p_->db,stop = p_->shutdown.get_token()] {
             db->deliverChannels(stop);
+        });
+    if (p_->sessionWakeWorker.valid() &&
+        p_->sessionWakeWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        p_->deferContendedWork("Session wake worker",[&] { p_->sessionWakeWorker.get(); });
+    if (!p_->sessionWakeWorker.valid())
+        p_->sessionWakeWorker = std::async(std::launch::async,[impl = p_.get()] {
+            impl->db.settleSessionQueueCancellations(impl->t3,impl->shutdown.get_token());
+            impl->db.wakeSessionMessages(impl->t3,impl->shutdown.get_token());
         });
     constexpr auto maxConversationWorkers = Impl::batchLimit;
     if (p_->conversationWorkers.size() < maxConversationWorkers) {

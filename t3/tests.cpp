@@ -1,6 +1,10 @@
 #include "internal.hpp"
+#include "flock/board_inbox.hpp"
+#include "flock/participation.hpp"
+#include "flock/policy.hpp"
 #include "flock/session_read.hpp"
 
+#include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -8,6 +12,8 @@
 using namespace flockv0;
 using flockv0::t3detail::http;
 
+void sessionMessageWake(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
+                        const std::function<Json(std::string_view)>&);
 void deletedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&);
 void boundedSessionSearch(T3&, const std::filesystem::path&, const std::function<void(Json)>&,
                           const std::function<Json(std::string_view)>&);
@@ -16,6 +22,184 @@ void sessionSearchDeadline(T3&, const std::filesystem::path&, const std::functio
 namespace {
 void check(bool pass, std::string_view reason) {
     if (!pass) throw std::logic_error(std::string(reason));
+}
+
+void lineageFallback(T3& t3, Command launch, const std::function<void(Json)>& fixture,
+                     const std::function<Json(std::string_view)>& effects, const std::function<Json()>& sessions) {
+    launch.authGeneration = t3.authGeneration(launch.environmentId,launch.config);
+    launch.sessionOrigin = SessionOrigin{{"origin-environment","lineage-parent"},"Deployment planning"};
+    const Json origin{{"environmentId","origin-environment"},{"threadId","lineage-parent"},{"title","Deployment planning"}};
+    const auto launches = [&] { return effects("t3_thread_launch"); };
+    const auto start = launches().size();
+    launch.actionId = "lineage-supported";
+    check(t3.send(launch).kind == Delivery::Kind::Accepted && launches().size() == start + 1 &&
+          launches().back().at("delegatedFrom") == origin,"T3 did not receive the linked launch");
+
+    for (const std::string mode : {"unsupported","unknown-delegated-from"}) {
+        fixture({{"lineageLaunchError",mode}});
+        launch.actionId = "lineage-" + mode;
+        const auto before = launches().size();
+        const auto count = sessions().size();
+        const auto accepted = t3.send(launch);
+        const auto attempts = launches();
+        check(accepted.kind == Delivery::Kind::Accepted && !accepted.launchWarning.empty() &&
+              attempts.size() == before + 2,"A confirmed rejection did not retry exactly once and report the limitation");
+        auto withOrigin = attempts.at(before);
+        check(withOrigin.at("delegatedFrom") == origin,"The first request lost its origin");
+        withOrigin.erase("delegatedFrom");
+        check(withOrigin == attempts.back() && withOrigin.at("clientRequestId") == launch.actionId,
+              "The retry changed arguments beyond delegatedFrom");
+        const auto replay = t3.send(launch);
+        check(replay.kind == Delivery::Kind::Accepted && replay.run.threadId == accepted.run.threadId &&
+              replay.run.runId == accepted.run.runId && sessions().size() == count + 1,
+              "Replaying a rejected launch created another Session");
+    }
+
+    for (const std::string mode : {"invalid-params","tool","lost-response","fallback-fails"}) {
+        fixture({{"lineageLaunchError",mode}});
+        launch.actionId = "lineage-" + mode;
+        const auto before = launches().size();
+        const auto count = sessions().size();
+        const auto failed = t3.send(launch);
+        const bool attemptedFallback = mode == "fallback-fails";
+        check(failed.kind == Delivery::Kind::Unknown && launches().size() == before + 1 + attemptedFallback &&
+              failed.launchWarning.empty() != attemptedFallback,
+              "Flock retried an unrelated error or attempted more than one fallback");
+        check(sessions().size() == count + (mode == "lost-response" ? 1 : 0),
+              "Unexpected Session creation after a launch error");
+        if (mode == "lost-response") {
+            const auto recovered = t3.reconcile(launch);
+            check(recovered.kind == Delivery::Kind::Accepted &&
+                  recovered.run.threadId == sessions().at(launch.actionId).at("threadId").get<std::string>() &&
+                  launches().size() == before + 1,"Reconciliation missed the linked child or replayed an uncertain launch");
+        }
+    }
+}
+
+void sessionOriginLaunch(T3& t3, const std::filesystem::path& database, const std::function<void(Json)>& fixture,
+                         const std::function<Json(std::string_view)>& effects) {
+    const Json origin{{"environmentId","env-1"},{"threadId","lineage-parent"},{"title","Deployment planning"}};
+    struct LaunchModel final : Model {
+        Decision next;
+        Json origin, result, tasks, invitation;
+        int wakes = 0;
+        ModelTurn decide(const ModelInput& input) override {
+            if (input.event.at("kind") != "conversation_turn")
+                return {{{"delegate",{{"instruction","Check the fixture."},{"doneWhen","The fixture is checked."}},"Start work"}}};
+            if (input.event.contains("sessionInvitation")) {
+                invitation = input.event;
+                return {{{"reply",{{"text","Joined the child Session."}},"Finish the invitation turn"}}};
+            }
+            const auto& steps = input.event.at("turn");
+            if (steps.empty()) {
+                origin = input.event.value("sessionOrigin",Json(nullptr));
+                tasks = input.task.at("tasks");
+                if (input.event.contains("sessionWake")) {
+                    ++wakes;
+                    auto args = input.event.at("sessionWake");
+                    return {{{"flock_session_events",{{"operation","counts"},{"environmentId",args.at("environmentId")},
+                                                     {"threadId",args.at("threadId")}},"Read the child after waking"}}};
+                }
+                return {{next}};
+            }
+            result = steps.back().at("result");
+            return {{{"reply",{{"text","Checked."}},"Finish this turn"}}};
+        }
+    } model;
+    fixture({{"lineageLaunchError","unsupported"}});
+    Store store(database);
+    const Person member{"session-member",false};
+    store.setWebIdentityResolver([&](std::string_view id) -> std::optional<bool> {
+        if (id == member.id) return false;
+        return {};
+    });
+    store.policy().setMember(localOwner,"release",member.id,true);
+    store.policy().setMember(localOwner,"triage",member.id,true);
+    T3Connections connections(store);
+    const auto credential = connections.connect("env-1",member.id,3210);
+    const auto connection = connections.authenticate(credential);
+    check(connection.has_value(),"Could not authenticate the Session integration");
+    SessionParticipation participation(store,t3);
+    const Intake intake{"release",{},"env-1","project",{{"botDisplayName","Ernest"}}};
+    const SessionAsk start{"release","Start child work.","lineage-parent","lineage-ask"};
+    const auto resolve = [&](auto,auto) { return intake; };
+    const auto message = participation.ask(*connection,start,resolve);
+    check(participation.ask(*connection,start,resolve) == message,"The same Session ask created another turn");
+    store.policy().setMode(localOwner,"supervised");
+    const RuntimeOptions options{.peers=[](std::string_view bot) -> std::vector<PeerBot> {
+        if (bot == "release") return {{"Triage",{"triage","","env-1","project"}}};
+        return {};
+    },.intake=[](std::string_view bot, std::string_view text) {
+        return Intake{std::string(bot),std::string(text),"env-1","project"};
+    }};
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },options);
+    model.next = {"start_task",{{"request","Check the release fixture."}},"Start work in a new Session"};
+    runtime.runConversations();
+    check(model.origin == origin && model.result.value("ok",false),"Session origin was not saved before starting the task");
+    const Id taskId = model.result.at("taskId");
+    check(store.task(taskId).at("sessionOrigin") == origin,"The task omitted its originating Session");
+
+    const auto launches = [&] { return effects("t3_thread_launch"); };
+    const auto before = launches().size();
+    Json approval;
+    for (int i = 0; i < 6 && approval.is_null(); ++i) {
+        runtime.tick();
+        for (const auto& item : store.inbox(member)) if (item.at("status") == "pending") approval = item;
+    }
+    check(!approval.is_null() && launches().size() == before,"The linked launch bypassed Supervised approval");
+    store.decideInbox(member,{approval.at("botId"),InboxKind::policy_approval,approval.at("itemId"),approval.at("waitId"),
+                             approval.at("taskId"),approval.at("targetRevision"),approval.at("targetGeneration")},"allow_once");
+    for (int i = 0; i < 6 && launches().size() == before; ++i) runtime.tick();
+    const auto attempts = launches();
+    check(attempts.size() == before + 2 && attempts.at(before).at("delegatedFrom") == origin &&
+          !attempts.at(before + 1).contains("delegatedFrom"),"The approved Session-origin task sent the wrong launch");
+    const auto task = store.task(taskId);
+    const auto thread = task.at("activeRun").at("threadId");
+    check(task.contains("launchWarning") && std::ranges::any_of(store.history(taskId),[](const Json& entry) {
+        return entry.at("kind") == "session_lineage_unavailable";
+    }),"A launch fallback was not recorded on the task and in its journal");
+
+    store.policy().setMode(localOwner,"full");
+    const auto call = [&](const char* clientId, std::string tool, const Json& args) {
+        model.next = {std::move(tool),args,"Check a Session from the origin turn"};
+        store.receiveWeb(member,intake,clientId,"Follow up on this work.",message);
+        runtime.runConversations();
+        check(model.origin == origin,"An explicit reply lost the original Session context");
+        return model.result;
+    };
+    const Json target{{"environmentId","env-1"},{"threadId",thread}};
+    check(!call("unrelated","flock_session_events",{{"operation","counts"},{"environmentId","env-1"},
+                {"threadId","lineage-unrelated"}}).value("ok",true),"A Bot member could read an unrelated Session");
+    auto read = target;
+    read["operation"] = "counts";
+    check(call("read-child","flock_session_events",read).value("ok",false),
+          "The originating Bot could not read its child Session");
+    check(model.tasks.at(0).at("session") == target && model.tasks.at(0).contains("launchWarning"),
+          "The Bot did not receive the launched Session identity and fallback result");
+    auto send = target;
+    send["text"] = "Inspect the fixture output";
+    const auto sends = effects("t3_thread_send").size();
+    check(call("send-child","message_session",send).value("delivery","") == "queued" &&
+          effects("t3_thread_send").size() == sends + 1 && effects("t3_thread_send").back().at("threadId") == thread,
+          "The originating Bot could not queue a message to its child Session");
+    runtime.runConversations();
+    check(model.wakes == 0,"The Bot woke before its queued message ran");
+    fixture({{"lineageFollowupStatus","completed"}});
+    runtime.runConversations();
+    runtime.runConversations();
+    check(model.wakes == 1 && model.origin == origin && model.result.value("ok",false),
+          "The child send did not wake exactly once with the original Session and access to the child");
+    auto invite = target;
+    invite["botId"] = "triage";
+    invite["note"] = "Review the child Session";
+    check(call("invite-child","invite_bot",invite).value("depth",0) == 1 &&
+          model.invitation.at("sessionOrigin").at("threadId") == thread &&
+          model.invitation.at("sessionInvitation").at("inviterBotId") == "release",
+          "The Bot could not invite another Bot into the Session it launched");
+
+    participation.stop(*connection,"release","lineage-parent");
+    check(!call("stopped","message_session",send).value("ok",true) && effects("t3_thread_send").size() == sends + 1,
+          "A reply after stopping origin participation could still send into its child");
 }
 }
 
@@ -121,7 +305,7 @@ int main(int argc, char** argv) {
         check(args.at("clientRequestId") == launch.actionId &&
               args.at("message") == launch.instruction + "\n\n[Flock action ID: " + launch.actionId + "]",
               "T3 receives the original launch instruction followed by one canonical marker");
-        check(!args.contains("modelSelection") && !args.contains("runtimeMode") &&
+        check(!args.contains("modelSelection") && !args.contains("runtimeMode") && !args.contains("delegatedFrom") &&
               !args.contains("workspaceStrategy") && !args.contains("interactionMode"),
               "T3 uses its defaults when Session settings are omitted");
 
@@ -182,7 +366,7 @@ int main(int argc, char** argv) {
               "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && !observation.settled, "wait timeout preserves outstanding work");
+        check(observation.kind == Observation::Kind::Settling, "wait timeout preserves outstanding work");
         fixture({{"scenario", "settling-input"}});
         observation = adapter->observe("env-1", launch.config, run);
         check(observation.kind == Observation::Kind::ExternalInput &&
@@ -191,7 +375,7 @@ int main(int argc, char** argv) {
         const auto checkResult = [&](const char* scenario, bool ownsLater) {
             fixture({{"scenario", scenario}});
             const auto observed = adapter->observe("env-1", launch.config, run);
-            check(observed.settled && observed.resultRunId == (ownsLater ? "later" : "root") &&
+            check(observed.kind == Observation::Kind::Finished && observed.resultRunId == (ownsLater ? "later" : "root") &&
                   observed.report == (ownsLater ? "later report" : "root report"),
                   std::string("Incorrect result attribution in ") + scenario);
         };
@@ -217,12 +401,12 @@ int main(int argc, char** argv) {
 
         fixture({{"scenario", "paged-report"}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && !observation.truncated &&
+        check(observation.kind == Observation::Kind::Finished && !observation.truncated &&
               observation.itemId == "item-1" && observation.report == std::string(7000, 'x') + "end of report",
               "Report reads older pages for the assigned Run and joins text continuations");
         fixture({{"changeReportDuringRead", true}});
         observation = adapter->observe("env-1", launch.config, run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.report.empty() &&
+        check(observation.kind == Observation::Kind::Finished && observation.report.empty() &&
               observation.evidence == RunEvidence::Availability::ReportUnavailable,
               "Report rejects changes during text continuation without erasing settlement");
         fixture({{"changeReportDuringRead", false}});
@@ -231,7 +415,7 @@ int main(int argc, char** argv) {
             const bool later = std::string_view(scenario) == "notification-result";
             fixture({{"scenario",scenario},{"reportReadFailure","messages"}});
             const auto observed = adapter->observe("env-1",launch.config,run);
-            check(observed.kind == Observation::Kind::Finished && observed.settled && observed.status == "completed" &&
+            check(observed.kind == Observation::Kind::Finished && observed.status == "completed" &&
                   observed.resultRunId == (later ? "later" : "root") && observed.report.empty() &&
                   observed.evidence == Availability::ReportUnavailable && !observed.detail.empty(),
                   "unreadable report erased settlement or its proven source");
@@ -245,14 +429,14 @@ int main(int argc, char** argv) {
         }
         fixture({{"scenario","settled"},{"terminalStatus","failed"},{"reportReadFailure","activity"}});
         observation = adapter->observe("env-1",launch.config,run);
-        check(observation.kind == Observation::Kind::Finished && observation.settled && observation.status == "failed" &&
+        check(observation.kind == Observation::Kind::Finished && observation.status == "failed" &&
               observation.resultRunId == "root" && observation.report == "root report" &&
               observation.evidence == Availability::DiagnosticUnavailable && !observation.detail.empty(),
               "unreadable error history erased a proven failure or its written report");
         fixture({{"scenario","notification-result"},{"terminalStatus","completed"},
                  {"reportReadFailure",nullptr},{"ownershipReadFailure",true}});
         observation = adapter->observe("env-1",launch.config,run);
-        check(observation.kind == Observation::Kind::Unavailable && !observation.settled && observation.resultRunId.empty(),
+        check(observation.kind == Observation::Kind::Unavailable && observation.resultRunId.empty(),
               "unreadable ownership evidence confirmed another Run's result");
         fixture({{"ownershipReadFailure",false}});
 
@@ -291,6 +475,14 @@ int main(int argc, char** argv) {
               delivery.run.runId == "selected-run","a previously unrelated idle Session starts the assigned Run");
         check(restarted->reconcile(selected).run.runId == "selected-run",
               "an existing Session's started Run can be recovered from its request");
+        fixture({{"selectedRunStatus","cancelled"},{"selectedDelegated",true}});
+        const auto draining = adapter->observe("env-1",selected.config,delivery.run);
+        check(draining.kind == Observation::Kind::Settling && draining.resultRunId.empty(),
+              "cancelling a started Run must keep its delegated work outstanding");
+        fixture({{"selectedDelegated",false}});
+        const auto drained = restarted->observe("env-1",selected.config,delivery.run);
+        check(drained.kind == Observation::Kind::Finished && drained.resultRunId == "selected-run",
+              "cancellation settles after the assigned Run's delegated work ends");
 
         selected.actionId = "flock-selected-busy";
         selected.target = {"flock-selected",{},{}};
@@ -310,8 +502,17 @@ int main(int argc, char** argv) {
               effects("t3_queue") == Json::array({{{"action","cancel"},{"threadId","flock-selected"},
                                                    {"queuedRunId","selected-run"}}}) &&
               effects("t3_thread_interrupt").empty(),"stop removes only the assigned queued Run");
-        const auto cancellation = adapter->observe("env-1",selected.config,delivery.run);
-        check(cancellation.kind == Observation::Kind::Finished && cancellation.settled &&
+        for (const auto& [conditions,error] : std::vector<std::pair<Json,std::string>>{
+            {{{"selectedRestartPending",true}}, "a pending restart must retain the assigned Run"},
+            {{{"selectedOmitStart",true}}, "missing start history cannot prove a queue cancellation"},
+            {{{"selectedEffectiveRun","continued"}}, "a different effective Run cannot use the assigned Run's queue history"}
+        }) {
+            fixture(conditions);
+            check(restarted->observe("env-1",selected.config,delivery.run).kind != Observation::Kind::Finished,error);
+            fixture({{"selectedRestartPending",false},{"selectedOmitStart",false},{"selectedEffectiveRun",nullptr}});
+        }
+        const auto cancellation = restarted->observe("env-1",selected.config,delivery.run);
+        check(cancellation.kind == Observation::Kind::Finished &&
               cancellation.status == "cancelled" && cancellation.resultRunId == "selected-run",
               "other active work does not hold cancellation of the assigned Run");
 
@@ -401,29 +602,6 @@ int main(int argc, char** argv) {
               "a Run ending before the interrupt was reported as acknowledged");
         fixture({{"interruptReply", false}});
 
-        Command note = launch;
-        note.tool = "steer";
-        note.actionId = "flock-turn-7-2";
-        note.target = run;
-        note.instruction = "Also include the CSV table";
-        note.authGeneration = adapter->authGeneration("env-1", launch.config);
-        check(!adapter->supportsRunTargetedSteer(), "the MCP adapter advertised an unsupported Run-targeted send");
-        const auto sends = effects("t3_thread_send").size();
-        const auto reads = effects("t3_thread_read").size();
-        const auto lists = effects("t3_thread_list").size();
-        for (const auto* scenario : {"running","resumed","manual-active","settled"}) {
-            fixture({{"scenario",scenario}});
-            const auto refused = adapter->send(note);
-            check(refused.kind == Delivery::Kind::NotAccepted && refused.definitelyUnsent,
-                  "the MCP adapter did not refuse an unsupported Run-targeted send");
-        }
-        const auto prior = adapter->reconcile(note);
-        check(prior.kind == Delivery::Kind::Unknown && !prior.definitelyUnsent &&
-              effects("t3_thread_send").size() == sends && effects("t3_thread_read").size() == reads &&
-              effects("t3_thread_list").size() == lists,
-              "the MCP adapter touched T3 during a refused send or rewrote the outcome of an older steer");
-        fixture({{"scenario", "running"}});
-
         signIn("env-1");
         const auto reauthorized = adapter->authGeneration("env-1", launch.config);
         check(reauthorized != launch.authGeneration, "reauthorization changes generation");
@@ -435,6 +613,21 @@ int main(int argc, char** argv) {
               "stale generation blocks commands before send");
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
+        sessionMessageWake(*restarted,home.parent_path()/"session-wake.db",fixture,effects);
+        const auto expired = home.parent_path()/"expired-creds";
+        std::filesystem::create_directory(expired);
+        std::filesystem::permissions(expired,std::filesystem::perms::owner_all);
+        for (const auto& entry : std::filesystem::directory_iterator(home)) {
+            std::ifstream source(entry.path());
+            auto credential = Json::parse(source,nullptr,false);
+            if (!credential.is_object() || credential.value("environmentId","") != "env-1") continue;
+            credential["expiresAt"] = unixTime() - 1;
+            const auto copy = expired/entry.path().filename();
+            std::ofstream(copy) << credential.dump();
+            std::filesystem::permissions(copy,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+        }
+        check(makeT3Mcp(expired)->sessionMessageWake({"env-1","thread"},run) == "unknown",
+              "A confirmed credential expiry did not settle as an unknown Run outcome");
         fixture({{"scope", "orchestration:read"}});
         check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);
@@ -548,6 +741,16 @@ int main(int argc, char** argv) {
         checkPreflight(other, Delivery::Kind::Auth, "mismatched login leaves no usable credential");
         check(adapter->authGeneration("env-1", launch.config) == readOnly,
               "mismatched login preserves the credential for the canonical environment");
+
+        fixture({{"scope","orchestration:read orchestration:operate"},{"denyRead",false},{"lineageFixture",true},
+                 {"lineageSessions",Json::object()}});
+        check(signIn("env-1"),"Could not restore the Operate credential for lineage tests");
+        lineageFallback(*adapter,launch,fixture,effects,[&] {
+            const auto response = http(origin + "/fixture/lineage-sessions","GET");
+            check(response.status == 200,"Could not inspect the fixture's created Sessions");
+            return Json::parse(response.body);
+        });
+        sessionOriginLaunch(*adapter,home.parent_path()/"session-origin-launch.db",fixture,effects);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

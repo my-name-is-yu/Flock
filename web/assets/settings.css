@@ -93,36 +93,33 @@ form .button { min-height: 2.1rem; }
 }
 
 
-#mode-control {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: .7rem .9rem;
-  background: var(--raised);
-  border-radius: var(--radius-lg);
-  font-size: var(--text-sm);
-  color: var(--text);
+.mode-options { display: grid; border-radius: var(--radius-lg); background: var(--raised); overflow: hidden; }
+.mode-option {
+  display: flex; align-items: flex-start; gap: .75rem; padding: .8rem .9rem; cursor: pointer;
+  color: var(--text); font-size: var(--text-sm); transition: background-color .15s ease;
 }
-#supervised {
-  appearance: none;
-  display: grid;
-  align-items: center;
-  width: 2.5rem;
-  min-height: 1.5rem;
-  margin: 0;
-  padding: .15rem;
-  border-radius: 1rem;
-  background: var(--field);
-  cursor: pointer;
+.mode-option + .mode-option { border-top: 1px solid var(--hairline); }
+.mode-option-text { display: grid; gap: .15rem; }
+.mode-option-text strong { font-weight: 600; }
+.mode-option-text small { color: var(--text-2); font-size: var(--text-xs); line-height: 1.45; }
+.mode-option:has(:checked) { background: var(--accent-soft); }
+.mode-option:has(:checked) strong { color: var(--accent); }
+@media (hover: hover) and (pointer: fine) {
+  .mode-options:not(.read-only) .mode-option:not(:has(:checked)):hover { background: var(--hover); }
 }
-#supervised::before {
-  content: '';
-  width: 1.1rem;
-  height: 1.1rem;
-  border-radius: 50%;
-  background: var(--text-3);
+.mode-options.read-only .mode-option { cursor: default; }
+.mode-options.read-only .mode-option:not(:has(:checked)) { display: none; }
+.mode-option input {
+  flex: none; width: 1.1rem; height: 1.1rem; min-height: 0; margin: .1rem 0 0; padding: 0;
+  accent-color: var(--accent-fill); cursor: inherit;
 }
-#supervised:checked { background: var(--accent); }
-#supervised:checked::before { justify-self: end; background: var(--raised); }
+.mode-option:has(:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
+.mode-option input:focus-visible { outline: none; box-shadow: none; }
 
 [hidden] { display: none !important; }
+
+.not-found-home { display: inline-flex; text-decoration: none; }
+
+#people:has(+ form[hidden]) > p:last-child {
+  border-end-start-radius: var(--radius-lg); border-end-end-radius: var(--radius-lg); border-block-end: 0;
+}

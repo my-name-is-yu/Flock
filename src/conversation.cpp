@@ -6,6 +6,11 @@ using conversation_storage::hasText;
 using conversation_storage::messageSize;
 
 namespace {
+bool reservedMessageId(std::string_view id) {
+    return id.starts_with("channel:") || id.starts_with("session-wake:") ||
+           id.starts_with("session-ask:") || id.starts_with("session-invite:");
+}
+
 Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
     if (row.string(1) != text || row.number(2) != replyTo)
         throw Conflict("This client message ID already has different content");
@@ -25,7 +30,7 @@ CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
   json_extract(data,'$.messageId'),task_id,json_extract(data,'$.step'))
-  WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
+  WHERE kind IN ('instruction_accepted','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)
@@ -35,7 +40,7 @@ CREATE TABLE IF NOT EXISTS messages(
   client_message_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   reply_to INTEGER, text TEXT NOT NULL, routing TEXT NOT NULL,
   person_id TEXT NOT NULL, person_root INTEGER NOT NULL CHECK(person_root IN (0,1)),
-  principal_source INTEGER NOT NULL CHECK(principal_source IN (0,1,2,3)),
+  principal_source INTEGER NOT NULL CHECK(principal_source IN (0,1,2,3,4)),
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
@@ -60,6 +65,11 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
   attempt_id INTEGER, decision TEXT CHECK(json_type(decision)='array'), effect TEXT,
   result TEXT CHECK(json_type(result)='array'),
   PRIMARY KEY(message_id,step));
+CREATE TABLE IF NOT EXISTS session_message_waits(
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   number INTEGER NOT NULL, intent TEXT NOT NULL, done_when TEXT NOT NULL,
@@ -112,7 +122,7 @@ std::optional<Json> Store::Impl::messageReceipt(const Person& actor, std::string
 std::optional<Json> Store::receipt(const Person& actor, std::string_view bot, std::string_view clientId,
                                    std::string_view text, Id replyTo, const Json& attachments) const {
     std::lock_guard lock(p_->mutex);
-    if (clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
     if (!Policy(*p_).allows(actor,Action::bot_talk,bot)) throw DecisionDenied{};
     return p_->messageReceipt(actor,bot,clientId,text,replyTo,attachments);
 }
@@ -132,7 +142,7 @@ Json Store::receiveWeb(const Person& actor, const Intake& routing, std::string_v
 Json Store::receive(const Person& actor, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
                     conversation::PrincipalSource source, const VerifiedChannelMessage* channel,
                     const std::function<Intake()>& route, const Json& attachments) {
-    if (!channel && clientId.starts_with("channel:")) throw Conflict("Channel message IDs are reserved");
+    if (!channel && reservedMessageId(clientId)) throw Conflict("This client message ID is reserved");
     if (bot.empty() || !hasText(clientId) || clientId.size() > (channel ? 2048u : 256u) ||
         !hasText(text) || text.size() > messageSize || replyTo < 0)
         throw Conflict("Bot, client message ID and nonempty text are required");
@@ -145,22 +155,8 @@ Json Store::receive(const Person& actor, std::string_view bot, std::string_view 
         if (existing) receipt = *existing;
         else {
             const auto routing = route();
-            if (routing.botId != bot || !routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
-            modelCallLimit(routing.config);
-            const Json saved = {{"environmentId",routing.environmentId},{"projectId",routing.projectId},
-                                {"config",routing.config}};
-            const auto scrub = p_->redactor(routing.botId);
-            scrub.requirePublic({routing.botId,actor.id,clientId,saved});
-            p_->exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message','{}',?)",
-                     {unixTime(),routing.botId});
-            const auto id = p_->last();
-            p_->exec(R"SQL(
-INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
-SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?
-)SQL", {id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
-        actor.id,source == conversation::PrincipalSource::trusted && actor.adminRoot ? 1 : 0,
-        static_cast<int>(source),routing.botId});
-            p_->exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
+            if (routing.botId != bot) throw Conflict("Invalid Bot conversation route");
+            const auto id = p_->enqueueConversation(actor,routing,source,clientId,text,replyTo);
             p_->saveAttachments(id,attachments);
             receipt = {{"messageId",id},{"status","received"}};
         }
@@ -168,6 +164,54 @@ SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=
         transaction.commit();
     }
     return receipt;
+}
+
+Id Store::Impl::enqueueConversation(const Person& actor, const Intake& routing, conversation::PrincipalSource source,
+                                    std::string_view clientId, std::string_view text, Id replyTo,
+                                    const SessionOrigin* origin, const Json& invitation) {
+    if (!routing.config.is_object()) throw Conflict("Invalid Bot conversation route");
+    modelCallLimit(routing.config);
+    Json saved{{"environmentId",routing.environmentId},{"projectId",routing.projectId},{"config",routing.config}};
+    const auto scrub = redactor(routing.botId);
+    if (origin) {
+        saved["sessionOrigin"] = {{"environmentId",origin->target.environmentId},{"threadId",origin->target.threadId},
+                                  {"title",scrub.text(origin->title)}};
+    } else if (replyTo && (source == conversation::PrincipalSource::trusted ||
+                           source == conversation::PrincipalSource::web)) {
+        auto previous = query(R"SQL(
+SELECT coalesce(json_extract(t.data,'$.sessionOrigin'),json_extract(m.routing,'$.sessionOrigin')),
+       json_extract(m.routing,'$.sessionInvitationDepth') FROM journal j
+LEFT JOIN conversation_turns turn ON turn.reply_id=j.id
+LEFT JOIN tasks t ON t.id=j.task_id AND t.bot_id=?2
+JOIN messages m ON m.id=coalesce(turn.message_id,json_extract(t.data,'$.sourceMessageId'),j.id)
+WHERE j.id=?1 AND m.bot_id=?2 AND m.person_id=?3
+  AND (json_type(t.data,'$.sessionOrigin')='object' OR json_type(m.routing,'$.sessionOrigin')='object')
+)SQL",{replyTo,routing.botId,actor.id});
+        if (previous.next()) {
+            auto inherited = previous.json(0);
+            inherited["title"] = scrub.text(field(inherited,"title"));
+            saved["sessionOrigin"] = std::move(inherited);
+            if (const auto depth = previous.number(1)) saved["sessionInvitationDepth"] = depth;
+        }
+    }
+    Json event = Json::object();
+    if (!invitation.is_null()) {
+        event["sessionInvitation"] = scrub.record(invitation);
+        saved["sessionInvitation"] = event.at("sessionInvitation");
+        saved["sessionInvitationDepth"] = invitation.at("depth");
+    }
+    scrub.requirePublic({routing.botId,actor.id,clientId,saved});
+    exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
+         {unixTime(),event,routing.botId});
+    const auto id = last();
+    exec(R"SQL(
+INSERT INTO messages(id,bot_id,client_message_id,sequence,reply_to,text,routing,person_id,person_root,principal_source)
+SELECT ?,?,?,coalesce(max(sequence),0)+1,?,?,?,?,?,? FROM messages WHERE bot_id=?
+)SQL",{id,routing.botId,clientId,replyTo ? Json(replyTo) : Json(nullptr),scrub.text(std::string(text)),saved,
+       actor.id,source == conversation::PrincipalSource::trusted && actor.adminRoot ? 1 : 0,
+       static_cast<int>(source),routing.botId});
+    exec("INSERT INTO conversation_turns(message_id,status) VALUES(?,'running')",{id});
+    return id;
 }
 
 std::vector<std::pair<std::string,Id>> Store::Impl::pendingConversations(unsigned limit, Seconds now) const {

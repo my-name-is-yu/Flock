@@ -1,7 +1,6 @@
 #pragma once
 #include "flock/policy.hpp"
 #include "flock/bot_profile.hpp"
-#include "flock/session_handoff.hpp"
 
 #include <optional>
 #include <string>
@@ -23,8 +22,8 @@ struct WebCallbacks {
     std::string githubWebhookSecret = {};
     // Required for queued messages with a custom authenticator. Resolve by person ID without credentials.
     WebIdentityResolver resolveIdentity = {};
-    std::shared_ptr<SessionHandoff> sessionHandoffs = {};
-    SessionHandoff::People configuredPerson = {};
+    T3* sessionT3 = nullptr;
+    std::function<std::optional<Person>(std::string_view)> configuredPerson = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);

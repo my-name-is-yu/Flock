@@ -31,11 +31,10 @@ Delivery result(Outcome kind, std::string message = {}, RunRef run = {}) {
     return {kind, std::move(run), std::move(message)};
 }
 
-Observation state(Observed kind, std::string status, bool settled = false) {
+Observation state(Observed kind, std::string status) {
     Observation observation;
     observation.kind = kind;
     observation.status = std::move(status);
-    observation.settled = settled;
     return observation;
 }
 
@@ -127,12 +126,41 @@ std::optional<std::string> readCompleteItemText(Client& client, Scan& scan, cons
     return output;
 }
 
-Json wait(Client& client, const RunRef& run, bool delegated, int timeout = 400) {
+enum class WaitFor { Run, DelegatedWork };
+
+Json wait(Client& client, const RunRef& run, WaitFor scope, int timeout = 400) {
     const auto response = client.call("t3_thread_wait", {{"threadId", run.threadId}, {"runId", run.runId},
-        {"timeoutMs", timeout}, {"untilDelegatedWorkSettled", delegated}});
+        {"timeoutMs", timeout}, {"untilDelegatedWorkSettled", scope == WaitFor::DelegatedWork}});
     if (str(response, "threadId") != run.threadId || str(response, "runId").empty()) invalidResponse();
     boolean(response, "timedOut");
     return response;
+}
+
+bool isRestartContinuation(Client& client, const RunRef& assigned, const std::string& effective) {
+    // T3 creates a server message keyed by the cut Run each time it resumes after a restart.
+    constexpr std::string_view prefix = "message:restart-continuation:";
+    Scan scan;
+    auto current = assigned.runId;
+    return !walkThreadHistoryForward(client,scan,assigned.threadId,"messages",32,-1,[&](const Json& item) {
+        if (localItem(item,assigned.threadId) && str(item,"type") == "user_message" &&
+            str(item,"creationSource") == "server" && str(item,"messageId") == std::string(prefix) + current) {
+            current = str(item,"runId");
+            if (current.empty()) invalidResponse();
+        }
+        return current != effective;
+    });
+}
+
+bool confirmsQueueCancellation(Client& client, const RunRef& assigned, const Json& head) {
+    for (const auto& run : array(head,"recentRuns")) {
+        if (str(run,"runId") != assigned.runId) continue;
+        const auto started = run.find("startedAt");
+        if (str(run,"status") != "cancelled" || started == run.end() || !started->is_null()) return false;
+        const auto exact = wait(client,assigned,WaitFor::Run,1);
+        return str(exact,"runId") == assigned.runId && str(exact,"status") == "cancelled" &&
+               !boolean(exact,"timedOut");
+    }
+    return false;
 }
 
 struct CompletionNotice { std::size_t count; std::string updatedAt; };
@@ -395,6 +423,11 @@ LaunchArguments launchArgs(const Command& command) {
     args["title"] = "Flock task";
     args["message"] = sessionPrompt(command.actionId,command.instruction);
     args["clientRequestId"] = command.actionId;
+    if (command.sessionOrigin) {
+        const auto& origin = *command.sessionOrigin;
+        args["delegatedFrom"] = {{"environmentId",origin.target.environmentId},{"threadId",origin.target.threadId},
+                                 {"title",origin.title}};
+    }
     return {std::move(args),std::move(pin).value_or(std::string{})};
 }
 
@@ -405,9 +438,10 @@ void verifyCommand(const Command& command) {
         return;
     }
     const bool validTarget = command.tool == "delegate" ||
-        (command.tool == "start_in_session" && !command.target.threadId.empty() && command.target.runId.empty()) ||
-        ((command.tool == "follow_up" || command.tool == "steer") && hasRun(command.target));
-    if (!validTarget || command.projectId.empty() ||
+        ((command.tool == "start_in_session" || command.tool == "message_session") &&
+         !command.target.threadId.empty() && command.target.runId.empty()) ||
+        (command.tool == "follow_up" && hasRun(command.target));
+    if (!validTarget || (command.tool != "message_session" && command.projectId.empty()) ||
         command.actionId.empty() || command.actionId.size() > 256 || trim(command.actionId) != command.actionId ||
         command.actionId.find_first_of("\r\n[]") != std::string::npos || trim(command.instruction).empty() ||
         sessionPrompt(command.actionId,command.instruction).size() > maxSessionPromptBytes)
@@ -427,23 +461,24 @@ Delivery workReply(const Failure& failure) {
     return reply;
 }
 
-std::vector<std::string> projectThreads(Client& client, Scan& scan, const std::string& projectId) {
+std::vector<std::string> projectThreads(Client& client, Scan& scan, const Command& command) {
     std::vector<std::string> found;
     std::set<std::string> visited;
     std::optional<Position> total;
     Position offset = 0;
     for (;;) {
         scan.step();
-        const auto page = client.call("t3_thread_list", {{"projectId", projectId}, {"includeSubagents", false},
+        const auto page = client.call("t3_thread_list", {{"projectId", command.projectId},
+                                                         {"includeSubagents", command.sessionOrigin.has_value()},
                                                          {"limit", 50}, {"cursor", offset}});
-        if (str(page, "projectId") != projectId) invalidResponse();
+        if (str(page, "projectId") != command.projectId) invalidResponse();
         const auto count = position(member(page, "total"));
         if (total && count != *total) invalidResponse();
         total = count;
         const auto& threads = array(page, "threads");
         for (const auto& thread : threads) {
             const auto id = str(thread, "threadId");
-            if (id.empty() || str(thread, "projectId") != projectId || !visited.insert(id).second) invalidResponse();
+            if (id.empty() || str(thread, "projectId") != command.projectId || !visited.insert(id).second) invalidResponse();
             if (str(thread, "createdBy") == "agent" && str(thread, "creationSource") == "mcp") found.push_back(id);
         }
         const auto next = cursor(page, "nextCursor");
@@ -495,7 +530,7 @@ Delivery reconcileWork(Client& client, const Command& command) {
     if (!destination.empty() && !hint.empty() && hint != destination)
         return result(Outcome::Unknown, "The supplied Thread is outside the saved action destination");
     Scan scan;
-    auto threads = destination.empty() ? projectThreads(client, scan, command.projectId) : std::vector{destination};
+    auto threads = destination.empty() ? projectThreads(client, scan, command) : std::vector{destination};
     if (destination.empty() && !hint.empty() && std::find(threads.begin(), threads.end(), hint) == threads.end())
         threads.push_back(hint);
     const auto expected = sessionPrompt(command.actionId,command.instruction);
@@ -591,7 +626,7 @@ std::optional<RunEvidence> pinnedEvidenceProblem(Client& client, const Json& con
     if (!gitCommit(pin) || !loopbackGitHost(origin)) return problem;
     const auto head = threadHead(client,source.threadId);
     const auto& thread = head.at("thread");
-    const auto actual = workspaceHead(client,str(thread,"projectId"),thread,true);
+    const auto actual = workspaceHead(client,str(thread,"projectId"),thread);
     if (!actual) return problem;
     if (actual->clean && actual->commit == pin) return {};
     problem.availability = RunEvidence::Availability::Available;
@@ -631,7 +666,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
 }
 
 bool followUpReady(Client& client, const Command& command) {
-    const auto settled = wait(client, command.target, true, 1);
+    const auto settled = wait(client, command.target, WaitFor::DelegatedWork, 1);
     const auto effective = str(settled, "runId");
     const auto resultRun = str(settled.value("resultRun", Json::object()), "runId");
     if (boolean(settled, "timedOut") || !terminal(str(settled, "status")) || resultRun.empty() ||
@@ -654,7 +689,7 @@ bool followUpReady(Client& client, const Command& command) {
 Delivery answer(Client& client, const Command& command, bool& invoked) {
     const auto& thread = command.target.threadId;
     if (!pending(client, thread).contains(command.questionId)) return result(Outcome::QuestionGone);
-    const auto watching = wait(client, command.target, false, 1);
+    const auto watching = wait(client, command.target, WaitFor::Run, 1);
     const auto runId = str(watching, "runId");
     // Codex's Run projection can stay "running" while its input activity
     // is "waiting". Attribution below checks the actual owned question.
@@ -681,10 +716,21 @@ Delivery answer(Client& client, const Command& command, bool& invoked) {
     }
 }
 
-Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin) {
+Json launchThread(Client& client, Json args, std::string& warning) {
+    try {
+        return client.call("t3_thread_launch",args);
+    } catch (const Failure& failure) {
+        if (failure.reason != Failure::Reason::DelegatedFromRejected || !args.erase("delegatedFrom")) throw;
+        // Validation rejected the first request before dispatch. Keep the same idempotency key.
+        warning = "T3 rejected the delegatedFrom launch field. Retried without linking the origin Session.";
+        return client.call("t3_thread_launch",std::move(args));
+    }
+}
+
+Delivery launchPinned(Client& client, const Command& command, Json args, std::string_view pin, std::string& warning) {
     auto prompt = str(args,"message");
     args.erase("message");
-    const auto launched = client.call("t3_thread_launch",std::move(args));
+    const auto launched = launchThread(client,std::move(args),warning);
     const auto threadId = str(launched,"threadId");
     if (threadId.empty() || str(launched,"projectId") != command.projectId ||
         !member(launched,"runId").is_null()) invalidResponse();
@@ -701,7 +747,7 @@ Delivery launchPinned(Client& client, const Command& command, Json args, std::st
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
-        const auto workspace = workspaceHead(client,command.projectId,thread,true);
+        const auto workspace = workspaceHead(client,command.projectId,thread);
         if (!workspace || !workspace->clean || workspace->commit != pin)
             return {Outcome::NotAccepted,{},"The provisioned specialist worktree does not match the saved commit",true};
         const auto sent = client.call("t3_thread_send",{{"threadId",threadId},{"mode","queue"},
@@ -743,10 +789,8 @@ public:
     }
 
     Delivery send(const Command& command) override {
-        // The MCP send targets the Thread's current Run and has no expected-Run condition.
-        if (command.tool == "steer")
-            return {Outcome::NotAccepted, {}, "T3 cannot target a specific running Run", true};
         bool invoked = false;
+        std::string launchWarning;
         try {
             verifyCommand(command);
             const bool launch = command.tool == "delegate";
@@ -759,18 +803,37 @@ public:
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
             if (command.tool == "answer_session_question") return answer(client, command, invoked);
+            if (command.tool == "message_session") {
+                const auto environment = client.call("t3_environment_read",Json::object());
+                if (str(environment,"environmentId") != command.environmentId)
+                    return {Outcome::Settings,{},"The OAuth endpoint belongs to a different T3 environment",true};
+                invoked = true;
+                const auto reply = client.call("t3_thread_send",{{"threadId",command.target.threadId},
+                    {"mode","queue"},{"message",command.instruction},{"clientRequestId",command.actionId}});
+                const auto run = str(reply,"runId");
+                const auto delivery = str(reply,"delivery");
+                if (str(reply,"threadId") != command.target.threadId || run.empty() ||
+                    (delivery != "started" && delivery != "queued")) invalidResponse();
+                return {Outcome::Accepted,{command.target.threadId,run,str(reply,"link")},{},false,delivery};
+            }
             Json reply;
             if (launch) {
+                if (command.sessionOrigin) {
+                    const auto environment = client.call("t3_environment_read",Json::object());
+                    if (str(environment,"environmentId") != command.environmentId)
+                        return {Outcome::Settings,{}, "The OAuth endpoint belongs to a different T3 environment",true};
+                }
                 if (!launchArguments.pin.empty()) {
                     if (!loopbackGitHost(origin))
                         return {Outcome::Settings,{},"Pinned specialist worktrees require a local T3 environment",true};
                     invoked = true;
-                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin);
+                    auto delivery = launchPinned(client,command,std::move(launchArguments.parameters),launchArguments.pin,launchWarning);
+                    delivery.launchWarning = std::move(launchWarning);
                     useLocalThreadLink(delivery.run,command.environmentId,origin);
                     return delivery;
                 }
                 invoked = true;
-                reply = client.call("t3_thread_launch", std::move(launchArguments.parameters));
+                reply = launchThread(client,std::move(launchArguments.parameters),launchWarning);
                 if (str(reply, "projectId") != command.projectId) invalidResponse();
             } else {
                 Json previous;
@@ -796,10 +859,16 @@ public:
             }
             RunRef run{str(reply, "threadId"), str(reply, "runId"), str(reply, "link")};
             useLocalThreadLink(run,command.environmentId,origin);
-            if (!hasRun(run)) return result(Outcome::Unknown, "T3 has not returned the assigned Run ID yet", std::move(run));
-            return result(Outcome::Accepted, {}, std::move(run));
+            auto delivery = hasRun(run) ? result(Outcome::Accepted,{},std::move(run))
+                : result(Outcome::Unknown,"T3 has not returned the assigned Run ID yet",std::move(run));
+            delivery.launchWarning = std::move(launchWarning);
+            return delivery;
         } catch (const Failure& failure) {
-            if (invoked && command.tool != "answer_session_question") return workReply(failure);
+            if (invoked && command.tool != "answer_session_question") {
+                auto delivery = workReply(failure);
+                delivery.launchWarning = std::move(launchWarning);
+                return delivery;
+            }
             auto refused = failureDelivery(failure);
             refused.definitelyUnsent = !invoked;
             return refused;
@@ -807,7 +876,6 @@ public:
     }
 
     Delivery reconcile(const Command& command) override {
-        if (command.tool == "steer") return result(Outcome::Unknown, "T3 cannot look up a steered note by action ID");
         try {
             verifyCommand(command);
             auto connection = credential(command.environmentId, command.config);
@@ -821,8 +889,7 @@ public:
                         if (!loopbackGitHost(origin))
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                         const auto head = threadHead(client,recovered.run.threadId);
-                        const auto workspace = workspaceHead(client,command.projectId,
-                                                             head.at("thread"),true);
+                        const auto workspace = workspaceHead(client,command.projectId,head.at("thread"));
                         if (!workspace || !workspace->clean || workspace->commit != pin)
                             return result(Outcome::Unknown,"The recovered specialist workspace does not match the saved commit");
                     }
@@ -842,27 +909,48 @@ public:
         }
     }
 
+    std::string sessionMessageWake(const SessionTarget& target, const RunRef& run) override {
+        try {
+            Client client(credential(target.environmentId,Json::object()));
+            const auto reply = wait(client,run,WaitFor::Run,1);
+            const auto effective = str(reply,"runId");
+            const auto status = str(reply,"status");
+            if (boolean(reply,"timedOut") && !active(status)) return {};
+            if (effective != run.runId && !isRestartContinuation(client,run,effective)) return {};
+            if (terminal(status)) {
+                return status == "completed" ? "finished" : "failed";
+            }
+            if (!active(status)) return "unknown";
+            if (status == "queued" || status == "preparing" || status == "starting") return {};
+            if (pending(client,run.threadId).empty()) return {};
+            // The thread-level question list may have changed while the exact Run ended.
+            const auto head = threadHead(client,run.threadId).at("thread");
+            if (str(head,"activeRunId") == effective) return "waiting_for_person";
+            return {};
+        } catch (const Failure& failure) {
+            return failure.reason == Failure::Reason::HistoryNotFound ||
+                   failure.reason == Failure::Reason::CredentialExpired ? "unknown" : "";
+        }
+    }
+
     Observation observe(const std::string& environmentId, const Json& config, const RunRef& run) override {
         if (!hasRun(run)) return state(Observed::Unavailable, "The assigned T3 Run is missing");
         try {
             auto connection = credential(environmentId,config);
             const auto origin = checkedUrl(connection.mcpUrl).origin;
             Client client(std::move(connection));
-            const auto reply = wait(client, run, true);
+            const auto reply = wait(client, run, WaitFor::DelegatedWork);
             const auto effective = str(reply, "runId");
             const auto status = str(reply, "status");
             const bool finished = terminal(status);
             if (status == "queued") return state(Observed::Running,status);
             const auto timedOut = boolean(reply,"timedOut");
-            bool settled = finished && !timedOut;
-            if (status == "cancelled" && timedOut) {
-                // A cancelled queue item can coexist with unrelated work in the Thread.
-                const auto exact = wait(client,{run.threadId,effective,run.link},false,1);
-                settled = str(exact,"runId") == effective && str(exact,"status") == status && !boolean(exact,"timedOut");
-            }
-            if (settled) {
+            std::optional<Json> head;
+            if (timedOut && status == "cancelled" && effective == run.runId)
+                head = threadHead(client,run.threadId,50);
+            if (finished && (!timedOut || (head && confirmsQueueCancellation(client,run,*head)))) {
                 auto source = RunRef{run.threadId, effective, run.link};
-                auto observed = state(Observed::Finished, status, true);
+                auto observed = state(Observed::Finished, status);
                 const auto later = reply.value("resultRun", Json::object());
                 const auto laterId = str(later, "runId");
                 if (!timedOut && (laterId.empty() || !terminal(str(later,"status")))) invalidResponse();
@@ -884,10 +972,10 @@ public:
                 return observed;
             }
             if (!finished && !active(status)) invalidResponse();
-            const auto head = threadHead(client, run.threadId);
-            const auto& thread = head.at("thread");
+            if (!head) head = threadHead(client,run.threadId);
+            const auto& thread = head->at("thread");
             const auto count = position(member(thread, "pendingRequestCount"));
-            if (count == 0) return state(finished ? Observed::Finished : Observed::Running, status);
+            if (count == 0) return state(finished ? Observed::Settling : Observed::Running, status);
             if (!finished && count == 1) {
                 const auto requests = pending(client, run.threadId);
                 if (requests.size() == 1) {
@@ -927,7 +1015,7 @@ public:
         requireOperate(connection);
         Client client(std::move(connection));
         // An explicit wait can resolve T3's own restart continuation of the assigned Run.
-        const auto current = wait(client, run, false, 1);
+        const auto current = wait(client, run, WaitFor::Run, 1);
         const auto effective = str(current, "runId");
         const auto status = str(current,"status");
         if (terminal(status)) return InterruptOutcome::AlreadyTerminal;
@@ -944,6 +1032,45 @@ public:
         if (replyStatus == "interrupt_requested") return InterruptOutcome::Requested;
         if (terminal(replyStatus)) return InterruptOutcome::AlreadyTerminal;
         invalidResponse();
+    }
+
+    QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
+        using Outcome = QueueCancelOutcome;
+        try {
+            auto connection = credential(target.environmentId,Json::object());
+            requireOperate(connection);
+            Client client(std::move(connection));
+            const auto environment = client.call("t3_environment_read",Json::object());
+            if (str(environment,"environmentId") != target.environmentId) return Outcome::Retry;
+            try {
+                const auto reply = client.call("t3_queue",{{"action","cancel"},{"threadId",target.threadId},{"queuedRunId",run}});
+                position(member(reply,"sequence"));
+                return Outcome::Cancelled;
+            } catch (const Failure& failure) {
+                if (failure.kind != Failure::Kind::Tool) return Outcome::Retry;
+            }
+
+            // T3 rejects the mutation if the Run left the queue. Read the exact Run to
+            // distinguish that race from a transient failure or a retried cancellation.
+            const auto head = threadHead(client,target.threadId,50);
+            for (const auto& entry : array(head,"recentRuns")) {
+                if (str(entry,"runId") != run) continue;
+                const auto status = str(entry,"status");
+                const auto started = entry.find("startedAt");
+                if (started != entry.end() && started->is_string() && !started->get_ref<const std::string&>().empty())
+                    return Outcome::AlreadyStarted;
+                if (status == "cancelled" && started != entry.end() && started->is_null()) return Outcome::Cancelled;
+                break;
+            }
+            const auto exact = wait(client,{target.threadId,std::string(run),{}},WaitFor::Run,1);
+            if (str(exact,"runId") != run) return Outcome::NotCancellable;
+            const auto status = str(exact,"status");
+            if (status == "running" || status == "waiting" || status == "completed") return Outcome::AlreadyStarted;
+            if (terminal(status)) return Outcome::NotCancellable;
+        } catch (const Failure& failure) {
+            if (failure.reason == Failure::Reason::HistoryNotFound) return Outcome::NotCancellable;
+        }
+        return Outcome::Retry;
     }
 
     Excerpt read(const ReadRequest& request) override {

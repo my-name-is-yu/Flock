@@ -57,10 +57,19 @@ std::string Store::Impl::ensureModelBudget(std::string key, const Json& config) 
 }
 
 std::string Store::Impl::messageModelBudget(Id messageId) {
-    auto row = query("SELECT routing FROM messages WHERE id=?",{messageId});
-    if (!row.next()) throw Conflict("The originating message is missing");
-    const auto routing = row.json(0);
-    return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+    for (;;) {
+        auto row = query(R"SQL(
+SELECT m.routing,i.source_message_id FROM messages m
+LEFT JOIN session_invitations i ON i.message_id=m.id WHERE m.id=?
+)SQL",{messageId});
+        if (!row.next()) throw Conflict("The originating message is missing");
+        const auto routing = row.json(0);
+        const auto wake = routing.find("sessionWake");
+        const auto source = wake == routing.end() ? row.number(1) : wake->at("sourceMessageId").get<Id>();
+        if (!source) return ensureModelBudget("message/" + std::to_string(messageId),routing.at("config"));
+        if (source >= messageId) throw Conflict("Invalid model budget ancestry");
+        messageId = source;
+    }
 }
 
 std::string Store::Impl::taskModelBudget(const Json& task) {
@@ -162,7 +171,7 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
     return {std::move(call),std::move(rejection)};
 }
 
-CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input) {
     Json revision;
     const bool conversation = input.event.contains("turn") && input.event.value("kind","") == "conversation_turn";
     const auto scrub = redactor(bot,conversation ? &revision : nullptr);
@@ -183,20 +192,11 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
             checked.calls.push_back(checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent")));
         checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
-        auto usage = scrub.payload(error.usage);
-        if (attemptId && !usage.empty()) {
-            std::lock_guard lock(mutex);
-            exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
-        }
-        throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+        throw ModelError(scrub.text(error.what()),error.transient,scrub.payload(error.usage));
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
-    }
-    if (attemptId && !checked.usage.empty()) {
-        std::lock_guard lock(mutex);
-        exec("UPDATE model_attempts SET usage=? WHERE id=?",{checked.usage,attemptId});
     }
     return checked;
 }

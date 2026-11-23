@@ -51,7 +51,6 @@ public:
             result.kind = Observation::Kind::Finished;
             result.status = "completed";
             result.report = "Returned evidence for the original criterion";
-            result.settled = true;
         }
         return result;
     }
@@ -350,7 +349,7 @@ void responseContract() {
 
     input.tools = {"start_task","send_to_task","change_task","answer_task_question","cancel_task",
                    "record_task_blocker","withdraw_task_question",
-                   "message_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
+                   "message_session","invite_bot","leave_session","interrupt_session","read_result","find_tasks","reply","start_workflow","workflow_status",
                    "instruct_workflow_stage","stop_workflow_stage","stop_workflow","compact_conversation",
                    "expand_context","continue_fresh_session",
                    "list_secrets","request_secret_input","list_connections",
@@ -375,7 +374,9 @@ void responseContract() {
           turnTool("expand_context")["properties"].contains("compactionId") &&
           turnTool("continue_fresh_session")["required"].back() == "taskId" &&
           turnTool("request_secret_input")["required"] == Json::array({"reason","name"}) &&
-          turnTool("message_session")["required"] == Json::array({"reason","taskId","generation","text"}) &&
+          turnTool("message_session")["required"] == Json::array({"reason","environmentId","threadId","text"}) &&
+          turnTool("invite_bot")["required"] == Json::array({"reason","botId","environmentId","threadId","note"}) &&
+          turnTool("leave_session")["required"] == Json::array({"reason","environmentId","threadId"}) &&
           turnTool("start_task")["required"] == Json::array({"reason","request"}) &&
           turnTool("start_task")["properties"]["sessionRef"]["type"] == "string" &&
           turnTool("start_task")["properties"]["resume"]["type"] == "boolean" &&
@@ -412,8 +413,8 @@ void responseContract() {
     const auto& search = turnTool("flock_session_search");
     const auto& events = turnTool("flock_session_events");
     check(search.at("required") == Json::array({"reason"}) && search.at("properties").size() == 8 &&
-          events.at("required") == Json::array({"reason","sessionRef","operation"}) &&
-          events.at("properties").size() == 11 &&
+          events.at("required") == Json::array({"reason","operation"}) &&
+          events.at("properties").size() == 13 &&
           events.at("properties").at("operation").at("enum") ==
               Json::array({"list","search","read_event","counts","get_attachment"}),
           "Session search and event schemas do not match their contracts");

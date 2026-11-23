@@ -35,15 +35,10 @@ struct Backend : T3 {
     bool nativeCatalog = false;
     std::vector<Id> catalogOffsets;
 
-    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
         writes.push_back(command);
-        const RunRef run{"foreign-thread","foreign-run",{}};
-        if (command.tool == "steer" &&
-            (command.target.threadId != run.threadId || command.target.runId != run.runId))
-            return {Delivery::Kind::NotAccepted,{},"The assigned Run is unavailable",true};
-        return {Delivery::Kind::Accepted,run,{}};
+        return {Delivery::Kind::Accepted,{"foreign-thread","foreign-run",{}},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }
@@ -428,7 +423,9 @@ void connectedSearchRespectsCurrentAccess() {
     const auto found = f.call(search,filters);
     check(found.at("sessions").size() == 1 && found.at("sessions").front().at("title") == "Native investigation",
           "connected search remained limited to the Bot routing project");
-    check(found.dump().find(nativeSession) == std::string::npos,"connected search exposed an upstream ID");
+    check(found.at("sessions").front().at("threadId") == nativeSession &&
+          found.at("sessions").front().at("environmentId") == otherEnv,
+          "connected search did not return the Session identifiers");
     const auto reference = found.at("sessions").front().at("sessionRef");
     const Json read{{"sessionRef",reference},{"operation","counts"}};
     const Json work{{"sessionRef",reference},{"request","Continue the investigation"}};
