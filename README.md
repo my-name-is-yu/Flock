@@ -14,6 +14,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+For one-off verification, run `./scripts/verify.sh`. It creates a temporary
+build directory and removes it when the command exits. Use `--keep-build` to
+keep the directory for debugging. Set `CMAKE_BUILD_PARALLEL_LEVEL` to control
+build concurrency.
+
 ## Configure a Bot
 
 The default state directory is `~/.config/flock`. Override it with the `FLOCK_HOME` environment variable or the CLI's `--home` option. Configure the Bot in `bots/release/config.json` under that directory.
