@@ -87,6 +87,9 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             saveTurnResults(id,step,Json::array({Json{{"ok",false},{"taskId",saved.json(0).at("taskId")},
                 {"delivery","unknown"},{"error","Flock restarted while sending this, so T3 may have received it. "
                                                "Check the Session before sending it again"}}}));
+        } else if (control == SessionControl::Steer && !t3.supportsRunTargetedSteer()) {
+            saveTurnResults(id,step,Json::array({toolFailure("This T3 connection cannot target a specific running Run. "
+                "Use send_to_task to save the instruction for the task's next safe point.")}));
         } else if (!offered) {
             saveTurnResults(id,step,Json::array({toolFailure("Session control was not offered for this turn")}));
         } else if (hasWebEvidence && !allowedAfterWebEvidence(decision)) {
@@ -101,8 +104,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
                 Command command;
                 command.actionId = "flock-turn-" + std::to_string(id) + "-" + std::to_string(step);
                 command.ownerBotId = message.bot;
-                command.environmentId = field(run,"environmentId");
-                if (command.environmentId.empty()) command.environmentId = field(task,"environmentId");
+                command.environmentId = run.at("environmentId");
                 command.projectId = field(task,"projectId");
                 command.config = task.at("config");
                 command.target = runRef(run);
@@ -140,6 +142,19 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             transaction.commit();
             return true;
         }
+        const Resource resource{Action::t3_send,
+            Resource::sessionRead(effect->command.environmentId,effect->command.target.threadId).target};
+        auto origin = policyOrigin(message);
+        origin.task = effect->taskId;
+        origin.generation = effect->generation;
+        origin.revision = ownTask(effect->taskId,message).value("currentRevision",Id{});
+        const auto gate = approveAction(origin,resource,"turn/" + std::to_string(id) + "/" + std::to_string(step),
+                                       Json::array({decision.tool,args,effect->run}),policyClock());
+        if (gate != ApprovalGate::allow) {
+            if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
+            transaction.commit();
+            return gate != ApprovalGate::waiting;
+        }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{effect->checkpoint(),id,step});
         if (!sqlite3_changes(db)) return false;
@@ -147,7 +162,12 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     }
 
     Json outcome;
-    try { outcome = effect->dispatch(t3); }
+    try {
+        const auto& cmd = effect->command;
+        const auto target = Resource::sessionRead(cmd.environmentId,cmd.target.threadId).target;
+        outcome = Policy(*this).forbidden(message.bot,Action::t3_send,target)
+            ? toolFailure(approvalError(ApprovalGate::denied)) : effect->dispatch(t3);
+    }
     catch (const std::exception& error) {
         const std::string detail = control == SessionControl::Steer ? "T3 may have received the note: "
                                                                    : "T3 may have received the interrupt: ";
@@ -162,7 +182,7 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
         Json entry = {{"messageId",id},{"step",step},{"run",outcome.value("run",effect->run)}};
         if (control == SessionControl::Steer) {
             entry["text"] = effect->command.instruction;
-            entry["revisionId"] = effect->run.value("revisionId",Json(nullptr));
+            entry["revisionId"] = effect->run.at("revisionId");
         }
         journal(effect->taskId,control == SessionControl::Steer ? "instruction_steered" : "interrupt_requested",entry);
     }
@@ -173,12 +193,17 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                                       std::string_view environment, Id messageId, const Json& source,
-                                      bool resume) {
-    const auto destination = environment.empty() ? field(routing,"environmentId")
-        : verifiedEnvironment(routing,routing,environment);
-    const auto id = submit({std::string(bot),std::string(request),destination,field(routing,"projectId"),
-                            routing.at("config")},messageId,source);
+                                      bool resume, const WorkSession* selectedSession) {
+    const auto destination = selectedSession ? selectedSession->environmentId
+        : environment.empty() ? field(routing,"environmentId") : verifiedEnvironment(routing,routing,environment);
+    const auto project = selectedSession ? selectedSession->projectId : field(routing,"projectId");
+    if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
+    const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
+                           messageId,source);
     auto task = load(id);
+    if (selectedSession)
+        task["selectedSession"] = {{"environmentId",destination},{"projectId",project},
+                                   {"threadId",selectedSession->threadId}};
     // Establish provenance at intake, while both the original message and the routed request are available.
     auto message = query("SELECT text FROM messages WHERE id=? AND bot_id=?", {messageId,bot});
     task["sourceMessageCoversFullRequest"] = source.is_null() && message.next() && message.string(0) == request;
@@ -275,7 +300,7 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
     }
     if (conflicting) {
         task["replanning"] = true;
-        exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{task.value("eventId",Id{0})});
+        releaseModelCall(takeReservedTaskCall(task.value("eventId",Id{0})));
         if (task.at("state") == "waiting" && waitIsActionable(task)) {
             auto data = task.at("wait");
             if (!data.is_object()) throw DecisionUnavailable{};

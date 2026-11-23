@@ -2,7 +2,7 @@
 #include "change_feed.hpp"
 #include "embedded_assets.hpp"
 #include "views.hpp"
-#include "access_routes.hpp"
+#include "settings_routes.hpp"
 #include "board_inbox_routes.hpp"
 #include "git_routes.hpp"
 #include "flock/board_inbox.hpp"
@@ -28,7 +28,7 @@ using HandlerResult = httplib::Server::HandlerResponse;
 constexpr auto loopback = "127.0.0.1";
 constexpr std::size_t maxStandardPayload = 128 * 1024;
 constexpr std::size_t maxProfilePayload = 7 * 1024 * 1024 + 128 * 1024;
-enum class Mutation { Message, Request, Operation };
+enum class Mutation { Message, Operation };
 
 void json(Response& res, int status, const Json& body) {
     res.status = status;
@@ -112,8 +112,7 @@ ParsedProfile parseBotProfile(const Json& body, bool creating) {
         if (source.contains("imageData") && !source["imageData"].is_null()) {
             if (!source["imageData"].is_string()) throw InputError("invalid_image");
             try {
-                image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),
-                                           AvatarImage::maxBytes,Base64Padding::AllowUnusedBits));
+                image.emplace(decodeBase64(source["imageData"].get_ref<const std::string&>(),AvatarImage::maxBytes));
             } catch (const std::invalid_argument&) {
                 throw InputError("invalid_image");
             } catch (const std::length_error&) {
@@ -155,10 +154,10 @@ bool localApprovalNavigation(const Request& req) {
         req.get_header_value("Sec-Fetch-Mode") != "navigate" ||
         req.get_header_value("Sec-Fetch-Dest") != "document") return false;
     std::string_view path = req.path;
-    constexpr std::string_view prefix = "/settings/", suffix = "/access";
+    constexpr std::string_view prefix = "/settings/";
     if (!path.starts_with(prefix)) return false;
     path.remove_prefix(prefix.size());
-    return path.ends_with(suffix) && validBotId(path.substr(0,path.size()-suffix.size()));
+    return validBotId(path);
 }
 
 class LoopbackServer final : public WebServer {
@@ -171,7 +170,7 @@ public:
         if (port > 65535 || !callbacks_.bots || !callbacks_.intake)
             throw std::invalid_argument("Invalid Flock Web listener settings");
         if (callbacks_.authenticate) {
-            store_.access().requireWebIdentity();
+            store_.policy().requireWebIdentity();
             store_.setWebIdentityResolver(callbacks_.resolveIdentity);
         }
         store_.protectGitCredential(callbacks_.githubWebhookSecret);
@@ -198,26 +197,20 @@ public:
             if (res.body.empty()) error(res,res.status,"http_error");
         });
         for (const auto& asset : web::assets) {
-            server_.Get(asset.path == "/index.html" ? "/" : std::string(asset.path),
+            const auto path = asset.path == "/index.html" ? "/" :
+                              asset.path == "/settings.html" ? "/settings" :
+                              asset.path == "/bot-settings.html" ? R"(/settings/([A-Za-z0-9][A-Za-z0-9_.-]{0,127}))" : asset.path;
+            server_.Get(std::string(path),
                 [asset](const Request&, Response& res) {
                     res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
                 });
         }
-        server_.Get(R"(/settings/([^/]+)/(secrets|environment|access))",[](const Request&, Response& res) {
-            for (const auto& asset : web::assets) {
-                if (asset.path == "/access.html") {
-                    res.set_content(asset.body.data(),asset.body.size(),std::string(asset.type));
-                    return;
-                }
-            }
-            error(res,404,"settings_not_found");
-        });
-        web::accessRoutes(server_,store_,callbacks_);
+        web::settingsRoutes(server_,store_,callbacks_);
         web::memoryAutomationRoutes(server_,store_,callbacks_);
         web::boardInboxRoutes(server_,store_,callbacks_);
         web::gitRoutes(server_,store_,callbacks_);
         web::channelRoutes(server_,store_,callbacks_);
-        web::sessionHandoffRoutes(server_,callbacks_);
+        web::sessionHandoffRoutes(server_,store_,callbacks_);
         server_.Get("/api/bots",[this](const Request& req, Response& res) {
             const auto actor = web::person(callbacks_,req);
             setViewer(res,callbacks_,actor);
@@ -227,33 +220,27 @@ public:
         server_.Get("/api/bot-avatar",[this](const Request& req, Response& res) {
             const auto id = req.get_param_value("bot");
             if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
-            if (!store_.access().permitsPerson(web::person(callbacks_,req),id,Role::view)) return error(res,403,"access_denied");
+            if (!store_.policy().allows(web::person(callbacks_,req),Action::bot_view,id)) return error(res,403,"access_denied");
             if (!callbacks_.botAvatar) return error(res,404,"avatar_not_found");
             const auto image = callbacks_.botAvatar(id);
             if (!image) return error(res,404,"avatar_not_found");
             res.set_content(image->bytes().data(),image->bytes().size(),std::string(image->format().contentType));
         });
-        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions","/api/task"}) {
+        for (const auto path : {"/api/view","/api/workflows","/api/compactions","/api/conversation","/api/peer-conversation","/api/sessions"}) {
             server_.Get(path,[this](const Request& req, Response& res) {
                 const auto id = req.get_param_value("bot");
                 if (req.get_param_value_count("bot") != 1 || id.empty()) return error(res,400,"invalid_bot");
                 const auto actor = web::person(callbacks_,req);
-                if (!store_.access().permitsPerson(actor,id,Role::view)) return error(res,403,"access_denied");
+                if (!store_.policy().allows(actor,Action::bot_view,id)) return error(res,403,"access_denied");
                 const auto known = bots();
                 const auto* bot = botById(known,id);
                 if (!bot) return error(res,404,"bot_not_found");
                 try {
-                    if (req.path == "/api/task") {
-                        const auto taskId = queryId(req,"taskId",false);
-                        const auto task = store_.task(taskId);
-                        if (web::field(task,"botId") != id) return error(res,404,"task_not_found");
-                        return json(res,200,store_.access().redactSecrets(id,web::taskDetail(task,store_.latestTaskResult(taskId))));
-                    }
                     const auto before = queryId(req,"before",true);
                     if (req.path == "/api/peer-conversation") return readPeerConversation(req,res,known,actor,id,before);
                     if (req.path == "/api/compactions" || req.path == "/api/workflows") {
                         const auto items = req.path == "/api/compactions" ? store_.compactions(id,before) : store_.workflows(id,before);
-                        return json(res,200,store_.access().redactSecrets(id,items));
+                        return json(res,200,store_.policy().redactSecrets(id,items));
                     }
                     if (req.path == "/api/view") {
                         const auto changesAfter = req.has_param("changesAfter")
@@ -262,7 +249,7 @@ public:
                             ? std::optional{queryId(req,"sessionsAfter",true)} : std::nullopt;
                         const auto changes = store_.conversationChangesSince(changesAfter,id);
                         const auto [sessionThrough,sessionTasks] = store_.sessionChangesSince(id,sessionsAfter);
-                        auto view = store_.access().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
+                        auto view = store_.policy().redactSecrets(id,web::botView(store_,*bot,sessionsAfter ? &sessionTasks : nullptr,actor.id));
                         view["bot"]["id"] = id;
                         view["composerPerson"] = callbacks_.authenticate ? Json(actor.id) : Json(nullptr);
                         view["historyCursor"] = changes.through;
@@ -272,8 +259,8 @@ public:
                         view["sessionCursor"] = sessionThrough;
                         setViewer(res,callbacks_,actor);
                         json(res,200,withConversationAccess(actor,id,std::move(view)));
-                    } else if (req.path == "/api/conversation") json(res,200,store_.access().redactSecrets(id,web::conversation(store_,id,before,actor.id)));
-                    else json(res,200,store_.access().redactSecrets(id,web::sessions(store_,id,before)));
+                    } else if (req.path == "/api/conversation") json(res,200,store_.policy().redactSecrets(id,web::conversation(store_,id,before,actor.id)));
+                    else json(res,200,store_.policy().redactSecrets(id,web::sessions(store_,id,before)));
                 } catch (const InputError& e) { error(res,400,e.what()); }
                 catch (const Conflict&) { error(res,404,"task_not_found"); }
             });
@@ -281,12 +268,13 @@ public:
         server_.Post("/api/bots",[this](const Request& req, Response& res) { saveBot(req,res,false); });
         server_.Post("/api/bots/profile",[this](const Request& req, Response& res) { saveBot(req,res,true); });
         server_.Post("/api/messages",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Message); });
-        server_.Post("/api/requests",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Request); });
         server_.Post("/api/operations",[this](const Request& req, Response& res) { mutate(req,res,Mutation::Operation); });
 
         const auto bound = port ? (server_.bind_to_port(loopback,static_cast<int>(port)) ? static_cast<int>(port) : -1)
                                 : server_.bind_to_any_port(loopback);
-        if (bound <= 0) throw std::runtime_error("Could not bind the Flock Web loopback listener");
+        if (bound <= 0) throw std::runtime_error(port ?
+            "Could not bind the Flock Web loopback listener on port " + std::to_string(port) + ". Check whether the port is in use." :
+            "Could not bind the Flock Web loopback listener");
         port_ = static_cast<unsigned>(bound);
         try {
             worker_ = std::thread([this] { server_.listen_after_bind(); });
@@ -319,9 +307,9 @@ private:
             (req.has_param("peer") && (bot.empty() || peer.empty() || bot == peer)))
             return error(res,400,"invalid_subscription");
         const auto person = web::person(callbacks_,req);
-        auto access = store_.access();
-        if ((!bot.empty() && !access.permitsPerson(person,bot,Role::view)) ||
-            (!peer.empty() && !access.permitsPerson(person,peer,Role::view)))
+        auto policy = store_.policy();
+        if ((!bot.empty() && !policy.allows(person,Action::bot_view,bot)) ||
+            (!peer.empty() && !policy.allows(person,Action::bot_view,peer)))
             return error(res,403,"access_denied");
         ChangeFeed::Target target = ChangeFeed::BotList{};
         if (!peer.empty()) target = ChangeFeed::DirectMessage{bot,peer};
@@ -372,7 +360,7 @@ private:
         }
         if (req.path == "/mcp/flock") {
             if (origins || req.has_header("Sec-Fetch-Site")) error(res,403,"invalid_origin");
-            else if (req.method != "POST") {
+            else if (req.method != "POST" && req.method != "GET" && req.method != "DELETE") {
                 res.set_header("Allow","POST");
                 error(res,405,"method_not_allowed");
             }
@@ -387,7 +375,7 @@ private:
             else return HandlerResult::Unhandled;
             return HandlerResult::Handled;
         }
-        if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.access().requiresIdentity())) {
+        if (web::person(callbacks_,req).id.empty() || (!callbacks_.authenticate && store_.policy().requiresIdentity())) {
             res.set_header("WWW-Authenticate","Basic realm=\"Flock\"");
             error(res,401,"identity_required");
             return HandlerResult::Handled;
@@ -426,18 +414,19 @@ private:
         try {
             if (update) {
                 const auto botId = requiredText(body,"botId",1024);
-                if (!store_.access().permitsPerson(web::person(callbacks_,req),botId,Role::admin)) return error(res,403,"access_denied");
+                if (!store_.policy().allows(web::person(callbacks_,req),Action::bot_settings,botId)) return error(res,403,"access_denied");
                 if (findBot(botId).is_null()) return error(res,404,"bot_not_found");
                 auto parsed = parseBotProfile(body,false);
-                if (store_.access().redactSecrets(botId,parsed.profile) != parsed.profile)
+                if (store_.policy().redactSecrets(botId,parsed.profile) != parsed.profile)
                     return error(res,400,"invalid_bot_profile");
                 const auto saved = callbacks_.updateBot(botId,parsed.profile,parsed.image);
                 changes_.rescan();
                 return json(res,200,redactBot(botId,web::botSettings(saved)));
             }
-            if (!web::person(callbacks_,req).adminRoot) return error(res,403,"access_denied");
+            const auto creator = web::person(callbacks_,req);
+            if (!store_.policy().allows(creator,Action::bot_create,"")) return error(res,403,"access_denied");
             auto parsed = parseBotProfile(body,true);
-            const auto created = callbacks_.createBot(parsed.profile,parsed.image);
+            const auto created = callbacks_.createBot(creator,parsed.profile,parsed.image);
             changes_.rescan();
             return json(res,201,redactBot(web::field(created,"id"),web::botSettings(created)));
         } catch (const InputError& e) { error(res,400,e.what()); }
@@ -452,7 +441,7 @@ private:
     }
 
     Json redactBot(std::string_view id, const Json& view) const {
-        auto bot = store_.access().redactSecrets(id,view);
+        auto bot = store_.policy().redactSecrets(id,view);
         bot["id"] = id;
         return bot;
     }
@@ -467,12 +456,12 @@ private:
         return callbacks_.peers ? callbacks_.peers(bot) : std::vector<PeerBot>{};
     }
 
-    bool grantsPeer(std::string_view bot, std::string_view peer) const {
+    bool hasPeerPermission(std::string_view bot, std::string_view peer) const {
         return std::ranges::any_of(peers(bot),[&](const PeerBot& entry) { return entry.intake.botId == peer; });
     }
 
     bool canReadPeer(std::string_view bot, std::string_view peer, bool configured) const {
-        if (configured && (grantsPeer(bot,peer) || grantsPeer(peer,bot))) return true;
+        if (configured && (hasPeerPermission(bot,peer) || hasPeerPermission(peer,bot))) return true;
         return store_.hasPeerExchange(bot,peer);
     }
 
@@ -481,32 +470,32 @@ private:
     }
 
     Json withConversationAccess(const Person& actor, std::string_view bot, Json view) const {
-        view["canDecide"] = store_.access().permitsPerson(actor,bot,Role::decide);
+        view["canDecide"] = store_.policy().allows(actor,Action::bot_decide,bot);
         return view;
     }
 
     Json snapshot(const Person& person, const ChangeFeed::BotView& view) const {
-        if (!store_.access().permitsPerson(person,view.bot,Role::view)) return nullptr;
+        if (!store_.policy().allows(person,Action::bot_view,view.bot)) return nullptr;
         const auto bot = findBot(view.bot);
         if (bot.is_null()) return nullptr;
-        return withConversationAccess(person,view.bot,store_.access().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
+        return withConversationAccess(person,view.bot,store_.policy().redactSecrets(view.bot,web::botView(store_,bot,nullptr,person.id)));
     }
 
     Json snapshot(const Person& person, const ChangeFeed::DirectMessage& dm) const {
-        auto access = store_.access();
-        if (!access.permitsPerson(person,dm.bot,Role::view) ||
-            !access.permitsPerson(person,dm.peer,Role::view)) return nullptr;
+        auto policy = store_.policy();
+        if (!policy.allows(person,Action::bot_view,dm.bot) ||
+            !policy.allows(person,Action::bot_view,dm.peer)) return nullptr;
         const auto known = bots();
         if (!botById(known,dm.bot) || !canReadPeer(dm.bot,dm.peer,botById(known,dm.peer) != nullptr))
             return nullptr;
-        return access.redactSecrets(dm.peer,access.redactSecrets(dm.bot,web::peerConversation(store_,dm.bot,dm.peer,0)));
+        return policy.redactSecrets(dm.peer,policy.redactSecrets(dm.bot,web::peerConversation(store_,dm.bot,dm.peer,0)));
     }
 
     Json botList(const Person& person) const {
         auto visible = bots();
-        auto access = store_.access();
+        auto policy = store_.policy();
         visible.erase(std::remove_if(visible.begin(),visible.end(),[&](const Json& bot) {
-            return !access.permitsPerson(person,web::field(bot,"id"),Role::view);
+            return !policy.allows(person,Action::bot_view,web::field(bot,"id"));
         }),visible.end());
         auto list = web::botList(store_,visible);
         if (list.empty()) return list;
@@ -522,8 +511,8 @@ private:
         std::map<std::string,std::set<std::string>> connections;
         for (const auto& [sender,recipient] : pairs) {
             if (sender == recipient) continue;
-            if (known.contains(sender) && access.permitsPerson(person,recipient,Role::view)) connections[sender].insert(recipient);
-            if (known.contains(recipient) && access.permitsPerson(person,sender,Role::view)) connections[recipient].insert(sender);
+            if (known.contains(sender) && policy.allows(person,Action::bot_view,recipient)) connections[sender].insert(recipient);
+            if (known.contains(recipient) && policy.allows(person,Action::bot_view,sender)) connections[recipient].insert(sender);
         }
         for (auto& bot : list) {
             const auto id = web::field(bot,"id");
@@ -539,7 +528,7 @@ private:
         const auto peer = req.get_param_value("peer");
         if (req.get_param_value_count("peer") != 1 || peer.empty() || bot == peer)
             return error(res,400,"invalid_peer");
-        if (!store_.access().permitsPerson(actor,peer,Role::view))
+        if (!store_.policy().allows(actor,Action::bot_view,peer))
             return error(res,403,"access_denied");
         const bool configured = botById(known,peer) != nullptr;
         if (!canReadPeer(bot,peer,configured))
@@ -550,9 +539,9 @@ private:
             anchor = store_.peerMessageAnchor(bot,peer,queryId(req,"anchor",false));
             if (!anchor) return error(res,404,"peer_message_not_found");
         }
-        const auto history = store_.access().redactSecrets(bot,
+        const auto history = store_.policy().redactSecrets(bot,
             web::peerConversation(store_,bot,peer,before,anchor,verifiedViewer(callbacks_,actor)));
-        json(res,200,store_.access().redactSecrets(peer,history));
+        json(res,200,store_.policy().redactSecrets(peer,history));
     }
 
     void mutate(const Request& req, Response& res, Mutation mutation) {
@@ -562,35 +551,27 @@ private:
         try {
             const auto bot = requiredText(body,"botId",1024);
             const auto actor = web::person(callbacks_,req);
-            if (!store_.access().permitsPerson(actor,bot,Role::decide)) return error(res,403,"access_denied");
+            if (!store_.policy().allows(actor,Action::bot_decide,bot)) return error(res,403,"access_denied");
             if (!botById(bots(),bot)) return error(res,404,"bot_not_found");
-            if (mutation != Mutation::Operation) {
-                const auto message = mutation == Mutation::Message;
-                const auto request = requiredText(body,message ? "text" : "request",16000);
-                const auto clientMessageId = message ? requiredText(body,"clientMessageId",256) : std::string{};
-                const auto replyTo = message && body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
+            if (mutation == Mutation::Message) {
+                const auto request = requiredText(body,"text",16000);
+                const auto clientMessageId = requiredText(body,"clientMessageId",256);
+                const auto replyTo = body.contains("replyToMessageId") ? bodyId(body,"replyToMessageId") : Id{};
                 const auto attachments = body.value("attachments",Json::array());
-                if (message) {
-                    const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
-                    if (previous) return json(res,201,*previous);
-                    if (callbacks_.authenticate && !callbacks_.resolveIdentity)
-                        return error(res,503,"message_identity_unavailable");
-                }
+                const auto previous = store_.receipt(actor,bot,clientMessageId,request,replyTo,attachments);
+                if (previous) return json(res,201,*previous);
+                if (callbacks_.authenticate && !callbacks_.resolveIdentity)
+                    return error(res,503,"message_identity_unavailable");
                 Intake intake;
                 try { intake = callbacks_.intake(bot,request); }
-                catch (const std::exception&) {
-                    if (!message) return error(res,422,"intake_settings");
-                }
+                catch (const std::exception&) {}
                 // The caller supplies only a Bot and text. Routing and config come from the callback.
                 intake.botId = bot;
                 intake.request = request;
-                if (message) {
-                    const auto receipt = callbacks_.authenticate
-                        ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
-                        : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
-                    return json(res,201,receipt);
-                }
-                return json(res,201,{{"taskId",store_.submit(intake)}});
+                const auto receipt = callbacks_.authenticate
+                    ? store_.receiveWeb(actor,intake,clientMessageId,request,replyTo,attachments)
+                    : store_.receive(actor,intake,clientMessageId,request,replyTo,attachments);
+                return json(res,201,receipt);
             }
             const auto operation = requiredText(body,"operation",32);
             const auto id = bodyId(body,"taskId");
@@ -605,9 +586,7 @@ private:
         catch (const DecisionDenied&) { error(res,403,"access_denied"); }
         catch (const RequestChanged&) { error(res,409,"request_changed"); }
         catch (const Conflict&) {
-            const auto code = mutation == Mutation::Message ? "message_conflict" :
-                mutation == Mutation::Request ? "request_conflict" : "operation_conflict";
-            error(res,409,code);
+            error(res,409,mutation == Mutation::Message ? "message_conflict" : "operation_conflict");
         }
     }
 

@@ -36,7 +36,7 @@ bool allowedAfterWebEvidence(const Decision& call) {
     if (gitOperation(call) == "read") return true;
     constexpr std::string_view readOnly[]{
         "reply","web_search","web_fetch","read_result","find_tasks","flock_session_search","flock_session_events",
-        "list_grants","list_secrets","list_connections","check_environment_readiness","workspace_read_file",
+        "list_secrets","list_connections","check_environment_readiness","workspace_read_file",
         "workspace_search","workspace_command_status","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment","workflow_status","expand_context","read_tool_result",
         "read_memory","memory_history","list_schedules"
@@ -70,6 +70,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
         const auto budget = messageModelBudget(ctx.messageId);
         auto approved = takeReservedConversationCall(ctx.messageId);
         const auto scrub = sharedRedactor();
+        const auto origin = policyOrigin(loadTurnMessage(ctx.messageId));
+        bool waiting = false;
         for (std::size_t i = 0; i < calls.size(); ++i) {
             auto& result = results.at(i);
             if (result.contains("inFlight")) {
@@ -98,14 +100,28 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
                 result = toolFailure("Bot tool target is unavailable");
                 continue;
             }
+            auto resource = authorizedBotToolScope(ctx.bot,calls[i]);
+            if (resource->action == Action::mcp_invoke)
+                resource->routine = ctx.settings.mcp->readOnlyHint(resource->target,field(calls[i].args,"name"));
+            const auto key = "turn/" + std::to_string(ctx.messageId) + "/" + std::to_string(step) + "/" + std::to_string(i);
+            const auto payload = Json::array({calls[i].tool,calls[i].args});
+            const auto now = policyClock();
+            const auto gate = approveAction(origin,*resource,key,payload,now,false);
+            if (gate != ApprovalGate::allow) {
+                if (gate == ApprovalGate::waiting) waiting = true;
+                else result = toolFailure(approvalError(gate));
+                continue;
+            }
             if (!std::exchange(approved,0) && !reserveModelCall(budget,"bot_tool",ctx.messageId,0,0)) continue;
+            approveAction(origin,*resource,key,payload,now);
             result = {{"inFlight",true}};
             reserved.push_back(i);
         }
-        if (approved) releaseModelCall(budget,approved);
+        releaseModelCall(approved);
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=?",
              {results,ctx.messageId,step});
         transaction.commit();
+        if (waiting && reserved.empty()) return false;
     }
 
     const auto persist = [&](std::size_t i, Json result) {
@@ -144,6 +160,10 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
     auto row = query("SELECT effect FROM conversation_steps WHERE message_id=? AND step=?",{ctx.messageId,step});
     if (!row.next()) throw Conflict("Bot tool step is missing");
     const auto results = row.json(0);
+    if (query("SELECT 1 FROM conversation_turns WHERE message_id=? AND status='policy_waiting'",{ctx.messageId}).next()) {
+        transaction.commit();
+        return false;
+    }
     const bool pending = std::ranges::any_of(results,[](const auto& result) { return result.is_null(); });
     if (pending) {
         const auto message = loadTurnMessage(ctx.messageId);

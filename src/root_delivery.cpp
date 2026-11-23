@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS thread_deliveries(
  generation INTEGER NOT NULL, text TEXT NOT NULL, state INTEGER NOT NULL DEFAULT 0,
  message_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT '',
  observed_run_id TEXT NOT NULL DEFAULT '', cursor INTEGER NOT NULL, input_position INTEGER,
- claimed_at INTEGER)
+ claimed_at INTEGER, approval_anchor INTEGER NOT NULL DEFAULT 0)
 )SQL");
     exec("CREATE INDEX IF NOT EXISTS thread_deliveries_channel ON thread_deliveries(channel_id,state)");
 }
@@ -51,7 +51,7 @@ void RootDelivery::prepare(Id channel, Id generation, std::string_view commandId
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     const auto outward = "[Flock Bot " + std::string(bot) + " | request " + std::string(requestId) +
-                         " | action " + std::string(commandId) + "]\n" + redactPairingCodes(db.sharedRedactor().text(text));
+                         " | action " + std::string(commandId) + "]\n" + redactT3Tokens(db.sharedRedactor().text(text));
     auto existing = db.query("SELECT channel_id,generation,text FROM thread_deliveries WHERE command_id=?",{commandId});
     if (existing.next()) {
         if (existing.number(0) != channel || existing.number(1) != generation || existing.string(2) != outward)
@@ -59,8 +59,8 @@ void RootDelivery::prepare(Id channel, Id generation, std::string_view commandId
         return;
     }
     db.exec(R"SQL(
-INSERT INTO thread_deliveries(command_id,channel_id,generation,text,cursor)
-SELECT ?,channel_id,generation,?,? FROM session_controls WHERE channel_id=? AND generation=? AND state='active'
+INSERT INTO thread_deliveries(command_id,channel_id,generation,text,cursor,approval_anchor)
+SELECT ?,channel_id,generation,?,?,human_input_position FROM session_controls WHERE channel_id=? AND generation=? AND state='active'
 )SQL",{commandId,outward,observationCursor,channel,generation});
     if (!sqlite3_changes(db.db)) throw Conflict("Session sending is paused or has stopped");
 }
@@ -70,10 +70,10 @@ RootDeliveryView RootDelivery::deliver(const Person& person, Id channel, std::st
     ThreadTarget target;
     std::string auth, text;
     bool coordination;
-    Id cursor;
+    Id cursor, anchor;
     auto rowFor = [&] {
         return db.query(R"SQL(
-SELECT d.command_id,d.state,d.message_id,d.run_id,d.mode,d.observed_run_id,d.text,d.cursor,s.auth_generation
+SELECT d.command_id,d.state,d.message_id,d.run_id,d.mode,d.observed_run_id,d.text,d.cursor,s.auth_generation,d.approval_anchor
 FROM thread_deliveries d JOIN session_controls s ON s.channel_id=d.channel_id
 WHERE d.channel_id=? AND d.command_id=?
 )SQL",{channel,commandId});
@@ -89,6 +89,7 @@ WHERE d.channel_id=? AND d.command_id=?
         text = row.string(6);
         cursor = row.number(7);
         auth = row.string(8);
+        anchor = row.number(9);
     }
     const auto page = coordination ? session_.dispatchHistory(target,cursor) : session_.read(target,std::nullopt);
     if (!page) return {std::string(commandId),State::Prepared,{},{}};
@@ -97,11 +98,25 @@ WHERE d.channel_id=? AND d.command_id=?
     const bool humanInput = coordination && std::ranges::any_of(page->events,[&](const auto& event) {
         return event.position > cursor && event.kind == "user_message" && event.createdBy == "user";
     });
-    const bool reject = humanInput || page->target != target || page->authGeneration != auth;
+    const bool stale = humanInput || page->target != target || page->authGeneration != auth;
     {
         std::lock_guard lock(db.mutex);
         Transaction tx(db.db);
-        db.authorizeParticipation(person,channel);
+        const auto participation = db.authorizeParticipation(person,channel);
+        const auto& origin = channelOf(participation).origin.invitation;
+        auto gate = ApprovalGate::stale;
+        if (!stale) {
+            const auto resource = Resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target,
+                                           !coordination};
+            const PolicyOrigin requester{origin.botId,"t3/" + std::to_string(channel),person.id,anchor,0,0,0,0,true};
+            gate = db.approveAction(requester,resource,"root/" + std::string(commandId),Json{{"text",text}},
+                                    db.policyClock());
+        }
+        if (gate == ApprovalGate::waiting) {
+            tx.commit();
+            return {std::string(commandId),State::Prepared,{},{}};
+        }
+        const bool reject = gate != ApprovalGate::allow;
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,claimed_at=CASE WHEN ? THEN NULL ELSE ? END
 WHERE channel_id=? AND command_id=? AND state=? AND EXISTS(
@@ -154,13 +169,19 @@ void RootDelivery::reconcile(const Person& person, Id channel) {
         auto rows = db.query(R"SQL(
 SELECT d.command_id,d.text,d.message_id,d.observed_run_id,d.state,d.cursor,d.input_position
 FROM thread_deliveries d
-WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
-)SQL",{channel,static_cast<int>(State::Accepted),static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
+WHERE d.channel_id=? AND d.state IN (?,?,?,?) ORDER BY d.rowid LIMIT 16
+)SQL",{channel,static_cast<int>(State::Dispatching),static_cast<int>(State::Accepted),
+        static_cast<int>(State::Queued),static_cast<int>(State::Unknown)});
         while (rows.next())
             pending.push_back({rows.string(0),rows.string(1),rows.string(2),rows.string(3),
                                static_cast<State>(rows.number(4)),rows.number(5),rows.number(6)});
     }
     for (auto& delivery : pending) {
+        // T3 can move a queued input to a different Run before it appears in history.
+        const auto run = delivery.observedRun;
+        // Check before reading so that any response already written by a failed Run
+        // is still visible to reconciliation.
+        const bool failed = !run.empty() && session_.runFailed(target,run);
         const auto page = session_.read(target,delivery.cursor);
         if (!page || page->target != target || page->cursor < delivery.cursor) continue;
         // History is read-only. Even after reauthentication it cannot create a
@@ -181,6 +202,8 @@ WHERE d.channel_id=? AND d.state IN (?,?,?) ORDER BY d.rowid LIMIT 16
                 if (state != delivery.state) break;
             }
         }
+        if (state == delivery.state && failed && delivery.observedRun == run && !page->hasMore)
+            state = State::Failed;
         std::lock_guard lock(db.mutex);
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,cursor=?,observed_run_id=?,input_position=?

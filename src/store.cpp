@@ -8,10 +8,15 @@
 #include <random>
 #include <set>
 #include <system_error>
+#include <thread>
 #include <tuple>
 
 namespace flockv0 {
 namespace {
+constexpr Id applicationId = 0x464c4f43; // FLOC
+constexpr Id schemaVersion = 3;
+constexpr std::chrono::milliseconds storageBusyTimeout{4000};
+
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
 }
 StorageError::StorageError(sqlite3* db)
@@ -101,10 +106,49 @@ Store::Impl::Impl(std::filesystem::path file, MemorySeed seed)
     const int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr);
     try {
         if (rc != SQLITE_OK) sqlError(db);
-        sqlite3_busy_timeout(db, 4000);
-        if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;",
-                         nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-        const char* schema = R"SQL(
+        sqlite3_busy_timeout(db,storageBusyTimeout.count());
+        const auto deadline = std::chrono::steady_clock::now() + storageBusyTimeout;
+        for (;;) {
+            try {
+                openSchema();
+                break;
+            } catch (const StorageError& error) {
+                // SQLite can skip the busy handler while a competing connection switches to WAL.
+                if (!error.contended() || std::chrono::steady_clock::now() >= deadline) throw;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    } catch (...) { sqlite3_close(db); throw; }
+}
+
+void Store::Impl::openSchema() {
+    exec("PRAGMA foreign_keys=ON");
+    exec("PRAGMA synchronous=FULL");
+    const auto format = [&] {
+        auto row = query("SELECT application_id,user_version FROM pragma_application_id(),pragma_user_version()");
+        row.next();
+        return std::pair{row.number(0),row.number(1)};
+    };
+    const std::pair current{applicationId,schemaVersion};
+    if (format() != current) {
+        Transaction initialize(db);
+        const auto existing = format();
+        if (existing != current) {
+            if (existing != std::pair<Id,Id>{} || query("SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1").next())
+                throw Conflict("Unsupported Flock database schema. Use --home with a new state directory.");
+            initializeSchema();
+            exec(("PRAGMA application_id=" + std::to_string(applicationId)).c_str());
+            exec(("PRAGMA user_version=" + std::to_string(schemaVersion)).c_str());
+        }
+        initialize.commit();
+    }
+    exec("PRAGMA journal_mode=WAL");
+    // Open the WAL now so a read-only peer can use a freshly initialized database.
+    exec("PRAGMA user_version");
+}
+
+void Store::Impl::initializeSchema() {
+    const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS tasks(
   id INTEGER PRIMARY KEY, bot_id TEXT NOT NULL, environment_id TEXT NOT NULL,
   project_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, data TEXT NOT NULL);
@@ -186,39 +230,28 @@ SELECT q.id,CASE WHEN q.id<>q.head_id AND (json_extract(owner.data,'$.workflowId
              json_extract(owner.data,'$.workflowId') IS NOT json_extract(t.data,'$.workflowId')) THEN q.head_id END AS blocker_id
 FROM queue q JOIN tasks t ON t.id=q.id JOIN tasks owner ON owner.id=q.head_id;
 )SQL";
-        {
-            Transaction upgrade(db);
-            if (query("SELECT 1 FROM sqlite_schema WHERE name='project_execution_queue'"
-                      " AND instr(sql,'specialistQueueOwner')=0").next()) {
-                exec("DROP VIEW IF EXISTS project_task_order");
-                exec("DROP VIEW IF EXISTS project_slots");
-                exec("DROP VIEW project_execution_queue");
-            }
-            if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
-            upgrade.commit();
-        }
-        initializeAccessSchema();
-        initializeParticipationSchema();
-        initializeRootDeliverySchema();
-        initializeSpecialistSchema();
-        initializeSessionHandoffSchema();
-        initializeConversationSchema();
-        initializeChannelSchema();
-        initializeLocalMachineSchema();
-        initializeModelBudgetSchema();
-        initializeWorkspaceSchema();
-        initializeAttachmentsSchema();
-        initializeCompactionSchema();
-        initializeWorkflowSchema();
-        initializeMemorySchema();
-        initializeAutomationSchema();
-        initializeGitSchema();
-        initializeBoardInboxSchema();
-        exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
-             " WHERE kind IN ('run_started','report')");
-        exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
-             " WHERE kind='bot_message'");
-    } catch (...) { sqlite3_close(db); throw; }
+    if (sqlite3_exec(db, schema, nullptr, nullptr, nullptr) != SQLITE_OK) sqlError(db);
+    initializePolicySchema();
+    initializeParticipationSchema();
+    initializeRootDeliverySchema();
+    initializeSpecialistSchema();
+    initializeSessionHandoffSchema();
+    initializeConversationSchema();
+    initializeChannelSchema();
+    initializeLocalMachineSchema();
+    initializeModelBudgetSchema();
+    initializeWorkspaceSchema();
+    initializeAttachmentsSchema();
+    initializeCompactionSchema();
+    initializeWorkflowSchema();
+    initializeMemorySchema();
+    initializeAutomationSchema();
+    initializeGitSchema();
+    initializeBoardInboxSchema();
+    exec("CREATE INDEX IF NOT EXISTS journal_session_changes ON journal(id,task_id)"
+         " WHERE kind IN ('run_started','report')");
+    exec("CREATE INDEX IF NOT EXISTS journal_peer_message ON journal(task_id,json_extract(data,'$.exchangeId'),id)"
+         " WHERE kind='bot_message'");
 }
 Store::Impl::~Impl() { sqlite3_close(db); }
 void Store::Impl::exec(const char* sql, const Json& args) const { query(sql, args).next(); }
@@ -319,7 +352,7 @@ Id Store::Impl::journal(Id id, std::string_view kind, const Json& data) {
 }
 std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
     auto rows = query("SELECT id,kind,phase,last_message,sender_task,recipient_task FROM peer_exchanges"
-                      " WHERE phase<>'closed' AND sender_task IS NOT NULL AND (sender_task=? OR recipient_task=?)", {id,id});
+                      " WHERE phase<>'closed' AND (sender_task=? OR recipient_task=?)", {id,id});
     if (!rows.next()) return std::nullopt;
     return PeerExchange{rows.string(0),rows.string(1),rows.string(2),rows.string(3),rows.number(4),rows.number(5)};
 }
@@ -414,6 +447,7 @@ Json Store::Impl::currentEvent(const Json& task) const {
     return result;
 }
 void Store::Impl::consumeEvent(const Json& task) {
+    releaseModelCall(takeReservedTaskCall(task.at("eventId")));
     exec("UPDATE events SET consumed=1 WHERE id=? AND task_id=? AND consumed=0", {task["eventId"], task["id"]});
 }
 void Store::Impl::wait(Json& task, std::string_view reason, Json data) {
@@ -463,8 +497,7 @@ void Store::Impl::unlockQuestion(Json& task, std::string_view reason) {
 }
 
 std::string taskIntent(const Json& task) {
-    const auto intent = field(task,"intent");
-    return intent.empty() ? field(task,"request") : intent;
+    return task.at("intent");
 }
 
 std::string effectiveDoneWhen(const Json& task) {
@@ -508,10 +541,15 @@ ORDER BY 1,2
     return changes;
 }
 
-Id Store::submit(const Intake& item) {
+Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
+    if (requester && !policy().allows(*requester,Action::bot_talk,item.botId)) throw DecisionDenied{};
     const auto id = p_->submit(item);
+    if (requester) {
+        p_->sharedRedactor().requirePublic(requester->id);
+        p_->exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{requester->id,id});
+    }
     transaction.commit();
     return id;
 }
@@ -554,6 +592,7 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
     const auto& pending = task.at("pendingAction");
     if (!wait.is_object() || wait.at("id") != waitId || wait.at("reason") != "settings" ||
         (!pending.is_null() && pending.at("phase") != "ready")) return target;
+    if (pending.is_object() && pending.at("tool") == "start_in_session") return target;
 
     const auto current = intake(task.at("botId").get_ref<const std::string&>(),
                                 task.at("request").get_ref<const std::string&>());
@@ -580,7 +619,7 @@ void Store::operate(const Person& actor, const TaskTarget& target, std::string_v
 void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::string_view operation,
                           const Json& input, Id sourceMessage, std::optional<InboxKind> expectedKind) {
     const auto& [bot,id,waitId,revision,generation] = target;
-    if (!Access(*this).permitsPerson(actor,bot,Role::decide)) {
+    if (!Policy(*this).allows(actor,Action::bot_decide,bot)) {
         if (operation!="answer") throw DecisionDenied{};
         auto origin = query(R"SQL(
 SELECT d.channel_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id
@@ -600,8 +639,8 @@ WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
 )SQL",{id,bot,actor.id,id,bot,actor.id});
         if (!origin.next()) throw DecisionDenied{};
         const auto participation = authorizeParticipation(actor,origin.number(0));
-        const auto* grant = std::get_if<CoordinationActivation>(&participation);
-        if (!grant || !grant->binding.request.allowDelegation) throw DecisionDenied{};
+        const auto* activation = std::get_if<CoordinationActivation>(&participation);
+        if (!activation || !activation->binding.request.allowDelegation) throw DecisionDenied{};
     }
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};
@@ -629,7 +668,7 @@ WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
     std::string next = "deciding";
     if (operation == "answer" && reason == "user_question") {
         const auto& owner = task["question"].is_object() ? task["question"] : wait;
-        if (owner.value("target",waitQuestionTarget(wait)) != questionTarget(task))
+        if (owner.at("target") != questionTarget(task))
             throw RequestChanged{};
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
@@ -842,17 +881,6 @@ WHERE j.task_id=? AND j.id>? ORDER BY j.id LIMIT ?
     return result;
 }
 
-Json Store::latestTaskResult(Id taskId) const {
-    std::lock_guard lock(p_->mutex);
-    auto row = p_->query(R"SQL(
-SELECT j.id,j.task_id,j.time,j.kind,j.data FROM journal j JOIN tasks t ON t.id=j.task_id
-WHERE j.task_id=? AND j.kind IN ('completed','report')
-AND coalesce(json_extract(j.data,'$.revisionId'),0)=coalesce(json_extract(t.data,'$.currentRevision'),0)
-ORDER BY j.id DESC LIMIT 1
-)SQL",{taskId});
-    return row.next() ? journalRow(row) : Json(nullptr);
-}
-
 Json Store::conversation(std::string_view bot, Id before, unsigned limit, ConversationEvents events,
                          std::string_view viewer) const {
     if (before == std::numeric_limits<Id>::min()) return Json::array();
@@ -893,27 +921,14 @@ WITH visible AS NOT MATERIALIZED (
 SELECT page.id,page.task_id,page.time,page.kind,
   CASE WHEN page.kind='user_answer' AND w.id IS NOT NULL
        THEN json_set(page.data,'$.question',json_extract(w.data,'$.text'))
-  WHEN page.kind='completed' AND json_extract(page.data,'$.source.status') IS NULL
-       AND length(json_extract(page.data,'$.source.runId'))>0
-       THEN json_set(page.data,'$.source.status',(
-         SELECT json_extract(r.data,'$.status') FROM journal r
-         WHERE r.task_id=page.task_id AND r.kind='report' AND r.id<page.id
-           AND json_extract(r.data,'$.environmentId')=json_extract(page.data,'$.source.environmentId')
-           AND json_extract(r.data,'$.run.threadId')=json_extract(page.data,'$.source.threadId')
-           AND json_extract(r.data,'$.resultRunId')=json_extract(page.data,'$.source.runId')
-           AND coalesce(json_extract(r.data,'$.itemId'),'')=coalesce(json_extract(page.data,'$.source.itemId'),'')
-           AND coalesce(json_extract(r.data,'$.revisionId'),0)=coalesce(json_extract(page.data,'$.revisionId'),0)
-         ORDER BY r.id DESC LIMIT 1))
   WHEN m.id IS NULL THEN page.data
   ELSE json_patch(page.data,json_object('messageId',m.id,'text',m.text,'sequence',m.sequence,
-            'replyToMessageId',coalesce(m.reply_to,0),'status',
-            coalesce(CASE WHEN input.message_id IS NULL THEN json_extract(page.data,'$.status')
-                          ELSE input.status END,'received'),
+            'replyToMessageId',coalesce(m.reply_to,0),'status',coalesce(input.status,'received'),
             'imageAttachmentCount',(SELECT count(*) FROM message_attachments a
               WHERE a.message_id=m.id AND json_extract(a.metadata,'$.kind')='image'),
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
-                SELECT kind,task_id,coalesce(json_extract(data,'$.step'),0) AS step
+                SELECT kind,task_id,json_extract(data,'$.step') AS step
                 FROM journal WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered')
                 -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
                 AND json_extract(data,'$.messageId')=+m.id

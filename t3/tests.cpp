@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
             return Json::parse(response.body).value(std::string(tool), Json::array());
         };
         auto signIn = [&](const std::string& environment) {
-            loginT3(home, environment, endpoint, [&](const std::string& authorization) {
+            return loginT3(home, environment, endpoint, [&](const std::string& authorization) {
                 fixture({{"authorization", authorization}});
             });
         };
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
             check(diagnosed, "OAuth failure identifies stage, HTTP status and error");
         }
         fixture({{"oauthFailure", false}});
-        signIn("env-1");
+        check(signIn("env-1"), "login reports Operate approval");
         auto ownerOnly = [](const std::filesystem::path& path) {
             struct stat st{};
             return stat(path.c_str(), &st) == 0 && st.st_uid == geteuid() && (st.st_mode & 0077) == 0;
@@ -85,9 +85,6 @@ int main(int argc, char** argv) {
         other.environmentId = "env-2";
         checkPreflight(other, Delivery::Kind::Auth, "another environment cannot use credential");
         other = launch;
-        other.config["t3"]["mcpUrl"] = "https://example.test/mcp";
-        checkPreflight(other, Delivery::Kind::Settings, "URL hint cannot redirect credential");
-        other = launch;
         other.config["session"]["model"] = "missing provider";
         checkPreflight(other, Delivery::Kind::Settings, "partial model selection rejected before send");
         fixture({{"delayRunId", true}});
@@ -97,6 +94,18 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "recovered exact launch after restart");
         const auto run = delivery.run;
+        other = launch;
+        other.launchReceiptThreadId = "thread";
+        const auto launchLists = effects("t3_thread_list").size();
+        fixture({{"duplicate", true}});
+        check(restarted->reconcile(other).kind == Delivery::Kind::Accepted &&
+              effects("t3_thread_list").size() == launchLists,
+              "a launch receipt scopes reconciliation to its Thread even when other Threads match");
+        other.candidate.threadId = "duplicate";
+        check(restarted->reconcile(other).kind == Delivery::Kind::Unknown &&
+              effects("t3_thread_list").size() == launchLists,
+              "a manual hint cannot override the Thread in the launch receipt");
+        fixture({{"duplicate", false}});
         other = launch;
         other.instruction += "x";
         check(adapter->reconcile(other).kind == Delivery::Kind::Unknown, "marker requires identical instruction");
@@ -168,9 +177,7 @@ int main(int argc, char** argv) {
               "a lost response was treated as definitely unsent or retried");
         fixture({{"dropAnswerReply", false}});
 
-        auto badConfig = launch.config;
-        badConfig["t3"]["mcpUrl"] = "https://wrong.test/mcp";
-        observation = adapter->observe("env-1", badConfig, run);
+        observation = adapter->observe("env-1", Json::array(), run);
         check(observation.kind == Observation::Kind::Unavailable && observation.status == "settings",
               "runtime recognizes observation settings failures");
         fixture({{"scenario", "settling"}});
@@ -193,7 +200,19 @@ int main(int argc, char** argv) {
         checkResult("nested-result", true);
         checkResult("mixed-result", false);
         checkResult("server-input-result", false);
-        checkResult("ambiguous-title-result", false);
+        checkResult("ambiguous-title-result", true);
+        checkResult("failed-result", true);
+        checkResult("stopped-result", true);
+        checkResult("unlabeled-result", true);
+        checkResult("batch-result", true);
+        checkResult("partial-batch-result", true);
+        checkResult("batch-overcount-result", false);
+        checkResult("invalid-batch-count-result", false);
+        checkResult("zero-batch-count-result", false);
+        checkResult("malformed-batch-count-result", false);
+        checkResult("late-settlement-result", false);
+        checkResult("foreign-child-result", false);
+        checkResult("native-subagent-result", false);
         checkResult("reused-result", false);
 
         fixture({{"scenario", "paged-report"}});
@@ -259,6 +278,55 @@ int main(int argc, char** argv) {
         check(followUps.size() == 1, "follow-up reconciliation does not send another queued message");
         check(followUps.at(0).at("message") == follow.instruction,
               "T3 receives all of the follow-up instruction");
+
+        Command selected = launch;
+        selected.tool = "start_in_session";
+        selected.actionId = "flock-selected-idle";
+        selected.target = {"human-selected",{},{}};
+        selected.instruction = "Add regression tests";
+        fixture({{"scenario","selected-session"}});
+        check(!adapter->preflight(selected),"an existing Session does not require a Flock Run");
+        delivery = adapter->send(selected);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "human-selected" &&
+              delivery.run.runId == "selected-run","a previously unrelated idle Session starts the assigned Run");
+        check(restarted->reconcile(selected).run.runId == "selected-run",
+              "an existing Session's started Run can be recovered from its request");
+
+        selected.actionId = "flock-selected-busy";
+        selected.target = {"flock-selected",{},{}};
+        selected.instruction = std::string(1200,'x');
+        fixture({{"selectedBusy",true},{"selectedRunStatus",nullptr},{"selectedDropSendReply",true}});
+        const auto sendsBeforeQueue = effects("t3_thread_send").size();
+        check(adapter->send(selected).kind == Delivery::Kind::Unknown,"fixture lost the queued send response");
+        fixture({{"selectedDropSendReply",false}});
+        delivery = restarted->reconcile(selected);
+        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "flock-selected" &&
+              delivery.run.runId == "selected-run" && effects("t3_thread_send").size() == sendsBeforeQueue + 1,
+              "reconciliation recovers the assigned queued Run without resending");
+        const auto queued = adapter->observe("env-1",selected.config,delivery.run);
+        check(queued.kind == Observation::Kind::Running && queued.status == "queued",
+              "an earlier Run's pending question is not attributed to the queued Run");
+        check(adapter->interrupt("env-1",selected.config,delivery.run) == InterruptOutcome::Requested &&
+              effects("t3_queue") == Json::array({{{"action","cancel"},{"threadId","flock-selected"},
+                                                   {"queuedRunId","selected-run"}}}) &&
+              effects("t3_thread_interrupt").empty(),"stop removes only the assigned queued Run");
+        const auto cancellation = adapter->observe("env-1",selected.config,delivery.run);
+        check(cancellation.kind == Observation::Kind::Finished && cancellation.settled &&
+              cancellation.status == "cancelled" && cancellation.resultRunId == "selected-run",
+              "other active work does not hold cancellation of the assigned Run");
+
+        fixture({{"selectedBadReceipt",true}});
+        check(adapter->send(selected).kind == Delivery::Kind::Unknown,
+              "a receipt pointing to the previous active Run cannot claim that Run");
+        const auto selectedSends = effects("t3_thread_send").size();
+        fixture({{"selectedBadReceipt",false},{"selectedArchived",true}});
+        check(adapter->send(selected).kind == Delivery::Kind::Settings,
+              "an archived Session rejected the request before sending");
+        fixture({{"selectedArchived",false},{"selectedProject","another-project"}});
+        check(adapter->send(selected).kind == Delivery::Kind::Settings &&
+              effects("t3_thread_send").size() == selectedSends,
+              "a changed destination project rejected the request before sending");
+        fixture({{"scenario","settled"}});
 
         ReadRequest read;
         read.environmentId = "env-1";
@@ -339,33 +407,21 @@ int main(int argc, char** argv) {
         note.target = run;
         note.instruction = "Also include the CSV table";
         note.authGeneration = adapter->authGeneration("env-1", launch.config);
-        delivery = adapter->send(note);
-        const auto steered = effects("t3_thread_send");
-        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "root" && !steered.empty() &&
-              steered.back() == Json{{"threadId","thread"},{"mode","steer"},{"message","Also include the CSV table"},
-                                     {"clientRequestId","flock-turn-7-2"}},
-              "a note reaches the running Run through T3 steer without starting another Run");
-        fixture({{"steerReply", "other-run"}});
-        delivery = adapter->send(note);
-        check(delivery.kind == Delivery::Kind::Unknown && !delivery.definitelyUnsent &&
-              delivery.detail.find("other-run") != std::string::npos, "steer Run race stays uncertain");
+        check(!adapter->supportsRunTargetedSteer(), "the MCP adapter advertised an unsupported Run-targeted send");
+        const auto sends = effects("t3_thread_send").size();
         const auto reads = effects("t3_thread_read").size();
         const auto lists = effects("t3_thread_list").size();
-        check(adapter->reconcile(note).kind == Delivery::Kind::Unknown &&
-              effects("t3_thread_read").size() == reads && effects("t3_thread_list").size() == lists,
-              "steer reconciliation never scans history");
-        fixture({{"scenario", "resumed"}, {"steerReply", false}});
-        delivery = adapter->send(note);
-        check(delivery.kind == Delivery::Kind::Accepted && delivery.run.runId == "continued",
-              "a note reaches T3's restart continuation of the assigned Run");
-        fixture({{"scenario", "manual-active"}});
-        auto before = effects("t3_thread_send").size();
-        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
-              "a note is refused while an unrelated Run is active in the Thread");
-        fixture({{"scenario", "settled"}});
-        before = effects("t3_thread_send").size();
-        check(adapter->send(note).kind == Delivery::Kind::NotAccepted && effects("t3_thread_send").size() == before,
-              "a note for a settled Run is refused without contacting T3");
+        for (const auto* scenario : {"running","resumed","manual-active","settled"}) {
+            fixture({{"scenario",scenario}});
+            const auto refused = adapter->send(note);
+            check(refused.kind == Delivery::Kind::NotAccepted && refused.definitelyUnsent,
+                  "the MCP adapter did not refuse an unsupported Run-targeted send");
+        }
+        const auto prior = adapter->reconcile(note);
+        check(prior.kind == Delivery::Kind::Unknown && !prior.definitelyUnsent &&
+              effects("t3_thread_send").size() == sends && effects("t3_thread_read").size() == reads &&
+              effects("t3_thread_list").size() == lists,
+              "the MCP adapter touched T3 during a refused send or rewrote the outcome of an older steer");
         fixture({{"scenario", "running"}});
 
         signIn("env-1");
@@ -380,7 +436,7 @@ int main(int argc, char** argv) {
         check(effects("t3_thread_launch").size() == 1, "stale authorization never launches another T3 thread");
 
         fixture({{"scope", "orchestration:read"}});
-        signIn("env-1");
+        check(!signIn("env-1"), "login reports read-only approval");
         other.authGeneration = adapter->authGeneration("env-1", launch.config);
         checkPreflight(other, Delivery::Kind::Auth, "read-only OAuth cannot operate");
         check(adapter->send(other).kind == Delivery::Kind::Auth &&
@@ -389,10 +445,22 @@ int main(int argc, char** argv) {
         check(delivery.kind == Delivery::Kind::Accepted && delivery.run.threadId == "thread" &&
               delivery.run.runId == "root", "reauthorization with read scope recovers the original Run");
         const auto readOnly = other.authGeneration;
+        const auto [allProjects,allProjectsNext] = restarted->projectSessions("env-1",{},0,{});
+        check(allProjects == std::vector<std::string>{"first","second"} && !allProjectsNext,
+              "a connected Environment lists Sessions across readable projects");
         fixture({{"scenario","session-read"}});
         deletedSessionSearch(*restarted,home.parent_path()/"session-search.db",fixture);
         boundedSessionSearch(*restarted,home.parent_path()/"bounded-search.db",fixture,effects);
         sessionSearchDeadline(*restarted,home.parent_path()/"search-deadline.db",fixture);
+        fixture({{"scenario","catalog-timeout"},{"delayCatalog",true}});
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        const auto [partial,offset] = restarted->projectSessions("env-1","project",0,deadline);
+        check(partial.size() == 50 && offset == 50,"Catalog timeout discarded a completed page");
+        fixture({{"delayCatalog",false}});
+        const auto [remaining,nextOffset] = restarted->projectSessions("env-1","project",*offset,{});
+        check(remaining == std::vector<std::string>{"catalog-50"} && !nextOffset,
+              "Catalog continuation did not resume the timed-out page");
+        fixture({{"scenario","session-read"}});
         const SessionTarget session{"env-1","manual"};
         const auto metadata = restarted->sessionMetadata(session,true);
         check(metadata && metadata->project == "Release Pipeline" && metadata->title == "Staging investigation" &&

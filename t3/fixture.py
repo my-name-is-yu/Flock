@@ -2,7 +2,12 @@
 import base64
 import hashlib
 import json
+import os
+import re
+import selectors
+import socket
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -12,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 class Fixture(BaseHTTPRequestHandler):
     def log_message(self, *_):
@@ -155,6 +161,9 @@ class Fixture(BaseHTTPRequestHandler):
                     and state.get("dropAnswerReply")):
                 self.close_connection = True
                 return
+            if tool["name"] == "t3_thread_send" and (state.get("stockDropSendReply") or state.get("selectedDropSendReply")):
+                self.close_connection = True
+                return
             envelope["result"] = {"content": [{"type": "text", "text": json.dumps(content)}],
                                   "isError": content.get("_tag") == "OrchestratorMcpFailure"}
             if self.server.peer_recovery and tool["name"] == "t3_thread_launch":
@@ -181,13 +190,14 @@ class Fixture(BaseHTTPRequestHandler):
         ]
         if (name in ("t3_project_read", "t3_thread_read", "t3_thread_list", "t3_thread_launch",
                      "t3_thread_send", "t3_thread_interrupt") or
+                (name == "t3_queue" and args["action"] == "cancel") or
                 (name == "t3_pending_request" and args["action"] == "respond")):
             state.setdefault("effects", {}).setdefault(name, []).append(args)
         assert "environmentId" not in args
         if self.server.stock_thread:
             return self.stock_tool(name, args)
         if name == "t3_environment_read":
-            return {"environmentId": "env-1", "serverVersion": "0.1.11"}
+            return {"environmentId": state.get("claimedEnvironment", "env-1"), "serverVersion": "0.1.11"}
         if name == "t3_project_read":
             if args["projectId"] == "slow-search-project":
                 time.sleep(4)
@@ -207,27 +217,67 @@ class Fixture(BaseHTTPRequestHandler):
             state["launched"] = args["message"]
             return {"projectId": "project", "threadId": "thread", "link": "t3://thread",
                     "runId": None if state.get("delayRunId") else "root"}
-        if name == "t3_thread_send" and args["mode"] == "steer":
-            assert scenario in ("running", "resumed") and args["threadId"] == "thread"
-            assert args["clientRequestId"] == "flock-turn-7-2"
-            return {"threadId": "thread", "runId": state.get("steerReply") or ("continued" if scenario == "resumed" else "root"),
-                    "delivery": "steered"}
         if name == "t3_thread_send":
+            if scenario == "selected-session":
+                thread = args["threadId"]
+                assert thread in ("human-selected", "flock-selected") and args["mode"] == "queue"
+                assert args["message"].endswith(f"\n\n[Flock action ID: {args['clientRequestId']}]")
+                state["selectedInput"] = args["message"]
+                state["selectedRunStatus"] = "queued" if state.get("selectedBusy") else "running"
+                run = "manual-run" if state.get("selectedBadReceipt") else "selected-run"
+                return {"threadId": thread, "runId": run, "messageId": "selected-message",
+                        "delivery": "queued" if state.get("selectedBusy") else "started", "link": "t3://" + thread}
             assert scenario == "settled" and args["mode"] == "queue" and args["threadId"] == "thread"
             assert args["clientRequestId"] == "flock-action-01234"
             state["followup"] = args["message"]
             return {"threadId": "thread", "runId": "follow", "delivery": "started", "link": "t3://thread"}
         if name == "t3_queue":
+            if scenario == "selected-session":
+                assert args["threadId"] in ("human-selected", "flock-selected")
+                action = args["action"]
+                if action in ("read", "cancel"):
+                    assert args["queuedRunId"] == "selected-run"
+                if action == "cancel":
+                    assert state["selectedRunStatus"] == "queued"
+                    state["selectedRunStatus"] = "cancelled"
+                    return {"sequence": 11}
+                if state["selectedRunStatus"] == "queued":
+                    text = state["selectedInput"]
+                    length = 1000 if action == "list" else 16000
+                    entry = {"queuedRunId": "selected-run", "text": text[:length], "truncated": len(text) > length}
+                    if action == "read":
+                        return entry
+                    return {"items": [entry], "nextCursor": None}
+                return {"items": [], "nextCursor": None}
             assert args["action"] == "list" and args["threadId"] == "thread"
             return {"items": [], "nextCursor": None}
         if name == "t3_thread_list":
+            if args.get("allProjects") is True:
+                assert "projectId" not in args and not args["includeSubagents"]
+                projects = [self.summary("first"), self.summary("second") | {"projectId": "another-project"}]
+                return {"projectId": None, "threads": projects, "total": len(projects), "nextCursor": None}
             assert args["projectId"] == "project"
             ids = ["thread", "duplicate"] if state.get("duplicate") else ["thread"]
+            if scenario == "sparse-session-search":
+                ids = (["deadline-1", "deadline-2", "deadline-3"] if state.get("searchTitles", {}).get("deadline-2")
+                       else [f"candidate-{i}" for i in range(1000, 1130)])
+            elif scenario == "session-read":
+                ids = ["deleted", "manual"]
+            elif scenario == "catalog-timeout":
+                ids = [f"catalog-{i}" for i in range(51)]
             start = args.get("cursor", 0)
+            if scenario == "catalog-timeout" and start and state.get("delayCatalog"):
+                time.sleep(2)
             end = min(start + args.get("limit", len(ids)), len(ids))
             return {"projectId": "project", "threads": [self.summary(t) for t in ids[start:end]],
                     "total": len(ids), "nextCursor": end if end < len(ids) else None}
         if name == "t3_thread_wait":
+            if scenario == "selected-session":
+                assert args["threadId"] in ("human-selected", "flock-selected") and args["runId"] == "selected-run"
+                status = state["selectedRunStatus"]
+                waiting_for_thread = args["untilDelegatedWorkSettled"] and state.get("selectedBusy")
+                return {"threadId": args["threadId"], "runId": args["runId"], "status": status,
+                        "timedOut": status == "queued" or status == "running" or waiting_for_thread}
             assert args["threadId"] == "thread" and args["runId"] == "root" and args["timeoutMs"] <= 400
             if state.get("waitFailure"):
                 return {"_tag": "OrchestratorMcpFailure", "code": "invalid_request", "message": "Wait is unavailable."}
@@ -278,6 +328,17 @@ class Fixture(BaseHTTPRequestHandler):
         recent = [{"runId": "root", "ordinal": 1, "status": "completed"}]
         rows = [self.item(thread_id, 0, "root", "user_message", state["launched"], source="mcp"),
                 self.item(thread_id, 1, "root", "assistant_message", "root report")]
+        if scenario == "selected-session":
+            assert thread_id in ("human-selected", "flock-selected")
+            source = "web" if thread_id == "human-selected" else "mcp"
+            summary |= {"activeRunId": "manual-run" if state.get("selectedBusy") else None,
+                        "latestRunId": "manual-run", "pendingRequestCount": 1 if state.get("selectedBusy") else 0,
+                        "projectId": state.get("selectedProject", "project"),
+                        "archived": state.get("selectedArchived", False),
+                        "creationSource": source, "createdBy": "user" if source == "web" else "agent"}
+            rows = [self.item(thread_id, 0, "manual-run", "user_message", "Earlier work", source=source)]
+            if state.get("selectedRunStatus") == "running":
+                rows.append(self.item(thread_id, 1, "selected-run", "user_message", state["selectedInput"], source="mcp"))
         if scenario == "paged-report":
             rows[1]["text"] = "x" * 7000 + "end of report"
             rows.extend(self.item(thread_id, i, "other", "assistant_message", "unrelated report") for i in range(2, 5))
@@ -402,7 +463,11 @@ class Fixture(BaseHTTPRequestHandler):
             assert set(args) == {"threadId", "message", "mode", "clientRequestId"}
             thread = args["threadId"]
             if thread == "human":
-                assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
+                if state.get("stockRootRecovery"):
+                    assert args["message"].startswith("[Flock Bot planner | ")
+                    state["stockRootInput"] = args["message"]
+                else:
+                    assert args["clientRequestId"] == "command-1" and args["message"] == "[Flock result] Complete."
             else:
                 assert thread == "pinned-worker" and args["clientRequestId"] == "pinned-worker:start"
                 assert "Check fixture" in args["message"]
@@ -418,6 +483,14 @@ class Fixture(BaseHTTPRequestHandler):
             return {"threadId": "wrong" if state.get("badReceipt") else thread,
                     "messageId": "sent-id", "runId": "next-run", "delivery": "queued" if thread == "human" else "started"}
         if name == "t3_thread_wait":
+            if args["threadId"] == "human":
+                assert args["runId"] == "next-run" and args["timeoutMs"] == 1
+                assert not args["untilDelegatedWorkSettled"]
+                wait = state["stockRootWait"]
+                return {"threadId": "other" if wait == "wrong-thread" else "human",
+                        "runId": "other-run" if wait == "wrong-run" else "next-run",
+                        "status": "cancelled" if wait == "cancelled" else "failed",
+                        "timedOut": wait == "timed-out"}
             assert args["threadId"] == "pinned-worker" and args["runId"] == "next-run"
             return {"threadId": "pinned-worker", "runId": "next-run", "status": "completed", "timedOut": False,
                     "resultRun": {"runId": "next-run", "status": "completed"}}
@@ -439,6 +512,10 @@ class Fixture(BaseHTTPRequestHandler):
             self.item("human", 6, "root-run", "user_message", "[Flock result] Complete.", "mcp") |
                 {"messageId": "sent-id"},
         ]
+        if is_root and state.get("handoffText"):
+            rows[-1] = self.item("human", 6, "next-run", "user_message", state["handoffText"], "mcp") | {
+                "messageId": "sent-id"}
+            rows.append(self.item("human", 7, "next-run", "assistant_message", "Received consultation reply."))
         if is_root and state.get("stockHistory") == "late-human":
             rows = [self.item("human", position, "root-run", "assistant_message", f"Progress {position}")
                     for position in range(1, 26)]
@@ -446,9 +523,39 @@ class Fixture(BaseHTTPRequestHandler):
         elif is_root and state.get("stockHistory") == "streaming-late-human":
             rows = [self.item("human", 1, "root-run", "assistant_message", "Unfinished response", status="running"),
                     self.item("human", 2, "root-run", "user_message", "Human after unfinished response", "web")]
+        if is_root and state.get("stockRootRecovery"):
+            rows = rows[:1]
+            if "stockRootInput" in state:
+                rows.append(self.item(thread, 4, "next-run", "user_message", state["stockRootInput"], "mcp") |
+                            {"messageId": "sent-id"})
+                summary["activeRunId"] = None
+                summary["latestRunId"] = "next-run"
+                if state.get("stockRootExtraHistory"):
+                    rows.extend(self.item(thread, position, "later-run", "assistant_message", "Later progress")
+                                for position in range(5, 26))
         if thread == "pinned-worker":
             rows = [self.item(thread, 1, "next-run", "assistant_message", "Pinned report") |
                     {"textTruncated": False, "nextTextOffset": None, "messageId": "worker-result"}]
+        if is_root and args["view"] == "activity" and state.get("stockInvocation"):
+            mode = state["stockInvocation"]
+            summary["activeRunId"] = None if mode == "finished" else "root-run"
+            arguments = state["stockArguments"]
+            tool_name = "mcp__flock__invoke_flock_bot" if mode == "claude" else "flock.invoke_flock_bot"
+            body = json.dumps({"toolName": tool_name, "input": arguments}, ensure_ascii=False)
+            source = "other" if mode == "wrong-thread" else "human"
+            item = self.item(source, 2 if state.get("stockRootRecovery") else 7, "old-run" if mode == "old-run" else "root-run",
+                             "dynamic_tool", body, status="running") | {"itemId": "invocation"}
+            if mode == "inherited":
+                item["visibility"] = "inherited"
+            if args.get("itemId") is None or args["itemId"] == item["itemId"]:
+                offset = args.get("textOffset", 0)
+                bounded = body[offset:offset + args["maxCharsPerItem"]]
+                item["text"] = bounded
+                item["textTruncated"] = offset + len(bounded) < len(body)
+                item["nextTextOffset"] = offset + len(bounded) if item["textTruncated"] else None
+                rows = [item]
+            else:
+                rows = []
         if args.get("beforePosition") is not None:
             rows = [row for row in rows if row["position"] < args["beforePosition"]]
         else:
@@ -467,13 +574,14 @@ class Fixture(BaseHTTPRequestHandler):
         def add(run, kind, text, source="provider", **fields):
             rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
 
-        def child(run, task, title):
-            add(run, "subagent", "done", subagentId=task, title=title)
+        def child(run, task, title, native=False, **fields):
+            subagent = task if native else f"node:delegated-task:{task}"
+            add(run, "subagent", "done", subagentId=subagent, title=title, **fields)
 
-        def notice(run, title):
-            add(run, "notification", f'Delegated task "{title}" finished', source=None, createdBy=None)
+        def notice(run, text, **fields):
+            add(run, "notification", text, source=None, createdBy=None, **fields)
 
-        if scenario in ("nested-result", "reused-result"):
+        if scenario in ("nested-result", "reused-result", "partial-batch-result"):
             recent.insert(0, {"runId": "middle", "ordinal": 2, "status": "completed"})
         recent.insert(0, {"runId": "later", "ordinal": len(recent) + 1, "status": "completed"})
 
@@ -486,17 +594,48 @@ class Fixture(BaseHTTPRequestHandler):
         elif scenario == "shortened-result":
             prefix = "Read notes.md and identify which action items are assigned to "
             child("root", "child-task", prefix + "the...")
-            notice("later", prefix + "the release owner…")
+            notice("later", f'Delegated task "{prefix}the release owner…" finished')
+        elif scenario in ("failed-result", "stopped-result", "unlabeled-result"):
+            verb = scenario.removesuffix("-result")
+            status = {"failed": "failed", "stopped": "cancelled", "unlabeled": "completed"}[verb]
+            child("root", "child-task", "" if verb == "unlabeled" else title, status=status)
+            notice("later", "Delegated task finished" if verb == "unlabeled" else f'Delegated task "{title}" {verb}')
+        elif scenario == "batch-result":
+            child("root", "a", "Read notes, logs")
+            child("root", "b", "b" * 100)
+            notice("later", "2 delegated tasks finished: Read notes, logs, " + "b" * 79 + "…")
+        elif scenario == "partial-batch-result":
+            later = "2026-01-01T00:00:01.000Z"
+            child("root", "a", "a")
+            child("root", "b", "b", updatedAt=later)
+            notice("middle", "1 of 2 delegated tasks finished: a")
+            notice("later", 'Delegated task "b" finished', updatedAt=later)
+        elif scenario == "late-settlement-result":
+            child("root", "child-task", title, updatedAt="2026-01-01T00:00:01.000Z")
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario == "foreign-child-result":
+            child("unrelated", "child-task", title)
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario == "native-subagent-result":
+            child("root", "toolu_native", "Native helper", native=True)
+            child("unrelated", "child-task", title)
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario in ("batch-overcount-result", "invalid-batch-count-result", "zero-batch-count-result",
+                          "malformed-batch-count-result"):
+            child("root", "child-task", title)
+            count = {"batch-overcount-result": "2", "invalid-batch-count-result": "2 of 1",
+                     "zero-batch-count-result": "0", "malformed-batch-count-result": "1x"}[scenario]
+            notice("later", f"{count} delegated tasks finished")
         else:
             child("root", "child-task", title)
             if scenario == "ambiguous-title-result":
                 child("unrelated", "other-task", title)
             if scenario in ("nested-result", "reused-result"):
-                notice("middle", title)
+                notice("middle", f'Delegated task "{title}" finished')
                 if scenario == "nested-result":
                     title = "Review follow-up"
                     child("middle", "grandchild-task", title)
-            notice("later", title)
+            notice("later", f'Delegated task "{title}" finished')
             if scenario == "mixed-result":
                 add("later", "user_message", "simultaneous manual input", source="web")
         add("later", "assistant_message", "later report")
@@ -537,12 +676,342 @@ def test_peer_recovery(server, runner, temp):
     assert server.state["launches"] == [action_id], "recovery resent the launch"
 
 
+def test_connection_setup(server, flock, temp):
+    directory = Path(temp)
+    state = directory / "flock"
+    codex_config = directory / "config.toml"
+    claude_skills = directory / "claude-skills"
+    codex_skills = directory / "codex-skills"
+    claude_config = directory / ".claude.json"
+    original_claude = b'{ "z-last" : [1,  2], "mcpServers":{}, "a-first" : true }\n'
+    claude_config.write_bytes(original_claude)
+    claude = directory / "claude"
+    claude.write_text(
+        f"#!{sys.executable}\n"
+        + """import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print(os.environ.get("FIXTURE_CLAUDE_VERSION", "2.1.327") + " (Claude Code)")
+    sys.exit(0)
+
+directory = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.environ["HOME"]))
+path = directory / ".claude.json"
+config = path.read_bytes()
+servers = json.loads(config)["mcpServers"]
+before = json.dumps(servers).encode()
+if args == ["mcp", "add-json", "--scope", "user", "flock", "-"]:
+    assert "flock" not in servers
+    server = json.load(sys.stdin)
+    if server["headers"]["Authorization"] != os.environ.get(
+        "FIXTURE_CLAUDE_ALLOW_BEARER", server["headers"]["Authorization"]
+    ):
+        sys.exit(1)
+    servers["flock"] = server
+else:
+    assert args == ["mcp", "remove", "--scope", "user", "flock"]
+    del servers["flock"]
+marker = b'"mcpServers":'
+old = marker + before
+assert old in config
+path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
+"""
+    )
+    claude.chmod(0o700)
+    env = dict(os.environ, HOME=str(directory), FLOCK_CODEX_CONFIG=str(codex_config),
+               FLOCK_CLAUDE_CONFIG=str(claude_config),
+               FLOCK_CLAUDE_CLI=str(claude), FLOCK_CODEX_CLI="/usr/bin/true",
+               FLOCK_CLAUDE_SKILLS_DIR=str(claude_skills), FLOCK_CODEX_SKILLS_DIR=str(codex_skills))
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    env.pop("FLOCK_WEB_IDENTITIES_FILE", None)
+    original = 'model = "fixture"\n\n[mcp_servers.unrelated]\ncommand = "/usr/bin/true"\n'
+    codex_config.write_text(original)
+    profile = state / "bots" / "reviewer"
+    profile.mkdir(parents=True)
+    (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+    command = [flock, "--home", str(state)]
+
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", 0))
+        port = choose_port.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+
+    def connect(environment, flags, restart=False, expected_error=None, rewritten=True):
+        server.state["claimedEnvironment"] = environment
+        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
+                                         *flags], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "T3 connect did not display the OAuth URL"
+                    assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
+                authorization = process.stderr.readline().strip()
+                request = urllib.request.Request(server.origin + "/fixture",
+                    data=json.dumps({"authorization": authorization}).encode(),
+                    headers={"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+                output, errors = process.communicate(timeout=8)
+                if expected_error:
+                    assert process.returncode != 0 and expected_error in errors, (output, errors)
+                    return
+                assert process.returncode == 0, errors
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        details = json.loads(output)
+        assert "mode" not in details and details["port"] == port
+        has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
+        providers = ["codex", "claude"] if has_claude else ["codex"]
+        assert details["configuredProviders"] == (providers if rewritten else [])
+        assert ("Restart 'flock run'" in errors) == restart
+        codex = codex_config.read_text()
+        assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
+        assert codex_config.stat().st_mode & 0o777 == 0o600
+        token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
+        assert token not in output and token not in errors
+        if has_claude:
+            assert json.loads(claude_config.read_text())["mcpServers"]["flock"] == {
+                "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
+            }
+        assert token.encode() not in (state / "flock.sqlite3").read_bytes()
+        for root in ([codex_skills, claude_skills] if has_claude else [codex_skills]):
+            assert (root / "flock" / "SKILL.md").is_file()
+            skill = (root / "flock-reviewer" / "SKILL.md").read_text()
+            assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
+        return token
+
+    working_command = command
+    command = [flock, "--home", str(directory / "rejected-flock")]
+    for reserved in [
+        '[mcp_servers . flock]\nurl = "https://example.com/mcp"\n',
+        'mcp_servers.flock.url = "https://example.com/mcp"\n',
+        'mcp_servers = { flock = { url = "https://example.com/mcp" } }\n',
+    ]:
+        codex_config.write_text(reserved)
+        connect("env-1", ["--port", str(port)],
+                expected_error="Remove the existing Codex MCP server named flock")
+        assert codex_config.read_text() == reserved
+    command = working_command
+    codex_config.write_text(original)
+
+    env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+    old = connect("env-1", ["--port", str(port)], restart=True)
+    assert claude_config.read_bytes() == original_claude
+    env["FLOCK_CLAUDE_CLI"] = str(claude)
+    token = connect("env-2", [])
+    assert token != old
+    rotated = connect("env-2", [])
+    assert rotated != token
+    token = rotated
+    assert connect("env-3", [], rewritten=False) == token
+    subprocess.run(command + ["t3", "disconnect", "env-3"], env=env, check=True,
+                   timeout=5, stdout=subprocess.DEVNULL)
+    credential_dir = state / "credentials" / "t3"
+    credentials = {path.name: path.read_bytes() for path in credential_dir.glob("*.json")}
+    previous_config = codex_config.read_bytes()
+    def connector():
+        with sqlite3.connect(state / "flock.sqlite3") as db:
+            return db.execute("SELECT * FROM t3_connector").fetchone()
+    previous_connector = connector()
+    previous_claude = claude_config.read_bytes()
+    for setting, value in [
+        ("FIXTURE_CLAUDE_VERSION", "2.1.326"),
+        ("FIXTURE_CLAUDE_ALLOW_BEARER", "Bearer " + token),
+    ]:
+        env[setting] = value
+        connect("env-2", [], expected_error="Claude Code 2.1.327 or later is required")
+        del env[setting]
+        assert {path.name: path.read_bytes() for path in credential_dir.glob("*.json")} == credentials
+        assert codex_config.read_bytes() == previous_config and connector() == previous_connector
+        assert claude_config.read_bytes() == previous_claude
+
+    previous_port = port
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", previous_port))
+        with socket.socket() as replacement:
+            replacement.bind(("127.0.0.1", 0))
+            port = replacement.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+    before_port_change = token
+    token = connect("env-2", ["--port", str(port)], restart=True)
+    assert token != before_port_change
+
+    with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(headless.stderr, selectors.EVENT_READ)
+                assert selector.select(5), "headless startup did not warn about the MCP endpoint"
+                assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+        finally:
+            headless.terminate()
+            headless.wait(timeout=8)
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", port))
+        busy.listen()
+        result = subprocess.run(command + ["run"], env=env, capture_output=True, text=True, timeout=8)
+        assert result.returncode != 0 and f"port {port}" in result.stderr and "in use" in result.stderr
+
+    def ping(value):
+        request = urllib.request.Request(endpoint, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                    headers={"Content-Type":"application/json", "Authorization":"Bearer " + value})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as result:
+                return result.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    with subprocess.Popen(command + ["run"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(daemon.stdout, selectors.EVENT_READ)
+                assert selector.select(8), "Flock did not listen on the saved port"
+                assert daemon.stdout.readline().rstrip().endswith(f":{port}")
+            assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+            subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 200 and endpoint in codex_config.read_text() and "flock" in json.loads(claude_config.read_text())["mcpServers"]
+            subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 401
+            assert codex_config.read_text() == original and claude_config.read_bytes() == original_claude
+
+            connect("env-1", ["--port", str(port)], restart=True)
+            second = [flock, "--home", str(directory / "second-flock")]
+            command = second
+            # Setup only needs OAuth and provider files. The Web port remains with the first home.
+            profile = directory / "second-flock" / "bots" / "reviewer"
+            profile.mkdir(parents=True)
+            (profile / "config.json").write_text('{"name":"Reviewer","role":"reviewer"}')
+            connect("env-1", ["--port", str(port)], restart=True)
+            configs = codex_config.read_bytes(), claude_config.read_bytes()
+            subprocess.run(working_command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert (codex_config.read_bytes(), claude_config.read_bytes()) == configs
+
+            # A leftover Claude Code config must not strand the Codex registration once Claude Code is gone.
+            env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+            claude_config.write_text("{ not json")
+            subprocess.run(second + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert codex_config.read_text() == original and claude_config.read_text() == "{ not json"
+            env["FLOCK_CLAUDE_CLI"] = str(claude)
+        finally:
+            daemon.terminate()
+            daemon.wait(timeout=8)
+
+
+def test_headless_handoff(server, flock, temp):
+    home = Path(temp)
+    args = [flock, "--home", str(home)]
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FLOCK_")}
+    subprocess.run(args + ["rules", "list"],
+                   env=env, check=True, capture_output=True, timeout=5)
+    identities = home / "identities.json"
+    identities.write_text(json.dumps([
+        {"authorization": "Bearer fixture-identity", "person": "alice", "adminRoot": True},
+        {"authorization": "Bearer fixture-revoked", "person": "bob"},
+    ]), encoding="utf-8")
+    identities.chmod(0o600)
+    env["FLOCK_WEB_IDENTITIES_FILE"] = str(identities)
+
+    credential_dir = home / "credentials" / "t3"
+    credential_dir.mkdir(mode=0o700, parents=True)
+    digest = base64.urlsafe_b64encode(hashlib.sha256(b"env-1").digest()).decode().rstrip("=")
+    generation = "a" * 43
+    credential = credential_dir / f"t3-{digest}.json"
+    credential.write_text(json.dumps({
+        "environmentId": "env-1", "mcpUrl": server.origin + "/mcp", "token": "fixture.signed-token",
+        "generation": generation, "expiresAt": int(time.time()) + 60, "operate": True,
+    }), encoding="utf-8")
+    credential.chmod(0o600)
+    handoff_text = "[Flock Bot release | request request-1 | action command-1]\nConsultation reply"
+    server.state.update(handoffText=handoff_text, finalized=True)
+
+    with sqlite3.connect(home / "flock.sqlite3") as db:
+        db.execute("INSERT INTO t3_connector VALUES(1,'fixture','alice','fixture-digest',4173)")
+        db.execute("INSERT INTO t3_connected_environments VALUES('env-1')")
+        # Simulate a daemon exit after T3 accepted the reply and before Flock saved the receipt.
+        db.execute("INSERT INTO return_channels VALUES(1,'env-1','project','human','','request-1','',"
+                   "'release','alice','{\"request\":\"Review the release\"}','client-1','digest')")
+        db.execute("INSERT INTO session_controls(channel_id,state,auth_generation,permission,consult_command,event_cursor) "
+                   "VALUES(1,'active',?,'null','command-1',4)", (generation,))
+        db.execute("INSERT INTO thread_deliveries(command_id,channel_id,generation,text,state,cursor) "
+                   "VALUES('command-1',1,1,?,1,4)", (handoff_text,))
+
+        # Bob has lost access and Carol is absent from the identity directory.
+        for channel, owner in [(2, "bob"), (3, "carol")]:
+            delegation = f"delegation-{channel}"
+            sender, recipient = channel * 2 - 1, channel * 2
+            db.execute("INSERT INTO return_channels VALUES(?,'env-1','project',?,'',?,'',"
+                       "'release',?,?,?,'digest')",
+                       (channel, f"paused-{channel}", f"request-{channel}", owner,
+                        json.dumps({"request": "Review the paused release"}), f"client-{channel}"))
+            db.execute("INSERT INTO session_controls(channel_id,state,generation,auth_generation,permission,consult_command,event_cursor) "
+                       "VALUES(?,'paused',2,?,?,'',0)",
+                       (channel, generation, json.dumps({"goal": "Review", "allowDelegation": True})))
+            db.execute("INSERT INTO specialist_budgets(channel_id,allowance) VALUES(?,1)", (channel,))
+            db.executemany("INSERT INTO tasks VALUES(?,'release','env-1','project',?,1,?)",
+                           [(sender, "completed", "{}"),
+                            (recipient, "queued", json.dumps({
+                                "activeRun": None, "environmentId": "env-1", "eventId": 0,
+                                "specialistRole": "executor", "specialistDelegationId": delegation,
+                            }))])
+            db.execute("INSERT INTO peer_exchanges VALUES(?,'specialist','closed','',?,?,'env-1',NULL)",
+                       (delegation, sender, recipient))
+            db.execute("INSERT INTO specialist_delegations VALUES(?,?,1,'Review','Done','',NULL,?,?)",
+                       (delegation, channel, sender, recipient))
+
+    state = None
+    with subprocess.Popen(args + ["run", "--no-web"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            deadline = time.monotonic() + 8
+            with sqlite3.connect(home / "flock.sqlite3") as db:
+                while daemon.poll() is None and time.monotonic() < deadline:
+                    state, = db.execute("SELECT state FROM session_controls WHERE channel_id=1").fetchone()
+                    if state == "completed":
+                        break
+                    time.sleep(0.05)
+        finally:
+            if daemon.poll() is None:
+                daemon.terminate()
+            try:
+                stdout, stderr = daemon.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.communicate()
+                raise
+    assert daemon.returncode == 0 and "headless mode" in stdout, (stdout, stderr)
+    assert state == "completed", f"accepted Session handoff remained {state!r} after restart: {stderr}"
+    with sqlite3.connect(home / "flock.sqlite3") as db:
+        recovered = db.execute("""
+            SELECT r.person_id, c.state, c.generation, t.state,
+                   EXISTS(SELECT 1 FROM journal WHERE task_id=t.id AND kind='cancel_requested')
+            FROM specialist_delegations d JOIN return_channels r ON r.id=d.channel_id
+            JOIN session_controls c ON c.channel_id=r.id JOIN tasks t ON t.id=d.recipient_task
+        """).fetchall()
+        assert {row[0] for row in recovered} == {"bob", "carol"}, recovered
+        for owner, state, generation, task, cancelled in recovered:
+            assert (state, generation) == ("paused", 2), owner
+            assert task in ("cancelling", "cancelled") and cancelled, (owner, task)
+    assert "t3_thread_send" not in server.state.get("effects", {}), "recovery resent an already accepted reply"
+
+
 with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
     server.origin = f"http://127.0.0.1:{server.server_port}"
     server.state = {}
     server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
-    server.stock_thread = sys.argv[2:] == ["stock-thread"]
-    if server.stock_thread:
+    headless_handoff = sys.argv[2:] == ["headless-handoff"]
+    server.stock_thread = headless_handoff or sys.argv[2:] == ["stock-thread"]
+    if server.stock_thread and not headless_handoff:
         root = temp + "/project"
         good = temp + "/worker"
         wrong = temp + "/wrong-worker"
@@ -566,6 +1035,12 @@ with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0)
     try:
         if server.peer_recovery:
             test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif sys.argv[2:] == ["connection-setup"]:
+            test_connection_setup(server, sys.argv[1], temp)
+            code = 0
+        elif headless_handoff:
+            test_headless_handoff(server, sys.argv[1], temp)
             code = 0
         else:
             code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode
