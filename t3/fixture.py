@@ -494,8 +494,9 @@ class Fixture(BaseHTTPRequestHandler):
         def add(run, kind, text, source="provider", **fields):
             rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
 
-        def child(run, task, title, **fields):
-            add(run, "subagent", "done", subagentId=task, title=title, **fields)
+        def child(run, task, title, native=False, **fields):
+            subagent = task if native else f"node:delegated-task:{task}"
+            add(run, "subagent", "done", subagentId=subagent, title=title, **fields)
 
         def notice(run, text, **fields):
             add(run, "notification", text, source=None, createdBy=None, **fields)
@@ -533,6 +534,10 @@ class Fixture(BaseHTTPRequestHandler):
             child("root", "child-task", title, updatedAt="2026-01-01T00:00:01.000Z")
             notice("later", f'Delegated task "{title}" finished')
         elif scenario == "foreign-child-result":
+            child("unrelated", "child-task", title)
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario == "native-subagent-result":
+            child("root", "toolu_native", "Native helper", native=True)
             child("unrelated", "child-task", title)
             notice("later", f'Delegated task "{title}" finished')
         elif scenario in ("batch-overcount-result", "invalid-batch-count-result", "zero-batch-count-result",

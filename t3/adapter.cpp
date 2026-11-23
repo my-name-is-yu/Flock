@@ -211,7 +211,9 @@ bool ownsResult(Client& client, const RunRef& requested, const std::string& effe
         const auto type = str(item,"type");
         if (type == "subagent") {
             const auto id = str(item,"subagentId");
-            if (!id.empty())
+            // Provider-native subagents also appear as subagent items but never produce delegated-task
+            // notices. Count only app-owned delegated tasks, whose node ids T3 derives with this prefix.
+            if (id.starts_with("node:delegated-task:"))
                 children.emplace(id,DelegatedChild{run,terminal(str(item,"status")) ? str(item,"updatedAt") : ""});
         }
         const auto candidate = notices.find(run);

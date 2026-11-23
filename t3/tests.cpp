@@ -212,6 +212,7 @@ int main(int argc, char** argv) {
         checkResult("malformed-batch-count-result", false);
         checkResult("late-settlement-result", false);
         checkResult("foreign-child-result", false);
+        checkResult("native-subagent-result", false);
         checkResult("reused-result", false);
 
         fixture({{"scenario", "paged-report"}});
