@@ -192,7 +192,7 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
             checked.calls.push_back(checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent")));
         checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
-        throw ModelError(scrub.text(error.what()),error.transient,scrub.payload(error.usage));
+        throw ModelError(scrub.text(error.what()),error.transient,scrub.payload(error.usage),error.code);
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {

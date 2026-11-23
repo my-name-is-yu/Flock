@@ -65,11 +65,16 @@ struct ModelInput {
     bool needsDoneWhen = false, canForwardUserMessage = false;
     std::vector<ModelImage> images{};
 };
+enum class ModelErrorCode { inference_failed, invalid_tool_count, invalid_tool_output, unavailable_tool, invalid_tool_arguments };
 struct ModelError : std::runtime_error {
-    ModelError(std::string message, bool retryable, Json measurements = Json::object())
-        : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)) {}
+    ModelError(std::string message, bool retryable, Json measurements = Json::object(),
+               ModelErrorCode failureCode = ModelErrorCode::inference_failed)
+        : std::runtime_error(std::move(message)), transient(retryable), usage(std::move(measurements)), code(failureCode) {}
+    ModelError(std::string message, ModelErrorCode failureCode)
+        : ModelError(std::move(message),false,Json::object(),failureCode) {}
     bool transient;
     Json usage;
+    ModelErrorCode code;
 };
 class Model {
 public:
