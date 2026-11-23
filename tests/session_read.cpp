@@ -29,6 +29,7 @@ struct Backend : T3 {
     std::string secret;
     bool denyAttachment = false;
     bool pagedCatalog = false;
+    bool overlappingCatalog = false;
     std::vector<Id> catalogOffsets;
 
     bool supportsRunTargetedSteer() const override { return true; }
@@ -53,6 +54,8 @@ struct Backend : T3 {
     }
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view environment, std::string_view, Id offset, SessionReadDeadline) override {
+        if (overlappingCatalog)
+            return {environment == env ? std::vector<std::string>{staging} : std::vector<std::string>{},std::nullopt};
         if (pagedCatalog) {
             if (environment == otherEnv) return {};
             catalogOffsets.push_back(offset);
@@ -359,6 +362,35 @@ void acceptance() {
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
 }
 
+void catalogResultsAreDeduplicatedAcrossRecordedBatches() {
+    Fixture f;
+    f.t3.overlappingCatalog = true;
+    f.store->submit(f.intake("alpha"));
+    {
+        sqlite3* raw = nullptr;
+        check(sqlite3_open(f.store->path().c_str(),&raw) == SQLITE_OK,"could not open fixture database");
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> writer(raw,sqlite3_close);
+        check(sqlite3_exec(writer.get(),R"SQL(
+WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<65)
+INSERT INTO outbox(id,task_id,phase,data)
+SELECT printf('fixture-%02d',n),tasks.id,'acked','{}' FROM numbers CROSS JOIN tasks;
+INSERT INTO runs(action_id,task_id,environment_id,thread_id,run_id,link)
+SELECT id,task_id,'desktop',CASE WHEN id='fixture-65' THEN 'internal-staging-thread' ELSE id END,id,''
+FROM outbox;
+)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"could not seed recorded Sessions");
+    }
+    const auto search = "flock_session_search";
+    const auto first = f.call(search,Json::object());
+    check(first.at("sessions").empty() && first.at("nextCursor").is_string(),"recorded batch did not advance");
+    const auto catalog = f.call(search,{{"cursor",first.at("nextCursor")}});
+    check(catalog.at("sessions").size() == 1 && catalog.at("nextCursor").is_string(),
+          "overlapping Session was not returned by the catalog");
+    f.restart();
+    const auto recorded = f.call(search,{{"cursor",catalog.at("nextCursor")}});
+    check(recorded.at("sessions").empty() && recorded.at("nextCursor").is_null(),
+          "recorded batch returned a Session already emitted by the catalog");
+}
+
 void catalogResumesAfterPartialDiscovery() {
     Fixture f;
     f.t3.pagedCatalog = true;
@@ -464,6 +496,7 @@ int main() {
     try {
         acceptance();
         catalogResumesAfterPartialDiscovery();
+        catalogResultsAreDeduplicatedAcrossRecordedBatches();
         redactionAndResumedHistory();
         approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {
