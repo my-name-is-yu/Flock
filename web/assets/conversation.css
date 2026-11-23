@@ -532,7 +532,7 @@
   .msg.working { animation: none; }
   .typing span { animation: none; opacity: .55; }
   .conversation-actions-list { animation: none; }
-  .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; }
+  .jump-to-latest, .jump-to-latest svg, .msg-time, .msg-actions { transition: none; transform: none; animation: none; }
   @starting-style { .jump-to-latest { opacity: 1; transform: none; } }
   .conversation-action:active, .peer-back:active, .profile-face-button:hover, .profile-face-button:active,
   .profile-caption:has(.needs-you:not([hidden])):active, .jump-to-latest:active, .question-option:active,
@@ -553,8 +553,18 @@
 @media (hover: none), (pointer: coarse) {
   .msg-actions { opacity: 1; transform: none; pointer-events: auto; }
 }
+/* Touch screens have no hover, so every row used to show its copy and reply icons at once.
+   Tapping a bubble already reveals its time; it now reveals that row's actions too. */
 @media (hover: none) {
+  .event-message:not(:has(> .msg-time), :focus-visible, :has(:focus-visible)) .msg-actions { display: none; }
+  /* Without the actions beside it, a shrink-wrapped line would size the bubble's percentage width against itself. */
+  .event-message .msg-line { justify-self: stretch; }
+  .event-message:has(> .msg-time) .msg-actions { animation: msg-actions-in .18s var(--ease-out); }
   .event-message:not(:focus-visible, :has(:focus-visible)) .msg-actions .msg-time { display: none; }
+}
+@keyframes msg-actions-in { from { opacity: 0; transform: translateY(3px); } }
+@media (hover: none) and (prefers-reduced-motion: reduce) {
+  .event-message:has(> .msg-time) .msg-actions { animation: none; }
 }
 /* Narrow chats keep bubbles at full width: touch rows drop their actions below a long bubble, and hover rows float them over the row. */
 @container conversation-layout (max-width: 700px) {
