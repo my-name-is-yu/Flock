@@ -488,10 +488,6 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     return result;
 }
 
-bool Store::Impl::gitConversationEffectStarted(Id message, int step) const {
-    return gitEffectStarted("turn/" + std::to_string(message) + "/" + std::to_string(step));
-}
-
 bool Store::Impl::gitEffectStarted(std::string_view invocation, Id taskId) const {
     return query(R"SQL(
 SELECT 1 FROM git_pr_operations WHERE (?1=0 OR task_id=?1) AND invocation IN (?2,?2 || '/new')
@@ -500,7 +496,8 @@ LIMIT 1
 )SQL",{taskId,invocation}).next();
 }
 
-Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, int step, const Decision& decision) {
+Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message& message, const Decision& decision,
+                                      std::string_view key) {
     try {
         if (!host || !message.channelScope.empty()) throw Conflict("Git tools are available in Flock Web with a connected Git host");
         auto call = decision;
@@ -513,8 +510,7 @@ Json Store::Impl::gitConversationTool(GitHost* host, const conversation::Message
                 throw Conflict("Git notification tools must use the watched target");
             call.args["taskId"] = owner;
         }
-        return gitTool(*host,message.bot,0,message.routing,call,
-                       "turn/" + std::to_string(message.id) + "/" + std::to_string(step),{},message.id);
+        return gitTool(*host,message.bot,0,message.routing,call,key,{},message.id);
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {

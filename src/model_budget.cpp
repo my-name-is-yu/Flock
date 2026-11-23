@@ -200,4 +200,29 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
     }
     return checked;
 }
+
+Json Store::pausedConversations(std::string_view bot) const {
+    std::lock_guard lock(p_->mutex);
+    auto rows = p_->query(R"SQL(
+SELECT j.data FROM conversation_turns t JOIN journal j ON j.id=t.pause_id
+WHERE j.conversation_bot_id=? AND t.status='paused' ORDER BY j.id DESC
+)SQL",{bot});
+    auto result = Json::array();
+    while (rows.next()) result.push_back(rows.json(0));
+    return result;
+}
+
+void Store::Impl::approveMessageModelCall(Id message, Id waitMessageId) {
+    const bool toolPending = query("SELECT 1 FROM conversation_steps WHERE message_id=?"
+                                   " AND result IS NULL AND json_type(effect)='array'",{message}).next();
+    const auto attempt = reserveExtraModelCall(messageModelBudget(message),toolPending ? "bot_tool" : "conversation_turn",message,0,0);
+    exec("UPDATE conversation_turns SET status='running',pause_id=NULL,reserved_attempt=? WHERE message_id=?",
+             {attempt,message});
+    exec("UPDATE journal SET data=json_set(data,'$.status','done') WHERE id=?",{waitMessageId});
+    exec(R"SQL(
+INSERT INTO journal(time,kind,data,conversation_bot_id)
+SELECT ?,'conversation_budget_approved',json_object('messageId',id,'waitMessageId',?),bot_id
+FROM messages WHERE id=?
+)SQL",{unixTime(),waitMessageId,message});
+}
 }
