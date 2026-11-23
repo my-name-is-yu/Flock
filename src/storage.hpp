@@ -174,7 +174,7 @@ struct Store::Impl {
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
-    Json accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision&);
+    Json accessTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
     Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Json& routing, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);

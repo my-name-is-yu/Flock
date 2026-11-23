@@ -127,12 +127,14 @@ void memoryFlow(const std::filesystem::path& db) {
     bot.choices = {
         {"apply_memory_edit",{{"baseVersion",2},{"content","Member edit"}},"Change memory"},
         {"remove_schedule",{{"id",1}},"Remove schedule"},
+        {"update_bot_settings",{{"environmentId",alpha.environmentId},{"runTimeoutSeconds",1}},"Change timeout"},
         reply()
     };
     store.receive(member,alpha,"member-mutation","Change memory and schedules");
     runtime.runConversations();
-    check(lastResult(bot.inputs.at(memberStep+1)).at("ok") == false &&
-          lastResult(bot.inputs.at(memberStep+2)).at("ok") == false,
+    check(lastResult(bot.inputs.at(memberStep+1)).at("error") == "Memory access denied" &&
+          lastResult(bot.inputs.at(memberStep+2)).at("error") == "Automation change denied" &&
+          lastResult(bot.inputs.at(memberStep+3)).at("error") == "Bot settings access denied",
           "Member chat bypassed owner-only mutations");
 
     const auto shared = turn(alpha,"Update the staging playbook",{

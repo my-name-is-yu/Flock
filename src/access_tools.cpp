@@ -47,7 +47,7 @@ Json Store::Impl::readiness(std::string_view bot, const Json& routing, const Jso
     return {{"ready",true}};
 }
 
-Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json& routing, const Decision& decision) {
+Json Store::Impl::accessTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision& decision) {
     Policy access(*this);
     const auto& tool = decision.tool;
     const auto& args = decision.args;
@@ -81,6 +81,7 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
         return result;
     }
     if (tool == "update_bot_settings") {
+        if (!access.allows(actor,Action::bot_settings,bot)) throw AccessDenied("Bot settings access denied");
         const auto id = argument(args,"environmentId");
         if (!environments(routing).contains(id) || !access.allows(bot,Action::environment_configure,id)) throw Conflict("Environment configure access required");
         if (!args.contains("runTimeoutSeconds") || !args.at("runTimeoutSeconds").is_number_integer()) throw Conflict("Integer timeout required");

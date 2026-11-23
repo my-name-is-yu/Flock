@@ -413,8 +413,8 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
         if (tool == "start_workflow" || tool == "workflow_status" || tool == "instruct_workflow_stage" ||
             tool == "stop_workflow_stage" || tool == "stop_workflow")
             return workflowTool(tool,args,bot,message.id,step,routing);
-        auto result = accessTool(bot,message.id,routing,decision);
         const auto actor = turnActor(message);
+        auto result = accessTool(bot,actor,message.id,routing,decision);
         if (result.is_null()) result = memory(bot,actor,tool,args,now,true);
         if (result.is_null()) result = automationTool(bot,actor,routing,decision,now);
         if (result.is_null()) throw ToolError("Unknown conversation tool");
