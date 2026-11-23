@@ -18,8 +18,12 @@
   <div id="policy" hidden>
     <section>
       <h2 id="mode-heading">Permission mode</h2>
-      <p id="mode"></p>
-      <label id="mode-control" hidden><span>Supervised</span><input type="checkbox" id="supervised" role="switch"></label>
+      <div id="mode-options" class="mode-options" role="radiogroup" aria-labelledby="mode-heading">
+        <label class="mode-option"><input type="radio" name="mode" value="full">
+          <span class="mode-option-text"><strong>Full</strong><small>Bots use the access they’re given without asking. Never rules still apply.</small></span></label>
+        <label class="mode-option"><input type="radio" name="mode" value="supervised">
+          <span class="mode-option-text"><strong>Supervised</strong><small>By default, Bots ask before actions such as opening pull requests, posting to channels, or starting Sessions.</small></span></label>
+      </div>
     </section>
     <section><h2>Rules</h2><div id="rules"></div></section>
     <section><h2>T3 connections</h2><div id="connections"></div></section>

@@ -87,7 +87,7 @@ queued or unresolved messages and admitted work separately from local state.
 
 **Flock settings** shows the installation mode, rules, and the read-only T3
 connection details for the person who connected T3 and installation roots.
-Installation roots can toggle **Supervised** and remove rules. **Full** is
+Installation roots can choose **Full** or **Supervised** and remove rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
 [category defaults](../README.md#installation-policy).
