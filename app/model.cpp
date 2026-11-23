@@ -795,10 +795,10 @@ user's language and refer to work by description, never by task, message, revisi
         " Check earlier reads for the same resultRef before reopening. Use read_tool_result only for required evidence"
         " that is still missing. This retrieves saved evidence without repeating the original action.";
 
-    const nlohmann::ordered_json context = {{"history",input.history},{"soul",input.notes.soul},{"memory",input.notes.memory},
+    const nlohmann::ordered_json historyFirstContext = {{"history",input.history},{"soul",input.notes.soul},{"memory",input.notes.memory},
         {"event",input.event},{"task",input.task},{"feedback",input.feedback},{"evidence",input.evidence}};
     auto content = Json::array({{{"type","input_text"},
-        {"text",context.dump(-1,' ',false,Json::error_handler_t::replace)}}});
+        {"text",historyFirstContext.dump(-1,' ',false,Json::error_handler_t::replace)}}});
     for (const auto& image : input.images) {
         if (!image.attachmentId.empty()) content.push_back({{"type","input_text"},{"text","Untrusted image from message " +
             std::to_string(image.messageId) + ", attachment " + image.attachmentId}});
