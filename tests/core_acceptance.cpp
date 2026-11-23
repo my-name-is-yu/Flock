@@ -3261,3 +3261,191 @@ void exhaustedSavedSpecialistEffect() {
     T3Connections connections(*f.store);
     const auto connection = connections.authenticate(connections.connect(target.environmentId,person.id,4173));
     const auto channel = SessionHandoff(*f.store,session,f.specialistPerson,route).invoke(*connection,
+        {{"threadId",target.threadId},{"botId","alpha"},{"requestId","budget-effect"},
+         {"text","Review the pinned project."},{"mode","coordinate"},{"goal",scope.goal}},
+        [](std::string_view) { return true; }).channel;
+    const auto generation=SessionHandoff(*f.store,session,f.specialistPerson,route).view(person,channel).generation;
+    int modelCalls=0;
+    f.model.script=[&](const ModelInput& input)->Decision {
+        ++modelCalls;
+        check(hasTool(input,"delegate_specialist"),"the useful delegation tool was hidden before reservation");
+        for (int i=0;i<12;++i)
+            f.runtime->startSpecialist(person,{channel,generation,"coord/fuel-"+std::to_string(i),"beta",
+                "Consume one work unit","Report the result",pin});
+        session.pin.reset();
+        return {"delegate_specialist",{{"botId","beta"},{"text","Review the pinned project"},
+            {"doneWhen","Report the result"}},"Delegate the scoped review"};
+    };
+    const auto soul=[](std::string_view) { return std::string{}; };
+    {
+        const auto peers=[&](std::string_view bot) { return f.peers.at(std::string(bot)); };
+        SessionHandoff handoff(*f.store,session,f.specialistPerson,route,f.runtime.get(),peers);
+        const auto waiting=handoff.step(person,channel,f.model,soul);
+        check(waiting.state=="active" && !waiting.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
+              "a transient unavailable input pin settled an outstanding specialist effect");
+        session.pin=pin;
+        const auto view=handoff.step(person,channel,f.model,soul);
+        check(view.state=="budget_exhausted" && view.latestDecision.at("settled") && modelCalls==1 && f.t3.launches==0,
+              "a permanent saved delegation refusal left coordination active or retried its model action");
+    }
+    f.restart();
+    SessionHandoff restarted(*f.store,session,f.specialistPerson,route,f.runtime.get());
+    const auto view=restarted.step(person,channel,f.model,soul);
+    check(view.state=="budget_exhausted" && modelCalls==1 && f.t3.launches==0,
+          "a saved budget refusal admitted work again after restart");
+}
+
+void inferenceInvalidatedByCancel() {
+    Fixture f;
+    const auto id = f.submit();
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool inModel = false, cancelled = false;
+    f.model.script = [&](const ModelInput&) {
+        std::unique_lock lock(mutex);
+        inModel = true;
+        ready.notify_one();
+        ready.wait(lock,[&] { return cancelled; });
+        return work();
+    };
+    f.runtime->tick();
+    std::thread deciding([&] { f.runtime->tick(); });
+    {
+        std::unique_lock lock(mutex);
+        ready.wait(lock,[&] { return inModel; });
+        Store cli(f.directory/"state.db");
+        cli.operate(localOwner,TaskTarget::from(cli.task(id),0),"cancel");
+        cancelled = true;
+        ready.notify_one();
+    }
+    deciding.join();
+    f.reach(id,"cancelled");
+    check(f.t3.launches == 0 && f.logs(id,"decision") == 0,"cancelled inference committed");
+}
+void prefillInFull() {
+    Fixture f;
+    f.read = "prefill";
+    f.restart();
+    auto access = f.store->policy();
+    for (const auto& [name,token] : std::map<std::string,std::string>{{"first","result"},{"second","complete"}}) {
+        auto request = access.requestSecret("alpha",{name});
+        access.submitSecret({"fixture",true},"alpha",request,token);
+    }
+    const std::string hidden = "fixture-hidden-question";
+    access.submitSecret({"fixture",true},"alpha",access.requestSecret("alpha",{"question-token"}),hidden);
+    const auto id = f.submit();
+    f.model.script = [&](const ModelInput& in) {
+        if (in.event.at("kind")=="intake") return work();
+        if (in.event.at("kind")=="question") {
+            check(in.event.dump().find(hidden)==std::string::npos,"Session question reached the model with a secret");
+            return reply();
+        }
+        check(in.event.at("kind")=="result" && in.event.at("report")=="checked" && in.evidence.size()==1,
+              "prefill damaged the settled report or control fields");
+        return complete();
+    };
+    f.reach(id,"running");
+    f.t3.question("run-1");
+    f.t3.runs.at("run-1").question.fields.at(0)["prompt"] = hidden;
+    f.runtime->tick();
+    check(f.task(id).at("question").at("fields").at(0).at("prompt")=="[redacted]" &&
+          f.store->history(id).dump().find(hidden)==std::string::npos,"raw question persisted in Task or journal");
+    f.reach(id,"running");
+    f.t3.finish("run-1");
+    f.reach(id,"completed");
+    check(f.t3.reads==1,"owner could not read its own Session without an explicit share");
+}
+
+}
+
+int main() {
+    for (const auto& [name,run] : std::vector<std::pair<const char*, void(*)()>>{
+            {"invalid decisions",invalidDecisions},{"correct invalid task arguments",correctInvalidTaskArguments},
+            {"failed preflight",failedPreflightIsUnsent},
+            {"replay saved question decision",[] { replayQuestionDecision(); }},{"clarification and failure",ambiguityAndFailure},
+            {"replay question decision after auth recovery",[] { replayQuestionDecision("auth"); }},
+            {"replay question decision after settings reconciliation",[] { replayQuestionDecision("settings"); }},
+            {"deadline, approval and cancel",deadlineApprovalAndCancel},{"additional work budget",budgetAndStaleWaits},
+            {"branch questions",sessionQuestions},{"stale waits",waitsExpireWithReality},
+            {"recover live question across auth and settings waits",connectionRecoveryRestoresSessionQuestion},
+            {"discard expired question after connection recovery",connectionRecoveryDiscardsExpiredSessionQuestion},
+            {"recover the question's model approval",connectionRecoveryRestoresQuestionModelApproval},
+            {"reconsider new directions after question recovery",connectionRecoveryReconsidersNewDirections},
+            {"delivery recovery",recoveredDelivery},{"retry unsent Session answer",unsentAnswerRemainsRetryable},
+            {"cancel during delivery",cancelDuringDelivery},
+            {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
+            {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
+            {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},
+            {"late report recovery for a peer result",lateReportCanRestorePeerResult},
+            {"cancellation with unavailable report",missingReportDoesNotBlockCancellation},
+            {"history reading restart",evidenceResume},{"prefill in Full mode",prefillInFull},
+            {"redacted history pagination",redactedHistoryPagination},
+            {"project owners on task pages",taskPagesShowProjectOwners},
+            {"Bot handoff and restart",peerWorkAndRestart},{"peer work budget shared with direct T3",peerWorkSharesBudgetWithDirectT3Work},
+            {"Peer completion evidence follows the Session read grant",peerCompletionKeepsEvidenceWithinTheReadGrant},
+            {"Bot clarification after a settled Run",peerClarificationAfterRun},
+            {"Task revision during Bot clarification",[] { revisionWaitsForPeerClarification(); }},
+            {"Direct answer during Bot clarification revision",[] { revisionWaitsForPeerClarification(true); }},
+            {"peer completion after environment move",peerCompletionAfterEnvironmentMove},
+            {"recipient revision continues its work exchange",recipientRevisionContinuesTheOpenWorkExchange},
+            {"recipient revision during peer question preserves answer",recipientRevisionDuringPeerQuestionPreservesTheAnswer},
+            {"recipient move during peer question starts a fresh Session",recipientMoveDuringPeerQuestionStartsAFreshSession},
+            {"work recipient move shares its sender's queue",workRecipientMoveSharesSenderQueue},
+            {"work recipient move waits for an unrelated owner",workRecipientMoveWaitsForUnrelatedOwner},
+            {"consultation replies after user instructions",consultationRepliesAfterUserInstructions},
+            {"Bot consultation and permission",peerConsultationAndPermission},
+            {"Requested criteria for first peer work",requestedCriteriaApplyToFirstPeerWork},
+            {"Model budget across a conversation turn and Bot consultation",modelBudgetFollowsBotConsultation},
+            {"Peer result waits for the recipient's conversation turn",peerResultWaitsForRecipientTurn},
+            {"Model budget counts failed attempts",modelBudgetCountsFailedAttempts},
+            {"Model budget permits T3 observation and reconciliation",modelBudgetAllowsT3ObservationAndRecovery},
+            {"Unsuccessful consultations",unsuccessfulConsultationsDoNotComplete},
+            {"Concurrent Bot handoff",concurrentPeerHandoff},{"Consultation own-Session evidence",consultationRestoresOwnEvidence},
+            {"Fresh result prefill failure",freshResultSurvivesUnavailableHistory},
+            {"Prefill persistence failure",prefillPersistenceFailureDoesNotProceed},
+            {"Bot handoff cancellation",peerCancelWithLateSessionResult},{"Bot project cycle",peerProjectCycle},
+            {"Cyclic recipient move is rejected",cyclicPeerMoveIsRejected},
+            {"Accepted peer move constrains new exchanges",pendingPeerMovePreventsNewExchange},
+            {"Accepted peer move constrains other moves",pendingPeerMovePreventsAnotherMove},
+            {"Cancelled peer move frees its pending destination",cancelledPeerMoveFreesItsPendingDestination},
+            {"Legacy cyclic recipient move recovers",recoverLegacyPeerMoveCycle},
+            {"Queued Bot handoff cancellation",peerCancelWhileQueued},
+            {"Bot handoff cancellation during T3 preflight",peerCancelDuringPreflight},
+            {"pinned specialist admission in Full mode",[] { specialistAdmission(SpecialistMode::Single); }},
+            {"Never rule blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::PolicyRevoked); }},
+            {"disconnect blocks pending specialist launch",[] { specialistAdmission(SpecialistMode::Disconnected); }},
+            {"ordinary launch still needs a grant with a full connection",[] {
+                Fixture f;
+                f.store->policy().changeNeverRule(localOwner,Action::environment_launch,"e",true);
+                T3Connections(*f.store).connect("e",localOwner.id,4173);
+                f.model.script = [](const ModelInput&) { return work(); };
+                f.wait(f.submit(),"settings");
+                check(f.t3.launches==0,"the connector granted an ordinary Bot launch");
+            }},
+            {"direct specialist rejects missing findings",[] { specialistAdmission(SpecialistMode::MissingFindings); }},
+            {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},
+            {"direct specialist rejects more than eight findings",[] { specialistAdmission(SpecialistMode::TooManyFindings); }},
+            {"evidence completion rechecks the root pin after model inference",[] { specialistAdmission(SpecialistMode::EvidenceFreshness); }},
+            {"scoped specialist workflow transfers its slot and aggregates evidence",[] { specialistAdmission(SpecialistMode::Workflow); }},
+            {"scoped specialist workflow retains a failed check's findings",[] { specialistAdmission(SpecialistMode::FailedWorkflow); }},
+            {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},
+            {"specialist workflow freezes only work which did not start",[] { specialistAdmission(SpecialistMode::FrozenWorkflow); }},
+            {"specialist workflow settles a rejected worktree without losing its sibling",[] { specialistAdmission(SpecialistMode::RejectedWorkflowInput); }},
+            {"specialist workflow rejects a frozen stage creation",[] { specialistAdmission(SpecialistMode::FrozenWorkflowAdmission); }},
+            {"nested specialist preserves scope, provenance and shared allowance",[] { specialistAdmission(SpecialistMode::Nested); }},
+            {"nested specialist cancellation reaches only its assigned Run",[] { specialistAdmission(SpecialistMode::CancelledNested); }},
+            {"nested workflow pause preserves an admitted grandchild Run",[] { specialistAdmission(SpecialistMode::NestedWorkflowPause); }},
+            {"prelaunch specialist cancellation settles coordinator work",[] { specialistAdmission(SpecialistMode::CancelledPrelaunch); }},
+            {"pause settles prelaunch questions and resumes unrelated work",[] { specialistAdmission(SpecialistMode::PausedPrelaunch); }},
+            {"recovery settles work frozen before cleanup",[] { specialistAdmission(SpecialistMode::InterruptedPauseCleanup); }},
+            {"pause then stop recovery sweeps all prior delegation generations",[] { specialistAdmission(SpecialistMode::InterruptedPauseStopRecovery); }},
+            {"admitted direct question reaches T3 and progresses",[] { specialistAdmission(SpecialistMode::ResidualDirectAnswer); }},
+            {"admitted direct question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualDirectAfterResume); }},
+            {"forwarded answer cannot target a replaced T3 question",[] { specialistAdmission(SpecialistMode::ResidualDirectStaleQuestion); }},
+            {"admitted workflow stage question survives pause and resume",[] { specialistAdmission(SpecialistMode::ResidualStageAfterResume); }},
+            {"exhausted saved delegation settles across restart",exhaustedSavedSpecialistEffect},
+            {"stale in-flight model decision",inferenceInvalidatedByCancel}}) {
+        try { run(); std::cout << "PASS " << name << '\n'; }
+        catch (const std::exception& e) { std::cerr << "FAIL " << name << ": " << e.what() << '\n'; return 1; }
+    }
+}

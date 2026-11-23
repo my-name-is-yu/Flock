@@ -389,3 +389,146 @@ void lateRedactionProjection(const std::filesystem::path& path) {
     handoff.step(owner,channel,bot,soul);
     const auto secretRequest=store.policy().requestSecret("planner",{"late-secret"});
     store.policy().submitSecret(owner,"planner",secretRequest,secret);
+    const auto view=handoff.view(owner,channel);
+    const auto recent=handoff.recent(owner);
+    check(view.latestDecision.dump().find(secret)==std::string::npos,
+          "late-registered secret remained in the persisted decision projection");
+    check(view.pendingQuestion.dump().find(secret)==std::string::npos,
+          "late-registered secret remained in the pending question projection");
+    check(view.permission->goal.find(secret)==std::string::npos,
+          "late-registered secret remained in the goal projection");
+    const auto opaqueId=view.origin.invitation.requestId;
+    check(recent.size()==1 && recent.front().latestDecision.dump().find(secret)==std::string::npos &&
+          recent.front().pendingQuestion.dump().find(secret)==std::string::npos &&
+          recent.front().permission->goal.find(secret)==std::string::npos &&
+          !opaqueId.empty() && view.origin.invitation.requestId==opaqueId &&
+          recent.front().origin.invitation.requestId==opaqueId,
+          "recent projection exposed a late secret or changed an opaque ID");
+}
+
+void modelAttemptBudget(const std::filesystem::path& path, bool coordination, bool throws) {
+    Sessions sessions;
+    const auto routing = intakeWithLimit(2);
+    Bot bot;
+    bot.response = [throws](const ModelInput&) {
+        if (throws) throw std::runtime_error("scripted model failure");
+        ModelTurn turn;
+        turn.calls.push_back({"invalid_action",Json::object(),{}});
+        return turn;
+    };
+    Id channel = 0;
+    {
+        Store store(path);
+        const auto connection = connect(store);
+        SessionHandoff handoff(store,sessions,resolve,routing);
+        channel = invoke(handoff,connection,first,"bounded-model-attempts","Try this request.",
+                         coordination ? "Bounded decision attempts" : "").channel;
+        for (std::size_t call=1;call<=2;++call) {
+            bool failed = false;
+            try {
+                if (coordination) handoff.step(owner,channel,bot,soul);
+                else handoff.consult(owner,channel,bot,soul);
+            } catch (const std::exception&) { failed = true; }
+            check(failed && bot.seen.size()==call && bot.seen.back().config.at("modelCallLimit")==2 &&
+                  handoff.view(owner,channel).state=="active",
+                  "an invalid or throwing decision did not consume one configured attempt");
+        }
+    }
+    Store restarted(path);
+    SessionHandoff handoff(restarted,sessions,resolve,routing);
+    if (coordination) handoff.step(owner,channel,bot,soul);
+    else handoff.consult(owner,channel,bot,soul);
+    check(handoff.view(owner,channel).state=="budget_exhausted" && bot.seen.size()==2,
+          "the exhausted session budget was not persisted across restart");
+    if (coordination) handoff.step(owner,channel,bot,soul);
+    else handoff.consult(owner,channel,bot,soul);
+    check(bot.seen.size()==2,"an exhausted handoff called the model again");
+}
+
+void originMatching() {
+    const Json args{{"threadId","first"},{"botId","planner"},{"requestId","sample"},{"text","Review"}};
+    const auto fixture = [&](std::string_view tool, const Json& input) {
+        return Json{{"type","dynamic_tool"},{"visibility","local"},{"sourceThreadId","first"},
+                    {"runId","active"},{"textTruncated",false},
+                    {"text",Json{{"toolName",tool},{"input",input}}.dump()}};
+    };
+    const auto match = [&](const Json& item) { return matchesThreadInvocation(item,"first","active",args); };
+    check(match(fixture("flock.invoke_flock_bot",args)), "Codex running call did not match");
+    check(match(fixture("mcp__flock__invoke_flock_bot",args)), "Claude running call did not match");
+    check(match(fixture("invoke_flock_bot",args.dump())), "JSON-string arguments did not match");
+    check(!match(fixture("invoke_flock_bot",Json::array())), "array arguments matched");
+    check(!match(fixture("invoke_flock_bot","{bad")), "invalid JSON arguments matched");
+    auto changed = args;
+    changed["mode"] = "consult";
+    check(!match(fixture("invoke_flock_bot",changed)), "different argument presence matched");
+    check(!match(fixture("service.other_tool",args)), "different tool matched");
+    const auto item = fixture("flock.invoke_flock_bot",args);
+    check(!matchesThreadInvocation(item,"first","",args), "finished run matched");
+    for (const auto& diff : {Json{{"visibility","inherited"}},Json{{"visibility","synthetic"}},
+                            Json{{"sourceThreadId","second"}},Json{{"runId","old"}},
+                            Json{{"textTruncated",true}},Json{{"text",28}},Json{{"text","{"}}}) {
+        auto wrong = item;
+        wrong.update(diff);
+        check(!match(wrong), "invalid activity matched");
+    }
+}
+
+void skillExport(const std::filesystem::path& root) {
+    const auto bots = Json::array({
+        {{"id","A___B."},{"name","設計レビュー"},{"role","reviewer"},{"private","secret settings"}},
+        {{"id","a.b"},{"name","Other"}},
+        {{"id",std::string(95,'X')},{"name","Long ID"}}
+    });
+    const auto names = flockSkillNames(bots);
+    check(names.at("A___B.").starts_with("flock-a-b-") && names.at("a.b") != names.at("A___B.") &&
+          names.at(std::string(95,'X')).size() == 64,"invalid skill slugs or unresolved collision");
+    std::filesystem::create_directories(root / "flock-foreign");
+    std::ofstream(root / "flock-foreign" / "SKILL.md") << "foreign";
+    exportFlockSkills(root,bots);
+    const auto read = [](const auto& path) {
+        std::ifstream in(path);
+        return std::string(std::istreambuf_iterator<char>(in),{});
+    };
+    const auto file = root / names.at("A___B.") / "SKILL.md";
+    const auto firstSkill = read(file);
+    check(firstSkill.find("設計レビュー") != firstSkill.npos && firstSkill.find("reviewer") != firstSkill.npos &&
+          firstSkill.find("A___B.") != firstSkill.npos && firstSkill.find("secret settings") == firstSkill.npos,
+          "skill description or stable Bot ID was missing, or config leaked");
+    auto renamed = bots;
+    renamed[0]["name"] = "新しい名前";
+    exportFlockSkills(root,renamed);
+    check(read(file).find("新しい名前") != std::string::npos,"rename did not update the skill");
+    exportFlockSkills(root,Json::array());
+    check(!std::filesystem::exists(file) && std::filesystem::exists(root / "flock" / "SKILL.md") &&
+          read(root / "flock-foreign" / "SKILL.md") == "foreign","cleanup changed an unowned skill");
+}
+
+}
+
+int main() {
+    char name[] = "/tmp/flock-participation.XXXXXX";
+    const auto* dir = mkdtemp(name);
+    if (!dir) return 1;
+    const std::filesystem::path path(dir);
+    try {
+        originMatching();
+        skillExport(path / "skills");
+        multiEnvironment(path / "environments.sqlite3");
+        invocationAndRecovery(path / "invocation.sqlite3");
+        reconcileAfterReceiptWriteContention(path / "receipt-contention.sqlite3");
+        coordinate(path / "coordination.sqlite3");
+        concurrentHumanAndBudget(path / "human-policy.sqlite3");
+        dispatchHistoryCoverage(path);
+        lateRedactionProjection(path);
+        std::size_t attemptCase = 0;
+        for (const auto coordination : {false,true})
+            for (const auto throws : {false,true})
+                modelAttemptBudget(path / ("model-budget-" + std::to_string(attemptCase++) + ".sqlite3"),
+                                   coordination,throws);
+        std::filesystem::remove_all(path);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << '\n';
+        std::filesystem::remove_all(path);
+        return 1;
+    }
+}

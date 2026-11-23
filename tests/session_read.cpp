@@ -341,7 +341,6 @@ void acceptance() {
 
 void approvedCallSurvivesReadPreflightContention() {
     Fixture f;
-    f.share(staging);
     f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
     auto intake = f.intake("alpha");
     intake.config["modelCallLimit"] = 1;

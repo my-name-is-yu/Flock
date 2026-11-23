@@ -633,4 +633,147 @@ esac
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, flags, rewritten, restart=False, expected_error=None):
+    def connect(environment, flags, rewritten, restart=False):
+        server.state["claimedEnvironment"] = environment
+        argv_before = claude_argv.read_text() if claude_argv.exists() else ""
+        with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
+                                         *flags], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "T3 connect did not display the OAuth URL"
+                    assert "authorize Flock" in process.stderr.readline(), "T3 connect failed before OAuth"
+                authorization = process.stderr.readline().strip()
+                request = urllib.request.Request(server.origin + "/fixture",
+                    data=json.dumps({"authorization": authorization}).encode(),
+                    headers={"Content-Type":"application/json"})
+                with urllib.request.urlopen(request, timeout=5):
+                    pass
+                output, errors = process.communicate(timeout=8)
+                assert process.returncode == 0, errors
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        details = json.loads(output)
+        assert "mode" not in details and details["port"] == port
+        assert details["configuredProviders"] == (["codex", "claude"] if rewritten else [])
+        assert ("Restart 'flock run'" in errors) == restart
+        codex = codex_config.read_text()
+        assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
+        assert codex_config.stat().st_mode & 0o777 == 0o600
+        token, = re.findall(r'Authorization = "Bearer (flock-t3-[a-f0-9]{64})"', codex)
+        assert token not in output and token not in errors
+        assert json.loads(claude_state.read_text()) == {
+            "type": "http", "url": endpoint, "headers": {"Authorization": "Bearer " + token},
+        }
+        argv = claude_argv.read_text()
+        assert "flock-t3-" not in argv and (argv != argv_before) == rewritten
+        assert token.encode() not in (state / "flock.sqlite3").read_bytes()
+        for root in [claude_skills, codex_skills]:
+            assert (root / "flock" / "SKILL.md").is_file()
+            skill = (root / "flock-reviewer" / "SKILL.md").read_text()
+            assert "Reviewer" in skill and "botId `reviewer`" in skill and token not in skill
+        return token
+
+    old = connect("env-1", ["--port", str(port)], rewritten=True, restart=True)
+    token = connect("env-1", [], rewritten=True)
+    assert token != old
+    assert connect("env-2", [], rewritten=False) == token
+
+    previous_port = port
+    with socket.socket() as choose_port:
+        choose_port.bind(("127.0.0.1", previous_port))
+        with socket.socket() as replacement:
+            replacement.bind(("127.0.0.1", 0))
+            port = replacement.getsockname()[1]
+    endpoint = f"http://127.0.0.1:{port}/mcp/flock"
+    before_port_change = token
+    token = connect("env-2", ["--port", str(port)], rewritten=True, restart=True)
+    assert token != before_port_change
+
+    for option in ("--headless", "--no-web"):
+        with subprocess.Popen(command + ["run", option], env=env, text=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(headless.stderr, selectors.EVENT_READ)
+                    assert selector.select(5), "headless startup did not warn about the MCP endpoint"
+                    assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+            finally:
+                headless.terminate()
+                headless.wait(timeout=8)
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", port))
+        busy.listen()
+        result = subprocess.run(command + ["run"], env=env, capture_output=True, text=True, timeout=8)
+        assert result.returncode != 0 and f"port {port}" in result.stderr and "in use" in result.stderr
+
+    def ping(value):
+        request = urllib.request.Request(endpoint, data=b'{"jsonrpc":"2.0","id":1,"method":"ping"}',
+                    headers={"Content-Type":"application/json", "Authorization":"Bearer " + value})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as result:
+                return result.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    with subprocess.Popen(command + ["run"], env=env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as daemon:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(daemon.stdout, selectors.EVENT_READ)
+                assert selector.select(8), "Flock did not listen on the saved port"
+                assert daemon.stdout.readline().rstrip().endswith(f":{port}")
+            assert ping(old) == 401 and ping(before_port_change) == 401 and ping(token) == 200
+            subprocess.run(command + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 200 and endpoint in codex_config.read_text() and claude_state.exists()
+            subprocess.run(command + ["t3", "disconnect", "env-2"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert ping(token) == 401
+            assert codex_config.read_text() == original and not claude_state.exists()
+        finally:
+            daemon.terminate()
+            daemon.wait(timeout=8)
+
+
+with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1", 0), Fixture) as server:
+    server.origin = f"http://127.0.0.1:{server.server_port}"
+    server.state = {}
+    server.peer_recovery = sys.argv[2:] == ["peer-recovery"]
+    server.stock_thread = sys.argv[2:] == ["stock-thread"]
+    if server.stock_thread:
+        root = temp + "/project"
+        good = temp + "/worker"
+        wrong = temp + "/wrong-worker"
+        def git(*args):
+            return subprocess.check_output(["/usr/bin/git", *args], stderr=subprocess.DEVNULL, text=True).strip()
+        git("init", "-b", "main", root)
+        with open(root + "/tracked.txt","w",encoding="utf-8") as tracked:
+            tracked.write("pinned input\n")
+        git("-C",root,"add","tracked.txt")
+        commit = ["-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                  "commit", "--allow-empty", "-m"]
+        git(*commit, "original input")
+        pin = git("-C", root, "rev-parse", "HEAD")
+        git(*commit, "advanced input")
+        git("-C", root, "worktree", "add", "--detach", good, pin)
+        git("-C", root, "worktree", "add", "--detach", wrong, "HEAD")
+        server.state.update(stockRoot=root, stockTree=good, stockWrongTree=wrong, stockPin=pin,
+                            stockSource=good + "/tracked.txt", stockSourceContents="pinned input\n",
+                            stockHead=git("-C", root, "rev-parse", "HEAD"))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        if server.peer_recovery:
+            test_peer_recovery(server, sys.argv[1], temp)
+            code = 0
+        elif sys.argv[2:] == ["connection-setup"]:
+            test_connection_setup(server, sys.argv[1], temp)
+            code = 0
+        else:
+            code = subprocess.run([sys.argv[1], server.origin, temp + "/creds"], timeout=30, check=False).returncode
+    finally:
+        server.shutdown()
+    sys.exit(code)
