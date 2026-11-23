@@ -73,7 +73,7 @@ void channelEndpoints(const std::filesystem::path& database) {
                                             {{"authorization","Bearer fixture-sender"},{"person",sender.id}}});
     std::filesystem::permissions(identities,std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     configureWebIdentities(store,identities,cb);
-    check(!store.policy().allows(Person{owner.id},Action::bot_decide,"release"),"Machine owner has a redundant Bot grant");
+    check(!store.policy().allows(Person{owner.id},Action::bot_decide,"release"),"Machine owner unexpectedly has permission to decide for the Bot");
     const std::string sessionCredential(32,'s');
     const auto config = database.parent_path() / "session-bridge.json";
     std::ofstream(config) << Json{{"localMachines",{{"fixture",owner.id}}},{"sessionBridgeCredentialEnv","FLOCK_HTTP_TEST_SESSION_KEY"},
@@ -145,7 +145,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     store.receiveChannel(ChannelKind::slack,"Bearer fixture-channel",event,cb.intake);
     runtime.runConversations();
     check(model.review.at("status") == "pending" && !model.review.contains("reviewUrl") &&
-          model.review.at("reviewInstructions").get<std::string>().find("Access, then Local machine connections") != std::string::npos,
+          model.review.at("reviewInstructions").get<std::string>().find("Sharing and connections, and select Local machine connections") != std::string::npos,
           "Headless channel approval needs Web navigation guidance");
     const auto id = model.review.at("connectionId");
 
@@ -156,7 +156,7 @@ void channelEndpoints(const std::filesystem::path& database) {
     event["externalMessageId"] = "local-with-web";
     Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),201);
     runtime.runConversations();
-    const std::string settings = "/settings/release/access";
+    const std::string settings = "/settings/release";
     check(model.review.at("connectionId") == id && model.review.at("reviewUrl") == reviewBrowser.origin + settings + "#local-connections",
           "External approval did not use the bound Web origin for the pending request");
     const httplib::Headers navigation{{"Sec-Fetch-Site","cross-site"},{"Sec-Fetch-Mode","navigate"},{"Sec-Fetch-Dest","document"}};

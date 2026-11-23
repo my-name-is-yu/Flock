@@ -8,7 +8,6 @@ let actionRevision = 0;
 let question;
 let rendered = '';
 let recentRendered = '';
-let connectionsRendered;
 const workAnswerDrafts = new Map();
 const handoffLabels = {
   active: 'Active', paused: 'Paused in Flock',
@@ -230,7 +229,6 @@ async function pollHandoffs() {
   refreshing = true;
   const revision = actionRevision;
   try {
-    await loadConnections();
     const recent = await request('');
     if (busy || revision !== actionRevision) return;
     renderRecent(recent);
@@ -240,19 +238,6 @@ async function pollHandoffs() {
     }
   } catch {
   } finally { refreshing = false; }
-}
-
-async function loadConnections() {
-  const response = await fetch('/api/t3-connections');
-  if (!response.ok) throw new Error('Could not load T3 connections');
-  const connections = await response.json();
-  const key = JSON.stringify(connections);
-  if (key === connectionsRendered) return;
-  connectionsRendered = key;
-  const { environments } = connections;
-  $('connect-hint').hidden = environments.length > 0;
-  $('connections').hidden = environments.length === 0;
-  $('connections').replaceChildren(...environments.map(listItem));
 }
 
 $('refresh').addEventListener('click', () => void run(async () => {
@@ -281,7 +266,6 @@ $('answer').addEventListener('submit', (event) => {
 });
 
 void (async () => {
-  await loadConnections();
   await loadRecent();
   if (channel) render(await request(`/${channel}`));
 })().catch(() => { status.textContent = 'Session handoffs are unavailable. Check your Flock sign-in.'; });

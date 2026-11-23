@@ -1,4 +1,5 @@
 #include "fake_git.hpp"
+#include "flock/board_inbox.hpp"
 #include "model.hpp"
 
 #include <fstream>
@@ -470,7 +471,7 @@ void accessAndActions() {
         {"git_manage_issue",{{"action","update"},{"issueNumber",2},{"state","closed"},{"labels",Json::array()}}},
     };
     for (auto action : {Action::repository_pr,Action::repository_issues})
-        store.policy().changeNeverRule(localOwner,action,repoGrant,true);
+        store.policy().changeNeverRule(localOwner,action,repositoryTarget,true);
     auto readOnly = openArgs();
     readOnly["taskId"] = task;
     check(invoke(store,runtime,script,"read-is-not-pr","git_open_pr",readOnly).at("ok") == false &&
@@ -483,7 +484,7 @@ void accessAndActions() {
     check(deniedIssueUpdate.at("error") == "Repository access denied" && host->hostCalls == 0,
           "repository read or write allowed an issue update");
     for (auto action : {Action::repository_pr,Action::repository_issues})
-        store.policy().changeNeverRule(localOwner,action,repoGrant,false);
+        store.policy().changeNeverRule(localOwner,action,repositoryTarget,false);
     for (auto action : {Action::repository_read,Action::repository_write,Action::repository_pr,
                         Action::repository_issues,Action::repository_review})
         store.policy().changeNeverRule(localOwner,action,"github.com/*/private",true);
@@ -494,7 +495,7 @@ void accessAndActions() {
     int counter = 0;
     for (const auto& [tool,args] : commands) {
         const auto denied = invoke(store,runtime,script,"denied-" + std::to_string(++counter),tool,argsFor(args,"org/private"));
-        check(denied.at("ok") == false && denied.at("error") == "Repository access denied","ungranted repo reached Git host");
+        check(denied.at("ok") == false && denied.at("error") == "Repository access denied","blocked repo reached Git host");
     }
     check(host->hostCalls == 0 && host->createCalls == 0 && host->logCalls == 0,"denied call reached adapter");
     host->upstreamPermitted = false;
@@ -503,6 +504,13 @@ void accessAndActions() {
     host->upstreamPermitted = true;
     const auto find = invoke(store,runtime,script,"find","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
     check(find.at("repos") == Json::array({repoName}),"repository discovery exposed ungranted repositories");
+    const auto repoTarget = GitRepository{hostName,repoName}.resource();
+    store.policy().setMode(localOwner,"supervised");
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,true);
+    const auto askFirst = invoke(store,runtime,script,"ask-first-repos","git_find_repos",{{"host",hostName},{"query","FLOCK"}});
+    check(askFirst.at("repos").empty(),"Discovery exposed a repository requiring approval");
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,repoTarget,false);
+    store.policy().setMode(localOwner,"full");
     const auto later = invoke(store,runtime,script,"later-repos","git_find_repos",
         {{"host",hostName},{"query","FLOCK"},{"page",11}});
     check(later.at("repos").empty() && later.at("nextPage") == 12,
@@ -525,11 +533,20 @@ void accessAndActions() {
     auto cross = argsFor(openArgs("cross"),repoName);
     cross["headRepo"] = "fork/private";
     check(invoke(store,runtime,script,"cross-repo","git_open_pr",cross).at("ok") == false &&
-          host->createCalls == 0,"ungranted fork was used");
+          host->createCalls == 0,"blocked fork was used");
+    const auto fork = GitRepository{hostName,"fork/public"}.resource();
+    cross["headRepo"] = "fork/public";
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,fork,true);
+    store.policy().changeRule(localOwner,RuleKind::allow,Action::repository_pr,repoTarget,true);
+    store.policy().setMode(localOwner,"supervised");
+    check(invoke(store,runtime,script,"cross-repo-head-ask","git_open_pr",cross).at("error") ==
+          "Head repository read access denied" && host->createCalls == 0,
+          "A base PR Allow bypassed the fork's Ask-first read rule");
+    store.policy().setMode(localOwner,"full");
     for (const auto& [tool,args] : commands) {
-        const auto name = "granted-" + std::to_string(++counter);
+        const auto name = "allowed-" + std::to_string(++counter);
         const auto result = invoke(store,runtime,script,name,tool,argsFor(args,repoName));
-        check(result.at("ok") == true,"granted action failed: " + tool + " " + result.dump());
+        check(result.at("ok") == true,"allowed action failed: " + tool + " " + result.dump());
     }
     for (auto [label,args] : std::vector<std::pair<std::string,Json>>{
             {"create",{{"action","create"},{"title","Requires a task"}}},
@@ -704,7 +721,7 @@ void taskReadRecovery() {
     }
     Store store(path);
     const auto blockRead = [&](bool block) {
-        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,block);
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repositoryTarget,block);
     };
     int phase = 0;
     Id saved = 0;
@@ -739,6 +756,37 @@ void taskReadRecovery() {
     for (int i = 0; i < 8 && store.task(task).at("state") != "completed"; ++i) runtime.tick();
     check(store.task(task).at("state") == "completed" && phase == 3 && host->logCalls == 5,
           "recovery did not use saved snapshots through both access checks");
+}
+
+void approvedTaskReadProjects() {
+    Directory directory;
+    Store store(directory.path/"state.db");
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    int phase = 0;
+    script.onTaskResult = [&](const ModelInput& input) -> Decision {
+        if (phase++ == 0)
+            return {"git_repo_info",{{"host",hostName},{"repo",repoName}},{}};
+        const auto& read = input.event.at("gitResults").back();
+        check(read.at("sourceTool") == "git_repo_info" && read.at("result").at("ok") == true,
+              "Ask-first hid its approved Git read");
+        return {"complete",{{"report","Reviewed repository information"}},{}};
+    };
+    store.policy().setMode(localOwner,"supervised");
+    store.policy().changeRule(localOwner,RuleKind::allow,Action::environment_launch,intake().environmentId,true);
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,GitRepository{hostName,repoName}.resource(),true);
+    Runtime runtime(store,script,sessions,[](auto) { return std::string{}; },options(host));
+    const auto task = store.submit(intake(),&localOwner);
+    for (int i=0; i<8 && store.inbox(localOwner).empty(); ++i) runtime.tick();
+    const auto items = store.inbox(localOwner);
+    check(items.size()==1 && host->hostCalls==0,"Git read reached the host before approval");
+    const auto& card = items.at(0);
+    store.decideInbox(localOwner,{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),card.at("waitId"),
+        card.at("taskId"),card.at("targetRevision"),card.at("targetGeneration")},"allow_once");
+    for (int i=0; i<8 && store.task(task).at("state")!="completed"; ++i) runtime.tick();
+    check(phase==2 && host->hostCalls==1 && store.task(task).at("state")=="completed",
+          "Approved Git read did not settle through the task");
 }
 
 void discoveryReplayRevocation() {
@@ -827,9 +875,9 @@ void redaction() {
     const std::string credential = "fixture-pr-credential-value";
     const std::string secret = "fixture-protected-other-bot-value";
     store.protectGitCredential(credential);
-    auto access = store.policy();
-    const auto input = access.requestSecret("other",{"example"});
-    access.submitSecret(localOwner,"other",input,secret);
+    auto policy = store.policy();
+    const auto input = policy.requestSecret("other",{"example"});
+    policy.submitSecret(localOwner,"other",input,secret);
     const auto task = store.submit(intake());
     host->result["description"] = credential + " " + secret;
     host->result[credential] = secret;
@@ -925,18 +973,18 @@ void notificationBudgetAndRevocation() {
     check(history.dump().find("CI failed. linker: missing symbol") != std::string::npos,"Approved model call did not resume");
 
     script.onNotification = [&] {
-        store.policy().changeNeverRule(localOwner,Action::repository_read,repoGrant,true);
+        store.policy().changeNeverRule(localOwner,Action::repository_read,repositoryTarget,true);
     };
     const auto replies = historyCount(store,task,"conversation_reply");
     check(store.receiveGitWebhook({hostName,"revoked-turn",repoName,"comment","created",{1},sha,"An update",0}),
           "Could not enqueue new event");
     runtime.runConversations();
     check(script.notifications == 2 && historyCount(store,task,"conversation_reply") == replies,
-          "A queued notification posted a reply after grant revocation");
+          "A queued notification posted a reply after adding a Never rule");
     check(store.receiveGitWebhook({hostName,"revoked-event",repoName,"comment","created",{1},sha,"Another update",0}),
           "Could not enqueue event after revocation");
     runtime.runConversations();
-    check(historyCount(store,task,"git_webhook") == 2,"Revoked grant received another task event");
+    check(historyCount(store,task,"git_webhook") == 2,"A blocked repository received another task event");
 }
 
 void schemas() {
@@ -997,6 +1045,7 @@ int main() {
         taskMutationRestart(false);
         taskMutationRestart(true);
         taskReadRecovery();
+        approvedTaskReadProjects();
         discoveryReplayRevocation();
         boundedTaskReadAndForeignReference(false);
         boundedTaskReadAndForeignReference(true);

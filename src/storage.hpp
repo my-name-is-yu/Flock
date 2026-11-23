@@ -96,6 +96,14 @@ private:
 Id requiredInteger(const Json&, std::string_view key, Id minimum = 1);
 std::string redactT3Tokens(std::string);
 
+struct PolicyOrigin {
+    std::string bot, scope, requester;
+    Id anchor = 0, turn = 0, task = 0, revision = 0, generation = 0;
+    bool background = false;
+};
+enum class ApprovalGate { allow, waiting, denied, expired, stale };
+std::string_view approvalError(ApprovalGate);
+
 struct Store::Impl {
     sqlite3* db = nullptr;
     const std::filesystem::path path;
@@ -109,6 +117,7 @@ struct Store::Impl {
     WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
+    std::function<Seconds()> policyClock = unixTime;
     void openSchema();
     void initializeSchema();
     void initializeChannelSchema();
@@ -120,9 +129,13 @@ struct Store::Impl {
     Json channelContext(Id, std::string_view bot, std::vector<ModelImage>* images = nullptr, std::string_view viewer = {}) const;
     std::optional<ChannelResource> channelAttachment(Id source, Id attachment, std::string_view bot) const;
     Json channelTool(Id, std::string_view bot, const Decision&);
+    void channelApprovalNotice(Id source);
+    void channelNotice(Id source, std::string_view bot, std::string_view reason, bool supportsReplies,
+                       std::string_view followUp = {});
     void channelLimitation(Id source, std::string_view bot, std::string_view reason, bool supportsReplies);
     bool permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const;
     Json localMachineTool(std::string_view bot, std::string_view scope, const Decision&);
+    std::optional<Resource> channelToolPolicy(Id, std::string_view tool);
     void queueChannelReply(Id source, Id reply, const Json&);
     void queueChannelTaskUpdate(Id task, Id entry, std::string_view kind, const Json&);
     bool channelDeliveryDue() const;
@@ -131,6 +144,16 @@ struct Store::Impl {
     bool permitsChannel(std::string_view bot, const ChannelOrigin&, std::string_view sender, std::string_view person,
                         std::string_view operation) const;
     void initializePolicySchema();
+    PolicyOrigin policyOrigin(const conversation::Message&);
+    PolicyOrigin taskPolicyOrigin(const Json&);
+    ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation,
+                               const Json& payload, Seconds now, bool claim = true);
+    bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const;
+    void settlePolicyApprovals(std::optional<Seconds> now = {});
+    void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
+    Json policyApprovalCards(const Person&, std::string_view bot);
+    void releasePolicyTurn(Id turn);
+    void releasePolicyTask(Id approval, std::string_view resolution);
     void initializeParticipationSchema();
     void initializeRootDeliverySchema();
     void initializeSessionHandoffSchema();
@@ -154,7 +177,7 @@ struct Store::Impl {
     void initializeBoardInboxSchema();
     void initializeGitSchema();
     Json gitTool(GitHost&, std::string_view bot, Id task, const Json& routing, const Decision&,
-                 std::string_view invocation, std::optional<Id> generation = {});
+                 std::string_view invocation, std::optional<Id> generation = {}, Id turn = 0);
     void projectTaskGitReads(GitHost&, const Json& task, Json& event);
     Json saveTaskGitRead(Id task, std::string_view invocation, std::string_view tool, const Json& target, const Json& result);
     Json openGitPr(GitHost&, const GitContext&, const GitOpenPr&, std::string_view invocation, bool newIntent);
@@ -176,8 +199,8 @@ struct Store::Impl {
     void recordTaskBlocker(Json&, std::string_view reason, Id waitId);
     void withdrawTaskQuestion(Json&, Id waitId);
     SecretRedactor redactor(std::string_view bot, Json* revision = nullptr) const;
-    Json accessTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
-    Json sessionReadTool(std::string_view bot, std::string_view channelScope, const Json& routing, const Decision&, T3&);
+    Json botSettingsTool(std::string_view bot, const Person& actor, Id sourceMessage, const Json& routing, const Decision&);
+    Json sessionReadTool(const conversation::Message&, int step, const Decision&, T3&);
     void authorizeSessionHistory(std::string_view bot, std::string_view channelScope, Json& steps, T3&);
     Json readiness(std::string_view bot, const Json& routing, const Json& args, T3&);
     Seconds environmentTimeout(std::string_view bot, std::string_view environment, const Json& config) const;

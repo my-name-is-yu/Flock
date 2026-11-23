@@ -18,7 +18,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 2;
+constexpr Id schemaVersion = 3;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -549,10 +549,15 @@ ORDER BY 1,2
     return changes;
 }
 
-Id Store::submit(const Intake& item) {
+Id Store::submit(const Intake& item, const Person* requester) {
     std::lock_guard lock(p_->mutex);
     Transaction transaction(p_->db);
+    if (requester && !policy().allows(*requester,Action::bot_talk,item.botId)) throw DecisionDenied{};
     const auto id = p_->submit(item);
+    if (requester) {
+        p_->sharedRedactor().requirePublic(requester->id);
+        p_->exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{requester->id,id});
+    }
     transaction.commit();
     return id;
 }
@@ -594,6 +599,7 @@ Id Store::submitRequest(const Person& actor, std::string_view bot, std::string_v
     if (!id) {
         p_->redactor(bot).requirePublic({actor.id,clientId});
         id = p_->submit(intake);
+        p_->exec("UPDATE tasks SET data=json_set(data,'$.requester',?) WHERE id=?",{actor.id,*id});
         p_->exec("INSERT INTO task_request_receipts(bot_id,person_id,client_request_id,request_digest,task_id)"
                  " VALUES(?,?,?,?,?)", {bot,actor.id,clientId,encoded,*id});
     }
@@ -685,8 +691,8 @@ WHERE t.id=? AND t.bot_id=? AND d.parent_id IS NOT NULL AND c.person_id=?
 )SQL",{id,bot,actor.id,id,bot,actor.id});
         if (!origin.next()) throw DecisionDenied{};
         const auto participation = authorizeParticipation(actor,origin.number(0));
-        const auto* grant = std::get_if<CoordinationActivation>(&participation);
-        if (!grant || !grant->binding.request.allowDelegation) throw DecisionDenied{};
+        const auto* activation = std::get_if<CoordinationActivation>(&participation);
+        if (!activation || !activation->binding.request.allowDelegation) throw DecisionDenied{};
     }
     auto task = load(id);
     if (task.at("botId") != bot || task.value("currentRevision",Id{0}) != revision) throw RequestChanged{};

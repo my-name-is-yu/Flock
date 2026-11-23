@@ -1,4 +1,5 @@
 #include "flock/channels.hpp"
+#include "flock/board_inbox.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -109,7 +110,7 @@ Intake intake(std::string_view bot, std::string_view text) {
     return {std::string(bot),std::string(text),"env","project",{{"modelCallLimit",20}}};
 }
 
-void grant(Store& store, std::string_view bot) {
+void shareBot(Store& store, std::string_view bot) {
     store.policy().setMember(root,bot,owner.id,true);
 }
 
@@ -176,7 +177,7 @@ void channels(const std::filesystem::path& database) {
     {
         Store store(database);
         connect(store,transport);
-        grant(store,"release");
+        shareBot(store,"release");
         rejects([&] { store.receiveChannel(slack,"bad",screenshot,intake); });
         const auto target = channelPolicyTarget({slack,"workspace","",""});
         store.policy().changeNeverRule(root,Action::channel_read,target,true);
@@ -323,9 +324,13 @@ void taskUpdates(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
     connect(store,transport);
-    grant(store,"release");
+    shareBot(store,"release");
     const auto channel = ChannelKind::slack;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    store.setWebIdentityResolver([](std::string_view person) -> std::optional<bool> {
+        if (person == owner.id) return false;
+        return std::nullopt;
+    });
     auto original = event("private-origin","start","Start the private release task");
     auto publish = event("private-origin","publish","Publish the preview");
 
@@ -344,6 +349,26 @@ void taskUpdates(const std::filesystem::path& database) {
     check(transport->effects.size() == 2 && transport->effects.at(0).at("action") == "reply" &&
           transport->effects.at(0).at("payload").at("text").get<std::string>().find("preview URL") != std::string::npos,
           "Publishing without a preview origin reached transport or did not explain the limitation");
+    auto screenshot = event("private-origin","screenshot","Inspect a screenshot");
+    screenshot["attachments"] = Json::array({{{"name","screenshot.png"},{"mimeType","image/png"},
+                                               {"contentBase64",encodeAttachment(image)}}});
+    const auto channelTarget = channelPolicyTarget({channel,"workspace","",""});
+    store.policy().setMode(root,"supervised");
+    store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,true);
+    bool inspected = false;
+    auto taskModel = model.decideNext;
+    model.decideNext = [&](const ModelInput& input) {
+        check(input.images.empty() && input.event.at("attachments").size()==1,
+              "Ask-first exposed image bytes or hid the attachment identifier");
+        inspected = true;
+        return reply("I need approval to inspect it.");
+    };
+    store.receiveChannel(channel,"fixture-auth",screenshot,intake);
+    runtime.runConversations();
+    check(inspected && transport->effects.size()==3,"Image approval was not exercised");
+    store.policy().changeRule(root,RuleKind::ask,Action::channel_read,channelTarget,false);
+    store.policy().setMode(root,"full");
+    model.decideNext = std::move(taskModel);
     const auto receipt = store.receiveChannel(channel,"fixture-auth",original,intake);
     for (int i = 0; i < 4; ++i) runtime.tick();
     const auto taskId = store.activeTasks("release").at(0).at("id").get<Id>();
@@ -361,10 +386,22 @@ void taskUpdates(const std::filesystem::path& database) {
                     "The release needs a target"};
         return reply("Unexpected turn");
     };
+    const auto target = channelPolicyTarget({channel,"workspace","",""});
+    store.policy().setMode(root,"supervised");
+    store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,true);
     for (int i = 0; i < 4; ++i) runtime.tick();
-    check(transport->effects.size() == 4 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
+    check(transport->effects.size() == 4,"Task question sent before Ask-first approval");
+    const auto items = store.inbox(owner);
+    const auto card = std::ranges::find_if(items,[](const auto& item) { return item.at("itemKind")=="policy_approval"; });
+    check(card != items.end(),"Task question did not create an approval");
+    store.decideInbox(owner,{card->at("botId"),InboxKind::policy_approval,card->at("itemId"),0,0,0,0},"allow_once");
+    store.policy().changeRule(root,RuleKind::ask,Action::channel_post,target,false);
+    runtime.tick();
+
+    check(transport->effects.size() == 5 && transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
           transport->effects.back().at("payload").at("suggestions") == Json::array({"Preview","Production"}),
           "Task question was not delivered to the originating thread");
+    store.policy().setMode(root,"full");
 
     model.decideNext = [&](const ModelInput& input) -> Decision {
         check(input.task.at("tasks").empty() && input.history.empty(),"Another thread received private task context");
@@ -391,14 +428,14 @@ void taskUpdates(const std::filesystem::path& database) {
     check(store.decisionHistory(root).at(0).at("decidedBy") == owner.id,"Channel decision lost the verified sender");
     t3.observeRun = [](const RunRef&) { return finished(); };
     for (int i = 0; i < 5; ++i) runtime.tick();
-    check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 7 &&
+    check(store.task(taskId).at("state") == "completed" && transport->effects.size() == 8 &&
           transport->effects.back().at("origin").at("threadRef") == "private-origin" &&
           transport->effects.back().at("payload").at("text") == "Private release completed.",
           "Task completion was not delivered to the originating thread");
     check(store.receiveChannel(channel,"fixture-auth",original,intake) == receipt,"Task-start event changed on replay");
     store.receiveChannel(channel,"fixture-auth",answer,intake);
     runtime.runConversations();
-    check(transport->effects.size() == 7,"Task replay repeated a channel update");
+    check(transport->effects.size() == 8,"Task replay repeated a channel update");
 }
 
 void workflowContextIsWebScoped(const std::filesystem::path& database) {
@@ -408,7 +445,7 @@ void workflowContextIsWebScoped(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
     connect(store,transport);
-    grant(store,"release");
+    shareBot(store,"release");
     const auto channel = ChannelKind::slack;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
 
@@ -466,7 +503,7 @@ void sessionEvidence(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
     connect(store,transport);
-    grant(store,"release");
+    shareBot(store,"release");
     const auto channel = ChannelKind::slack;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     model.decideNext = [](const ModelInput& input) -> Decision {
@@ -549,7 +586,7 @@ void taskQuestionChoices(const std::filesystem::path& database) {
     auto transport = std::make_shared<RecordedTransport>();
     transport->loseNextSlackReply = false;
     connect(store,transport);
-    grant(store,"release");
+    shareBot(store,"release");
     const auto channel = ChannelKind::slack;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     t3.observeRun = [](const RunRef& run) {
@@ -627,8 +664,8 @@ void taskQuestionChoices(const std::filesystem::path& database) {
 
 void local(const std::filesystem::path& database, const std::string& path) {
     Store store(database);
-    grant(store,"release");
-    grant(store,"peer");
+    shareBot(store,"release");
+    shareBot(store,"peer");
     store.connectLocalMachine("laptop",hostLocalMachine(owner.id));
     Script model;
     SessionAdapter t3;
@@ -708,7 +745,7 @@ void local(const std::filesystem::path& database, const std::string& path) {
     turn("release",request(b),true);
     store.decideLocalConnection(owner,store.localConnections(owner).at(0).at("id"),false);
     rejects([&] { operation(b,"read_file",path); });
-    check(store.policy().rules() == environments,"Local approval created reusable grants");
+    check(store.policy().rules() == environments,"Local approval created reusable policy rules");
     bool unchanged = false;
     model.decideNext = [&](const ModelInput& input) {
         const auto& steps = input.event.at("turn");

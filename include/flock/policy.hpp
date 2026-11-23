@@ -42,9 +42,13 @@ enum class Action {
     channel_post,
     t3_coordinate,
     t3_send,
-    automation_change
+    automation_change,
+    email_send,
+    destructive_write
 };
 enum class PolicyResult { allow, ask, deny };
+enum class RuleKind { allow, ask, never };
+std::optional<RuleKind> parseRuleKind(std::string_view);
 std::string_view actionName(Action);
 std::optional<Action> parseAction(std::string_view);
 
@@ -57,6 +61,8 @@ inline const Person localOwner{"local-owner",true};
 struct Resource {
     Action action;
     std::string target;
+    // Verified exception to the category default, still subject to rules.
+    bool routine = false;
     static Resource sessionRead(std::string_view environment, std::string_view thread);
 };
 struct SecretRef { std::string name; bool valid() const; };
@@ -77,14 +83,18 @@ public:
     bool allows(std::string_view bot, const Resource& resource) const {
         return allows(bot,resource.action,resource.target);
     }
+    PolicyResult check(std::string_view bot, const Resource&) const;
+    bool forbidden(std::string_view bot, Action, std::string_view target) const;
     std::string mode() const;
+    void setMode(const Person&, std::string_view);
+    void changeRule(const Person&, RuleKind, Action, std::string_view target, bool add);
     Json rules() const;
     void changeNeverRule(const Person&, Action, std::string_view target, bool add);
     using PublishOwnedBot = std::function<void(std::string_view, const std::function<void()>&)>;
     Json createOwnedBot(const Person&, const std::function<Json(const PublishOwnedBot&)>&);
     void setOwner(const Person& creator, std::string_view bot);
     void setMember(const Person&, std::string_view bot, std::string_view person, bool add);
-    Json administration(const Person&, std::string_view bot) const;
+    Json botSettings(const Person&, std::string_view bot) const;
     void executeSessionResource(std::string_view environment, const RunRef&, const Resource&,
                                 const std::function<bool()>& upstreamPermits,
                                 const std::function<void(Id ownerTask)>& execute) const;
@@ -97,10 +107,11 @@ public:
                       const ApplyBotChange&, const ReconcileBotCreation* onExhausted = nullptr);
     Id requestSecret(std::string_view bot, const SecretRef&, Id sourceMessage = 0);
     void submitSecret(const Person&, std::string_view bot, Id request, std::string_view value);
-    void useSecret(Id task, const SecretRef&, bool upstreamPermitted,
+    void useSecret(Id task, const SecretRef&, std::string_view destination, std::string_view operation, bool upstreamPermitted,
                    const std::function<void(std::string_view)>& adapter) const;
 private:
     explicit Policy(Store::Impl& db) : db_(db) {}
+    void writeRule(const Person&, RuleKind, Action, std::string_view target, bool add, bool fromCard);
     void fulfillSecret(const Person&, std::string_view bot, Id request, std::string_view value);
     void audit(const Person&, std::string_view bot, std::string_view action, const Json& details);
     Store::Impl& db_;

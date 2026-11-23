@@ -41,8 +41,10 @@ CREATE TABLE IF NOT EXISTS thread_deliveries(
  generation INTEGER NOT NULL, text TEXT NOT NULL, state INTEGER NOT NULL DEFAULT 0,
  message_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL DEFAULT '',
  observed_run_id TEXT NOT NULL DEFAULT '', cursor INTEGER NOT NULL, input_position INTEGER,
- claimed_at INTEGER)
+ claimed_at INTEGER, approval_anchor INTEGER NOT NULL DEFAULT 0)
 )SQL");
+    if (!query("SELECT 1 FROM pragma_table_info('thread_deliveries') WHERE name='approval_anchor'").next())
+        exec("ALTER TABLE thread_deliveries ADD COLUMN approval_anchor INTEGER NOT NULL DEFAULT 0");
     exec("CREATE INDEX IF NOT EXISTS thread_deliveries_channel ON thread_deliveries(channel_id,state)");
 }
 
@@ -59,8 +61,8 @@ void RootDelivery::prepare(Id channel, Id generation, std::string_view commandId
         return;
     }
     db.exec(R"SQL(
-INSERT INTO thread_deliveries(command_id,channel_id,generation,text,cursor)
-SELECT ?,channel_id,generation,?,? FROM session_controls WHERE channel_id=? AND generation=? AND state='active'
+INSERT INTO thread_deliveries(command_id,channel_id,generation,text,cursor,approval_anchor)
+SELECT ?,channel_id,generation,?,?,human_input_position FROM session_controls WHERE channel_id=? AND generation=? AND state='active'
 )SQL",{commandId,outward,observationCursor,channel,generation});
     if (!sqlite3_changes(db.db)) throw Conflict("Session sending is paused or has stopped");
 }
@@ -70,10 +72,10 @@ RootDeliveryView RootDelivery::deliver(const Person& person, Id channel, std::st
     ThreadTarget target;
     std::string auth, text;
     bool coordination;
-    Id cursor;
+    Id cursor, anchor;
     auto rowFor = [&] {
         return db.query(R"SQL(
-SELECT d.command_id,d.state,d.message_id,d.run_id,d.mode,d.observed_run_id,d.text,d.cursor,s.auth_generation
+SELECT d.command_id,d.state,d.message_id,d.run_id,d.mode,d.observed_run_id,d.text,d.cursor,s.auth_generation,d.approval_anchor
 FROM thread_deliveries d JOIN session_controls s ON s.channel_id=d.channel_id
 WHERE d.channel_id=? AND d.command_id=?
 )SQL",{channel,commandId});
@@ -89,6 +91,7 @@ WHERE d.channel_id=? AND d.command_id=?
         text = row.string(6);
         cursor = row.number(7);
         auth = row.string(8);
+        anchor = row.number(9);
     }
     const auto page = coordination ? session_.dispatchHistory(target,cursor) : session_.read(target,std::nullopt);
     if (!page) return {std::string(commandId),State::Prepared,{},{}};
@@ -103,9 +106,19 @@ WHERE d.channel_id=? AND d.command_id=?
         Transaction tx(db.db);
         const auto participation = db.authorizeParticipation(person,channel);
         const auto& origin = channelOf(participation).origin.invitation;
-        const bool denied = !Policy(db).allows(origin.botId,Action::t3_send,
-                                               Resource::sessionRead(target.environmentId,target.threadId).target);
-        const bool reject = stale || denied;
+        auto gate = ApprovalGate::stale;
+        if (!stale) {
+            const auto resource = Resource{Action::t3_send,Resource::sessionRead(target.environmentId,target.threadId).target,
+                                           !coordination};
+            const PolicyOrigin requester{origin.botId,"t3/" + std::to_string(channel),person.id,anchor,0,0,0,0,true};
+            gate = db.approveAction(requester,resource,"root/" + std::string(commandId),Json{{"text",text}},
+                                    db.policyClock());
+        }
+        if (gate == ApprovalGate::waiting) {
+            tx.commit();
+            return {std::string(commandId),State::Prepared,{},{}};
+        }
+        const bool reject = gate != ApprovalGate::allow;
         db.exec(R"SQL(
 UPDATE thread_deliveries SET state=?,claimed_at=CASE WHEN ? THEN NULL ELSE ? END
 WHERE channel_id=? AND command_id=? AND state=? AND EXISTS(

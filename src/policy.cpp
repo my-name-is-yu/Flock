@@ -64,7 +64,40 @@ constexpr std::pair<Action,std::string_view> actions[] = {
     {Action::t3_coordinate,"t3.coordinate"},
     {Action::t3_send,"t3.send"},
     {Action::automation_change,"automation.change"},
+    {Action::email_send,"email.send"},
+    {Action::destructive_write,"data.destructive_write"},
 };
+
+constexpr std::string_view ruleName(RuleKind kind) {
+    switch (kind) {
+    case RuleKind::allow: return "allow";
+    case RuleKind::ask: return "ask";
+    case RuleKind::never: return "never";
+    }
+    throw Conflict("Unknown policy rule");
+}
+
+bool supervisedCategory(Action action) {
+    switch (action) {
+    case Action::repository_write:
+    case Action::repository_pr:
+    case Action::repository_review:
+    case Action::repository_issues:
+    case Action::channel_post:
+    case Action::email_send:
+    case Action::environment_launch:
+    case Action::t3_send:
+    case Action::bot_create:
+    case Action::bot_rename:
+    case Action::automation_change:
+    case Action::destructive_write:
+    case Action::secret_use:
+    case Action::mcp_invoke:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // Track the last wildcard and retry it with one more byte when needed.
 bool targetMatches(std::string_view pattern, std::string_view target) {
@@ -97,6 +130,12 @@ std::optional<Action> parseAction(std::string_view name) {
     return {};
 }
 
+std::optional<RuleKind> parseRuleKind(std::string_view name) {
+    for (auto kind : {RuleKind::allow,RuleKind::ask,RuleKind::never})
+        if (ruleName(kind) == name) return kind;
+    return {};
+}
+
 Resource Resource::sessionRead(std::string_view environment, std::string_view thread) {
     return {Action::session_read,Json::array({environment,thread}).dump()};
 }
@@ -106,10 +145,22 @@ Policy Store::policy() { return Policy(*p_); }
 void Store::Impl::initializePolicySchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS web_identity_required(id INTEGER PRIMARY KEY CHECK(id=1));
-CREATE TABLE IF NOT EXISTS policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode='full'));
-INSERT OR IGNORE INTO policy_settings VALUES(1,'full');
-CREATE TABLE IF NOT EXISTS policy_rules(kind TEXT NOT NULL CHECK(kind IN ('never')),action TEXT NOT NULL,
- target TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(kind,action,target));
+CREATE TABLE IF NOT EXISTS policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode IN ('full','supervised')), revision INTEGER NOT NULL);
+INSERT OR IGNORE INTO policy_settings VALUES(1,'full',0);
+CREATE TABLE IF NOT EXISTS policy_rules(id INTEGER PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('allow','ask','never')),
+ action TEXT NOT NULL,target TEXT NOT NULL,created_at INTEGER NOT NULL,exact INTEGER NOT NULL,UNIQUE(kind,action,target));
+CREATE TABLE IF NOT EXISTS policy_approvals(
+ id INTEGER PRIMARY KEY, operation TEXT NOT NULL UNIQUE, bot TEXT NOT NULL,
+ action TEXT NOT NULL,target TEXT NOT NULL,fingerprint TEXT NOT NULL,preview TEXT NOT NULL,
+ scope TEXT NOT NULL, requester TEXT NOT NULL, anchor INTEGER NOT NULL, turn INTEGER NOT NULL,
+ task INTEGER NOT NULL, revision INTEGER NOT NULL,generation INTEGER NOT NULL,
+ created_at INTEGER NOT NULL,expires_at INTEGER,mode_revision INTEGER NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending', resume TEXT,
+ wait_id INTEGER NOT NULL DEFAULT 0, card_generation INTEGER NOT NULL, resume_state TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS policy_pending ON policy_approvals(status,bot);
+CREATE INDEX IF NOT EXISTS policy_denied ON policy_approvals(bot,scope,action,target,status);
+CREATE TABLE IF NOT EXISTS secret_destinations(destination TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS bot_owners(bot TEXT PRIMARY KEY,person TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bot_members(bot TEXT NOT NULL,person TEXT NOT NULL,PRIMARY KEY(bot,person));
 CREATE TABLE IF NOT EXISTS policy_journal(id INTEGER PRIMARY KEY,time INTEGER,actor TEXT,bot TEXT,action TEXT,details TEXT);
@@ -123,17 +174,36 @@ CREATE TABLE IF NOT EXISTS bot_creation_intents(
  request_key TEXT PRIMARY KEY,target TEXT UNIQUE NOT NULL,person TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS environment_settings(bot TEXT,environment TEXT,timeout INTEGER,PRIMARY KEY(bot,environment));
 )SQL";
-    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw Conflict("Cannot initialize access schema");
+    if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw StorageError(db);
 }
 
 
 PolicyResult Policy::check(std::string_view bot, Action action, std::string_view target) const {
-    if (!validBotId(bot) || target.empty()) return PolicyResult::deny;
+    return check(bot,Resource{action,std::string(target)});
+}
+
+bool Policy::forbidden(std::string_view bot, Action action, std::string_view target) const {
+    if (!validBotId(bot) || target.empty()) return true;
     std::lock_guard lock(db_.mutex);
     auto rows = db_.query("SELECT target FROM policy_rules WHERE kind='never' AND action=?",{actionName(action)});
     while (rows.next())
-        if (targetMatches(rows.string(0),target)) return PolicyResult::deny;
-    return PolicyResult::allow;
+        if (targetMatches(rows.string(0),target)) return true;
+    return false;
+}
+
+PolicyResult Policy::check(std::string_view bot, const Resource& resource) const {
+    std::lock_guard lock(db_.mutex);
+    if (forbidden(bot,resource.action,resource.target)) return PolicyResult::deny;
+    if (mode() == "full") return PolicyResult::allow;
+    auto rows = db_.query("SELECT kind,target,exact FROM policy_rules WHERE kind<>'never' AND action=?"
+                          " ORDER BY kind DESC",{actionName(resource.action)});
+    while (rows.next()) {
+        const auto pattern = rows.string(1);
+        if (rows.number(2) ? pattern == resource.target : targetMatches(pattern,resource.target))
+            return rows.string(0) == "ask" ? PolicyResult::ask : PolicyResult::allow;
+    }
+    return !resource.routine && supervisedCategory(resource.action)
+        ? PolicyResult::ask : PolicyResult::allow;
 }
 
 PolicyResult Policy::check(Id task, Action action, std::string_view target) const {
@@ -172,16 +242,48 @@ Json Policy::rules() const {
     return result;
 }
 
-void Policy::changeNeverRule(const Person& actor, Action action, std::string_view target, bool add) {
+void Policy::setMode(const Person& actor, std::string_view value) {
+    if (!allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
+    if (value != "full" && value != "supervised") throw Conflict("Unknown policy mode");
     std::lock_guard lock(db_.mutex);
     Transaction tx(db_.db);
-    if (!allows(actor,Action::rules_manage,"installation") || !identifier(target)) throw DecisionDenied{};
-    db_.sharedRedactor().requirePublic({actor.id,target});
-    const auto name = actionName(action);
-    if (add) db_.exec("INSERT OR IGNORE INTO policy_rules VALUES('never',?,?,?)",{name,target,unixTime()});
-    else db_.exec("DELETE FROM policy_rules WHERE kind='never' AND action=? AND target=?",{name,target});
-    audit(actor,"",add ? "add_never" : "remove_never",{{"action",name},{"target",target}});
+    if (mode() != value) {
+        db_.exec("UPDATE policy_settings SET mode=?,revision=revision+1 WHERE id=1",{value});
+        audit(actor,"","mode_changed",{{"mode",value}});
+        db_.settlePolicyApprovals();
+    }
     tx.commit();
+}
+
+void Policy::changeRule(const Person& actor, RuleKind kind, Action action, std::string_view target, bool add) {
+    std::lock_guard lock(db_.mutex);
+    Transaction tx(db_.db);
+    if (!allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
+    writeRule(actor,kind,action,target,add,false);
+    tx.commit();
+}
+
+void Policy::changeNeverRule(const Person& actor, Action action, std::string_view target, bool add) {
+    changeRule(actor,RuleKind::never,action,target,add);
+}
+
+void Policy::writeRule(const Person& actor, RuleKind kind, Action action, std::string_view target, bool add, bool fromCard) {
+    if (!identifier(target)) throw Conflict("Invalid policy rule target");
+    db_.sharedRedactor().requirePublic({actor.id,target});
+    const auto name = actionName(action), type = ruleName(kind);
+    if (add) {
+        if (db_.query("SELECT 1 FROM policy_rules WHERE kind=? AND action=? AND target=?",{type,name,target}).next())
+            return;
+        auto count = db_.query("SELECT count(*) FROM policy_rules WHERE kind=?",{type});
+        count.next();
+        if (kind != RuleKind::never && count.number(0) >= 20) {
+            if (!fromCard || kind != RuleKind::allow) throw Conflict("Policy rule limit reached");
+            db_.exec("DELETE FROM policy_rules WHERE id=(SELECT min(id) FROM policy_rules WHERE kind='allow')");
+        }
+        db_.exec("INSERT INTO policy_rules(kind,action,target,created_at,exact) VALUES(?,?,?,?,?)",
+                 {type,name,target,unixTime(),fromCard});
+    } else db_.exec("DELETE FROM policy_rules WHERE kind=? AND action=? AND target=?",{type,name,target});
+    audit(actor,"",add ? "rule_added" : "rule_removed",{{"kind",type},{"action",name},{"target",target}});
 }
 
 Json Policy::createOwnedBot(const Person& creator,
@@ -217,11 +319,11 @@ void Policy::setMember(const Person& actor, std::string_view bot, std::string_vi
     tx.commit();
 }
 
-Json Policy::administration(const Person& actor, std::string_view bot) const {
+Json Policy::botSettings(const Person& actor, std::string_view bot) const {
     std::lock_guard lock(db_.mutex);
     if (!allows(actor,Action::bot_view,bot)) throw DecisionDenied{};
     const bool owner = allows(actor,Action::bot_settings,bot);
-    Json result{{"mode",mode()},{"rules",rules()},{"canManage",owner},{"members",Json::array()},
+    Json result{{"canManage",owner},{"members",Json::array()},
                 {"secretInputs",Json::array()}};
     if (owner) {
         auto members = db_.query("SELECT person FROM bot_members WHERE bot=? ORDER BY person",{bot});
@@ -259,7 +361,7 @@ Id Policy::applyBotChange(std::string_view bot, const Person& creator, std::stri
     }
     if (owner.empty()) {
         if ((!create && operation != "rename_bot") || !validBotId(target) ||
-            !allows(bot,create ? Action::bot_create : Action::bot_rename,target))
+            forbidden(bot,create ? Action::bot_create : Action::bot_rename,target))
             throw Conflict("Bot change denied by policy");
         if (!identifier(creator.id) || (!create && !allows(creator,Action::bot_settings,target)))
             throw DecisionDenied{};
@@ -385,18 +487,32 @@ SELECT file,name FROM protected_inputs p WHERE bot=? AND id=? AND status='pendin
     db_.secrets.insert({row.string(0)},value);
 }
 
-void Policy::useSecret(Id task, const SecretRef& ref, bool upstream, const std::function<void(std::string_view)>& adapter) const {
+void Policy::useSecret(Id task, const SecretRef& ref, std::string_view destination, std::string_view operation,
+                       bool upstream, const std::function<void(std::string_view)>& adapter) const {
     std::string value;
     {
         std::lock_guard lock(db_.mutex);
-        Transaction snapshot(db_.db,Transaction::Mode::read);
-        if (!upstream || !ref.valid() || !allows(task,Action::secret_use,ref.name)) throw Conflict("Secret access denied");
+        Transaction tx(db_.db);
+        if (!upstream || !ref.valid() || !identifier(destination) || !identifier(operation)) throw Conflict("Secret access denied");
+        const auto entry = db_.load(task);
+        if (forbidden(field(entry,"botId"),Action::secret_use,ref.name)) throw Conflict("Secret access denied");
+        const auto seen = db_.query("SELECT 1 FROM secret_destinations WHERE destination=?",{destination}).next();
+        const auto key = "secret/" + Json::array({task,operation}).dump();
+        const auto gate = db_.approveAction(db_.taskPolicyOrigin(entry),{Action::secret_use,std::string(destination),seen},
+                                           key,Json{{"secret",ref.name},{"destination",destination}},db_.policyClock());
+        if (gate != ApprovalGate::allow) {
+            tx.commit();
+            throw Conflict(gate == ApprovalGate::waiting ? "Secret use is waiting for policy approval." :
+                           std::string(approvalError(gate)));
+        }
         auto row = db_.query("SELECT file FROM protected_inputs WHERE name=? AND status='fulfilled'",{ref.name});
         if (!row.next()) throw Conflict("Secret unavailable");
         value = db_.secrets.read({row.string(0)});
-        snapshot.commit();
+        tx.commit();
     }
     try { adapter(value); }
     catch (...) { throw Conflict("Secret adapter failed"); }
+    std::lock_guard lock(db_.mutex);
+    db_.exec("INSERT OR IGNORE INTO secret_destinations VALUES(?)",{destination});
 }
 }

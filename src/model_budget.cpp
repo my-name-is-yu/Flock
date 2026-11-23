@@ -141,7 +141,7 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
         rejection = "Tool unavailable for this turn";
         if (redactor(bot).containsProtected(call.tool)) call.tool.clear();
     } else if (sharedMemoryTool(call.tool) && call.args.contains("docId") &&
-               !Policy(*this).allows(bot,(call.tool == "read_memory" || call.tool == "memory_history")
+               Policy(*this).forbidden(bot,(call.tool == "read_memory" || call.tool == "memory_history")
                    ? Action::shared_memory_read : Action::shared_memory_write,field(call.args,"docId"))) {
         rejection = "Memory access denied";
     } else {

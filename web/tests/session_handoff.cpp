@@ -136,7 +136,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     authFailure({{"Authorization",aliceCredential}});
     authFailure({{"Authorization","Bearer flock-t3-" + std::string(64,'a')}});
     authFailure({{"Authorization","Bearer " + consult},{"Authorization","Bearer " + consult}});
-    Browser::checked(browser.client.Get("/api/t3-connections"),401);
+    Browser::checked(browser.client.Get("/api/settings"),401);
 
     mcp.use(consult);
     const auto rows = mcp.request("tools/call",{{"name","list_flock_bots"}}).at("result").at("structuredContent").at("bots");
@@ -146,12 +146,15 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     viewOnly["botId"] = "triage";
     check(mcp.call(viewOnly).at("result").at("isError") == true,"a stranger could invoke the Bot");
 
+    browser.client.set_default_headers({{"Authorization",aliceCredential}});
+    check(browser.get("/api/settings").at("t3").at("port") == 4173,
+          "An installation root could not see the singleton connector owned by another person");
     const auto token = connections.connect(target.environmentId,alice.id,4173);
     authFailure({{"Authorization","Bearer " + consult}});
     mcp.use(token);
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
-    check(browser.get("/api/t3-connections") ==
-          Json{{"environments",Json::array({target.environmentId})}},
+    check(browser.get("/api/settings").at("t3") ==
+          Json{{"port",4173},{"environments",Json::array({target.environmentId})}},
           "connection view returned an unexpected projection");
     Browser::checked(mcp.client.Post(endpoint,{{"Origin",browser.origin}},ping,"application/json"),403);
     Browser::checked(mcp.client.Post(endpoint,{{"Sec-Fetch-Site","same-origin"}},ping,"application/json"),403);
@@ -241,7 +244,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     browser.post(coordPath + "/resume",Json::object(),403);
     check(connections.disconnect(target.environmentId),"registered connection was not removed");
     authFailure({{"Authorization","Bearer " + token}});
-    check(browser.get("/api/t3-connections") == Json{{"environments",Json::array()}},
+    check(browser.get("/api/settings").at("t3").is_null(),
           "disconnected environment was still listed");
 }
 }

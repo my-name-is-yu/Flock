@@ -134,7 +134,7 @@ Json gitToolSchema(std::string_view name, bool conversation) {
                     {"reason",{{"type","string"},{"description","Evidence and reason for the action."}}}};
     Json required = {"host","reason"};
     if (name != "git_find_repos" && name != "git_read_result") {
-        properties["repo"] = {{"type","string"},{"description","Exact owner/repo from the repository grant."}};
+        properties["repo"] = {{"type","string"},{"description","Exact owner/repo from repository discovery."}};
         required.push_back("repo");
         if (conversation)
             properties["taskId"] = {{"type","integer"},{"minimum",1},{"description","Task owned by this Bot. Required for mutations."}};

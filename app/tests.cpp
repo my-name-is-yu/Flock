@@ -308,11 +308,11 @@ void directionalPeerConfiguration() {
     check(intake.environmentId == "verification-environment" && intake.projectId == "verification-project" &&
         intake.config["model"] == "verification-model" && intake.config["session"]["runtimeMode"] == "approval-required",
         "receiver must use its own route and settings");
-    check(bots.peers("verifier").empty(),"grant must be directional and default to empty");
+    check(bots.peers("verifier").empty(),"peer configuration must be directional and default to empty");
 
     release["allowedBots"] = Json::array();
     write(temp.path / "release" / "config.json",release.dump());
-    check(bots.peers("release").empty(),"resolver must observe changes to grants");
+    check(bots.peers("release").empty(),"resolver must observe peer configuration changes");
     release["allowedBots"] = Json::array({"../verifier"});
     write(temp.path / "release" / "config.json",release.dump());
     rejects<Conflict>([&] { bots.get("release"); },"invalid peer ID accepted");

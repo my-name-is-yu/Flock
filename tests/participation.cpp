@@ -1,5 +1,6 @@
 #include <mutex>
 #include "flock/session_handoff.hpp"
+#include "flock/board_inbox.hpp"
 #include "flock/skill_export.hpp"
 #include <fstream>
 
@@ -304,6 +305,42 @@ void coordinate(const std::filesystem::path& path) {
     const auto halted = handoff.step(owner,stopped,bot,soul);
     check(halted.state == "stopped" && sessions.sent.size() == 3,"stop admitted a new effect");
 }
+void supervisedCoordination(const std::filesystem::path& path) {
+    Store store(path);
+    Sessions sessions;
+    SessionHandoff handoff(store,sessions,resolve,intake);
+    const auto connection = connect(store);
+    store.policy().setMode(owner,"supervised");
+    const auto channel = invoke(handoff,connection,first,"supervised","Begin.","Coordinate checks").channel;
+    Bot bot;
+    bot.decision = {"root_guidance"};
+    handoff.step(owner,channel,bot,soul);
+    const auto items = store.inbox(owner);
+    check(sessions.sent.empty() && items.size()==1,"connector work dispatched before approval");
+    const auto& card = items.at(0);
+    check(card.at("itemKind")=="policy_approval" && card.at("expiresAt").get<Seconds>() ==
+          card.at("createdAt").get<Seconds>() + 1800,"coordination did not create a background card");
+    const InboxTarget target{card.at("botId"),InboxKind::policy_approval,card.at("itemId"),0,0,0,0};
+    denied([&] { store.decideInbox(visitor,target,"allow_once"); });
+    store.decideInbox(owner,target,"allow_once");
+    handoff.step(owner,channel,bot,soul);
+    handoff.step(owner,channel,bot,soul);
+    check(sessions.sent.size()==1 && store.inbox(owner).empty(),"coordination did not resume exactly once");
+    sessions.consumed(sessions.sent.back());
+    bot.decision = {"root_guidance","root_guidance","root_guidance"};
+    handoff.step(owner,channel,bot,soul);
+    const auto deniedCard = store.inbox(owner).at(0);
+    store.decideInbox(owner,{deniedCard.at("botId"),InboxKind::policy_approval,deniedCard.at("itemId"),0,0,0,0},"deny");
+    handoff.step(owner,channel,bot,soul);
+    sessions.event(first,"assistant_message","agent","provider","","Another progress update.");
+    handoff.step(owner,channel,bot,soul);
+    check(store.inbox(owner).empty(),"Assistant progress cleared the denial");
+    sessions.event(first,"user_message","user","user","human-request","Try another check.");
+    handoff.step(owner,channel,bot,soul);
+    check(store.inbox(owner).size()==1 && sessions.sent.size()==1,"New human input could not request approval");
+
+}
+
 void concurrentHumanAndBudget(const std::filesystem::path& path) {
     Store store(path);
     Sessions sessions;
@@ -517,6 +554,7 @@ int main() {
         invocationAndRecovery(path / "invocation.sqlite3");
         reconcileAfterReceiptWriteContention(path / "receipt-contention.sqlite3");
         coordinate(path / "coordination.sqlite3");
+        supervisedCoordination(path / "supervised-coordination.sqlite3");
         concurrentHumanAndBudget(path / "human-policy.sqlite3");
         dispatchHistoryCoverage(path);
         lateRedactionProjection(path);

@@ -94,6 +94,8 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
 )SQL",{base.host,base.repo,baseRef,head.repo,headRef,context.taskId,intent,int{newIntent}});
         create = !operation.next();
         if (create) {
+            if (Policy(*this).forbidden(context.botId,Action::repository_pr,base.resource()))
+                throw Conflict("Repository access denied");
             request.operationId = actionId();
             exec("INSERT INTO git_pr_operations VALUES(?,?,?,?,?,?,?,?,?,?,"
                  "(SELECT coalesce(max(id),0) FROM git_webhook_events),'pending',NULL,NULL)",
@@ -199,9 +201,9 @@ WHERE i.id=? AND o.task_id=? AND o.bot_id=? AND o.status='ambiguous'
     std::string url;
     const bool link = decision == "link_pr";
     if (link) {
-        const Policy access(*this);
-        if (!access.allows(item.botId,Action::repository_pr,base.resource()) ||
-            (head != base && !access.allows(item.botId,Action::repository_read,head.resource())))
+        const Policy policy(*this);
+        if (policy.forbidden(item.botId,Action::repository_pr,base.resource()) ||
+            (head != base && !policy.allows(item.botId,Action::repository_read,head.resource())))
             throw DecisionDenied{};
         const auto candidates = row.json(7);
         const auto selected = data.find("prNumber");

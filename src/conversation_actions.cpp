@@ -142,6 +142,19 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
             transaction.commit();
             return true;
         }
+        const Resource resource{Action::t3_send,
+            Resource::sessionRead(effect->command.environmentId,effect->command.target.threadId).target};
+        auto origin = policyOrigin(message);
+        origin.task = effect->taskId;
+        origin.generation = effect->generation;
+        origin.revision = ownTask(effect->taskId,message).value("currentRevision",Id{});
+        const auto gate = approveAction(origin,resource,"turn/" + std::to_string(id) + "/" + std::to_string(step),
+                                       Json::array({decision.tool,args,effect->run}),policyClock());
+        if (gate != ApprovalGate::allow) {
+            if (gate != ApprovalGate::waiting) fail(ToolError(std::string(approvalError(gate))));
+            transaction.commit();
+            return gate != ApprovalGate::waiting;
+        }
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{effect->checkpoint(),id,step});
         if (!sqlite3_changes(db)) return false;
@@ -149,7 +162,12 @@ bool Store::Impl::runSessionEffect(const conversation::Message& message, int ste
     }
 
     Json outcome;
-    try { outcome = effect->dispatch(t3); }
+    try {
+        const auto& cmd = effect->command;
+        const auto target = Resource::sessionRead(cmd.environmentId,cmd.target.threadId).target;
+        outcome = Policy(*this).forbidden(message.bot,Action::t3_send,target)
+            ? toolFailure(approvalError(ApprovalGate::denied)) : effect->dispatch(t3);
+    }
     catch (const std::exception& error) {
         const std::string detail = control == SessionControl::Steer ? "T3 may have received the note: "
                                                                    : "T3 may have received the interrupt: ";

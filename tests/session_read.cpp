@@ -307,7 +307,7 @@ void acceptance() {
           "invalid or missing references produced a distinct response");
     f.restart();
     check(fetchLog() == log && request("list",{{"cursor",cursor},{"limit",2}}) == secondPage &&
-          f.call(search,nextSearch) == next,"restart lost scoped references or the read grant");
+          f.call(search,nextSearch) == next,"restart lost scoped references or read access");
 
     const auto task = f.store->submit(f.intake("beta"));
     for (int i = 0; i < 8 && f.store->task(task).at("state") != "running"; ++i) f.runtime->tick();
@@ -330,14 +330,14 @@ void acceptance() {
     for (auto tool : {"message_session","interrupt_session","send_to_task","cancel_task"}) {
         const auto outcome = f.call(tool,{{"taskId",task},{"generation",running.at("generation")},
                                          {"text","Deliver this"},{"instruction","Deliver this"}});
-        check(outcome.at("ok") == false,"read grant enabled a write or interruption");
+        check(outcome.at("ok") == false,"Session read enabled a write or interruption");
     }
     check(f.t3.writes.size() == 1 && !f.t3.stops,"write tool bypassed task ownership");
 
     f.t3.denied[staging] = true;
     check(request("list",{{"cursor",cursor},{"limit",2}}) == missing &&
           request("counts") == missing && fetchLog() == missingAttachment &&
-          f.call(search,nextSearch) == empty,"T3 denial did not override the active grant");
+          f.call(search,nextSearch) == empty,"T3 denial did not override the current read policy");
     check(request("list",{{"fromTime","invalid"}}).dump() ==
           f.call(events,{{"operation","list"},{"sessionRef","missing"},{"fromTime","invalid"}}).dump() &&
           request("unknown").dump() == f.call(events,{{"operation","unknown"},{"sessionRef","missing"}}).dump(),
@@ -438,10 +438,10 @@ void approvedCallSurvivesReadPreflightContention() {
 void redactionAndResumedHistory() {
     Fixture f;
     f.blockSession(staging);
-    auto access = f.store->policy();
+    auto policy = f.store->policy();
     const auto secret = "synthetic-session-credential";
-    const auto key = access.requestSecret("beta",{"beta-fixture"});
-    access.submitSecret({"root",true},"beta",key,secret);
+    const auto key = policy.requestSecret("beta",{"beta-fixture"});
+    policy.submitSecret({"root",true},"beta",key,secret);
     f.t3.secret = secret;
 
     const auto found = f.call("flock_session_search",{{"query","regression"}});

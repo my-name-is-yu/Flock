@@ -27,8 +27,9 @@ constexpr std::string_view usage = R"(Usage: flock [--home DIRECTORY] COMMAND
   run [--fixed] [--no-web] [--port PORT] [--session-read off|on_demand|prefill]
   bots
   rules list
-  rules add never ACTION TARGET
-  rules remove never ACTION TARGET
+  mode [full|supervised]
+  rules add allow|ask|never ACTION TARGET
+  rules remove allow|ask|never ACTION TARGET
   submit BOT REQUEST
   tasks [BOT] [--before ID] [--limit N]
   status TASK
@@ -439,12 +440,13 @@ void rulesCommand(const std::filesystem::path& home, Arguments& args) {
         args.end();
     } else {
         if (command != "add" && command != "remove") throw Conflict("Unknown rules command");
-        if (args.pop("rule kind") != "never") throw Conflict("Expected never rule");
+        const auto kind = parseRuleKind(args.pop("rule kind"));
+        if (!kind) throw Conflict("Unknown rule kind");
         const auto action = parseAction(args.pop("policy action"));
         if (!action) throw Conflict("Unknown policy action");
         const auto target = args.pop("target");
         args.end();
-        policy.changeNeverRule(localOwner,*action,target,command == "add");
+        policy.changeRule(localOwner,*kind,*action,target,command == "add");
     }
     print(policy.rules());
 }
@@ -468,13 +470,22 @@ int runCli(Arguments& args) {
         print(bots.cards());
     } else if (command == "run") daemon(args,home,bots);
     else if (command == "rules") rulesCommand(home,args);
+    else if (command == "mode") {
+        auto store = openStore(home);
+        if (!args.empty()) {
+            const auto mode = args.pop("mode");
+            args.end();
+            store.policy().setMode(localOwner,mode);
+        }
+        std::cout << store.policy().mode() << '\n';
+    }
     else if (command == "submit") {
         const auto botId = args.pop("Bot ID");
         const auto request = args.pop("request");
         args.end();
         const auto intake = bots.get(botId).intake(request);
         auto store = openStore(home);
-        const auto id = store.submit(intake);
+        const auto id = store.submit(intake,&localOwner);
         print(store.task(id));
     } else if (command == "status") {
         const auto id = number(args,"task ID");

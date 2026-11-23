@@ -94,6 +94,10 @@ int main() {
             "PRAGMA application_id=123; PRAGMA user_version=1; CREATE TABLE items(id INTEGER PRIMARY KEY);");
         unsupportedSchemaLeavesDatabaseIntact(path / "pre-policy-state.db",
             "PRAGMA application_id=0x464c4f43; PRAGMA user_version=1; CREATE TABLE tasks(id INTEGER PRIMARY KEY);");
+        unsupportedSchemaLeavesDatabaseIntact(path / "full-policy-state.db",
+            "PRAGMA application_id=0x464c4f43; PRAGMA user_version=2;"
+            "CREATE TABLE policy_settings(id INTEGER PRIMARY KEY,mode TEXT NOT NULL);"
+            "INSERT INTO policy_settings VALUES (1,'full');");
         const auto db = path / "state.db";
         FixedModel model;
         FixedT3 t3;

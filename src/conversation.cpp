@@ -39,13 +39,14 @@ CREATE TABLE IF NOT EXISTS messages(
   UNIQUE(bot_id,person_id,client_message_id), UNIQUE(bot_id,sequence));
 CREATE TABLE IF NOT EXISTS conversation_turns(
   message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
+  status TEXT NOT NULL CHECK(status IN ('running','paused','policy_waiting','done')),
   pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
   reply_id INTEGER UNIQUE REFERENCES journal(id));
 CREATE INDEX IF NOT EXISTS conversation_turns_running ON conversation_turns(message_id) WHERE status='running';
 CREATE VIEW IF NOT EXISTS conversation_input_status AS
 SELECT t.message_id,
   CASE t.status WHEN 'paused' THEN 'needs_you'
+                WHEN 'policy_waiting' THEN 'needs_you'
                 WHEN 'done' THEN coalesce(
                   (SELECT json_extract(data,'$.status') FROM journal WHERE id=t.reply_id),'access_revoked')
   END AS status

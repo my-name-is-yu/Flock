@@ -81,8 +81,11 @@ CREATE TABLE IF NOT EXISTS session_controls(
  permission TEXT NOT NULL,
  consult_command TEXT NOT NULL,
  event_cursor INTEGER NOT NULL,
- initial_pending INTEGER NOT NULL DEFAULT 1)
+ initial_pending INTEGER NOT NULL DEFAULT 1,
+ human_input_position INTEGER NOT NULL DEFAULT 0)
 )SQL");
+    if (!query("SELECT 1 FROM pragma_table_info('session_controls') WHERE name='human_input_position'").next())
+        exec("ALTER TABLE session_controls ADD COLUMN human_input_position INTEGER NOT NULL DEFAULT 0");
     exec(R"SQL(
 CREATE TABLE IF NOT EXISTS t3_connector(
  singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL, person_id TEXT NOT NULL,
@@ -157,11 +160,11 @@ std::optional<T3Connection> T3Connections::authenticate(std::string_view token) 
     return T3Connection{row.string(0),row.string(1)};
 }
 
-std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person) const {
+std::optional<T3ConnectionSettings> T3Connections::settings(std::string_view person, bool installationRoot) const {
     auto& db = *store_.p_;
     std::lock_guard lock(db.mutex);
     auto rows = db.query("SELECT port,environment_id FROM t3_connector CROSS JOIN t3_connected_environments"
-                         " WHERE person_id=? ORDER BY environment_id",{person});
+                         " WHERE (? OR person_id=?) ORDER BY environment_id",{installationRoot ? 1 : 0,person});
     if (!rows.next()) return {};
     T3ConnectionSettings result{static_cast<unsigned>(rows.number(0)),{}};
     do { result.environments.push_back(rows.string(1)); } while (rows.next());

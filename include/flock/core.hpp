@@ -260,7 +260,7 @@ public:
                      const Json& data = Json::object());
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
-    Id submit(const Intake&);
+    Id submit(const Intake&, const Person* requester = nullptr);
     // Creates an explicit Task for an authorized person. An identical retry returns its Task ID.
     Id submitRequest(const Person&, std::string_view botId, std::string_view clientRequestId,
                      std::string_view request, const IntakeResolver&);
