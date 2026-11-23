@@ -517,13 +517,14 @@ class Fixture(BaseHTTPRequestHandler):
         def add(run, kind, text, source="provider", **fields):
             rows.append(self.item(thread_id, len(rows), run, kind, text, source=source) | fields)
 
-        def child(run, task, title):
-            add(run, "subagent", "done", subagentId=task, title=title)
+        def child(run, task, title, native=False, **fields):
+            subagent = task if native else f"node:delegated-task:{task}"
+            add(run, "subagent", "done", subagentId=subagent, title=title, **fields)
 
-        def notice(run, title):
-            add(run, "notification", f'Delegated task "{title}" finished', source=None, createdBy=None)
+        def notice(run, text, **fields):
+            add(run, "notification", text, source=None, createdBy=None, **fields)
 
-        if scenario in ("nested-result", "reused-result"):
+        if scenario in ("nested-result", "reused-result", "partial-batch-result"):
             recent.insert(0, {"runId": "middle", "ordinal": 2, "status": "completed"})
         recent.insert(0, {"runId": "later", "ordinal": len(recent) + 1, "status": "completed"})
 
@@ -536,17 +537,48 @@ class Fixture(BaseHTTPRequestHandler):
         elif scenario == "shortened-result":
             prefix = "Read notes.md and identify which action items are assigned to "
             child("root", "child-task", prefix + "the...")
-            notice("later", prefix + "the release owner…")
+            notice("later", f'Delegated task "{prefix}the release owner…" finished')
+        elif scenario in ("failed-result", "stopped-result", "unlabeled-result"):
+            verb = scenario.removesuffix("-result")
+            status = {"failed": "failed", "stopped": "cancelled", "unlabeled": "completed"}[verb]
+            child("root", "child-task", "" if verb == "unlabeled" else title, status=status)
+            notice("later", "Delegated task finished" if verb == "unlabeled" else f'Delegated task "{title}" {verb}')
+        elif scenario == "batch-result":
+            child("root", "a", "Read notes, logs")
+            child("root", "b", "b" * 100)
+            notice("later", "2 delegated tasks finished: Read notes, logs, " + "b" * 79 + "…")
+        elif scenario == "partial-batch-result":
+            later = "2026-01-01T00:00:01.000Z"
+            child("root", "a", "a")
+            child("root", "b", "b", updatedAt=later)
+            notice("middle", "1 of 2 delegated tasks finished: a")
+            notice("later", 'Delegated task "b" finished', updatedAt=later)
+        elif scenario == "late-settlement-result":
+            child("root", "child-task", title, updatedAt="2026-01-01T00:00:01.000Z")
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario == "foreign-child-result":
+            child("unrelated", "child-task", title)
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario == "native-subagent-result":
+            child("root", "toolu_native", "Native helper", native=True)
+            child("unrelated", "child-task", title)
+            notice("later", f'Delegated task "{title}" finished')
+        elif scenario in ("batch-overcount-result", "invalid-batch-count-result", "zero-batch-count-result",
+                          "malformed-batch-count-result"):
+            child("root", "child-task", title)
+            count = {"batch-overcount-result": "2", "invalid-batch-count-result": "2 of 1",
+                     "zero-batch-count-result": "0", "malformed-batch-count-result": "1x"}[scenario]
+            notice("later", f"{count} delegated tasks finished")
         else:
             child("root", "child-task", title)
             if scenario == "ambiguous-title-result":
                 child("unrelated", "other-task", title)
             if scenario in ("nested-result", "reused-result"):
-                notice("middle", title)
+                notice("middle", f'Delegated task "{title}" finished')
                 if scenario == "nested-result":
                     title = "Review follow-up"
                     child("middle", "grandchild-task", title)
-            notice("later", title)
+            notice("later", f'Delegated task "{title}" finished')
             if scenario == "mixed-result":
                 add("later", "user_message", "simultaneous manual input", source="web")
         add("later", "assistant_message", "later report")
