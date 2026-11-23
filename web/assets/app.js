@@ -84,12 +84,12 @@ const waitLabels = {
   user_question: ['Question from the Bot', 'The Bot is waiting for your answer.'],
   budget: ['Approval for one more run', 'This request used all of its runs. Approving lets the Bot start one more run, which can use more model and T3 usage.'],
   model_budget: ['Approval for another model call', 'This request reached its model call limit. You can approve one more model call.'],
-  model_failure: ['Retry decision', 'The Bot could not decide on the next step after several attempts. You can retry.'],
+  model_failure: ['The Bot got stuck', 'The Bot could not choose its next step after several attempts. Try again to continue.'],
   t3_input: ['Action in T3', 'Open the session in T3 to approve or answer.'],
   deadline: ['Deadline extension', 'This request reached its deadline. You can set a new one.'],
-  unknown_delivery: ['Delivery unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Reconcile checks T3 again without resending anything.'],
-  auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then reconcile.'],
-  settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then reconcile.'],
+  unknown_delivery: ['Message to T3 unconfirmed', 'Flock could not confirm whether T3 received the last message, so this work is paused. Check again asks T3 without resending anything.'],
+  auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then check again.'],
+  settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then check again.'],
 };
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
@@ -101,8 +101,8 @@ const errors = {
   message_conflict: 'A message was already recorded for this submission. Check the conversation.',
   operation_conflict: 'Flock already processed this action or the pending request changed.',
   request_changed: 'The request changed. Review its current details before acting again.',
-  already_closed: 'This request was already decided or closed.',
-  access_denied: 'You do not have permission to make this decision.',
+  already_closed: 'This request was already answered or closed.',
+  access_denied: 'You do not have permission to respond to this request.',
   bot_not_found: 'Bot not found.',
   invalid_peer: 'Choose another Bot for this DM.',
   peer_not_allowed: 'This Bot DM is unavailable.',
@@ -522,7 +522,7 @@ function menuPopover(bot) {
   list.setAttribute('aria-label', `${bot.name} menu`);
   const actions = [
     [pins.has(bot.id) ? 'Unpin' : 'Pin', sidebarIcons.pin, () => togglePin(bot.id)],
-    ['Recent decisions', sidebarIcons.inbox, () => {
+    ['History', sidebarIcons.inbox, () => {
       selectBot(bot.id);
       void decisions.openHistory(sidebar.querySelector(`[data-focus="${CSS.escape(`menu:${bot.id}`)}"]`));
     }],
@@ -620,7 +620,7 @@ function createSidebarEntry(botId) {
       const count = decisions.count(botId);
       decisionCount.hidden = !count;
       decisionCount.textContent = count;
-      decisionCount.setAttribute('aria-label', `${bot.name}: ${count} pending ${count === 1 ? 'decision' : 'decisions'}`);
+      decisionCount.setAttribute('aria-label', `${bot.name}: ${count} ${count === 1 ? 'item needs' : 'items need'} you`);
 
       face.className = pinned ? 'pin-face' : '';
       avatarHost.classList.toggle('pin-avatar', pinned);
@@ -956,7 +956,7 @@ function workflowInspectors(data, open) {
 const decisionKindLabels = {
   user_question: 'Question from the Bot',
   pr_review: 'Pull request review',
-  pr_reconciliation: 'Pull request reconciliation',
+  pr_reconciliation: 'Unconfirmed pull request',
   extra_run: 'Extra run',
   deadline: 'Deadline extension',
   model_budget: 'Extra model call',
@@ -2443,7 +2443,7 @@ function waitContent(context, task) {
     primary.append(questionActions(context, task, { dialog: true }));
   } else if (wait.reason === 'budget') primary.append(action('Approve one more run', 'approve'));
   else if (wait.reason === 'model_budget') primary.append(action('Approve one more model call', 'approve'));
-  else if (wait.reason === 'model_failure') primary.append(action('Retry decision', 'retry'));
+  else if (wait.reason === 'model_failure') primary.append(action('Try again', 'retry'));
   else if (wait.reason === 'deadline') {
     const [form, submit] = waitForm('Extend deadline', [{ name: 'deadline', label: 'New deadline (local time)',
       type: 'datetime-local', value: localDateTime(Date.now() + 60 * 60 * 1000), required: true }], ({ deadline }) => {
@@ -2455,7 +2455,7 @@ function waitContent(context, task) {
     content.push(form);
     primary.append(submit);
   } else if (['unknown_delivery', 'auth', 'settings'].includes(wait.reason)) {
-    primary.append(action('Reconcile', 'reconcile'));
+    primary.append(action('Check again', 'reconcile'));
   }
   actions.append(button('Stop this request', 'wait-cancel', () => {
     const name = task.request.split('\n')[0];
