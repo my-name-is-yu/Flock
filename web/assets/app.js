@@ -2889,8 +2889,9 @@ function renderDetail() {
     }
     return;
   }
-  const content = task.wait.reason === 'deadline' ? { ...task, generation: undefined } : task;
-  if (changed('detail', detail, content, waitLabel(task.wait.reason), waitText(task.wait))) {
+  const { generation, ...waitDetails } = task;
+  const waitGeneration = task.wait.reason === 'deadline' ? null : generation;
+  if (changed('detail', detail, waitDetails, waitGeneration, waitLabel(task.wait.reason), waitText(task.wait))) {
     const input = elements['detail-body'].querySelector('#wait-deadline-form input');
     const sameWait = input?.form?.dataset.waitId === String(task.wait.id);
     const restoreFocus = sameWait && input === document.activeElement;

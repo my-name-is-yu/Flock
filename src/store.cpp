@@ -674,7 +674,8 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
     if (task.at("state") != "waiting") throw DecisionUnavailable{};
     const auto reason = field(wait,"reason");
     const auto deadlineRun = reason == "deadline" ? field(wait,"runActionId") : std::string{};
-    if (task.at("generation") != generation && (operation != "extend" || deadlineRun.empty()))
+    const bool extendingVerificationDeadline = operation == "extend" && !deadlineRun.empty();
+    if (task.at("generation") != generation && !extendingVerificationDeadline)
         throw RequestChanged{};
     const auto kind = inboxWaitKind(reason);
     if (expectedKind && kind != expectedKind) throw RequestChanged{};

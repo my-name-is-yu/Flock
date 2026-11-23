@@ -2,14 +2,16 @@
 
 namespace flockv0 {
 void Store::Impl::initializeProjectQueue() {
-    constexpr auto installed = "SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_project_slots'";
-    if (query(installed).next()) return;
-    Transaction update(db);
-    if (query(installed).next()) return;
+    const auto runScopedSlotsInstalled = [this] {
+        return query("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='task_project_slots'").next();
+    };
+    if (runScopedSlotsInstalled()) return;
+    Transaction install(db);
+    if (runScopedSlotsInstalled()) return;
     constexpr auto sql = R"SQL(
 CREATE VIEW project_route_queue AS
 WITH candidates AS (
-  SELECT task.id,task.state,task.project_id,task.environment_id,NULL AS action_id
+  SELECT task.id,task.state AS slot_state,task.project_id,task.environment_id,NULL AS action_id
   FROM tasks task
   WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled')
@@ -25,10 +27,10 @@ WITH candidates AS (
 SELECT task.id,task.environment_id,task.project_id,task.action_id,
        ROW_NUMBER() OVER (
          PARTITION BY task.environment_id,task.project_id
-         ORDER BY COALESCE(sender.state,task.state)='queued',
+         ORDER BY COALESCE(sender.slot_state,task.slot_state)='queued',
            COALESCE(sender.id,task.id),
-           CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
-                WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
+           CASE WHEN sender.id IS NOT NULL AND task.slot_state='cancelling' THEN 0
+                WHEN task.slot_state='peer_waiting' THEN 2 ELSE 1 END, task.id
        ) AS position
 FROM candidates task
 LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
@@ -52,7 +54,7 @@ SELECT id,CASE WHEN count(blocker_id)=count(*) THEN min(blocker_id) END AS block
 FROM project_route_slots GROUP BY id;
 )SQL";
     if (sqlite3_exec(db,sql,nullptr,nullptr,nullptr) != SQLITE_OK) throw StorageError(db);
-    update.commit();
+    install.commit();
 }
 
 bool Store::Impl::projectRouteReady(Id task, std::string_view action) const {

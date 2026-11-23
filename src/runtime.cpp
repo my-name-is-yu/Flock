@@ -5,6 +5,7 @@
 #include "flock/participation.hpp"
 
 #include <algorithm>
+#include <compare>
 #include <cstdio>
 #include <chrono>
 #include <fcntl.h>
@@ -107,8 +108,12 @@ struct Runtime::Impl {
     std::future<void> channelWorker, sessionWakeWorker;
     std::stop_source shutdown;
     int lockFd = -1;
-    using Work = std::pair<Id,std::string>;
-    std::map<Work,std::future<void>> workers;
+    struct ScheduledWork {
+        Id taskId = 0;
+        std::optional<std::string> verificationAction;
+        auto operator<=>(const ScheduledWork&) const = default;
+    };
+    std::map<ScheduledWork,std::future<void>> workers;
     // Keep provider outcomes until the Task decision and attempt usage are committed together.
     std::map<Id,TaskInference> taskInferences;
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
@@ -214,7 +219,7 @@ struct Runtime::Impl {
         },saved);
     }
 
-    std::vector<Work> eligible() {
+    std::vector<ScheduledWork> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
 WITH slots AS MATERIALIZED (
@@ -239,7 +244,7 @@ WITH slots AS MATERIALIZED (
     SELECT 1 FROM outbox WHERE outbox.id=json_extract(tasks.data,'$.actionId') AND phase='started'
   )
 )
-SELECT task.id,'' AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
+SELECT task.id,NULL AS action_id FROM runnable JOIN tasks task ON task.id=runnable.id
 WHERE json_type(task.data,'$.runResults') IS NULL AND NOT EXISTS (
   SELECT 1 FROM policy_approvals approval WHERE approval.task=task.id AND turn=0 AND status='pending'
 )
@@ -251,17 +256,20 @@ WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR (
   )
 ))
 ORDER BY 1,2)SQL",{runOutboxOperation});
-        std::vector<Work> result;
-        while (rows.next()) result.emplace_back(rows.number(0),rows.string(1));
+        std::vector<ScheduledWork> result;
+        while (rows.next()) {
+            auto action = rows.string(1);
+            result.push_back({rows.number(0),action.empty() ? std::nullopt : std::optional{std::move(action)}});
+        }
         return result;
     }
     static constexpr unsigned batchLimit = 4;
-    Work lastScheduled;
+    ScheduledWork lastScheduled;
 
-    std::vector<Work> nextProjects(std::size_t slots) {
+    std::vector<ScheduledWork> nextProjects(std::size_t slots) {
         if (slots == 0) return {};
         auto jobs = eligible();
-        std::erase_if(jobs,[&](const Work& work) { return workers.contains(work); });
+        std::erase_if(jobs,[&](const ScheduledWork& work) { return workers.contains(work); });
         if (jobs.size() > slots) {
             std::rotate(jobs.begin(),std::upper_bound(jobs.begin(),jobs.end(),lastScheduled),jobs.end());
             jobs.resize(slots);
@@ -842,7 +850,9 @@ ORDER BY 1,2)SQL",{runOutboxOperation});
         const auto phase = field(action,"phase");
         const auto detail = bounded(outcome.detail.empty() ? "T3 has not confirmed the assigned Run." : outcome.detail,2048);
         const bool rejected = outcome.kind == Delivery::Kind::NotAccepted || outcome.kind == Delivery::Kind::Settings;
-        if (delivery == DeliveryOutcome::DefinitelyUnsent && (cancelling || phase == "started" || rejected)) {
+        const bool closeUnsentDelivery = delivery == DeliveryOutcome::DefinitelyUnsent &&
+            (cancelling || phase == "started" || rejected);
+        if (closeUnsentDelivery) {
             db.exec("UPDATE outbox SET phase='closed' WHERE id=?",{key});
             Observation observed;
             observed.status = cancelling ? "cancelled" : "failed";
@@ -896,8 +906,9 @@ AND json_extract(data,'$.actionId')=? ORDER BY id LIMIT 1)SQL",{task.at("id"),ac
             applyDelivery(id,action,{Delivery::Kind::NotAccepted,{},"Cancelled before dispatch",true});
             return;
         }
-        if (phase == "started" && !cancelling &&
-            (!run.contains("deadline") || (task.at("wait").is_null() && now >= run.at("deadline").get<Seconds>())))
+        const bool unconfirmedRunNeedsDeadlineCheck = phase == "started" && !cancelling &&
+            (!run.contains("deadline") || (task.at("wait").is_null() && now >= run.at("deadline").get<Seconds>()));
+        if (unconfirmedRunNeedsDeadlineCheck)
             changeTask(id,[&](Json& current) {
                 return checkVerificationDeadline(current,verificationRun(current,key),now);
             });
@@ -2467,13 +2478,13 @@ AND kind IN ('decision','report','user_answer','session_answered','bot_message')
         return true;
     }
 
-    void step(const Work& work) {
+    void step(const ScheduledWork& work) {
         if (shutdown.stop_requested()) return;
-        const auto& [id,action] = work;
+        const auto id = work.taskId;
         auto task = snapshot(id);
         const auto state = field(task,"state");
-        if (!action.empty()) {
-            auto& run = verificationRun(task,action);
+        if (work.verificationAction) {
+            auto& run = verificationRun(task,*work.verificationAction);
             if (verificationRunOutstanding(run)) stepCheck(task,run);
             return;
         }

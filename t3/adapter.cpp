@@ -655,8 +655,8 @@ std::string commitCheckOutput(const Json& item, std::string_view command) {
     return gitCommit(output) ? std::string(output) : std::string{};
 }
 
-std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
-                          const RunRef& result, const RunEvidence& report, std::string_view expected, bool marked) {
+std::string readCheckedCommit(Client& client, const RunRef& assigned, const RunRef& effective,
+                              const RunRef& result, const RunEvidence& report, std::string_view expected, bool marked) try {
     if (!gitCommit(expected) || report.itemId.empty()) return {};
     Scan scan;
     std::string before, after, mismatch;
@@ -687,6 +687,8 @@ std::string checkedCommit(Client& client, const RunRef& assigned, const RunRef& 
     });
     if (!mismatch.empty()) return mismatch;
     return before == expected && finalReport ? after : std::string{};
+} catch (const Failure&) {
+    return {};
 }
 
 RunEvidence unavailableReport(const Failure& failure) {
@@ -1055,11 +1057,9 @@ public:
                 if (problem) observed.status = "failed";
                 auto evidence = problem ? std::move(*problem) : readTerminalEvidence(client,source,observed.status);
                 if (verification != config.end()) {
-                    try {
-                        observed.checkedCommit = checkedCommit(client,run,{run.threadId,effective,run.link},source,
+                    observed.checkedCommit = readCheckedCommit(client,run,{run.threadId,effective,run.link},source,
                                                                evidence,str(*verification,"expectedCommit"),
                                                                verification->value("markedChecks",true));
-                    } catch (const Failure&) {}
                     observed.commitEvidenceUnavailable = observed.status == "completed" && observed.checkedCommit.empty();
                 }
                 observed.evidence = evidence.availability;
