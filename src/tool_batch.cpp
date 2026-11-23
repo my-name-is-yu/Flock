@@ -56,9 +56,9 @@ CallClass classify(const Decision& call) {
     return CallClass::exclusive;
 }
 
-bool batchable(const Decision& call) {
-    return isBotTool(call.tool) ||
-           std::ranges::find(conversationBatchReads,call.tool) != std::end(conversationBatchReads);
+bool batchable(std::string_view tool) {
+    return isBotTool(tool) ||
+           std::ranges::find(conversationBatchReads,tool) != std::end(conversationBatchReads);
 }
 
 std::vector<std::vector<std::size_t>> planWaves(const std::vector<Decision>& validatedCalls) {

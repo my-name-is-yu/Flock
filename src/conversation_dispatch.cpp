@@ -74,18 +74,9 @@ Store::Impl::CallOutcome Store::Impl::executeConversationCall(
         if (!allowed) return stop;
     }
 
-    Json result;
-    if (git) {
-        result = gitConversationTool(ctx.gitHost,message,decision,key);
-    } else if (sessionRead) {
-        result = sessionReadTool(message,decision,ctx.t3,key);
-    } else {
-        try {
-            result = readiness(message.bot,message.routing,decision.args,ctx.t3);
-            result["ok"] = true;
-        } catch (const Conflict& error) { result = toolFailure(error.what()); }
-    }
-    if ((git || sessionRead) && result.value("policyWaiting",false)) return waiting;
+    auto result = git ? gitConversationTool(ctx.gitHost,message,decision,key) :
+                        executeConversationRead(message,decision,ctx.t3,key);
+    if (result.value("policyWaiting",false)) return waiting;
 
     std::lock_guard lock(mutex);
     Transaction transaction(db);
@@ -93,6 +84,18 @@ Store::Impl::CallOutcome Store::Impl::executeConversationCall(
     saveConversationCallResult(message,step,std::move(result));
     transaction.commit();
     return advance;
+}
+
+Json Store::Impl::executeConversationRead(const Message& message, const Decision& decision, T3& t3,
+                                          std::string_view key) {
+    if (decision.tool == "flock_session_search" || decision.tool == "flock_session_events")
+        return sessionReadTool(message,decision,t3,key);
+    if (decision.tool != "check_environment_readiness") throw Conflict("Unsupported conversation read");
+    try {
+        auto result = readiness(message.bot,message.routing,decision.args,t3);
+        result["ok"] = true;
+        return result;
+    } catch (const Conflict& error) { return toolFailure(error.what()); }
 }
 
 Store::Impl::CallOutcome Store::Impl::executeConversationBotChange(

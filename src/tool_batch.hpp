@@ -6,7 +6,7 @@ namespace flockv0::tool_batch {
 enum class CallClass { parallel_read, gated_read, exclusive, terminal };
 
 CallClass classify(const Decision&);
-bool batchable(const Decision&);
+bool batchable(std::string_view tool);
 
 bool validatedCallsConflict(const Decision&, const Decision&);
 std::vector<std::vector<std::size_t>> planWaves(const std::vector<Decision>& validatedCalls);

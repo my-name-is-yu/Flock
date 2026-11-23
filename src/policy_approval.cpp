@@ -140,7 +140,8 @@ WHERE a.status IN ('pending','approved')
 }
 
 ApprovalGate Store::Impl::approveAction(const PolicyOrigin& origin, const Resource& resource,
-                                        std::string_view operation, const Json& payload, Seconds now, bool claim) {
+                                       std::string_view operation, const Json& payload, Seconds now, bool claim,
+                                       ApprovalWait waitMode) {
     Policy policy(*this);
     const auto action = actionName(resource.action);
     const auto deny = [&](std::string_view reason) {
@@ -202,7 +203,7 @@ SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,revision,? FROM policy_settings WHERE id=1
        origin.anchor,origin.turn,origin.task,origin.revision,origin.generation,now,
        origin.background ? Json(now+30*60) : Json(nullptr),origin.generation});
     const auto card = last();
-    if (origin.turn)
+    if (origin.turn && waitMode == ApprovalWait::pause)
         exec("UPDATE conversation_turns SET status='policy_waiting' WHERE message_id=? AND status='running'",{origin.turn});
     if (origin.task) {
         if (!origin.turn && (operation.starts_with("outbox/") || operation.starts_with("git/"))) {

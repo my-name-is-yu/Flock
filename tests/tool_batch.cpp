@@ -47,12 +47,12 @@ void classification() {
 }
 
 void batchAdmission() {
-    for (const auto& tool : botToolNames()) check(batchable(call(tool)), "Bot tool missing from batch admission");
-    check(batchable(call("flock_session_search")), "Session search missing from batch admission");
-    check(batchable(call("check_environment_readiness")), "Environment readiness missing from batch admission");
-    for (const auto& tool : gitTools()) check(!batchable(call(tool)), "Git tool admitted to batching");
+    for (const auto& tool : botToolNames()) check(batchable(tool), "Bot tool missing from batch admission");
+    check(batchable("flock_session_search"), "Session search missing from batch admission");
+    check(batchable("check_environment_readiness"), "Environment readiness missing from batch admission");
+    for (const auto& tool : gitTools()) check(!batchable(tool), "Git tool admitted to batching");
     for (const auto tool : {"read_tool_result","flock_session_events","message_session","reply","unknown_tool"})
-        check(!batchable(call(tool)), "Unexpected batch admission for " + std::string(tool));
+        check(!batchable(tool), "Unexpected batch admission for " + std::string(tool));
 }
 
 void waves() {

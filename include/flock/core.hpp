@@ -50,6 +50,7 @@ struct Decision {
 struct ModelTurn {
     std::vector<Decision> calls;
     Json usage = Json::object();
+    std::map<std::size_t,std::string> rejections{}; // Adapter validation errors by zero-based call index.
 };
 struct ModelImage {
     Id messageId;

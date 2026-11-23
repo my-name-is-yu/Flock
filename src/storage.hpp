@@ -177,8 +177,9 @@ struct Store::Impl {
     void initializePolicySchema();
     PolicyOrigin policyOrigin(const conversation::Message&);
     PolicyOrigin taskPolicyOrigin(const Json&);
+    enum class ApprovalWait { pause, defer };
     ApprovalGate approveAction(const PolicyOrigin&, const Resource&, std::string_view operation,
-                               const Json& payload, Seconds now, bool claim = true);
+                               const Json& payload, Seconds now, bool claim = true, ApprovalWait = ApprovalWait::pause);
     bool currentPolicyApproval(Id turn, Id task, Id revision, Id generation) const;
     void settlePolicyApprovals(std::optional<Seconds> now = {});
     void decidePolicyApproval(const Person&, const InboxTarget&, std::string_view);
@@ -289,7 +290,9 @@ struct Store::Impl {
     void validateBotTool(const ToolContext&, const Decision&);
     Json executeBotTool(const ToolContext&, const Decision&);
     void saveTurnResults(Id, int step, const Json& results);
-    bool runBotTools(const ToolContext&, int step, const std::vector<ModelCall>&, std::stop_token);
+    bool runToolBatch(const conversation::Message&, const ToolContext&, int step, const std::vector<ModelCall>&,
+                      T3&, std::stop_token);
+    std::map<std::pair<Id,int>,std::map<std::size_t,Json>> toolBatchResults;
     std::string messageModelBudget(Id messageId);
     std::string taskModelBudget(const Json& task);
     std::string ensureModelBudget(std::string key, const Json& config);
@@ -326,6 +329,7 @@ struct Store::Impl {
     };
     CallOutcome executeConversationCall(const conversation::Message&, int step, const ModelCall&,
                                         const ConversationCallContext&);
+    Json executeConversationRead(const conversation::Message&, const Decision&, T3&, std::string_view key);
     CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
                                              std::string_view key, const ConversationCallContext&);
     CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&,
