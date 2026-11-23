@@ -75,17 +75,23 @@ async function load() {
     if (data.canManageMembers)
       note('people', 'No shared members', 'Add a person ID below to share this Bot.');
     else
-      note('people', 'Sharing setup required', 'Set FLOCK_WEB_IDENTITIES_FILE and restart Flock so people can sign in.');
+      note('people', 'Only you can use this Bot', 'To share it, set ',
+        code('FLOCK_WEB_IDENTITIES_FILE'), ' to a file listing who can sign in, then restart Flock.');
   }
 }
-function note(id, title, detail) {
+function code(text) {
+  const element = document.createElement('code');
+  element.textContent = text;
+  return element;
+}
+function note(id, title, ...detail) {
   const item = document.createElement('p');
   const label = document.createElement('span');
   label.className = 'row-label';
   const heading = document.createElement('strong');
   heading.textContent = title;
   const sub = document.createElement('small');
-  sub.textContent = detail;
+  sub.append(...detail);
   label.append(heading, sub);
   item.append(label);
   $(id).append(item);
