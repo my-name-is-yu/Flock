@@ -125,9 +125,15 @@ struct SimulatedT3 : T3 {
     std::map<std::string,RunRef> deliveries;
     std::map<std::string,Observation> observations;
     std::map<std::pair<std::string,std::string>,SessionMetadata> sessions;
+    std::map<std::string,std::vector<T3Project>> projectsByEnvironment;
     bool loseNextSend = false, loseNextStop = false, deliveryVisible = true;
     std::string login = "original-login";
     InterruptOutcome interruptOutcome = InterruptOutcome::Requested;
+
+    std::vector<T3Project> projects(std::string_view environment) override {
+        const auto found = projectsByEnvironment.find(std::string(environment));
+        return found == projectsByEnvironment.end() ? std::vector<T3Project>{{"project","Fixture Project",{}}} : found->second;
+    }
 
     std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view environment, std::string_view project, Id, SessionReadDeadline) override {
@@ -725,6 +731,54 @@ void destinationClarificationContinuesFromConversationHistory() {
     check(hasHistoryEntry("user",request) && hasHistoryEntry("bot","Which environment should I use?") &&
           tasks.size() == 1 && f.task(tasks.front()["id"])["environmentId"] == "cloud",
           "a destination clarification lost its original request or selected environment");
+}
+
+void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
+    Fixture f;
+    T3Connections(*f.store).connect("desktop",localOwner.id,48123);
+    f.t3.projectsByEnvironment["desktop"] = {{"docs","Docs","docs"},{"release","Release","release"}};
+    const auto held = f.store->submit(f.routing("Keep the release project occupied","beta","desktop","release"));
+    f.reach(held,"running");
+
+    const Intake automatic{"alpha","","",""};
+    const auto request = "Check the build";
+    f.script(request,{start()});
+    f.store->receive(localOwner,automatic,"new-project",request);
+    f.runtime->runConversations();
+    const Id task = f.store->tasks("alpha").front().at("id");
+    f.reach(task,"waiting");
+    auto waiting = f.task(task);
+    check(waiting.at("environmentId") == "desktop" && waiting.at("projectId") == "" &&
+          waiting.at("wait").at("choices") == Json::array({"Docs","Release"}) && f.t3.sent.size() == 1,
+          "first work on the connected environment did not wait for a named project");
+    const auto target = TaskTarget::from(waiting,waiting.at("wait").at("id"));
+    bool invalid = false;
+    try { f.store->operate(localOwner,target,"answer",{{"text","Arbitrary project"}}); }
+    catch (const Conflict&) { invalid = true; }
+    check(invalid && f.task(task).at("state") == "waiting","an answer selected an unlisted project");
+
+    f.restart();
+    f.store->operate(localOwner,target,"answer",{{"text","Release"}});
+    f.tick(3);
+    check(f.task(task).at("state") == "queued" && f.task(task).at("projectId") == "release" &&
+          f.task(task).at("blockedBy").at("id") == held && f.t3.sent.size() == 1,
+          "selecting a project bypassed its occupied execution slot");
+    f.t3.finish("run-1","Release check complete");
+    f.reach(task,"running");
+    check(f.t3.sent.back().projectId == "release","first launch did not use the selected project");
+    f.t3.finish("run-2","Build checked");
+    f.reach(task,"completed");
+
+    const auto next = f.store->submit({"alpha","Verify the fix","desktop",""});
+    f.reach(next,"running");
+    check(f.t3.sent.back().projectId == "release","a later task did not use the remembered project");
+
+    T3Connections(*f.store).connect("cloud",localOwner.id,48123);
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud only","cloud"}};
+    const auto remote = f.store->submit({"alpha","Verify remotely","cloud",""});
+    f.reach(remote,"running");
+    check(f.t3.sent.back().environmentId == "cloud" && f.t3.sent.back().projectId == "cloud-project",
+          "the remembered project crossed environments or the sole project needed an answer");
 }
 
 void suggestionsStayWithTheBotMessage() {
@@ -2191,6 +2245,7 @@ int main() {
         resumedChoicesRecoverSavedSessionCalls();
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();
+        connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
         pausedTurnDoesNotHoldCompletion();

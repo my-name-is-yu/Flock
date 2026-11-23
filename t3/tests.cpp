@@ -254,6 +254,10 @@ int main(int argc, char** argv) {
               "URL-only login saves credentials under the discovered environment ID");
         fixture({{"claimedEnvironment", "env-1"}});
         auto adapter = makeT3Mcp(home);
+        const auto projects = adapter->projects("env-1");
+        check(projects.size() == 2 && projects[0].id == "project" && projects[0].title == "Release Pipeline" &&
+              projects[0].directory == "release" && projects[1].id == "docs" && projects[1].directory == "docs",
+              "Project discovery did not page through live projects or exclude archived projects");
         Command launch;
         launch.actionId = "flock-action-0123";
         launch.tool = "delegate";

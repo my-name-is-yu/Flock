@@ -214,10 +214,11 @@ struct Fixture {
     Script model;
     Seconds now = unixTime();
     std::string read = "off";
+    bool requireT3Connection;
     std::map<std::string,BotNotes> notes{{"alpha",{"Initial SOUL","ALPHA_ONLY"}},{"beta",{"Second SOUL","BETA_ONLY"}}};
     std::map<std::string,std::vector<PeerBot>,std::less<>> peers;
 
-    Fixture() {
+    explicit Fixture(bool requireConnection = false) : requireT3Connection(requireConnection) {
         char temp[] = "/tmp/flock-acceptance-XXXXXX";
         const auto* path = mkdtemp(temp);
         if (!path) throw std::runtime_error("Cannot create test directory");
@@ -237,6 +238,7 @@ struct Fixture {
             return notes.at(std::string(id)).memory;
         });
         RuntimeOptions options{[&] { return now; },read};
+        options.requireT3Connection = requireT3Connection;
         options.peers = [&](std::string_view source) {
             const auto found = peers.find(source);
             return found == peers.end() ? std::vector<PeerBot>{} : found->second;
@@ -344,6 +346,102 @@ void selectedWorkRechecksConnectionAfterApproval() {
     f.wait(task,"user_question");
     check(f.t3.seen.empty() && f.logs(task,"policy_action_closed") == 1,
           "A previously approved selected Session sent work after its connection was revoked");
+}
+
+void disconnectBlocksSendingAndRetry() {
+    for (const bool followUp : {false,true}) {
+        Fixture f(true);
+        Store settingsStore(f.directory/"state.db");
+        T3Connections connections(settingsStore);
+        connections.connect("e",localOwner.id,4173);
+        const auto id = f.submit();
+        f.model.script = [](const ModelInput& input) {
+            return input.event.at("kind") == "intake" ? work() : work("follow_up",false);
+        };
+        if (followUp) {
+            f.reach(id,"running");
+            f.t3.finish("run-1");
+        }
+        f.reach(id,"sending");
+        f.t3.onPreflight = [&] { connections.disconnect("e"); };
+        auto wait = f.wait(id,"auth");
+        const auto sent = followUp ? 1u : 0u;
+        check(f.t3.seen.size() == sent && f.logs(id,"send_started") == sent,
+              "A disconnect during preflight admitted a new T3 send");
+        f.restart();
+        f.t3.onPreflight = [] { throw std::runtime_error("A disconnected environment reached T3 preflight"); };
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+        wait = f.wait(id,"auth");
+        check(f.t3.seen.size() == sent && f.t3.reconciles == 0,
+              "Retrying an unsent action after disconnect contacted T3");
+        f.t3.onPreflight = {};
+        connections.connect("e",localOwner.id,4173);
+        f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+        f.reach(id,"running");
+        check(f.t3.seen.size() == sent + 1 && f.t3.reconciles == 0,
+              "Reconnecting did not permit one send of the waiting action");
+    }
+}
+
+void disconnectKeepsOwnedRunRecovery() {
+    Fixture f(true);
+    Store settingsStore(f.directory/"state.db");
+    T3Connections connections(settingsStore);
+    connections.connect("e",localOwner.id,4173);
+    const auto id = f.submit();
+    const auto queued = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.t3.loseAcknowledgement = true;
+    const auto wait = f.wait(id,"unknown_delivery");
+    connections.disconnect("e");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),wait),"reconcile");
+    f.reach(id,"running");
+    f.runtime->tick();
+    check(f.t3.launches == 1 && f.t3.reconciles == 1 && f.t3.polls > 0,
+          "Disconnect blocked reconciliation or observation of already sent work");
+    f.store->operate(localOwner,TaskTarget::from(f.task(id),0),"cancel");
+    f.runtime->tick();
+    check(f.t3.interruptedRuns.size() == 1 && f.t3.interruptedRuns.front().runId == "run-1",
+          "Disconnect blocked interrupting the exact owned Run");
+    f.t3.finish("run-1","cancelled");
+    f.reach(id,"cancelled");
+    f.wait(queued,"auth");
+    check(f.t3.launches == 1 && f.logs(queued,"send_started") == 0,
+          "Previously queued work launched after the environment was disconnected");
+}
+
+void disconnectWaitsForInFlightSend() {
+    using namespace std::chrono_literals;
+    Fixture f(true);
+    Store settingsStore(f.directory/"state.db");
+    T3Connections connections(settingsStore);
+    connections.connect("e",localOwner.id,4173);
+    const auto id = f.submit();
+    f.model.script = [](const ModelInput&) { return work(); };
+    f.reach(id,"sending");
+    std::promise<void> sendEntered, releaseSend;
+    auto release = releaseSend.get_future();
+    f.t3.beforeWorkAcknowledgement = [&] {
+        sendEntered.set_value();
+        release.wait();
+    };
+    auto tick = std::async(std::launch::async,[&] { f.runtime->tick(); });
+    if (sendEntered.get_future().wait_for(2s) != std::future_status::ready) {
+        releaseSend.set_value();
+        tick.get();
+        throw std::runtime_error("The test did not reach the in-flight T3 send");
+    }
+    std::promise<void> disconnectEntered;
+    auto disconnect = std::async(std::launch::async,[&] {
+        disconnectEntered.set_value();
+        return connections.disconnect("e");
+    });
+    disconnectEntered.get_future().wait();
+    const bool waited = disconnect.wait_for(100ms) == std::future_status::timeout;
+    releaseSend.set_value();
+    tick.get();
+    check(disconnect.get() && waited && f.task(id)["activeRun"]["runId"] == "run-1",
+          "A separate Store disconnected during an in-flight send or lost its accepted Run");
 }
 
 void invalidDecisions() {
@@ -2723,6 +2821,9 @@ int main() {
             {"cancel during delivery",cancelDuringDelivery},
             {"selected work reconciles and cancels only its own queued Run",selectedWorkSurvivesLostReceiptAndStopsOnlyAssignedRun},
             {"selected work rechecks its T3 connection after approval",selectedWorkRechecksConnectionAfterApproval},
+            {"disconnect blocks new work and retries",disconnectBlocksSendingAndRetry},
+            {"disconnect preserves owned Run recovery",disconnectKeepsOwnedRunRecovery},
+            {"disconnect fences sends across Stores",disconnectWaitsForInFlightSend},
             {"Run settlement with unknown answer delivery",settleWhileAnswerDeliveryIsUnknown},
             {"settled report recovery across restart",settledReportCanRecoverAfterRestart},
             {"late report recovery after retries exhaust",lateReportCanRestoreCompletion},

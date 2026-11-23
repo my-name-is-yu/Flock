@@ -52,10 +52,11 @@ root authority only when all of those credentials currently have `adminRoot`.
 
 ## Ask a Bot from a T3 Session
 
-In **Flock settings → Connections**, paste the connection URL from T3 Code
-and choose **Connect**. From a terminal, run `flock t3 connect ENVIRONMENT MCP_URL`
-on the machine running Flock.
-Approve T3 OAuth read and operate access for each connected environment.
+Start T3 Code and choose **Connect local T3** in **Flock settings → Connections**.
+For another machine, use **Use a connection URL** and paste the MCP URL from T3
+Code's **Settings → Environments**. From a terminal on the machine running Flock,
+run `flock t3 connect`, with an MCP URL for a remote environment.
+Approve T3 OAuth read and operate access in the browser on the Flock machine.
 Flock registers a loopback MCP server with installed Codex and Claude Code and
 exports their Flock skills. For shared Web identities, include `local-owner` in
 the identity file and grant it `decide` access to the Bots it may ask.
@@ -74,12 +75,15 @@ Keep the Web listener enabled to accept
 MCP calls. An accepted ask can finish when the Runtime restarts with
 `flock run --no-web` and uses the same home, connection, and identity file.
 
-Adding an environment at the same port keeps a complete provider configuration.
-Reconnecting an existing environment, changing the port, or provisioning a
-missing registration rotates the shared bearer. Existing provider sessions may
-need to reload their configuration. Choose **Disconnect** on an environment in Flock settings, or run
-`flock t3 disconnect ENVIRONMENT`, to revoke the connection to that environment. Disconnecting the final environment
-revokes the bearer and removes the provider registration. For custom provider
+Use **Reconnect** to authorize a saved environment again. Adding or reconnecting
+an environment keeps a complete provider configuration at the same port.
+Changing the port or repairing a missing registration rotates the provider
+bearer. Existing provider sessions may need to reload their configuration.
+Choose **Disconnect** in Flock settings or run `flock t3 disconnect ENVIRONMENT`
+to stop new Flock sends to that environment. Flock can still follow and stop Runs
+it already started while its T3 authorization is valid. To revoke that authorization,
+remove Flock under **Sharing & access → Authorized clients** in T3 Code.
+Disconnecting the final environment removes the local provider registration. For custom provider
 installations, set `FLOCK_CLAUDE_CLI`, `FLOCK_CODEX_CLI`, `FLOCK_CODEX_CONFIG`,
 `FLOCK_CLAUDE_CONFIG`, `FLOCK_CLAUDE_SKILLS_DIR`, or `FLOCK_CODEX_SKILLS_DIR`.
 
@@ -96,8 +100,7 @@ precedence over Ask first, then Allow, then the
 [category defaults](../README.md#installation-policy).
 
 Installation administrators manage ChatGPT, T3, and other integrations in
-**Connections**. Copy the connection URL from T3, paste it into Flock, and
-approve access in T3. Flock confirms the environment before registering it.
+**Connections**. Local discovery and URL connections both use T3 OAuth.
 Set up the corresponding external service or local bridge before connecting it.
 
 Use **Access** to enable shared sign-in and manage accounts for this Flock.
@@ -134,11 +137,11 @@ These endpoints require an installation root.
   Set `add` to `false` to remove the matching rule.
 - `POST /api/settings/model-login` takes `reconsent` and starts ChatGPT sign-in in
   the browser on the machine running Flock.
-- `POST /api/settings/t3-connect` takes `mcpUrl`. An optional `environmentId` must
-  match the authenticated environment. The person
-  who starts the connection receives the approval link in `t3Setup.authorizationUrl`.
+- `POST /api/settings/t3-connect` takes `source` of `local`, `url` with
+  `mcpUrl`, or `saved` with `environmentId`. The person who starts the
+  connection receives the approval link in `t3Setup.authorizationUrl`.
 - `POST /api/settings/t3-disconnect` takes `environmentId`. Pass `null` to retry
-  removing the provider registration after access has been revoked.
+  removing the provider registration after disconnecting the environment.
 
 ## Bot settings
 

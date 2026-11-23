@@ -237,9 +237,8 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
         else error = "This Session is unavailable through your T3 connection";
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
-    // A stop takes the exclusive lock. Hold this through the wire call so a stop cannot
-    // commit between recording a dispatch and starting it.
-    std::shared_lock dispatch(sessionDispatchMutex);
+    // Keep stop and disconnect from committing between recording the send and sending it.
+    const SessionDispatchLock dispatch(path,SessionDispatchLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -365,14 +364,39 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
     }
 }
 
+std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot) {
+    std::set<std::string> result;
+    Policy policy(*this);
+    auto rows = query("SELECT environment_id FROM t3_connected_environments");
+    while (rows.next()) {
+        const auto id = rows.string(0);
+        if (policy.allows(bot,Action::environment_inspect,id) && !policy.forbidden(bot,Action::environment_launch,id))
+            result.insert(id);
+    }
+    return result;
+}
+
+std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name) {
+    const auto configured = field(routing,"environmentId");
+    if (!name.empty()) {
+        const auto explicitEnvironment = verifiedEnvironment(routing,routing,name);
+        if (!explicitEnvironment.empty()) return explicitEnvironment;
+        return configured.empty() && registeredT3Environments(bot).contains(std::string(name)) ? std::string(name) : std::string{};
+    }
+    if (!configured.empty()) return configured;
+    const auto connected = registeredT3Environments(bot);
+    const auto origin = field(routing.value("sessionOrigin",Json::object()),"environmentId");
+    if (connected.contains(origin)) return origin;
+    return connected.size() == 1 ? *connected.begin() : std::string{};
+}
+
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                                      std::string_view environment, Id messageId, const Json& source,
+                                      std::string_view destination, Id messageId, const Json& source,
                                       bool resume, const WorkSession* selectedSession) {
-    const auto destination = selectedSession ? selectedSession->environmentId
-        : environment.empty() ? field(routing,"environmentId") : verifiedEnvironment(routing,routing,environment);
-    const auto project = selectedSession ? selectedSession->projectId : field(routing,"projectId");
+    const auto project = selectedSession ? selectedSession->projectId
+        : destination == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
     if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
-    const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
+    const auto id = submit({std::string(bot),std::string(request),std::string(destination),project,routing.at("config")},
                            messageId,source);
     auto task = load(id);
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
@@ -528,6 +552,7 @@ void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
     if (task.at("state") != "waiting" || field(wait,"reason") != "user_question" ||
         wait.at("id") != waitId || !waitIsActionable(task))
         throw Conflict("The question is no longer open");
+    if (wait.contains("projectChoices")) throw Conflict("Choose a T3 project before this task can start");
     auto updated = currentEvent(task);
     for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
     updated["withdrawnUserQuestion"] = field(wait,"text");

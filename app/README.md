@@ -91,7 +91,7 @@ for the requested `shared_memory` operation.
 build/app/flock model login
 build/app/flock model status
 build/app/flock model models
-build/app/flock t3 connect ENVIRONMENT_ID https://T3_HOST/mcp
+build/app/flock t3 connect
 build/app/flock run
 ```
 
@@ -99,8 +99,9 @@ Approve the two Flock connections in your browser. For ChatGPT sign-in, grant
 permission to use the eligible ChatGPT plan and check for `planUsage: true` in
 `flock model status`. Copy a slug from `flock model models` into each Bot
 configuration. Use `flock model login --reconsent` if plan usage is missing.
-For T3, approve Operate access. Use the connected environment ID in the Bot
-configuration. For T3 on this machine, use the loopback MCP URL published by T3.
+For T3, approve Operate access. `flock t3 connect` discovers the running local
+T3 server. To connect another machine, pass its MCP URL as the argument. When
+authorization expires, use `flock t3 reconnect ENVIRONMENT` to approve again.
 If Flock pauses a launch because of the installation policy, check the active
 mode and rules in **Flock settings**.
 

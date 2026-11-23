@@ -9,7 +9,6 @@
 #include <map>
 #include <mutex>
 #include <set>
-#include <shared_mutex>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
@@ -108,6 +107,18 @@ enum class SessionExit { removed, left };
 struct SessionStop {
     Id participation = 0, cutoff = 0;
 };
+
+class SessionDispatchLock {
+public:
+    enum class Mode { shared, exclusive };
+    SessionDispatchLock(const std::filesystem::path& database, Mode);
+    ~SessionDispatchLock();
+    SessionDispatchLock(const SessionDispatchLock&) = delete;
+    SessionDispatchLock& operator=(const SessionDispatchLock&) = delete;
+private:
+    int fd_;
+};
+
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 
@@ -125,7 +136,6 @@ struct Store::Impl {
     bool liveInteractiveRoles = false;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
-    std::shared_mutex sessionDispatchMutex;
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
@@ -176,6 +186,7 @@ struct Store::Impl {
     SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
+    bool t3EnvironmentConnected(std::string_view environment);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
@@ -326,6 +337,10 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
+    std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
+    void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
+    std::set<std::string> registeredT3Environments(std::string_view bot);
+    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
               RequestJournal requestJournal = RequestJournal::record, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,

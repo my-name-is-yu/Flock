@@ -1386,10 +1386,11 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
-    const Json t3Target{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}};
+    const Json t3Target{{"source","url"},{"mcpUrl","https://t3.example/mcp"}};
     std::atomic<bool> t3Started = false;
-    cb.t3Connect = [&](const Person& actor, const std::string& env, const std::string& url) {
-        check(actor.id == "owner" && env == "env-1" && url == "https://t3.example/mcp",
+    cb.t3Connect = [&](const Person& actor, const T3ConnectRequest& target) {
+        check(actor.id == "owner" && target.source == T3ConnectRequest::Source::Url &&
+              target.value == "https://t3.example/mcp",
               "T3 connection callback received the wrong requester or target");
         return !t3Started.exchange(true);
     };

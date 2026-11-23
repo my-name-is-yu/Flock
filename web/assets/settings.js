@@ -228,6 +228,7 @@ let t3Poll = 0;
 let watchingT3 = false;
 let startingT3 = false;
 let disconnectingT3 = false;
+let t3ApprovalTab = null;
 
 function pollConnections() {
   clearTimeout(t3Poll);
@@ -252,27 +253,39 @@ async function refreshConnections() {
 
 function renderConnections({t3, t3Setup, canManagePolicy: editable, canDisconnectT3, t3CleanupPending}) {
   clearTimeout(t3Poll);
-  $('t3-form').hidden = !t3Setup || t3Setup.running;
+  $('t3-connect-options').hidden = !t3Setup || t3Setup.running;
+  $('t3-connect-local').hidden = t3?.environments.some(({authorization}) => authorization?.local) ?? false;
   watchingT3 = t3Setup?.running === true;
   $('connections').replaceChildren();
   if (t3) {
-    for (const environment of t3.environments) {
-      const item = row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots.'));
+    for (const {environmentId, authorization} of t3.environments) {
+      const {label, expiresAt, expired} = authorization ?? {};
+      const expiry = expiresAt && !expired
+        ? `Authorization expires ${new Date(expiresAt * 1000).toLocaleDateString()}`
+        : '';
+      const item = row('connections', emptyLabel(label || environmentId, expiry));
       const actions = document.createElement('div');
       actions.className = 'connection-actions';
-      actions.append(statusBadge('Authorized', 'checked'));
-      if (canDisconnectT3) disconnectButton(actions, 'Disconnect', environment);
+      actions.append(statusBadge(authorization && !expired ? 'Authorized' : 'Sign-in needed',
+                                 authorization && !expired ? 'checked' : ''));
+      if (t3Setup && authorization) {
+        const reconnect = actionButton(actions, 'Reconnect', () => {
+          void startT3({source: 'saved', environmentId});
+        });
+        if (expired) reconnect.classList.add('primary');
+        reconnect.dataset.t3Action = '';
+      }
+      if (canDisconnectT3) disconnectButton(actions, 'Disconnect', environmentId,
+                                             label || environmentId);
       item.append(actions);
     }
-  } else if (editable && t3Setup) {
-    row('connections', emptyLabel('Not connected', 'In T3 Code, open Settings → Environments and choose Copy MCP URL.'));
-  } else if (editable) {
+  } else if (editable && !t3Setup) {
     row('connections', emptyLabel('Not connected', 'T3 setup is unavailable in this Flock instance.'));
-  } else {
+  } else if (!editable) {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
   if (t3CleanupPending) {
-    const item = row('connections', emptyLabel('Provider registration remains', 'T3 access is revoked. Retry removing the Flock registration from local coding agents.'));
+    const item = row('connections', emptyLabel('Provider registration remains', 'Retry removing the Flock registration from local coding agents.'));
     disconnectButton(item, 'Retry cleanup', null);
   }
   if (watchingT3) {
@@ -280,6 +293,10 @@ function renderConnections({t3, t3Setup, canManagePolicy: editable, canDisconnec
     const item = row('connections', emptyLabel(authorization ? 'Authorize Flock in T3' : 'Connecting to T3…',
       authorization ? 'Approve read and operate access in T3. This page updates when you’re done.' : 'Starting T3 authorization.'));
     if (authorization) {
+      if (t3ApprovalTab) {
+        if (!t3ApprovalTab.closed) t3ApprovalTab.location.replace(authorization);
+        t3ApprovalTab = null;
+      }
       const open = link('Open T3', authorization, 'Open T3 authorization');
       open.classList.add('primary');
       open.target = '_blank';
@@ -287,26 +304,28 @@ function renderConnections({t3, t3Setup, canManagePolicy: editable, canDisconnec
       item.append(open);
     }
     pollConnections();
-  } else if (t3Setup?.error) {
-    row('connections', emptyLabel('Connection didn’t finish', t3Setup.error)).classList.add('settings-row-error');
+  } else {
+    closeUnusedApprovalTab();
+    if (t3Setup?.error)
+      row('connections', emptyLabel('Connection didn’t finish', t3Setup.error)).classList.add('settings-row-error');
   }
+  updateConnectionButtons();
 }
 
 function updateConnectionButtons() {
-  for (const button of $('connections').querySelectorAll('button[data-t3-disconnect]')) {
-    button.disabled = startingT3 || watchingT3 || disconnectingT3;
-  }
-  for (const control of $('t3-form').elements) control.disabled = disconnectingT3 || startingT3;
+  const busy = startingT3 || watchingT3 || disconnectingT3;
+  for (const button of $('connections').querySelectorAll('button[data-t3-action]')) button.disabled = busy;
+  for (const control of $('t3-form').elements) control.disabled = busy;
+  $('t3-connect-local').disabled = busy;
 }
 
-function disconnectButton(item, label, environment) {
-  const control = actionButton(item, label, () => void disconnectT3(environment));
+function disconnectButton(item, label, environment, environmentLabel) {
+  const control = actionButton(item, label, () => void disconnectT3(environment, environmentLabel));
   control.classList.add('quiet-danger');
-  control.dataset.t3Disconnect = '';
-  control.disabled = startingT3 || watchingT3 || disconnectingT3;
+  control.dataset.t3Action = '';
 }
 
-async function disconnectT3(environment) {
+async function disconnectT3(environment, environmentLabel) {
   if (startingT3 || watchingT3 || disconnectingT3) return;
   disconnectingT3 = true;
   ++connectionsRequest;
@@ -318,34 +337,51 @@ async function disconnectT3(environment) {
   } catch {}
   const refreshed = await refreshConnections();
   $('status').textContent = saved
-    ? (refreshed ? (environment ? `Disconnected ${environment}.` : 'Provider registration removed.')
+    ? (refreshed ? (environment ? `Disconnected ${environmentLabel}.` : 'Provider registration removed.')
                   : 'Saved. Reload to see the current connections.')
     : 'Could not finish disconnecting. Check the current connection status.';
   disconnectingT3 = false;
   updateConnectionButtons();
 }
 
-$('t3-form').onsubmit = async (event) => {
-  event.preventDefault();
+function closeUnusedApprovalTab() {
+  if (t3ApprovalTab && !t3ApprovalTab.closed) t3ApprovalTab.close();
+  t3ApprovalTab = null;
+}
+
+async function startT3(target) {
   if (!canManagePolicy || startingT3 || watchingT3 || disconnectingT3) return;
-  const form = event.currentTarget;
-  const {mcpUrl} = Object.fromEntries(new FormData(form));
+  t3ApprovalTab = window.open('about:blank', '_blank');
+  if (t3ApprovalTab) t3ApprovalTab.opener = null;
   startingT3 = true;
   ++connectionsRequest;
   updateConnectionButtons();
   try {
-    const response = await postSettings('t3-connect', {mcpUrl: mcpUrl.trim()});
-    if (response.ok) form.reset();
-    else if (response.status !== 409 || (await response.json()).error !== 'connect_pending') throw new Error();
+    const response = await postSettings('t3-connect', target);
+    if (response.ok && target.source === 'url') $('t3-form').reset();
+    else if (!response.ok) {
+      closeUnusedApprovalTab();
+      if (response.status !== 409 || (await response.json()).error !== 'connect_pending') throw new Error();
+    }
     watchingT3 = true;
     $('status').textContent = '';
     await refreshConnections();
   } catch {
-    $('status').textContent = 'Could not start the T3 connection. Check the connection URL.';
+    closeUnusedApprovalTab();
+    $('status').textContent = target.source === 'url'
+      ? 'Could not start the T3 connection. Check the connection URL.'
+      : 'Could not start the T3 connection.';
   } finally {
     startingT3 = false;
     updateConnectionButtons();
   }
+}
+
+$('t3-connect-local').onclick = () => void startT3({source: 'local'});
+$('t3-form').onsubmit = (event) => {
+  event.preventDefault();
+  const {mcpUrl} = Object.fromEntries(new FormData(event.currentTarget));
+  void startT3({source: 'url', mcpUrl: mcpUrl.trim()});
 };
 
 async function submit(path, data) {

@@ -171,6 +171,9 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS t3_events(
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, item_type TEXT NOT NULL, item_id TEXT NOT NULL,
   PRIMARY KEY(environment_id,thread_id,item_type,item_id));
+CREATE TABLE IF NOT EXISTS bot_t3_projects(
+  bot_id TEXT NOT NULL, environment_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  PRIMARY KEY(bot_id,environment_id));
 CREATE TABLE IF NOT EXISTS waits(
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   data TEXT NOT NULL, resolution TEXT);
@@ -292,8 +295,18 @@ Json Store::Impl::load(Id id) const {
 }
 void Store::Impl::save(Json& task) {
     task["generation"] = task["generation"].get<Id>() + 1;
-    exec("UPDATE tasks SET state=?,generation=?,data=json_remove(?,'$.wait'),environment_id=? WHERE id=?",
-         {task["state"], task["generation"], task, task["environmentId"], task["id"]});
+    exec("UPDATE tasks SET state=?,generation=?,data=json_remove(?,'$.wait'),environment_id=?,project_id=? WHERE id=?",
+         {task["state"],task["generation"],task,task["environmentId"],task["projectId"],task["id"]});
+}
+
+std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {
+    auto row = query("SELECT project_id FROM bot_t3_projects WHERE bot_id=? AND environment_id=?",{bot,environment});
+    return row.next() ? row.string(0) : std::string{};
+}
+
+void Store::Impl::rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project) {
+    exec("INSERT INTO bot_t3_projects VALUES(?,?,?) ON CONFLICT(bot_id,environment_id) "
+         "DO UPDATE SET project_id=excluded.project_id",{bot,environment,project});
 }
 
 namespace {
@@ -558,9 +571,9 @@ Id Store::submit(const Intake& item, const Person* requester) {
 Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source,
                       RequestJournal requestJournal, const Json& trigger) {
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
-        item.request.size() > 16000 || item.environmentId.empty() || item.projectId.empty() ||
+        item.request.size() > 16000 || item.environmentId.empty() ||
         !item.config.is_object())
-        throw Conflict("Bot, nonempty request (up to 16,000 bytes), environment and project are required");
+        throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
     const auto scrub = redactor(item.botId);
     scrub.requirePublic({item.botId,item.environmentId,item.projectId,item.config});
     modelCallLimit(item.config);
@@ -599,8 +612,9 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
                                 task.at("request").get_ref<const std::string&>());
     const auto& environment = task.at("environmentId");
     const auto destinations = current.config.value("conversationEnvironments",Json::object());
-    if (task.at("projectId") != current.projectId ||
-        (environment != current.environmentId && std::ranges::find(destinations,environment) == destinations.end()))
+    if ((!current.projectId.empty() && environment == current.environmentId && task.at("projectId") != current.projectId) ||
+        (!current.environmentId.empty() && environment != current.environmentId &&
+         std::ranges::find(destinations,environment) == destinations.end()))
         throw Conflict("The project route changed. Cancel this task and submit a new request.");
     target["session"] = current.config.value("session",Json::object());
     return target;
@@ -652,15 +666,25 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         const auto answer = field(data,"text");
         if (answer.find_first_not_of(" \r\n\t") == std::string::npos || answer.size() > 8000)
             throw Conflict("A nonempty answer (up to 8,000 bytes) is required");
-        auto updated = currentEvent(task);
-        updated["userAnswer"] = answer;
-        updated["userQuestion"] = field(wait,"text");
-        for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
-        consumeEvent(task);
-        event(task, "answer/" + std::to_string(waitId), updated);
+        auto answerKind = "user_answer";
+        if (const auto projects = wait.find("projectChoices"); projects != wait.end()) {
+            const auto choice = projects->find(answer);
+            if (choice == projects->end()) throw Conflict("Choose one of the listed T3 projects");
+            task["projectId"] = *choice;
+            rememberT3Project(bot,field(task,"environmentId"),choice->get_ref<const std::string&>());
+            next = "queued";
+            answerKind = "project_selected";
+        } else {
+            auto updated = currentEvent(task);
+            updated["userAnswer"] = answer;
+            updated["userQuestion"] = field(wait,"text");
+            for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
+            consumeEvent(task);
+            event(task, "answer/" + std::to_string(waitId), updated);
+        }
         Json entry = {{"text",answer},{"waitId",waitId},{"conversation",sourceMessage != 0}};
         if (sourceMessage) entry["messageId"] = sourceMessage;
-        journal(id, "user_answer", entry);
+        journal(id,answerKind,entry);
     } else if (operation == "approve" && reason == "budget") {
         task["remaining"] = task["remaining"].get<int>() + 1;
         journal(id, "budget_granted", {{"waitId",waitId},{"remaining",task["remaining"]}});
@@ -686,8 +710,10 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
                 throw Conflict("Session settings can only be corrected before an unsent action");
             task["config"]["session"] = normalizeSessionSettings(data["session"]);
         }
-        if (field(task,"actionId").empty()) next = task["activeRun"].is_null() ? "deciding" : "running";
-        else {
+        if (field(task,"actionId").empty()) {
+            if (!task["activeRun"].is_null()) next = "running";
+            else if (field(task,"projectId").empty()) next = "queued";
+        } else {
             const auto action = outbox(task);
             if (action.is_null()) throw Conflict("No delivery to reconcile");
             if (action.at("phase") == "ready" && action.at("tool") == "answer_session_question") {

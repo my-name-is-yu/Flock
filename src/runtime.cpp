@@ -258,7 +258,79 @@ ORDER BY id)SQL");
         return db.load(id);
     }
 
-    void activate(const Json& task) {
+    bool selectProject(Json& task) {
+        const auto environment = field(task,"environmentId");
+        const auto bot = field(task,"botId");
+        const auto projectQuestionOpen = [&] {
+            return db.query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
+                            "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
+                            "AND json_type(w.data,'$.projectChoices')='object' LIMIT 1",{bot,environment}).next();
+        };
+        {
+            std::lock_guard lock(db.mutex);
+            if (projectQuestionOpen()) return false;
+        }
+        std::vector<T3Project> projects;
+        std::string problem;
+        if (options.requireT3Connection && !db.t3EnvironmentConnected(environment)) {
+            problem = "Connect this T3 environment in Settings, then try again.";
+        } else if (!policy.allows(bot,Action::environment_inspect,environment) ||
+            policy.forbidden(bot,Action::environment_launch,environment)) {
+            problem = "Flock cannot use this T3 environment under the current permissions.";
+        } else {
+            try {
+                projects = t3.projects(environment);
+                const auto scrub = db.redactor(bot);
+                std::erase_if(projects,[&](const T3Project& project) { return scrub.text(project.id) != project.id; });
+                if (projects.empty()) problem = "Add or unarchive a project in this T3 environment, then try again.";
+            } catch (const std::exception&) {
+                problem = "Flock could not list projects. Check the T3 connection and try again.";
+            }
+        }
+        return change(task,[&](Json& current) {
+            if (shutdown.stop_requested()) return false;
+            if (!problem.empty()) {
+                db.wait(current,"settings",{{"text",problem}});
+                return true;
+            }
+            const auto remembered = db.rememberedT3Project(bot,environment);
+            const auto saved = std::ranges::find(projects,remembered,&T3Project::id);
+            if (saved != projects.end() || projects.size() == 1) {
+                const auto& project = saved == projects.end() ? projects.front().id : saved->id;
+                current["projectId"] = project;
+                db.rememberT3Project(bot,environment,project);
+                return true;
+            }
+            // Concurrent workflow stages share a Bot's first choice.
+            if (projectQuestionOpen()) return false;
+            const auto scrub = db.redactor(bot);
+            std::map<std::string,std::size_t> titles;
+            std::vector<std::string> names;
+            for (const auto& project : projects) {
+                names.push_back(bounded(scrub.text(project.title),140));
+                ++titles[names.back()];
+            }
+            Json labels = Json::array(), choices = Json::object();
+            for (std::size_t index = 0; index < projects.size(); ++index) {
+                const auto& project = projects[index];
+                auto label = names[index];
+                if (titles.at(label) > 1 && !project.directory.empty())
+                    label += " (" + bounded(scrub.text(project.directory),40) + ")";
+                const auto base = label;
+                for (int suffix = 2; choices.contains(label); ++suffix)
+                    label = base + " #" + std::to_string(suffix);
+                labels.push_back(label);
+                choices[label] = project.id;
+            }
+            db.wait(current,"user_question",{{"text","Which T3 project should this Bot use in this environment?"},
+                {"choices",std::move(labels)},{"projectChoices",std::move(choices)}});
+            return true;
+        },&task) && !field(task,"projectId").empty();
+    }
+
+    void activate(Json task) {
+        if (field(task,"projectId").empty() && !selectProject(task)) return;
+        // Project selection changes the queue key. Claim only under that new key.
         change(task,[&](Json& current) {
             auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL"
                                  " UNION ALL SELECT 1 FROM peer_exchanges WHERE recipient_task=? AND kind='consult'",
@@ -914,8 +986,16 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             });
         };
         const bool firstSend = action["phase"] == "ready";
-        std::shared_lock dispatch(db.sessionDispatchMutex,std::defer_lock);
+        const auto disconnected = [&] {
+            return options.requireT3Connection && !db.t3EnvironmentConnected(cmd.environmentId);
+        };
+        const auto connectionUnavailable = [&] {
+            applyDelivery(id,action,{Delivery::Kind::Auth,{},
+                "Connect this T3 environment in Flock settings before sending work.",true});
+        };
+        std::optional<SessionDispatchLock> dispatch;
         if (firstSend) {
+            if (disconnected()) return connectionUnavailable();
             if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
             if (resource && policy.mode() == "full" && policy.forbidden(cmd.ownerBotId,resource->action,resource->target))
                 return applyDelivery(id,action,{Delivery::Kind::Settings,{},"Session action denied by installation policy.",true});
@@ -989,7 +1069,9 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 stopped->definitelyUnsent = true;
                 return applyDelivery(id,action,*stopped);
             }
-            if (sendsToSession || cmd.sessionOrigin) dispatch.lock();
+            if (options.requireT3Connection || sendsToSession || cmd.sessionOrigin)
+                dispatch.emplace(db.path,SessionDispatchLock::Mode::shared);
+            if (disconnected()) return connectionUnavailable();
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
                 if (shutdown.stop_requested() || current["actionId"] != action["id"]) return false;
