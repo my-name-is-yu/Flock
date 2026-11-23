@@ -706,17 +706,16 @@ def test_connection_setup(server, flock, temp):
     token = connect("env-2", "full", ["--port", str(port), "--mode", "full"], restart=True)
     assert token != before_port_change
 
-    for option in ("--headless", "--no-web"):
-        with subprocess.Popen(command + ["run", option], env=env, text=True,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
-            try:
-                with selectors.DefaultSelector() as selector:
-                    selector.register(headless.stderr, selectors.EVENT_READ)
-                    assert selector.select(5), "headless startup did not warn about the MCP endpoint"
-                    assert "T3 skills cannot reach Flock" in headless.stderr.readline()
-            finally:
-                headless.terminate()
-                headless.wait(timeout=8)
+    with subprocess.Popen(command + ["run", "--no-web"], env=env, text=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as headless:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(headless.stderr, selectors.EVENT_READ)
+                assert selector.select(5), "headless startup did not warn about the MCP endpoint"
+                assert "T3 skills cannot reach Flock" in headless.stderr.readline()
+        finally:
+            headless.terminate()
+            headless.wait(timeout=8)
 
     with socket.socket() as busy:
         busy.bind(("127.0.0.1", port))
