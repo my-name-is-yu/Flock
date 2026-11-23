@@ -659,7 +659,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         port = choose_port.getsockname()[1]
     endpoint = f"http://127.0.0.1:{port}/mcp/flock"
 
-    def connect(environment, flags, restart=False, expected_error=None):
+    def connect(environment, flags, restart=False, expected_error=None, rewritten=True):
         server.state["claimedEnvironment"] = environment
         with subprocess.Popen(command + ["t3", "connect", environment, server.origin + "/mcp",
                                          *flags], env=env, text=True,
@@ -686,7 +686,8 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
         details = json.loads(output)
         assert "mode" not in details and details["port"] == port
         has_claude = env["FLOCK_CLAUDE_CLI"] == str(claude)
-        assert details["configuredProviders"] == (["codex", "claude"] if has_claude else ["codex"])
+        providers = ["codex", "claude"] if has_claude else ["codex"]
+        assert details["configuredProviders"] == (providers if rewritten else [])
         assert ("Restart 'flock run'" in errors) == restart
         codex = codex_config.read_text()
         assert codex.startswith(original) and codex.count("[mcp_servers.flock]") == 1 and endpoint in codex
@@ -727,7 +728,7 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
     rotated = connect("env-2", [])
     assert rotated != token
     token = rotated
-    assert connect("env-3", []) == token
+    assert connect("env-3", [], rewritten=False) == token
     subprocess.run(command + ["t3", "disconnect", "env-3"], env=env, check=True,
                    timeout=5, stdout=subprocess.DEVNULL)
     credential_dir = state / "credentials" / "t3"
@@ -855,7 +856,7 @@ def test_headless_handoff(server, flock, temp):
     server.state.update(handoffText=handoff_text, finalized=True)
 
     with sqlite3.connect(home / "flock.sqlite3") as db:
-        db.execute("INSERT INTO t3_connector VALUES(1,'fixture','alice','full','fixture-digest',4173)")
+        db.execute("INSERT INTO t3_connector VALUES(1,'fixture','alice','fixture-digest',4173)")
         db.execute("INSERT INTO t3_connected_environments VALUES('env-1')")
         # Simulate a daemon exit after T3 accepted the reply and before Flock saved the receipt.
         db.execute("INSERT INTO return_channels VALUES(1,'env-1','project','human','','request-1','',"
