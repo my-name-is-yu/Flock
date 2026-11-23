@@ -81,11 +81,11 @@ void Store::Impl::initializeBoardInboxSchema() {
     const char* schema = R"SQL(
 CREATE TABLE IF NOT EXISTS pr_review_items(
     id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
-    target_revision INTEGER NOT NULL, target_generation INTEGER NOT NULL,
+    target_revision INTEGER NOT NULL,
     url TEXT NOT NULL, title TEXT NOT NULL, prompt TEXT NOT NULL,
     git_key TEXT, operation_id TEXT REFERENCES git_pr_operations(operation_id), candidates TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','changes_requested','linked','rejected','superseded')),
-    UNIQUE(task_id,git_key));
+    UNIQUE(task_id,git_key), CHECK((git_key IS NULL) <> (operation_id IS NULL)));
 CREATE UNIQUE INDEX IF NOT EXISTS pending_pr_reconciliation ON pr_review_items(operation_id) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS pr_reviews_by_task ON pr_review_items(task_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS journal_pr_review_anchor ON journal(task_id,json_extract(data,'$.itemId'))
@@ -100,19 +100,6 @@ CREATE INDEX IF NOT EXISTS inbox_decisions_by_bot ON inbox_decisions(bot_id,id);
 )SQL";
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK)
         throw std::runtime_error(sqlite3_errmsg(db));
-    // Earlier builds did not add conversation anchors for pending reviews.
-    exec(R"SQL(
-INSERT INTO journal(task_id,time,kind,data)
-SELECT review.task_id,?,'pr_review_requested',
-       json_object('itemId',review.id,'title',review.title,'text',review.prompt,'prUrl',review.url)
-FROM pr_review_items review
-WHERE review.status='pending' AND review.operation_id IS NULL
-AND NOT EXISTS (
-    SELECT 1 FROM journal source WHERE source.task_id=review.task_id AND source.kind='pr_review_requested'
-    AND json_extract(source.data,'$.itemId')=+review.id
-)
-ORDER BY review.id
-)SQL",{unixTime()});
 }
 
 std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std::string_view bot) {
@@ -219,7 +206,6 @@ LEFT JOIN journal j ON j.task_id=p.task_id AND j.kind='pr_review_requested'
 AND json_extract(j.data,'$.itemId')=+p.id AND p.operation_id IS NULL
 WHERE t.bot_id=? AND p.status='pending' AND (p.operation_id IS NOT NULL OR (
     p.target_revision=coalesce(json_extract(t.data,'$.currentRevision'),0)
-    AND (p.git_key IS NOT NULL OR p.target_generation=t.generation)
     AND NOT coalesce(json_extract(t.data,'$.replanning'),0))) ORDER BY p.id DESC
 )SQL",{id});
         while (reviews.next()) {
@@ -316,16 +302,15 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
         if (!p_->query("SELECT 1 FROM tasks WHERE id=? AND bot_id=?",{item.taskId,item.botId}).next())
             throw RequestChanged{};
         const auto task = p_->load(item.taskId);
-        auto review = p_->query("SELECT target_revision,target_generation,status,operation_id IS NOT NULL,git_key IS NOT NULL"
+        auto review = p_->query("SELECT target_revision,status,operation_id IS NOT NULL"
                                 " FROM pr_review_items WHERE id=? AND task_id=?",
                                 {item.itemId,item.taskId});
         if (!review.next()) throw RequestChanged{};
-        if (review.string(2) != "pending") throw DecisionUnavailable{};
-        if (review.number(3) != (kind == pr_reconciliation) || item.waitId ||
+        if (review.string(1) != "pending") throw DecisionUnavailable{};
+        if (review.number(2) != (kind == pr_reconciliation) || item.waitId ||
             task.value("currentRevision",Id{0}) != item.targetRevision || task.at("generation") != item.targetGeneration)
             throw RequestChanged{};
-        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false) ||
-                                  (!review.number(4) && review.number(1) != item.targetGeneration)))
+        if (kind == pr_review && (review.number(0) != item.targetRevision || task.value("replanning",false)))
             throw RequestChanged{};
         if (kind == pr_reconciliation) p_->decideGitPr(item,decision,data,task);
         else p_->exec("UPDATE pr_review_items SET status=? WHERE id=?",
@@ -348,35 +333,21 @@ WHERE t.status='paused' AND m.bot_id=? AND t.message_id=?
     }
 }
 
-Id Store::requestPrReview(Id taskId, Id revision, Id generation, std::string_view url,
-                          std::string_view title, std::string_view prompt) {
-    std::lock_guard lock(p_->mutex);
-    Transaction transaction(p_->db);
-    const auto task = p_->load(taskId);
-    if (task.value("currentRevision",Id{0}) != revision || task.at("generation") != generation ||
-        task.value("replanning",false)) throw RequestChanged{};
-    const auto id = p_->insertPrReview(task,url,title,prompt);
-    transaction.commit();
-    return id;
-}
-
-Id Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+void Store::Impl::insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
                                std::string_view gitKey, std::string_view operationId, const Json& candidates) {
     if (!(url.starts_with("https://") || url.starts_with("http://")) ||
         url.find_first_of(" \t\r\n") != url.npos || url.find('\0') != url.npos || url.size() > 2048 || title.empty() || title.size() > 500 ||
         prompt.empty() || prompt.size() > 8000)
         throw Conflict("A PR review needs a URL, title, and prompt");
-    const auto scrub = gitKey.empty() && operationId.empty() ? redactor(field(task,"botId")) : sharedRedactor();
+    const auto scrub = sharedRedactor();
     scrub.requirePublic({url,candidates});
     const auto savedTitle = scrub.text(title);
     const auto savedPrompt = scrub.text(prompt);
-    exec("INSERT INTO pr_review_items(task_id,target_revision,target_generation,url,title,prompt,git_key,operation_id,candidates)"
-         " VALUES(?,?,?,?,?,?,?,?,?)",
-         {task.at("id"),task.value("currentRevision",Id{0}),task.at("generation"),url,savedTitle,savedPrompt,
+    exec("INSERT INTO pr_review_items(task_id,target_revision,url,title,prompt,git_key,operation_id,candidates)"
+         " VALUES(?,?,?,?,?,?,?,?)",
+         {task.at("id"),task.value("currentRevision",Id{0}),url,savedTitle,savedPrompt,
           gitKey.empty() ? Json(nullptr) : Json(gitKey),operationId.empty() ? Json(nullptr) : Json(operationId),candidates});
-    const auto reviewId = last();
     if (operationId.empty()) journal(task.at("id"),"pr_review_requested",
-        {{"itemId",reviewId},{"title",savedTitle},{"text",savedPrompt},{"prUrl",url}});
-    return reviewId;
+        {{"itemId",last()},{"title",savedTitle},{"text",savedPrompt},{"prUrl",url}});
 }
 }

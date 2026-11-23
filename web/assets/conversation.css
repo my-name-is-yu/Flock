@@ -195,12 +195,6 @@
   to { opacity: 1; transform: none; }
 }
 .profile-name, .profile-status, .peer-names bdi { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.header-name {
-  max-width: 100%;
-  padding: .1875rem .7rem; border-radius: var(--radius-full);
-  background: var(--accent-soft); color: var(--accent);
-  font-size: var(--text-sm); font-weight: 600; line-height: 1.25;
-}
 .profile-name { max-width: 100%; font-size: var(--text-sm); font-weight: 650; line-height: 1.25; }
 .peer-names { display: inline-flex; align-items: center; gap: .38rem; max-width: 100%; min-width: 0; }
 .profile-status {
@@ -538,7 +532,7 @@
   .profile-caption:has(.needs-you:not([hidden])):active, .jump-to-latest:active, .question-option:active,
   .peer-exchange-link:active, .fold-toggle:active { transform: none; }
   .msg-action[data-copied="true"] svg, .question-option:has(:checked), .msg-resolution, .empty-state > * { animation: none; }
-  .profile-identity[data-state="offline"] .status-indicator, .peer-exchange[open] .peer-message-list { animation: none; }
+  .profile-identity[data-state="offline"] .status-indicator { animation: none; }
   .conversation-source-target .bubble { animation: source-highlight-reduced 2s ease-out; }
   .profile-status, .older { transition: none; }
   @starting-style { .profile-status, .older { opacity: 1; transform: none; } }
@@ -597,15 +591,3 @@
 }
 .peer-forwarded-message + .event-text { margin-block-start: .45rem; }
 .peer-status { margin-bottom: var(--space-4); text-align: center; color: var(--danger); font-size: var(--text-sm); }
-.peer-exchange { min-width: 0; max-width: 42rem; margin-top: .8rem; }
-.peer-exchange > summary { width: fit-content; max-width: 100%; border-radius: 7px; padding: .35rem .45rem; color: var(--text-2); cursor: pointer; font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
-.peer-exchange > summary:hover { color: var(--text); }
-.peer-message-list { list-style: none; display: grid; gap: .8rem; margin: .35rem 0 0 .55rem; border-inline-start: 1px solid var(--hairline); padding: .1rem 0 .1rem .8rem; }
-.peer-exchange[open] .peer-message-list { animation: exchange-reveal .2s cubic-bezier(0.23, 1, 0.32, 1); }
-@keyframes exchange-reveal {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: none; }
-}
-.peer-message { display: grid; gap: .22rem; min-width: 0; }
-.peer-message > .link { justify-self: start; }
-.event-meta { display: flex; flex-wrap: wrap; gap: .4rem; color: var(--text-2); font-size: var(--text-xs); }

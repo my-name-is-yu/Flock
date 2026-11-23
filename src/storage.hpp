@@ -111,6 +111,8 @@ struct Store::Impl {
     WebIdentityResolver resolveWebIdentity;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
+    void openSchema();
+    void initializeSchema();
     void initializeChannelSchema();
     void initializeLocalMachineSchema();
     std::optional<Json> messageReceipt(const Person&, std::string_view bot, std::string_view clientId, std::string_view text, Id replyTo,
@@ -167,9 +169,9 @@ struct Store::Impl {
     Id gitRedactionEpoch = 0;
     void gitInboxItem(const Json& task, std::string_view key, std::string_view url,
                       std::string_view title, std::string_view prompt);
-    Id insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
-                      std::string_view gitKey = {}, std::string_view operationId = {},
-                      const Json& candidates = Json::array());
+    void insertPrReview(const Json& task, std::string_view url, std::string_view title, std::string_view prompt,
+                        std::string_view gitKey, std::string_view operationId = {},
+                        const Json& candidates = Json::array());
     std::vector<std::string> visibleBoardBots(const Person&, std::string_view bot);
     void recordInboxDecision(const Person&, const InboxTarget&, std::string_view decision);
     void approveMessageModelCall(Id message, Id pause);
@@ -238,7 +240,7 @@ struct Store::Impl {
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;
     ModelCall checkModelCall(std::string_view bot, Decision, const std::vector<std::string>& offered,
-                             bool gitNotification, bool legacy = false);
+                             bool gitNotification);
     CheckedModelTurn callModel(std::string_view bot, Model&, const ModelInput&, Id attemptId);
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);

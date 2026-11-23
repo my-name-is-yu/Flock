@@ -921,15 +921,9 @@ private:
     std::filesystem::path directory_;
 
     Credential credential(const std::string& environment, const Json& config) const {
-        auto connection = loadCredential(directory_, environment);
-        if (!config.is_object() || (config.contains("t3") && !config["t3"].is_object()))
+        if (!config.is_object())
             throw Failure(Failure::Kind::Settings, "Invalid T3 Bot settings");
-        if (config.contains("t3") && config["t3"].contains("mcpUrl")) {
-            const auto hint = str(config["t3"], "mcpUrl");
-            if (checkedUrl(hint).full != connection.mcpUrl)
-                throw Failure(Failure::Kind::Settings, "The Bot's MCP URL differs from the T3 environment's OAuth connection");
-        }
-        return connection;
+        return loadCredential(directory_, environment);
     }
 
     static void requireOperate(const Credential& connection) {

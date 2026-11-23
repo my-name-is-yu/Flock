@@ -166,10 +166,6 @@ bool SecretRedactor::containsProtected(const Json& value) const {
     });
 }
 
-bool SecretRedactor::mayContainLegacyRedaction(const Json& value) {
-    return anyJsonText(value,[](std::string_view text) { return text.empty() || text.find(redactionPlaceholder) != text.npos; });
-}
-
 static SecretRedactor readRedactor(Statement rows, const SecretStore& secrets, std::vector<std::string> values) {
     while (rows.next()) values.push_back(secrets.read({rows.string(0)}));
     return SecretRedactor(std::move(values));

@@ -1,4 +1,5 @@
 #include "flock/board_inbox.hpp"
+#include "fake_git.hpp"
 
 #include <barrier>
 #include <cstdlib>
@@ -12,7 +13,7 @@ using namespace flockv0;
 namespace {
 const Person owner{"owner",true}, alice{"alice"}, bob{"bob"}, reader{"reader"};
 constexpr auto originalCriteria = "Verify the published report";
-constexpr auto prUrl = "https://github.com/example/report/pull/12";
+constexpr auto prReviewTitle = "Pull request awaiting review";
 
 void check(bool condition, std::string_view message) {
     if (!condition) throw std::runtime_error(std::string(message));
@@ -64,11 +65,18 @@ struct Script : Model {
     Id managed = 0;
     bool failConversation = false;
     Json reviewContext;
+    Json openPrArgs;
     ModelTurn decide(const ModelInput& input) override { return {{choose(input)}}; }
     Decision choose(const ModelInput& input) {
         const auto& event = input.event;
         if (event.at("kind") == "conversation_turn") {
             const auto prompt = event.at("text").get<std::string>();
+            if (prompt == "Open a pull request for review.") {
+                const auto& turn = event.at("turn");
+                if (turn.empty()) return {"git_open_pr",openPrArgs,"Prepare the review fixture"};
+                check(turn.front().at("result").at("status") == "created","could not open the fixture PR");
+                return {"reply",{{"text","Ready for review."}},"Report the pull request"};
+            }
             if (prompt == "Which checks ran?") {
                 reviewContext = event.at("replyTo");
                 return {"reply",{{"text","The smoke checks ran."}},"Answer the review question"};
@@ -148,6 +156,15 @@ InboxTarget pending(Store& store, InboxKind kind, std::string_view bot = {}) {
     return target(row(store.inbox(owner,bot),"itemKind",inboxKindName(kind)));
 }
 
+Id openReview(Store& store, Runtime& runtime, Script& script, const Intake& routing,
+              Id task, std::string branch, std::string_view reviewPrompt) {
+    script.openPrArgs = git_fixture::openArgs(branch);
+    script.openPrArgs.update({{"taskId",task},{"title",reviewPrompt}});
+    store.receive(owner,routing,branch,"Open a pull request for review.");
+    runtime.runConversations();
+    return row(store.inbox(owner,routing.botId),"prompt",reviewPrompt).at("itemId");
+}
+
 void exercise(const std::filesystem::path& path) {
     using enum InboxKind;
     Store store(path);
@@ -156,6 +173,7 @@ void exercise(const std::filesystem::path& path) {
     auto access = store.access();
     for (const auto* bot : {"report","review","private"})
         access.resourceGrant(owner,bot,{"environment","sandbox","launch"},GrantChange::grant);
+    git_fixture::grant(store,"report","repository",git_fixture::repoGrant,"pr");
     access.personGrant(owner,"report",alice.id,Role::decide,GrantChange::grant);
     access.personGrant(owner,"review",alice.id,Role::decide,GrantChange::grant);
     access.personGrant(owner,"review",bob.id,Role::decide,GrantChange::grant);
@@ -175,7 +193,7 @@ void exercise(const std::filesystem::path& path) {
     Script script;
     Sessions sessions;
     sessions.questionProject = "question";
-    RuntimeOptions options;
+    auto options = git_fixture::options(std::make_shared<git_fixture::FakeHost>());
     options.clock = [&] { return now; };
     Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options);
     for (int step = 0; step < 12; ++step) runtime.tick();
@@ -193,8 +211,8 @@ void exercise(const std::filesystem::path& path) {
     check(deadlineWait.is_object() && deadlineWait.at("reason") == "deadline","fixture did not reach its deadline");
 
     const auto report = store.task(question);
-    const auto review = store.requestPrReview(question,report.at("currentRevision"),report.at("generation"),
-                                              prUrl,"Review the published report","Check the report and source");
+    const auto review = openReview(store,runtime,script,intake("report","unused","turn"),question,
+                                   "published-report","Check the report and source");
     const auto grant = access.request("review",{"repository","github.com/org/report","read"});
     const auto secret = access.requestSecret("review",{"report-credential"});
     access.resourceGrant(owner,"review",{"bot_admin","review","rename_bot"},GrantChange::grant);
@@ -229,21 +247,18 @@ void exercise(const std::filesystem::path& path) {
           readerQuestion.at("waitId") != waitAnchor &&
           row(store.conversation("report"),"id",waitAnchor).at("kind") == "waiting",
           "view-only account got approval controls");
-    db.exec("UPDATE tasks SET data=json_set(data,'$.wait',json((SELECT data FROM journal WHERE id="+
-            waitAnchor.dump()+"))) WHERE id="+std::to_string(question));
     db.exec(R"SQL(
 WITH RECURSIVE newer(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM newer WHERE n<129)
 INSERT INTO journal(task_id,time,kind,data)
 SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
     check(store.task(question).at("wait").at("messageId") == waitAnchor,
-          "task detail lost the legacy wait anchor after 129 newer events");
+          "task detail lost the wait anchor after 129 newer events");
     check(row(store.inbox(reader),"itemKind","user_question") == readerQuestion,
-          "Inbox disagreed with task detail about the legacy wait anchor");
-    db.exec("UPDATE tasks SET data=json_set(data,'$.wait.text','Stale Task copy') WHERE id="+std::to_string(question));
+          "Inbox disagreed with task detail about the wait anchor");
     check(store.task(question).at("wait") == report.at("wait") &&
           row(store.tasks("report"),"id",question).at("wait") == report.at("wait") &&
           row(store.activeTasks("report"),"id",question).at("wait") == report.at("wait"),
-          "a stale Task copy overrode the authoritative wait payload");
+          "task views disagreed about the open wait payload");
     db.exec("DELETE FROM journal WHERE kind='fixture_activity' AND task_id="+std::to_string(question));
     check(!row(inbox,"itemKind","model_budget").contains("conversationEventId"),
           "inbox invented an anchor for an item without a visible source");
@@ -283,8 +298,8 @@ SELECT )SQL"+std::to_string(question)+",1,'fixture_activity','{}' FROM newer");
           "inbox Bot change bypassed canonical application");
 
     const auto old = target(row(store.inbox(alice),"taskId",changed));
-    const auto staleReview = store.requestPrReview(changed,old.targetRevision,old.targetGeneration,
-                                                  prUrl,"Review revision A","Review the first source");
+    const auto staleReview = openReview(store,runtime,script,intake("report","unused","turn"),changed,
+                                        "revision-a","Review the first source");
     script.managed = changed;
     store.receive(localOwner,intake("report","unused","turn"),"change","Switch the scope");
     runtime.runConversations();
@@ -428,24 +443,29 @@ void chatDecision(const std::filesystem::path& path) {
 
 void reviewReply(const std::filesystem::path& path) {
     Store store(path);
+    git_fixture::grant(store,"report","repository",git_fixture::repoGrant,"pr");
     const auto routing = intake("report","Prepare the report","review");
     const auto task = store.submit(routing);
-    const auto first = store.requestPrReview(task,0,0,prUrl,"Review the report","Check the report");
-    const auto second = store.requestPrReview(task,0,0,prUrl,"Review the source","Check the source");
+    {
+        Script script;
+        Sessions sessions;
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },
+                        git_fixture::options(std::make_shared<git_fixture::FakeHost>()));
+        openReview(store,runtime,script,routing,task,"report","Check the report");
+        openReview(store,runtime,script,routing,task,"source","Check the source");
+    }
     const auto items = store.inbox(owner,"report");
-    const auto firstAnchor = row(items,"itemId",first).at("conversationEventId");
-    const auto secondAnchor = row(items,"itemId",second).at("conversationEventId");
-    check(firstAnchor != secondAnchor,"two PR reviews of the same task shared a reply target");
+    const auto firstAnchor = row(items,"prompt","Check the report").at("conversationEventId");
+    const auto review = row(items,"prompt","Check the source");
+    const auto second = review.at("itemId");
+    const auto anchor = review.at("conversationEventId");
+    check(firstAnchor != anchor,"two PR reviews of the same task shared a reply target");
 
     Database db(path);
-    db.exec("DELETE FROM journal WHERE id="+secondAnchor.dump());
-    Store migrated(path);
     Store restarted(path);
-    const auto review = row(migrated.inbox(owner,"report"),"itemId",second);
-    const auto anchor = review.at("conversationEventId");
-    check(anchor != firstAnchor && row(restarted.inbox(owner,"report"),"itemId",second) == review &&
+    check(row(restarted.inbox(owner,"report"),"itemId",second) == review &&
           db.exec("SELECT count(*) FROM journal WHERE kind='pr_review_requested'") == 2,
-          "inbox did not backfill exactly one source for a legacy pending PR review");
+          "reopening the store changed the review or its conversation anchor");
 
     Script script;
     Sessions sessions;
@@ -455,7 +475,7 @@ void reviewReply(const std::filesystem::path& path) {
     const auto line = row(restarted.conversation("report"),"id",message);
     check(line.at("data").at("replyToMessageId") == anchor &&
           script.reviewContext == Json{{"messageId",anchor},{"kind","pr_review"},{"taskId",task},{"itemId",second},
-              {"title","Review the source"},{"text","Check the source"},{"prUrl",prUrl}} &&
+              {"title",prReviewTitle},{"text","Check the source"},{"prUrl","https://github.com/org/flock/pull/2"}} &&
           restarted.inbox(owner,"report").size() == 2 && restarted.decisionHistory(owner).empty(),
           "reply did not carry the exact pending PR context to the Bot");
 }

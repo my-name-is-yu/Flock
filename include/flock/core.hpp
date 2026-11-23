@@ -255,8 +255,6 @@ public:
     Json decisionHistory(const Person&, std::string_view bot = {}) const;
     void decideInbox(const Person&, const InboxTarget&, std::string_view decision,
                      const Json& data = Json::object(), const ApplyBotChange& = {});
-    Id requestPrReview(Id task, Id revision, Id generation, std::string_view url,
-                       std::string_view title, std::string_view prompt);
     bool receiveGitWebhook(const GitWebhook&);
     void protectGitCredential(std::string value);
     Id submit(const Intake&);
@@ -290,8 +288,6 @@ public:
     // On the initial read only the position is needed, before loading the first page.
     std::pair<Id,Json> sessionChangesSince(std::string_view botId, std::optional<Id> after) const;
     Json history(Id taskId, Id after = 0, unsigned limit = 50) const;
-    // Latest completion or Session report for the Task's current revision.
-    Json latestTaskResult(Id taskId) const;
     // One page of chronological user-visible conversation, across this Bot's tasks.
     enum class ConversationEvents { all, incoming };
     Json conversation(std::string_view botId, Id before = 0, unsigned limit = 50,

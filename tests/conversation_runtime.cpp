@@ -1,5 +1,6 @@
 #include "flock/access.hpp"
 #include "flock/board_inbox.hpp"
+#include "task_history.hpp"
 #include <sqlite3.h>
 #include <algorithm>
 #include <atomic>
@@ -14,6 +15,7 @@
 #include <utility>
 
 using namespace flockv0;
+using flockv0::test::lastTaskEvent;
 
 namespace {
 void check(bool ok, const char* why) {
@@ -256,9 +258,8 @@ struct Fixture {
         return nullptr;
     }
     Json event(Id id,std::string_view kind) {
-        const auto history = store->history(id,0,200);
-        const auto found = std::find_if(history.rbegin(),history.rend(),[&](const Json& row) { return row["kind"] == Json(kind); });
-        return found == history.rend() ? Json(nullptr) : (*found)["data"];
+        const auto entry = lastTaskEvent(*store,id,kind);
+        return entry.is_null() ? Json(nullptr) : entry.at("data");
     }
     Json lastTurn() { return model.turnInputs.back().event.at("turn"); }
 };
@@ -302,7 +303,7 @@ void linkedResultStartsANewSession() {
     f.t3.finish("run-1",report);
     f.reach(original,"completed");
     const auto earlier = f.event(original,"completed");
-    const auto resultId = f.store->latestTaskResult(original).at("id");
+    const auto resultId = lastTaskEvent(*f.store,original,"completed").at("id");
     f.script("2案目を実装して",{start({{"request","Implement option 2: capture a fixture trace"},
                                        {"sourceResultMessageId",resultId}})});
     f.receive("implement","2案目を実装して");
@@ -341,7 +342,7 @@ void followUpCarriesTheReferencedReport() {
     const std::string text = "1. Measure by hand\n2. Capture a fixture trace\n3. Measure after release";
     f.t3.finish("run-1",text);
     f.reach(id,"deciding");
-    const Id report = f.store->latestTaskResult(id)["id"];
+    const Id report = lastTaskEvent(*f.store,id,"report").at("id");
     f.model.onResult = [](const ModelInput&) {
         return Decision{"delegate",{{"instruction","Check the baseline separately"}},"Open a separate Session"};
     };
@@ -623,7 +624,7 @@ void resumedChoicesRecoverSavedEffectsWithoutDispatching() {
               sqlite3_bind_text(row.get(),2,decision.c_str(),-1,SQLITE_TRANSIENT) == SQLITE_OK &&
               (started ? sqlite3_bind_text(row.get(),3,effect.c_str(),-1,SQLITE_TRANSIENT)
                        : sqlite3_bind_null(row.get(),3)) == SQLITE_OK &&
-              sqlite3_step(row.get()) == SQLITE_DONE,"could not save the legacy decision and effect");
+              sqlite3_step(row.get()) == SQLITE_DONE,"could not save the decision and effect");
 
         f.script("Interrupt",{interrupt(other),answer(questionTask),say("Answer recorded.")});
         f.restart();
@@ -810,7 +811,7 @@ void cancelledReportCanBeReferencedWithoutRestarting() {
     constexpr auto report = "Partial benchmark found a spike in the first sample";
     f.t3.finish("run-1",report);
     f.reach(old,"deciding");
-    const auto source = f.store->latestTaskResult(old).at("id");
+    const auto source = lastTaskEvent(*f.store,old,"report").at("id");
     f.store->operate(localOwner,TaskTarget::from(f.store->task(old),0),"cancel");
     f.reach(old,"cancelled");
 
@@ -1011,7 +1012,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
     f.t3.finish(f.task(original)["activeRun"]["runId"].get<std::string>(),"Desktop work settled");
     f.reach(original,"cancelled");
 
-    const auto cancellation = f.store->latestTaskResult(original).at("id");
+    const auto cancellation = lastTaskEvent(*f.store,original,"report").at("id");
     constexpr auto request = "Resume checksum validation on クラウドMac";
     f.script(request,{start({{"request",request},{"sourceResultMessageId",cancellation},{"resume",true},
                             {"environment","クラウドMac"}})});
@@ -1393,7 +1394,7 @@ void unfinishedTurnHoldsCompletion() {
     f.reach(id,"running");
     f.t3.finish("run-1","Timing evidence");
     f.reach(id,"deciding");
-    const auto report = f.store->latestTaskResult(id).at("id");
+    const auto report = lastTaskEvent(*f.store,id,"report").at("id");
     int completionCalls = 0;
     f.model.beforeComplete = [&](const ModelInput&) { ++completionCalls; };
     bool failing = true;
@@ -2100,7 +2101,7 @@ void oversizedAuthoritativeHandoffBlocksDelivery() {
           "a new Session silently received an incomplete authoritative handoff");
 }
 
-void legacyIntakeChangeScopesTheFirstSessionAnswers() {
+void intakeChangeScopesTheFirstSessionAnswers() {
     Fixture f;
     const auto id = f.store->submit(f.routing("Measure frontend startup"));
     f.model.questions[id] = {{"question","Which browser?"}};
@@ -2113,11 +2114,6 @@ void legacyIntakeChangeScopesTheFirstSessionAnswers() {
     f.reach(id,"waiting");
     task = f.task(id);
     f.store->operate(localOwner,TaskTarget::from(task,task["wait"]["id"]),"answer",{{"text","Use worker Green-32"}});
-    sqlite3* raw = nullptr;
-    const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> legacy(raw,sqlite3_close);
-    check(opened == SQLITE_OK && sqlite3_exec(legacy.get(),"DELETE FROM journal WHERE kind='task_contract_changed'",
-          nullptr,nullptr,nullptr) == SQLITE_OK,"could not prepare the legacy intake fixture");
     f.restart();
     f.reach(id,"running");
     const auto& prompt = f.t3.sent.front().instruction;
@@ -2250,7 +2246,7 @@ int main() {
         newSessionsReceivePersistedTaskDecisions();
         revisedSessionDoesNotReplaySupersededDecisions();
         oversizedAuthoritativeHandoffBlocksDelivery();
-        legacyIntakeChangeScopesTheFirstSessionAnswers();
+        intakeChangeScopesTheFirstSessionAnswers();
         interruptLeavesTheTaskOpen();
         interruptNoOpsDoNotAcknowledgeARequest();
         std::cout << "Conversation Runtime acceptance passed with simulated T3\n";
