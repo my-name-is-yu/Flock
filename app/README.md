@@ -260,6 +260,7 @@ host-managed bearer token. Discovery lists one collection per call and returns
 `nextCursor` when another page is available.
 
 Each authorized Bot tool action counts against the request's shared
-`modelCallLimit`. Calls in a parallel batch reserve available action slots
-in provider order. An approval resumes the next pending action when a batch
-pauses. The Bot receives results in provider order when the batch finishes.
+`modelCallLimit`. Flock requests one tool per ChatGPT response. When Flock
+resumes a saved parallel batch, calls reserve available action slots in provider
+order. An approval resumes the next pending action when a batch pauses. The Bot
+receives results in provider order when the batch finishes.

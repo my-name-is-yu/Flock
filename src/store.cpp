@@ -142,9 +142,18 @@ void Store::Impl::openSchema() {
         }
         initialize.commit();
     }
-    // An additive table lets installed schema-6 databases retain their conversations.
-    if (!query("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='deleted_bots'").next())
-        exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
+    // Additive tables are created when opening existing version 6 databases.
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS conversation_model_failures(
+  attempt_id INTEGER PRIMARY KEY REFERENCES model_attempts(id),
+  message_id INTEGER NOT NULL REFERENCES conversation_turns(message_id),
+  step INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  repair_attempt_id INTEGER UNIQUE REFERENCES model_attempts(id) ON DELETE SET NULL)
+)SQL");
+    exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
+         " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
+    exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");
