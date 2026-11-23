@@ -2,7 +2,7 @@
 
 Flock is a local C++20 runtime for multiple Bots. Each Bot owns the requests it receives and delegates the work to T3 Sessions. The CLI and Web UI share the same SQLite database.
 
-Flock reopens databases with the current schema version (6). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
+Flock reopens databases with the current schema version (7). Databases from earlier builds require a new state directory. Use `--home` to start the current build alongside your existing data.
 
 ## Build
 
@@ -31,15 +31,7 @@ The default state directory is `~/.config/flock`. Override it with the `FLOCK_HO
   "modelCallLimit": 20,
   "session": {
     "runtimeMode": "approval-required"
-  },
-  "cron": [
-    {
-      "id": "release-notes",
-      "schedule": "0 10 * * 1",
-      "timezone": "Asia/Tokyo",
-      "request": "Summarize the open items for the next release."
-    }
-  ]
+  }
 }
 ```
 
@@ -50,6 +42,25 @@ Flock uses the sole connected T3 environment when the Bot starts work. It uses t
 Optional `allowedBots` entries list the Bot directory names this Bot may contact. Permission is directional: a sender must allow the recipient. Recipients can return questions, results, or failures through the same exchange.
 
 Optional `modelCallLimit` sets the initial allowance per request (20 by default). Each step of the Bot's conversation turn, the tasks it starts, and work or consultations passed to other Bots share that allowance. Failed attempts and retries count. Use **Approve one more model call** on the paused message or task to continue. See the [CLI guide](app/README.md#model-call-allowance) for details.
+
+### Scheduled requests
+
+For scheduled work, add the destination IDs and schedule to the Bot configuration.
+
+```json
+{
+  "environmentId": "<T3 environment ID>",
+  "projectId": "<T3 project ID>",
+  "cron": [
+    {
+      "id": "release-notes",
+      "schedule": "0 10 * * 1",
+      "timezone": "Asia/Tokyo",
+      "request": "Summarize the open items for the next release."
+    }
+  ]
+}
+```
 
 ## Connect a live model and T3
 

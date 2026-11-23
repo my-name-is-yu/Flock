@@ -217,6 +217,10 @@ struct Runtime::Impl {
         auto rows = db.query(R"SQL(
 SELECT id FROM project_slots WHERE blocker_id IS NULL
 UNION
+SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
+  state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
+)
+UNION
 SELECT id FROM tasks WHERE state NOT IN ('completed','cancelled') AND (
   COALESCE(json_extract(data,'$.environmentReleased'),0)=1 OR
   (state='queued' AND json_extract(data,'$.replanning')=1 AND json_extract(data,'$.pendingEnvironmentId')<>environment_id)
@@ -293,6 +297,14 @@ ORDER BY id)SQL");
                 db.wait(current,"settings",{{"text",problem}});
                 return true;
             }
+            std::erase_if(projects,[&](const T3Project& project) {
+                return db.recipientRouteWouldCycle(current.at("id"),environment,project.id);
+            });
+            if (projects.empty()) {
+                db.wait(current,"settings",{{"text",
+                    "Each project in this environment would make project queues wait for one another. Move this task to another environment or retry after related work finishes."}});
+                return true;
+            }
             const auto remembered = db.rememberedT3Project(bot,environment);
             const auto saved = std::ranges::find(projects,remembered,&T3Project::id);
             if (saved != projects.end() || projects.size() == 1) {
@@ -364,6 +376,7 @@ ORDER BY id)SQL");
         task.erase("runStop");
         task.erase("replanning");
         task.erase("pendingEnvironmentId");
+        task.erase("pendingProjectId");
         task.erase("environmentReleased");
         task.erase("queuedInT3");
         if (hasPending(task)) task["cancelledInstructions"] = task.at("pendingInstructions");
@@ -678,6 +691,7 @@ ORDER BY id)SQL");
             const auto old = field(current,"environmentId");
             auto target = field(current,"pendingEnvironmentId");
             if (target.empty()) target = old;
+            const bool changingEnvironment = target != old;
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
@@ -685,11 +699,11 @@ ORDER BY id)SQL");
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
-            if (target != old && !released) {
+            if (changingEnvironment && !released) {
                 current["environmentReleased"] = true;
                 return true;
             }
-            if (target != old || released || current["state"] == "queued") {
+            if (changingEnvironment || released || current["state"] == "queued") {
                 const auto blocker = db.queueBlocker(id);
                 if (!blocker.is_null()) {
                     const bool waitingSender = peer && blocker["id"] == peer->sender &&
@@ -697,8 +711,9 @@ ORDER BY id)SQL");
                     if (!waitingSender) return false;
                 }
             }
-            if (target != old) {
+            if (changingEnvironment) {
                 current["environmentId"] = target;
+                current["projectId"] = field(current,"pendingProjectId");
                 current["newSessionRequired"] = true;
                 current.erase("selectedSession");
                 db.journal(current["id"],"session_destination_changed",{{"from",old},{"to",target},{"revisionId",revision(current)}});
@@ -710,8 +725,11 @@ ORDER BY id)SQL");
                 db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),
                          report.is_null() ? Json{{"kind","intake"}} : report);
             }
-            current["state"] = current.contains("workflowId") && current["lastRun"].is_null() ? "queued" : "deciding";
-            for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","environmentReleased","runStop","feedback"})
+            const bool needsQueue = field(current,"projectId").empty() ||
+                (current.contains("workflowId") && current["lastRun"].is_null());
+            current["state"] = needsQueue ? "queued" : "deciding";
+            for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","pendingProjectId",
+                                    "environmentReleased","runStop","feedback"})
                 current.erase(key);
             return true;
         });

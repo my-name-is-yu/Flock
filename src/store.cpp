@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 6;
+constexpr Id schemaVersion = 7;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -198,7 +198,10 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
-  SELECT task.id,task.project_id,task.state,task.data,
+  SELECT task.id,task.state,task.data,
+         CASE WHEN json_extract(task.data,'$.environmentReleased')
+              THEN COALESCE(json_extract(task.data,'$.pendingProjectId'),'')
+              ELSE task.project_id END AS project_id,
          CASE WHEN json_extract(task.data,'$.environmentReleased')
               THEN COALESCE(json_extract(task.data,'$.pendingEnvironmentId'),task.environment_id)
               ELSE task.environment_id END AS environment_id
@@ -219,7 +222,7 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN candidates sender ON sender.id=peer.sender_task
   AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
   AND peer.phase<>'closed'
-WHERE COALESCE(peer.kind,'')<>'consult';
+WHERE task.project_id<>'' AND COALESCE(peer.kind,'')<>'consult';
 CREATE VIEW IF NOT EXISTS project_slots AS
 WITH queue AS (
   SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
@@ -369,19 +372,20 @@ bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environmen
     return query(R"SQL(
 WITH RECURSIVE source(env,project) AS (
   SELECT environment_id,project_id FROM tasks WHERE id=?1
-), work_routes(source_env,source_project,current_env,target_project,pending_env,released) AS (
+), work_routes(source_env,source_project,current_env,current_project,pending_env,pending_project,released) AS (
   SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
          CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
               THEN json_extract(r.data,'$.pendingEnvironmentId') END,
+         json_extract(r.data,'$.pendingProjectId'),
          COALESCE(json_extract(r.data,'$.environmentReleased'),0)
   FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
   WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
 ), dependencies(source_env,source_project,target_env,target_project) AS (
-  SELECT source_env,source_project,current_env,target_project FROM work_routes
-  WHERE NOT released
+  SELECT source_env,source_project,current_env,current_project FROM work_routes
+  WHERE NOT released AND current_project<>''
   UNION ALL
-  SELECT source_env,source_project,pending_env,target_project FROM work_routes
-  WHERE pending_env IS NOT NULL
+  SELECT source_env,source_project,pending_env,pending_project FROM work_routes
+  WHERE pending_env IS NOT NULL AND pending_project<>''
 ), reachable(env,project) AS (
   SELECT ?2,?3 FROM source WHERE env<>?2 OR project<>?3
   UNION
@@ -390,6 +394,13 @@ WITH RECURSIVE source(env,project) AS (
 )
 SELECT 1 FROM reachable JOIN source USING(env,project) LIMIT 1
 )SQL",{sender,environment,project}).next();
+}
+
+bool Store::Impl::recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const {
+    if (project.empty()) return false;
+    const auto peer = peerExchange(task);
+    return peer && peer->recipient == task && peer->kind == "work" &&
+        peerWorkRouteWouldCycle(peer->sender,environment,project);
 }
 
 bool Store::Impl::replanReady(const Json& task) const {
@@ -420,7 +431,7 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
         ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
         : Json::object());
     if (task["state"] == "queued" && !peer) {
-        for (const auto* key : {"replanning","pendingEnvironmentId","environmentReleased","pendingInstructions"})
+        for (const auto* key : {"replanning","pendingEnvironmentId","pendingProjectId","environmentReleased","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
@@ -670,8 +681,12 @@ void Store::Impl::operate(const Person& actor, const TaskTarget& target, std::st
         if (const auto projects = wait.find("projectChoices"); projects != wait.end()) {
             const auto choice = projects->find(answer);
             if (choice == projects->end()) throw Conflict("Choose one of the listed T3 projects");
+            const auto environment = field(task,"environmentId");
+            const auto& project = choice->get_ref<const std::string&>();
+            if (recipientRouteWouldCycle(id,environment,project))
+                throw Conflict("This project would make project queues wait for one another. Choose another project or move the task.");
             task["projectId"] = *choice;
-            rememberT3Project(bot,field(task,"environmentId"),choice->get_ref<const std::string&>());
+            rememberT3Project(bot,environment,project);
             next = "queued";
             answerKind = "project_selected";
         } else {

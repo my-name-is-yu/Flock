@@ -781,6 +781,22 @@ void connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot() {
           "the remembered project crossed environments or the sole project needed an answer");
 }
 
+void unansweredProjectChoiceDoesNotBlockAnotherBot() {
+    Fixture f;
+    f.t3.projectsByEnvironment["desktop"] = {{"docs","Docs",{}},{"release","Release",{}}};
+    const auto first = f.store->submit({"alpha","Choose a project first","desktop",""});
+    f.reach(first,"waiting");
+    const auto second = f.store->submit({"beta","Check the documentation","desktop",""});
+    check(f.task(second)["blockedBy"].is_null(),"a projectless task appeared to hold an execution slot");
+    f.reach(second,"waiting");
+    const auto choice = f.task(second);
+    check(choice["wait"]["choices"] == Json::array({"Docs","Release"}),"the second Bot did not reach project selection");
+    f.store->operate(localOwner,TaskTarget::from(choice,choice["wait"]["id"]),"answer",{{"text","Docs"}});
+    f.reach(second,"running");
+    check(f.task(first)["state"] == "waiting" && f.t3.sent.size() == 1 &&
+          f.t3.sent.front().projectId == "docs","an independent project could not start before the first Bot's answer");
+}
+
 void suggestionsStayWithTheBotMessage() {
     Fixture f;
     const auto suggest = [](Json choices) {
@@ -1687,13 +1703,23 @@ void cancellationReleasesOnlyAfterStopConfirmation() {
           f.task(independent)["state"] == "running", "settled cancellation did not release its own queue");
 }
 
+void rememberCloudProject(Fixture& f) {
+    sqlite3* raw = nullptr;
+    const auto opened = sqlite3_open(f.store->path().c_str(),&raw);
+    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
+    check(opened == SQLITE_OK && sqlite3_exec(db.get(),
+          "INSERT INTO bot_t3_projects VALUES('alpha','cloud','cloud-project')",nullptr,nullptr,nullptr) == SQLITE_OK,
+          "could not save the previously selected cloud project");
+}
+
 void cloudDestinationWaitsForItsProject() {
     Fixture f;
+    rememberCloudProject(f);
     f.script("Set the desktop timeout",{[](const ModelInput&){
         return Decision{"update_bot_settings",{{"environmentId","desktop"},{"runTimeoutSeconds",123}},"Set timeout"};
     }});
     f.receive("set-timeout","Set the desktop timeout");
-    const auto occupied = f.store->submit(f.routing("Cloud work","beta","cloud"));
+    const auto occupied = f.store->submit(f.routing("Cloud work","beta","cloud","cloud-project"));
     const auto moving = f.store->submit(f.routing());
     f.script("Include the table as CSV",{send(moving)});
     f.receive("format-before-launch","Include the table as CSV");
@@ -1702,7 +1728,7 @@ void cloudDestinationWaitsForItsProject() {
     check(f.task(moving).at("deadline")==f.now+123,"desktop launch missed its own timeout");
     f.script("Run the measurement on the cloud Mac",{change(moving,{{"environment","クラウドMac"}})});
     f.receive("where","Run the measurement on the cloud Mac");
-    const auto following = f.store->submit(f.routing("Cloud follower","beta","cloud"));
+    const auto following = f.store->submit(f.routing("Cloud follower","beta","cloud","cloud-project"));
     const auto desktopFollowing = f.store->submit(f.routing("Desktop follower","beta"));
     f.tick(3);
     check(f.t3.interrupted.size() == 1 && f.t3.interrupted[0] == std::pair<std::string,std::string>{"desktop","run-2"} &&
@@ -1732,7 +1758,7 @@ void cloudDestinationWaitsForItsProject() {
     const auto task = f.task(moving);
     check(task.at("deadline")==f.now+1800,"moved task retained the old environment timeout");
     check(sawHistoricalEnvironment && f.t3.sent.size() == 4 && f.t3.sent.back().tool == "delegate" && f.t3.sent.back().environmentId == "cloud" &&
-          f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
+          f.t3.sent.back().projectId == "cloud-project" && f.t3.sent.back().instruction.find("as CSV") != std::string::npos &&
           task["remaining"] == 2 && task["runs"][0]["environmentId"] == "desktop" &&
           task["runs"][1]["environmentId"] == "cloud" && task["runs"][0]["threadId"] != task["runs"][1]["threadId"] &&
           f.task(following)["state"] == "queued" && f.task(following)["blockedBy"]["id"] == moving,
@@ -1746,9 +1772,10 @@ void cloudDestinationWaitsForItsProject() {
 
 void queuedMoveWaitsForTheNewerDestinationOwner() {
     Fixture f;
+    rememberCloudProject(f);
     const auto local = f.store->submit(f.routing("Existing local work","beta"));
     const auto moving = f.store->submit(f.routing("Transfer this task"));
-    const auto remote = f.store->submit(f.routing("Newer destination owner","beta","cloud"));
+    const auto remote = f.store->submit(f.routing("Newer destination owner","beta","cloud","cloud-project"));
     f.reach(local,"running");
     f.reach(remote,"running");
     f.script("Transfer this task to cloud",{change(moving,{{"environment","cloud"}})});
@@ -1764,8 +1791,44 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
           "the queued transfer's task page still pointed to its old environment");
     f.t3.finish(f.task(remote)["activeRun"]["runId"].get<std::string>(),"Destination settled");
     f.reach(moving,"running");
-    check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" && f.task(local)["state"] == "running",
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" &&
+          f.t3.sent.back().projectId == "cloud-project" && f.task(local)["state"] == "running",
           "the queued Task did not retain its route through restart");
+}
+
+void moveAsksForTheDestinationProjectAfterSettlement() {
+    Fixture f;
+    f.t3.projectsByEnvironment["cloud"] = {
+        {"cloud-docs","Cloud Docs","docs"},{"cloud-release","Cloud Release","release"}};
+    const auto owner = f.store->submit(f.routing("Existing cloud work","beta","cloud","cloud-release"));
+    const auto moving = f.store->submit(f.routing("Move the desktop work"));
+    f.reach(owner,"running");
+    f.reach(moving,"running");
+    f.script("Move the work to cloud",{change(moving,{{"environment","cloud"}})});
+    f.receive("select-cloud-project","Move the work to cloud");
+    f.t3.finish("run-2","Old Run still settling",false);
+    f.tick(3);
+    check(f.task(moving).at("environmentId") == "desktop" && f.task(moving).at("projectId") == "project" &&
+          !f.task(moving).at("activeRun").is_null() && f.t3.sent.size() == 2,
+          "project selection moved work before its original Run settled");
+
+    f.t3.finish("run-2","Old Run settled");
+    f.reach(moving,"waiting");
+    const auto waiting = f.task(moving);
+    check(waiting.at("environmentId") == "cloud" && waiting.at("projectId") == "" &&
+          waiting.at("wait").at("choices") == Json::array({"Cloud Docs","Cloud Release"}) &&
+          f.t3.sent.size() == 2,"the move did not ask about the destination's projects");
+    const auto target = TaskTarget::from(waiting,waiting.at("wait").at("id"));
+    f.restart();
+    f.store->operate(localOwner,target,"answer",{{"text","Cloud Release"}});
+    f.tick(3);
+    check(f.task(moving).at("state") == "queued" && f.task(moving).at("blockedBy").at("id") == owner &&
+          f.t3.sent.size() == 2,"a move with a new project choice bypassed the destination owner");
+    f.t3.finish("run-1","The destination's existing Run settled");
+    f.reach(moving,"running");
+    check(f.t3.sent.size() == 3 && f.t3.sent.back().environmentId == "cloud" &&
+          f.t3.sent.back().projectId == "cloud-release" && f.task(moving).at("runs").size() == 2,
+          "the moved work did not start a fresh Run on the selected destination project");
 }
 
 void latestTargetPrecedesABatchedBacklog() {
@@ -2246,6 +2309,7 @@ int main() {
         directChoiceRechecksWebAuthority();
         destinationClarificationContinuesFromConversationHistory();
         connectedEnvironmentSelectsProjectBeforeTakingItsQueueSlot();
+        unansweredProjectChoiceDoesNotBlockAnotherBot();
         directAnswersRemainInConversationHistory();
         queuedTurnsSeeEarlierReplies();
         pausedTurnDoesNotHoldCompletion();
@@ -2272,6 +2336,7 @@ int main() {
         concurrentTasksShareModelBudget();
         cancellationReleasesOnlyAfterStopConfirmation();
         cloudDestinationWaitsForItsProject();
+        moveAsksForTheDestinationProjectAfterSettlement();
         queuedMoveWaitsForTheNewerDestinationOwner();
         latestTargetPrecedesABatchedBacklog();
         continuationUsesTheCurrentBudget();

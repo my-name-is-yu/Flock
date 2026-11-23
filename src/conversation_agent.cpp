@@ -490,8 +490,13 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                                 text(args,"environment",256,false)};
             if (change->intent.empty() && change->doneWhen.empty() && change->environment.empty())
                 throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
-            if (!change->environment.empty() && verifiedEnvironment(task,routing,change->environment).empty())
-                throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+            if (!change->environment.empty()) {
+                auto destination = verifiedEnvironment(task,routing,change->environment);
+                if (destination.empty()) destination = taskEnvironment(bot,routing,change->environment);
+                if (destination.empty())
+                    throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+                change->environment = std::move(destination);
+            }
         }
         const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),routing,change ? &*change : nullptr);

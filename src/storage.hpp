@@ -349,6 +349,7 @@ struct Store::Impl {
     Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
+    bool recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&, SessionStop stop = {});
