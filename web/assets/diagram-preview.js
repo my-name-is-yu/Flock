@@ -50,7 +50,6 @@ class DiagramPreview extends HTMLElement {
       const frame = document.createElement('iframe');
       frame.className = 'diagram-frame';
       frame.title = this.#title;
-      // Same-origin access lets the host measure static previews. Scripts stay disabled in both views.
       frame.setAttribute('sandbox', 'allow-same-origin');
       frame.referrerPolicy = 'no-referrer';
       frame.inert = Boolean(this.#expand);
@@ -61,7 +60,6 @@ class DiagramPreview extends HTMLElement {
           this.#fitInline(frame, doc, signal);
           this.#expand.disabled = false;
         } else {
-          // Keep the preview in its sandbox while allowing native scrolling within the document.
           const preventNavigation = (event) => {
             if (event.target.closest?.('a, area')) event.preventDefault();
           };
