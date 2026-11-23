@@ -442,7 +442,12 @@ try {
   let result;
   if (operation === "login") result = await login(input);
   else if (operation === "status") result = status(readProfile());
-  else if (operation === "models") result = await models();
+  else if (operation === "web_status") {
+    const profile = readProfile();
+    const needsSignIn = Boolean(profile.subject && (!Array.isArray(profile.granted) ||
+      (profile.granted.includes(directScope) && (!profile.accessToken || !profile.refreshToken))));
+    result = { ...status(profile), needsSignIn };
+  } else if (operation === "models") result = await models();
   else if (operation === "infer") result = await infer(input);
   else throw new Failure("Unknown ChatGPT transport operation");
   console.log(JSON.stringify({ result }));

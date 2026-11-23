@@ -26,10 +26,20 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         const auto actor = person(callbacks,req);
         auto policy = store.policy();
         const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
+        const bool canManage = policy.allows(actor,Action::rules_manage,"installation");
+        Json model = nullptr;
+        if (canManage && callbacks.modelStatus) {
+            try {
+                const auto status = callbacks.modelStatus();
+                model = {{"connected",status.value("connected",false)},{"account",status.value("account","")},
+                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)},
+                         {"needsSignIn",status.value("needsSignIn",false)}};
+            } catch (const std::exception&) { model = {{"unavailable",true}}; }
+        }
         auto personActionNames = Json::array();
         for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
-                       {"canManagePolicy",policy.allows(actor,Action::rules_manage,"installation")},
+                       {"canManagePolicy",canManage},{"model",std::move(model)},
                        {"personOnlyActions",std::move(personActionNames)},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});

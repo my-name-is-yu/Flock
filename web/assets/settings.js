@@ -68,8 +68,17 @@ async function load() {
   const response = await fetch('/api/settings');
   if (!response.ok) throw new Error();
   const data = await response.json();
-  const {mode, rules, t3} = data;
+  const {mode, rules, t3, model} = data;
   canManagePolicy = data.canManagePolicy === true;
+  $('model-section').hidden = !model;
+  $('model').replaceChildren();
+  if (model?.demo) row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
+  else if (model?.unavailable) row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now. Reload to try again.'));
+  else if (model?.connected && !model.needsSignIn) {
+    row('model', emptyLabel('ChatGPT', model.account ? `Saved account ${model.account}` : 'Account registered'));
+    if (!model.planUsage) row('model', emptyLabel('Plan usage unavailable',
+      'Bots can’t use your ChatGPT plan yet. Run ', command('flock model login --reconsent'), ' to grant access.'));
+  } else if (model) row('model', emptyLabel('ChatGPT sign-in needed', 'Run ', command('flock model login'), ' on the machine running Flock to sign in.'));
   currentMode = mode;
   $('mode-options').classList.toggle('read-only', !canManagePolicy);
   reflectMode(mode);

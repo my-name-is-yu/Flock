@@ -1369,6 +1369,14 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
+    std::atomic<bool> unavailable = false;
+    std::atomic<unsigned> statusCalls = 0;
+    cb.modelStatus = [&] {
+        ++statusCalls;
+        if (unavailable) throw std::runtime_error("private credential detail");
+        return Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
+                    {"needsSignIn",true},{"accessToken","internal fixture token"}};
+    };
     cb.intake = [original = cb.intake](std::string_view bot, std::string_view request) {
         auto intake = original(bot,request);
         intake.config.erase("token");
@@ -1406,7 +1414,15 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Bot settings exposed installation settings or lost membership");
     const auto settings = browser.get("/api/settings");
     check(settings.at("mode") == "full" && settings.at("canManagePolicy") == true &&
-          settings.at("rules").size() == 1 && !settings.contains("members"),"Flock settings lost the installation policy");
+          settings.at("rules").size() == 1 && !settings.contains("members"),
+          "Flock settings lost the installation policy");
+    check(settings.at("model") == Json{{"connected",true},{"account","owner@example.test"},{"planUsage",false},
+                                      {"demo",false},{"needsSignIn",true}},
+          "Flock settings lost model status or exposed credential fields");
+    unavailable = true;
+    check(browser.get("/api/settings").at("model") == Json{{"unavailable",true}},
+          "A failed credential check exposed details or broke the rest of settings");
+    unavailable = false;
     const auto settingsPage = browser.client.Get("/settings");
     const auto botPage = browser.client.Get("/settings/release");
     check(settingsPage && settingsPage->status == 200 && settingsPage->body.find("Flock settings") != std::string::npos &&
@@ -1416,9 +1432,11 @@ void settingsEndpoints(const std::filesystem::path& path) {
     const auto rule = settings.at("rules").at(0);
     const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
+    const auto beforeSharedRead = statusCalls.load();
     const auto sharedSettings = browser.get("/api/settings");
-    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false,
-          "Shared member did not get the read-only installation mode");
+    check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false &&
+          sharedSettings.at("model").is_null() && statusCalls.load() == beforeSharedRead,
+          "Shared member lost read-only settings or gained access to model status");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
     const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};

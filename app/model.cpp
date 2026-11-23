@@ -109,11 +109,12 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     checkPrivate(lock.get(), false);
     using Clock = std::chrono::steady_clock;
     using namespace std::chrono_literals;
+    const bool webStatus = operation == "web_status";
     const auto lockDeadline = Clock::now() + 2s;
     while (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
         if (errno != EWOULDBLOCK && errno != EINTR)
             throw ModelError("Unable to lock Flock's ChatGPT credentials",true);
-        if (Clock::now() >= lockDeadline)
+        if (webStatus || Clock::now() >= lockDeadline)
             throw ModelError("Flock's ChatGPT credentials are busy. Finish browser sign-in or retry shortly.",true);
         std::this_thread::sleep_for(25ms);
     }
@@ -181,7 +182,8 @@ std::string invoke(const std::filesystem::path& directory, std::string_view oper
     shutdown(parent.get(), SHUT_WR);
     std::string output;
     char buffer[8192];
-    const auto deadline = Clock::now() + (operation == "login" ? 365s : 150s);
+    const auto timeout = webStatus ? 1s : operation == "login" ? 365s : 150s;
+    const auto deadline = Clock::now() + timeout;
     for (;;) {
         pollfd reader {parent.get(),POLLIN,0};
         const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
@@ -598,6 +600,7 @@ Json ChatGPTModel::login(bool printUrl, bool reconsent) {
     return call("login",{{"printUrl",printUrl},{"reconsent",reconsent}});
 }
 Json ChatGPTModel::status() { return call("status"); }
+Json ChatGPTModel::webStatus() { return call("web_status"); }
 Json ChatGPTModel::models() { return call("models"); }
 ModelTurn ChatGPTModel::decide(const ModelInput& input) {
     const auto begin = std::chrono::steady_clock::now();
