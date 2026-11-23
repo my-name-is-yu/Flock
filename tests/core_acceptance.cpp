@@ -2644,7 +2644,7 @@ void peerCancelDuringPreflight() {
     f.reach(recipient,"cancelled");
 }
 
-enum class SpecialistMode { Single, PolicyRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
+enum class SpecialistMode { Single, PolicyRevoked, Disconnected, MissingFindings, EmptyFindings, TooManyFindings, EvidenceFreshness, EvidenceUnavailable, Workflow, FailedWorkflow, StaleWorkflow, FrozenWorkflow, RejectedWorkflowInput, FrozenWorkflowAdmission, Nested, CancelledNested, NestedWorkflowPause, CancelledPrelaunch, PausedPrelaunch, InterruptedPauseCleanup, InterruptedPauseStopRecovery, ResidualDirectAnswer, ResidualDirectAfterResume, ResidualDirectStaleQuestion, ResidualStageAfterResume };
 
 void specialistAdmission(SpecialistMode mode) {
     Fixture f;
@@ -2854,7 +2854,7 @@ void specialistAdmission(SpecialistMode mode) {
         mode!=SpecialistMode::InterruptedPauseCleanup && mode!=SpecialistMode::InterruptedPauseStopRecovery &&
         mode!=SpecialistMode::ResidualDirectAnswer && mode!=SpecialistMode::ResidualDirectAfterResume &&
         mode!=SpecialistMode::ResidualDirectStaleQuestion &&
-        mode!=SpecialistMode::EvidenceFreshness) {
+        mode!=SpecialistMode::EvidenceFreshness && mode!=SpecialistMode::EvidenceUnavailable) {
         f.model.script = [](const ModelInput& input) -> Decision {
             if (input.event.at("kind")=="bot_request") {
                 check(hasTool(input,"start_peer_workflow"),"received work did not expose its workflow action");
@@ -3216,7 +3216,7 @@ void specialistAdmission(SpecialistMode mode) {
     f.reach(first.senderTaskId,"completed");
     const auto history = f.store->history(first.senderTaskId,0,200);
     const auto result = std::find_if(history.begin(),history.end(),[](const auto& item) { return item.at("kind")=="specialist_result"; });
-    if (mode!=SpecialistMode::Single && mode!=SpecialistMode::EvidenceFreshness) {
+    if (mode!=SpecialistMode::Single && mode!=SpecialistMode::EvidenceFreshness && mode!=SpecialistMode::EvidenceUnavailable) {
         const auto verdict = result==history.end() ? "" : result->at("data").value("verdict","");
         check(result!=history.end() && result->at("data").at("status")=="failed" &&
               verdict!="pass" && verdict!="fail","a direct successful verdict was accepted without valid findings");
@@ -3225,7 +3225,7 @@ void specialistAdmission(SpecialistMode mode) {
           result->at("data").at("references").at(0).at("itemId")=="final-answer",
           "specialist result lost its author, pinned version, verdict or native evidence");
 
-    if (mode==SpecialistMode::EvidenceFreshness) {
+    if (mode==SpecialistMode::EvidenceFreshness || mode==SpecialistMode::EvidenceUnavailable) {
         session.pin=pin;
         int decisions=0;
         f.model.script=[&](const ModelInput& input)->Decision {
@@ -3234,19 +3234,21 @@ void specialistAdmission(SpecialistMode mode) {
                   input.event.at("specialistResult").at("status")!="stale",
                   "fresh specialist evidence did not authorize completion review");
             if (decisions==1) {
-                session.pin=std::string(40,'b');
+                if (mode==SpecialistMode::EvidenceUnavailable) session.pin.reset();
+                else session.pin=std::string(40,'b');
                 return {"complete_handoff",{{"text","Complete using the verified report"}},"The report is complete"};
             }
             return {"complete_handoff",{{"text","Complete using the rechecked report"}},"The report is complete"};
         };
         const auto soul=[](std::string_view) { return std::string{}; };
-        const auto before=handoffs().view(person,channel);
-        const auto stale=handoffs().step(person,channel,f.model,soul);
+        auto handoff=handoffs();
+        const auto before=handoff.view(person,channel);
+        const auto stale=handoff.step(person,channel,f.model,soul);
         check(stale.state=="active" && stale.eventCursor==before.eventCursor && stale.latestDecision.is_null() && decisions==1 &&
               stale.work.front().contains("result"),
               "a completion decision consumed evidence after the root pin changed during inference");
         session.pin=pin;
-        const auto completed=handoffs().step(person,channel,f.model,soul);
+        const auto completed=handoff.step(person,channel,f.model,soul);
         check(completed.state=="completed" && decisions==2,
               "the unconsumed specialist result was not reconsidered after the pin became available");
         return;
@@ -3522,6 +3524,7 @@ int main() {
             {"direct specialist rejects empty findings",[] { specialistAdmission(SpecialistMode::EmptyFindings); }},
             {"direct specialist rejects more than eight findings",[] { specialistAdmission(SpecialistMode::TooManyFindings); }},
             {"evidence completion rechecks the root pin after model inference",[] { specialistAdmission(SpecialistMode::EvidenceFreshness); }},
+            {"evidence completion replans when the root pin disappears",[] { specialistAdmission(SpecialistMode::EvidenceUnavailable); }},
             {"scoped specialist workflow transfers its slot and aggregates evidence",[] { specialistAdmission(SpecialistMode::Workflow); }},
             {"scoped specialist workflow retains a failed check's findings",[] { specialistAdmission(SpecialistMode::FailedWorkflow); }},
             {"specialist workflow rejects a stale aggregate",[] { specialistAdmission(SpecialistMode::StaleWorkflow); }},

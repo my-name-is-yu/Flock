@@ -472,7 +472,7 @@ void lateRedactionProjection(const std::filesystem::path& path) {
           "recent projection exposed a late secret or changed an opaque ID");
 }
 
-enum class Recovery { Send, Revoked, NewHumanInput };
+enum class Recovery { Send, Revoked, NewHumanInput, MissingHistory };
 
 void modelOutcomeSurvivesWriterContention(const std::filesystem::path& path, bool coordination,
                                          Recovery recovery = Recovery::Send) {
@@ -492,7 +492,7 @@ void modelOutcomeSurvivesWriterContention(const std::filesystem::path& path, boo
     bot.response = [&](const ModelInput&) {
         check(sqlite3_exec(writer.get(),"BEGIN IMMEDIATE",nullptr,nullptr,nullptr) == SQLITE_OK,
               "Could not contend with the handoff writer");
-        const auto* tool = recovery == Recovery::NewHumanInput ? "complete_handoff" :
+        const auto* tool = (recovery == Recovery::NewHumanInput || recovery == Recovery::MissingHistory) ? "complete_handoff" :
                            coordination ? "root_guidance" : "reply";
         return ModelTurn{{{tool,{{"text","Completed with one call"}},""}},{{"outputTokens",71}}};
     };
@@ -515,16 +515,18 @@ void modelOutcomeSurvivesWriterContention(const std::filesystem::path& path, boo
         denied(run);
         check(bot.seen.size() == 1 && sessions.sent.empty(),
               "Recovery acted after the consultation or coordination lost authorization");
-    } else if (recovery == Recovery::NewHumanInput) {
+    } else if (recovery == Recovery::NewHumanInput || recovery == Recovery::MissingHistory) {
         sessions.dispatchUnavailable = true;
         run();
         check(bot.seen.size() == 1 && handoff.view(owner,channel).state == "active",
               "A contended completion acted or spent another call without current Thread history");
-        sessions.dispatchUnavailable = false;
-        sessions.event(first,"user_message","user","web","new-input","I have one more question.");
+        if (recovery == Recovery::NewHumanInput) {
+            sessions.dispatchUnavailable = false;
+            sessions.event(first,"user_message","user","web","new-input","I have one more question.");
+        }
         run();
         check(bot.seen.size() == 1 && sessions.sent.empty() && handoff.view(owner,channel).state == "active",
-              "A contended completion ignored newer input");
+              "A contended completion acted without proving its Thread input is current");
     } else {
         if (coordination) denied([&] { handoff.consult(actor,channel,bot,soul); });
         else denied([&] { handoff.step(actor,channel,bot,soul); });
@@ -662,6 +664,7 @@ int main() {
         modelOutcomeSurvivesWriterContention(path / "coordinate-contention.sqlite3",true);
         modelOutcomeSurvivesWriterContention(path / "model-contention-revoked.sqlite3",true,Recovery::Revoked);
         modelOutcomeSurvivesWriterContention(path / "model-contention-new-input.sqlite3",true,Recovery::NewHumanInput);
+        modelOutcomeSurvivesWriterContention(path / "model-contention-history.sqlite3",true,Recovery::MissingHistory);
         std::size_t attemptCase = 0;
         for (const auto coordination : {false,true})
             for (const auto throws : {false,true})

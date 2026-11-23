@@ -333,7 +333,7 @@ WHERE c.person_id=? ORDER BY s.channel_id DESC LIMIT 25
 bool SessionHandoff::commitModelDecision(const Person* person, Id channel, bool coordination, bool retry) {
     const auto pending = modelCommits_.find(channel);
     if (pending == modelCommits_.end()) return false;
-    const auto& checkpoint = pending->second;
+    auto& checkpoint = pending->second;
     if (person && (person->id != checkpoint.personId || coordination != checkpoint.coordination))
         throw Conflict("This Session handoff decision belongs to another request");
     auto& db = *store_.p_;
@@ -357,8 +357,8 @@ bool SessionHandoff::commitModelDecision(const Person* person, Id channel, bool 
         }
         if (current) {
             const auto valid = checkpoint.checkEvidence(retry);
-            if (!valid) return true;
-            current = *valid;
+            if (!valid && !std::exchange(checkpoint.deferredForHistory,true)) return true;
+            current = valid.value_or(false);
         }
     }
     {
@@ -687,8 +687,7 @@ UPDATE session_controls SET event_cursor=? WHERE channel_id=? AND generation=? A
                     }
                     if (evidenceSha.empty()) return true;
                     const auto latestPin = session_.inputCommit(target);
-                    if (!latestPin) return std::nullopt;
-                    return *latestPin == evidenceSha;
+                    return latestPin && *latestPin == evidenceSha;
                 };
             }
             effect = kind == "root_guidance" || kind == "delegate_specialist";

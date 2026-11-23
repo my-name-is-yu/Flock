@@ -72,6 +72,7 @@ private:
         std::function<void()> save;
         std::function<std::optional<bool>(bool retry)> checkEvidence;
         std::exception_ptr failure;
+        bool deferredForHistory = false;
     };
     bool commitModelDecision(const Person*, Id channel, bool coordination, bool retry = true);
     template <typename Prepare>
