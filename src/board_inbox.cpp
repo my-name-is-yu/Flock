@@ -103,7 +103,16 @@ std::vector<std::string> Store::Impl::visibleBoardBots(const Person& actor, std:
     const Policy policy(*this);
     if (!bot.empty()) return policy.allows(actor,Action::bot_view,bot) ? std::vector{std::string(bot)} : std::vector<std::string>{};
     auto rows = actor.adminRoot ? query(R"SQL(
-SELECT bot_id FROM tasks UNION SELECT bot_id FROM messages UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
+-- Seek the next Bot ID in each index, regardless of how much history belongs to it.
+WITH RECURSIVE task_bots(bot) AS (
+  SELECT min(bot_id) FROM tasks
+  UNION ALL SELECT (SELECT min(bot_id) FROM tasks WHERE bot_id>task_bots.bot) FROM task_bots WHERE bot IS NOT NULL
+), message_bots(bot) AS (
+  SELECT min(bot_id) FROM messages
+  UNION ALL SELECT (SELECT min(bot_id) FROM messages WHERE bot_id>message_bots.bot) FROM message_bots WHERE bot IS NOT NULL
+)
+SELECT bot FROM task_bots WHERE bot IS NOT NULL UNION SELECT bot FROM message_bots WHERE bot IS NOT NULL
+UNION SELECT bot FROM bot_owners UNION SELECT bot FROM bot_members
 UNION SELECT bot FROM protected_inputs UNION SELECT bot FROM bot_changes UNION SELECT bot_id FROM inbox_decisions
 )SQL") : query("SELECT bot FROM bot_owners WHERE person=?1 UNION SELECT bot FROM bot_members WHERE person=?1 ORDER BY bot",{actor.id});
     std::vector<std::string> result;
@@ -181,9 +190,10 @@ ORDER BY w.id DESC
         }
         auto turns = p_->query(R"SQL(
 SELECT m.id,m.text,t.pause_id,j.data,j.kind='conversation_reply' AND j.conversation_bot_id=m.bot_id
+-- Seek the populated pause IDs instead of visiting all messages for the Bot.
 FROM conversation_turns t
-JOIN messages m ON m.id=t.message_id JOIN journal j ON j.id=t.pause_id
-WHERE m.bot_id=? AND t.status='paused' ORDER BY t.pause_id DESC
+CROSS JOIN messages m ON m.id=t.message_id CROSS JOIN journal j ON j.id=t.pause_id
+WHERE t.pause_id IS NOT NULL AND t.status='paused' AND m.bot_id=? ORDER BY t.pause_id DESC
 )SQL",{id});
         while (turns.next()) {
             add({id,conversation_model_budget,turns.number(0),turns.number(2),0,0,turns.number(2)},

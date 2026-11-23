@@ -112,6 +112,14 @@ struct Runtime::Impl {
     struct HistoryUnavailable : ModelError { using ModelError::ModelError; };
     std::map<std::string,std::future<void>> conversationWorkers;
 
+    struct MaintenanceCheck {
+        std::pair<Id,Id> stamp;
+        Seconds second;
+        bool operator==(const MaintenanceCheck&) const = default;
+    };
+    // These scans are due again after a database write or the next clock second.
+    std::optional<MaintenanceCheck> maintenanceAt;
+
     void settleApprovals() {
         std::lock_guard lock(db.mutex);
         Transaction tx(db.db);
@@ -119,22 +127,26 @@ struct Runtime::Impl {
         tx.commit();
     }
 
-    void fireDueAutomations() {
+    bool fireDueAutomations() {
         try { db.fireDueAutomations(options.clock()); }
         catch (const StorageError&) { throw; }
         catch (const std::exception& error) {
             if (!options.automationError) throw;
             options.automationError(error.what());
+            return false;
         }
+        return true;
     }
 
-    void deferContendedWork(std::string_view operation, const auto& work) {
+    bool deferContendedWork(std::string_view operation, const auto& work) {
         try { work(); }
         catch (const StorageError& error) {
             if (!error.contended()) throw;
             if (options.storageContention)
                 options.storageContention(std::string(operation) + ": " + error.what());
+            return false;
         }
+        return true;
     }
 
     void runTurn(Id id) {
@@ -2309,7 +2321,12 @@ void Runtime::tick() {
 }
 void Runtime::tickConcurrent() {
     if (p_->shutdown.stop_requested()) return;
-    p_->deferContendedWork("policy approvals",[&] { p_->settleApprovals(); });
+    const auto now = p_->options.clock();
+    std::optional<Impl::MaintenanceCheck> check;
+    p_->deferContendedWork("database change stamp",[&] { check.emplace(p_->db.changeStamp(),now); });
+    const bool checkMaintenance = !check || p_->maintenanceAt != check;
+    const bool approvalsSettled = checkMaintenance &&
+        p_->deferContendedWork("policy approvals",[&] { p_->settleApprovals(); });
     const auto collect = [this](auto& workers, std::string_view operation) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -2325,7 +2342,9 @@ void Runtime::tickConcurrent() {
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         p_->deferContendedWork("channel worker",[&] { p_->channelWorker.get(); });
     p_->deferContendedWork("workspace outcomes",[&] { p_->db.persistWorkspaceResults(); });
-    p_->deferContendedWork("automations",[&] { p_->fireDueAutomations(); });
+    bool automationsChecked = false;
+    if (checkMaintenance)
+        p_->deferContendedWork("automations",[&] { automationsChecked = p_->fireDueAutomations(); });
     p_->deferContendedWork("Git webhooks",[&] { p_->db.deliverGitWebhooks(); });
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async,[db = &p_->db,stop = p_->shutdown.get_token()] {
@@ -2348,7 +2367,10 @@ void Runtime::tickConcurrent() {
             }
         }
     }
-    p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
+    if (checkMaintenance) {
+        const bool workflowsAdvanced = p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
+        p_->maintenanceAt = approvalsSettled && automationsChecked && workflowsAdvanced ? check : std::nullopt;
+    }
     p_->deferContendedWork("task scheduling",[&] {
         p_->persistTaskInferences();
         for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))

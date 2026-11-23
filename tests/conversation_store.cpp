@@ -5,6 +5,7 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -199,6 +200,32 @@ void retryAcrossConnections() {
     check(receive(restarted,"retry","Write a release note") == a,"Receipt was lost on restart");
     execution.runtime.runConversations();
     check(calls == 2 && restarted.tasks("alpha").size() == 1,"The retry ran an applied message again");
+}
+
+void dueAutomationWakesAfterIdle(bool externalWrite) {
+    Fixture fixture;
+    Store store(fixture.database()), writer(fixture.database());
+    ScriptedModel model;
+    SimulatedT3 t3;
+    std::atomic<Seconds> now{100};
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    RuntimeOptions{.clock = [&] { return now.load(); }});
+    auto reminder = Fixture::bot("beta");
+    reminder.request = "Fire a scheduled reminder";
+    const auto createReminder = [&](Seconds from) {
+        writer.createAutomation(localOwner,reminder,{{"kind","reminder"},{"timezone","Etc/UTC"},
+                                  {"fireAt",from + 1},{"request",reminder.request}},from);
+    };
+    if (!externalWrite) createReminder(now.load());
+    runtime.tickConcurrent();
+    runtime.tickConcurrent();
+    check(store.tasks("beta").empty(),"A reminder ran before it was due");
+
+    // The separate writer can register work due at the Runtime's unchanged clock.
+    if (externalWrite) createReminder(now.load() - 1);
+    else ++now;
+    runtime.tickConcurrent();
+    check(store.tasks("beta").size() == 1,"An idle check missed a newly due reminder");
 }
 
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
@@ -895,6 +922,8 @@ void conversationPagesCombineTaskAndMessageHistory() {
 int main() {
     try {
         retryAcrossConnections();
+        dueAutomationWakesAfterIdle(false);
+        dueAutomationWakesAfterIdle(true);
         savedDecisionIsAppliedWithoutAnotherModelCall();
         missingToolCannotBeAddedAfterInferenceStarts();
         protectedArgumentKeyCannotReachTaskIntake();
