@@ -373,13 +373,7 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         return result;
     }
     const bool watchPr = decision.tool == "git_update_pr" || decision.tool == "git_request_review";
-    if (watchPr) {
-        if (args.contains("baseRef")) branch(args,"baseRef");
-        std::lock_guard lock(mutex);
-        if (query("SELECT 1 FROM git_pr_watches WHERE host=? AND repo=? AND pr_number=? AND task_id<>?",
-                  {repo.host,repo.repo,args.at("prNumber"),taskId}).next())
-            throw Conflict("This pull request belongs to another task");
-    }
+    if (watchPr && args.contains("baseRef")) branch(args,"baseRef");
     if (op == "read") {
         Json result;
         try {
@@ -425,6 +419,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             return {{"ok",false},{"status","unknown"},{"error","The host outcome is unknown. Check the target before retrying."}};
         }
         if (watchPr) {
+            if (gitPrOwnedByAnotherTask(repo,args.at("prNumber"),taskId))
+                throw Conflict("This pull request belongs to another task");
             auto events = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
             events.next();
             eventCursor = events.number(0);

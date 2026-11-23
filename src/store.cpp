@@ -154,6 +154,12 @@ CREATE TABLE IF NOT EXISTS conversation_model_failures(
     exec("CREATE UNIQUE INDEX IF NOT EXISTS conversation_model_repairs"
          " ON conversation_model_failures(message_id) WHERE repair_attempt_id IS NOT NULL");
     exec("CREATE TABLE IF NOT EXISTS deleted_bots(bot TEXT PRIMARY KEY)");
+    exec(R"SQL(
+CREATE TABLE IF NOT EXISTS git_pr_watch_origins(
+  host TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL, event_cursor INTEGER NOT NULL,
+  PRIMARY KEY(host,repo,pr_number),
+  FOREIGN KEY(host,repo,pr_number) REFERENCES git_pr_watches(host,repo,pr_number) ON DELETE CASCADE)
+)SQL");
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.
     exec("PRAGMA user_version");

@@ -19,6 +19,7 @@ public:
     bool openAfterSession = false;
     bool checkOriginatingSession = false;
     std::function<void()> onNotification;
+    std::function<void()> beforeUserTool;
     std::function<Decision(const ModelInput&)> rawNotification;
     std::function<Decision(const ModelInput&)> onTaskResult;
 
@@ -72,7 +73,10 @@ private:
             return {"reply",{{"text","CI failed. " + log.at("text").get<std::string>()}},{}};
         }
         const auto name = event.at("text").get<std::string>();
-        if (steps.empty()) return calls.at(name);
+        if (steps.empty()) {
+            if (beforeUserTool) beforeUserTool();
+            return calls.at(name);
+        }
         results[name] = steps.at(0).at("result");
         return {"reply",{{"text","Git tool result recorded"}},{}};
     }
@@ -216,6 +220,87 @@ void runner() {
         runtime.runConversations();
         check(script.notifications == 3 && historyCount(store,sibling,"git_webhook") == 0,
               "Retiring the Bot delivered a notification to its old conversation or changed attribution of a shared SHA");
+    }
+}
+
+void deletedBotWatchHandoff(std::string_view tool) {
+    Directory directory;
+    const auto path = directory.path/"state.db";
+    auto host = std::make_shared<FakeHost>();
+    Script script;
+    Sessions sessions;
+    script.openAfterSession = true;
+    const std::string newHead(40,'b');
+    Id retired, sibling, replacement;
+    const auto mutationArgs = [&](Id task) {
+        Json args{{"host",hostName},{"repo",repoName},{"taskId",task},{"prNumber",1}};
+        if (tool == "git_update_pr") args["title"] = "Replacement update";
+        else args["reviewers"] = {"alice"};
+        return args;
+    };
+    {
+        Store store(path);
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+        retired = store.submit(intake());
+        for (int i = 0; i < 8; ++i) runtime.tick();
+        check(store.task(retired).at("state") == "completed" && host->createCalls == 1,
+              "The original Bot did not finish its PR task");
+        for (const auto& review : store.inbox(localOwner,"owner"))
+            store.decideInbox(localOwner,target(review),"approve");
+
+        sibling = store.submit(intake("sibling","sibling-project"));
+        auto args = openArgs("sibling-change");
+        args["taskId"] = sibling;
+        check(invoke(store,runtime,script,"watch-sibling","git_open_pr",args,"sibling").at("prNumber") == 2,
+              "The sibling did not start watching another PR at the same commit");
+        replacement = store.submit(intake("replacement","replacement-project"));
+        const auto calls = host->hostCalls;
+        const auto blocked = invoke(store,runtime,script,"claim-active-watch",std::string(tool),
+                                    mutationArgs(replacement),"replacement");
+        check(blocked.at("ok") == false && host->hostCalls == calls,
+              "An active Bot's PR was made available to another task");
+
+        check(store.receiveGitWebhook({hostName,"before-handoff-shared",repoName,"ci","completed",{},sha,"Shared SHA",0}),
+              "Could not save a shared-commit event before handoff");
+        runtime.runConversations();
+        check(historyCount(store,retired,"git_webhook") == 0 && historyCount(store,sibling,"git_webhook") == 0,
+              "The fixture's shared-commit event was already attributed");
+        store.policy().deleteBot(localOwner,"owner");
+
+        // Enqueue after the Runtime's initial delivery pass so the old explicit event is still pending at handoff.
+        script.beforeUserTool = [&] {
+            check(store.receiveGitWebhook({hostName,"before-handoff-explicit",repoName,"ci","completed",{1},sha,
+                                           "Queued for the old watch",0}),"Could not queue an explicit pre-handoff event");
+        };
+        host->result["headSha"] = newHead;
+        const auto claimed = invoke(store,runtime,script,"claim-retired-watch",std::string(tool),
+                                    mutationArgs(replacement),"replacement");
+        script.beforeUserTool = {};
+        check(claimed.value("ok",false) && claimed.value("watchAttached",false) && host->hostCalls == calls + 1,
+              "The replacement task could not claim the retired watch via " + std::string(tool) + ": " + claimed.dump());
+    }
+    {
+        Store store(path);
+        Runtime runtime(store,script,sessions,[](std::string_view) { return std::string{}; },options(host));
+        check(store.receiveGitWebhook({hostName,"after-handoff-explicit",repoName,"ci","completed",{1},newHead,
+                                       "Explicit PR activity for the new watch",0}) &&
+              store.receiveGitWebhook({hostName,"after-handoff-commit",repoName,"ci","completed",{},newHead,
+                                       "Commit-only activity for the new head",0}),"Could not enqueue activity after handoff");
+        runtime.runConversations();
+        check(historyCount(store,retired,"git_webhook") == 0 && historyCount(store,sibling,"git_webhook") == 0,
+              "Handoff delivered an old event to the retired task or changed attribution to the sibling PR");
+        const auto history = store.history(replacement,0,200).dump();
+        check(historyCount(store,replacement,"git_webhook") == 2 &&
+              history.find("after-handoff-explicit") != std::string::npos &&
+              history.find("after-handoff-commit") != std::string::npos &&
+              history.find("before-handoff-explicit") == std::string::npos,
+              "The replacement watch lost new activity or replayed an old event after restart");
+
+        const auto calls = host->hostCalls;
+        const auto blocked = invoke(store,runtime,script,"reclaim-active-watch",std::string(tool),
+                                    mutationArgs(sibling),"sibling");
+        check(blocked.at("ok") == false && host->hostCalls == calls,
+              "A competing task could claim the replacement Bot's active watch");
     }
 }
 
@@ -1044,6 +1129,8 @@ int main() {
         freshPrReviewSchema();
         schemas();
         runner();
+        deletedBotWatchHandoff("git_update_pr");
+        deletedBotWatchHandoff("git_request_review");
         webhookHeadPeriods();
         reviewAfterTaskProgress();
         webhookDeliveryResumesAfterAnIdlePoll();

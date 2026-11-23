@@ -203,6 +203,7 @@ struct Store::Impl {
     void deliverGitWebhooks();
     std::optional<Id> gitWebhooksDrainedAt;
     bool canReceiveGitWebhook(std::string_view bot, const Json& event);
+    bool gitPrOwnedByAnotherTask(const GitRepository&, Id pr, Id task) const;
     bool watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest&);
     void decideGitPr(const InboxTarget&, std::string_view decision, const Json& data, const Json& task);
     std::vector<std::string> gitCredentials;

@@ -60,13 +60,34 @@ CREATE INDEX IF NOT EXISTS git_events_repo ON git_webhook_events(host,repo);
     if (sqlite3_exec(db,schema,nullptr,nullptr,nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
 }
 
+bool Store::Impl::gitPrOwnedByAnotherTask(const GitRepository& repo, Id pr, Id task) const {
+    return query(R"SQL(
+SELECT 1 FROM git_pr_watches w WHERE (w.host,w.repo,w.pr_number)=(?,?,?) AND w.task_id<>?
+AND NOT EXISTS (SELECT 1 FROM deleted_bots d WHERE d.bot=w.bot_id)
+)SQL",{repo.host,repo.repo,pr,task}).next();
+}
+
 bool Store::Impl::watchGitPr(Id task, std::string_view bot, const Json& run, Id eventCursor, const GitPullRequest& pr) {
     const auto& repo = pr.target.base;
-    exec(R"SQL(
+    auto prior = query("SELECT task_id,bot_id,event_cursor FROM git_pr_watches WHERE (host,repo,pr_number)=(?,?,?)",
+                       {repo.host,repo.repo,pr.number});
+    if (prior.next() && (prior.number(0) != task || prior.string(1) != bot)) {
+        if (!Policy(*this).botDeleted(prior.string(1))) return false;
+        // Keep the original attribution boundary and start the new owner's delivery at the handoff.
+        exec("INSERT INTO git_pr_watch_origins VALUES(?,?,?,?) ON CONFLICT DO NOTHING",
+             {repo.host,repo.repo,pr.number,prior.number(2)});
+        auto events = query("SELECT coalesce(max(id),0) FROM git_webhook_events");
+        events.next();
+        eventCursor = events.number(0);
+        exec(R"SQL(
+UPDATE git_pr_watches SET task_id=?,bot_id=?,run=?,url=?,event_cursor=? WHERE (host,repo,pr_number)=(?,?,?)
+)SQL",{task,bot,run,pr.url,eventCursor,repo.host,repo.repo,pr.number});
+    } else {
+        exec(R"SQL(
 INSERT INTO git_pr_watches VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,pr_number)
- DO UPDATE SET url=excluded.url WHERE task_id=excluded.task_id AND bot_id=excluded.bot_id
+ DO UPDATE SET url=excluded.url
 )SQL",{repo.host,repo.repo,pr.number,task,bot,run,pr.url,eventCursor});
-    if (sqlite3_changes(db) != 1) return false;
+    }
     if (!pr.headSha.empty()) {
         exec(R"SQL(
 INSERT INTO git_pr_heads VALUES(?,?,?,?,?,0) ON CONFLICT(host,repo,pr_number,event_cursor)
@@ -157,8 +178,7 @@ ORDER BY (task_id=?6 AND invocation=?7) DESC,status IN ('pending','ambiguous','r
     if (state == "ambiguous") {
         auto candidates = Json::array();
         for (const auto& [id,pr] : matches) {
-            if (query("SELECT 1 FROM git_pr_watches WHERE host=? AND repo=? AND pr_number=? AND task_id<>?",
-                      {base.host,base.repo,id,context.taskId}).next()) continue;
+            if (gitPrOwnedByAnotherTask(base,id,context.taskId)) continue;
             candidates.push_back({{"prNumber",id},{"url",pr.url},{"headSha",pr.headSha},{"awaitingReview",pr.awaitingReview}});
         }
         auto pending = query("SELECT id,candidates FROM pr_review_items WHERE operation_id=? AND status='pending'",
