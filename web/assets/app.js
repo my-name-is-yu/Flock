@@ -2361,9 +2361,24 @@ function generalContent(bot) {
   access.insertAdjacentHTML('beforeend', chevron);
   rows.append(access);
   if (!bot.soul) return [hero, rows];
-  const role = node('section', 'settings-card');
-  role.setAttribute('aria-label', 'Role');
-  role.append(node('p', 'settings-soul', bot.soul));
+  // Label the Bot's SOUL.md text so it reads as its role, and fold long roles behind "Show all".
+  const role = node('section', 'settings-card settings-role');
+  const heading = node('h3', 'settings-card-label', 'Role');
+  heading.id = 'settings-role-label';
+  role.setAttribute('aria-labelledby', heading.id);
+  const soul = node('p', 'settings-soul', bot.soul);
+  role.append(heading, soul);
+  if (bot.soul.split('\n').length > 8 || bot.soul.length > 600) {
+    soul.dataset.folded = 'true';
+    const toggle = button('Show all', 'text-button settings-soul-toggle', () => {
+      const folded = soul.dataset.folded === 'true';
+      soul.dataset.folded = String(!folded);
+      toggle.textContent = folded ? 'Show less' : 'Show all';
+      toggle.setAttribute('aria-expanded', String(folded));
+    });
+    toggle.setAttribute('aria-expanded', 'false');
+    role.append(toggle);
+  }
   return [hero, role, rows];
 }
 function cronContent(bot) {
