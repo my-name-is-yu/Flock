@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS journal_task_results ON journal(task_id,id DESC)
   WHERE kind IN ('completed','report','cancelled');
 CREATE INDEX IF NOT EXISTS journal_instruction_message ON journal(
   json_extract(data,'$.messageId'),task_id,json_extract(data,'$.step'))
-  WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered');
+  WHERE kind IN ('instruction_accepted','instruction_delivered');
 CREATE INDEX IF NOT EXISTS conversation_active_tasks ON tasks(bot_id,id DESC)
   WHERE state NOT IN ('completed','cancelled');
 CREATE INDEX IF NOT EXISTS conversation_terminal_tasks ON tasks(bot_id,id DESC)

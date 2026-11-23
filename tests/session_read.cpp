@@ -38,11 +38,7 @@ struct Backend : T3 {
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
         writes.push_back(command);
-        const RunRef run{"foreign-thread","foreign-run",{}};
-        if (command.tool == "steer" &&
-            (command.target.threadId != run.threadId || command.target.runId != run.runId))
-            return {Delivery::Kind::NotAccepted,{},"The assigned Run is unavailable",true};
-        return {Delivery::Kind::Accepted,run,{}};
+        return {Delivery::Kind::Accepted,{"foreign-thread","foreign-run",{}},{}};
     }
     Delivery reconcile(const Command&) override { return {}; }
     Observation observe(const std::string&,const Json&,const RunRef&) override { return {}; }

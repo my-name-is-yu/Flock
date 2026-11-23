@@ -530,7 +530,7 @@ Store::ConversationChanges Store::conversationChangesSince(std::optional<Id> aft
 SELECT m.bot_id,m.id FROM journal j JOIN messages m ON m.id=CASE j.kind
   WHEN 'conversation_reply' THEN json_extract(j.data,'$.replyToMessageId') ELSE json_extract(j.data,'$.messageId') END
 WHERE j.id>?1 AND j.id<=?2 AND (?3='' OR m.bot_id=?3)
-  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_steered','instruction_delivered',
+  AND j.kind IN ('conversation_reply','instruction_accepted','instruction_delivered',
                  'conversation_budget_approved')
 UNION
 SELECT j.conversation_bot_id,json_extract(j.data,'$.waitMessageId') FROM journal j
@@ -908,11 +908,11 @@ SELECT page.id,page.task_id,page.time,page.kind,
             'deliveredToT3',json(CASE WHEN (
               WITH instructions AS (
                 SELECT kind,task_id,json_extract(data,'$.step') AS step
-                FROM journal WHERE kind IN ('instruction_accepted','instruction_steered','instruction_delivered')
+                FROM journal WHERE kind IN ('instruction_accepted','instruction_delivered')
                 -- Unary + prevents SQLite from coercing JSON values and lets it use the expression index.
                 AND json_extract(data,'$.messageId')=+m.id
               )
-              SELECT min(i.kind='instruction_steered' OR EXISTS (
+              SELECT min(EXISTS (
                 SELECT 1 FROM instructions d WHERE d.kind='instruction_delivered'
                 AND d.task_id=i.task_id AND d.step=i.step
               )) FROM instructions i WHERE i.kind!='instruction_delivered'

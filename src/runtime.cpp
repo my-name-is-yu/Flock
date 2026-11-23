@@ -1270,8 +1270,7 @@ FROM journal j
 LEFT JOIN waits w ON j.kind='user_answer' AND w.id=json_extract(j.data,'$.waitId') AND w.task_id=j.task_id
 WHERE j.task_id=?1 AND
       (j.kind='instruction_accepted' OR
-       (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer') OR
-       (j.kind='instruction_steered' AND json_extract(j.data,'$.revisionId')=?2))
+       (j.kind='user_answer' AND j.id>?3 AND w.resolution='answer'))
 ORDER BY j.id
 )SQL",{task.at("id"),revision(task),answersAfter});
         Json sources = Json::array();
@@ -1285,8 +1284,7 @@ ORDER BY j.id
             if (std::exchange(first,false))
                 instruction += "\n\nUser decisions for this task, oldest first. Apply later directions where they replace "
                                "earlier ones, under the current task intent and completion criteria above.";
-            instruction += answer ? "\n\nUser answer" : kind == "instruction_steered" ? "\n\nDelivered Session steer"
-                                                                                       : "\n\nAccepted instruction";
+            instruction += answer ? "\n\nUser answer" : "\n\nAccepted instruction";
             instruction += " (record " + std::to_string(rows.number(0));
             if (item.contains("messageId")) instruction += ", message " + item.at("messageId").dump();
             if (item.contains("step")) instruction += ", step " + item.at("step").dump();

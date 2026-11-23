@@ -1149,8 +1149,10 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
             check(opened == SQLITE_OK,"could not open the fixture writer");
             sqlite3_busy_timeout(db.get(),2000);
-            const auto write = "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) +
-                ",unixepoch(),'instruction_steered',json_object('messageId'," + std::to_string(message) + ",'step',1))";
+            std::string write;
+            for (const auto* kind : {"instruction_accepted","instruction_delivered"})
+                write += "INSERT INTO journal(task_id,time,kind,data) VALUES(" + std::to_string(task) + ",unixepoch(),'" +
+                    kind + "',json_object('messageId'," + std::to_string(message) + ",'step',1));";
             check(sqlite3_exec(db.get(),write.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
                   "could not record the historical delivery");
             return true;

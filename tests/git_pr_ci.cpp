@@ -936,7 +936,7 @@ void notificationCannotControlASession() {
     check(store.receiveGitWebhook({hostName,"session-effect",repoName,"comment","created",{1},sha,"A comment",0}),
           "Could not enqueue comment");
     runtime.runConversations();
-    check(result.value("ok",true) == false && historyCount(store,task,"instruction_steered") == 0,
+    check(result.value("ok",true) == false && sessions.sessionMessages == 0,
           "A generic model executed a Session write that the turn did not offer");
 }
 
