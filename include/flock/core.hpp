@@ -372,7 +372,6 @@ struct RuntimeOptions {
     // confirm publication by request key or release any unpublished reservation.
     ReconcileBotCreation reconcileBotCreation = {};
     IntakeResolver intake = {};
-    // Require an installation connection for new sends through the production T3 adapter.
     bool requireT3Connection = false;
 };
 class Runtime {

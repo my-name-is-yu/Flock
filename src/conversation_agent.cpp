@@ -11,7 +11,6 @@ using conversation_storage::identifier;
 using conversation_storage::text;
 using conversation_storage::ToolError;
 using conversation_storage::messageSize;
-using conversation_storage::verifiedEnvironment;
 
 namespace {
 using conversation::Message;
@@ -369,7 +368,7 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     const auto& config = message.routing.at("config");
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
         for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = verifiedEnvironment(message.routing,message.routing,alias.key());
+            const auto id = taskEnvironment(message.bot,message.routing,alias.key());
             if (!id.empty()) environments.push_back({{"name",alias.key()},{"environmentId",id}});
         }
     }
@@ -502,8 +501,7 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             if (change->intent.empty() && change->doneWhen.empty() && change->environment.empty())
                 throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
             if (!change->environment.empty()) {
-                auto destination = verifiedEnvironment(task,routing,change->environment);
-                if (destination.empty()) destination = taskEnvironment(bot,routing,change->environment);
+                auto destination = taskEnvironment(bot,routing,change->environment,&task);
                 if (destination.empty())
                     throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
                 change->environment = std::move(destination);

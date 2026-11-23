@@ -995,7 +995,7 @@ void resumeRestoresCancelledTaskDirections() {
                                      "report median throughput, and attach the raw trace";
     f.script(revisionRequest,{change(next,{{"intent",goal},{"doneWhen",criteria},{"environment","ローカルMac"}})});
     f.receive("revise-resumed",revisionRequest);
-    check(f.task(next)["pendingEnvironmentId"] == "desktop" && f.task(next)["intent"] == goal &&
+    check(f.task(next)["pendingDestination"]["environmentId"] == "desktop" && f.task(next)["intent"] == goal &&
           f.task(next)["doneWhen"] == criteria,"the combined move and work revision was not accepted");
     constexpr auto abandonedMove = "Use ローカルMac for the next run";
     f.script(abandonedMove,{change(next,{{"environment","ローカルMac"}})});
@@ -1067,7 +1067,7 @@ void liveMoveAndCriteriaCorrectionKeepCurrentContract() {
     constexpr auto correction = "Change the completion criteria to report p95 latency";
     f.script(correction,{change(id,{{"doneWhen",correctedCriteria}})});
     f.receive("live-criteria-correction",correction);
-    check(f.task(id)["environmentId"] == "cloud" && f.task(id)["pendingEnvironmentId"] == "desktop" &&
+    check(f.task(id)["environmentId"] == "cloud" && f.task(id)["pendingDestination"]["environmentId"] == "desktop" &&
           f.task(id)["intent"] == goal && f.task(id)["doneWhen"] == correctedCriteria &&
           f.t3.sent.size() == 1,
           "the live route and criteria changes were not saved before delivery");
@@ -1109,7 +1109,7 @@ void environmentOnlyMoveKeepsWorkAcrossResume() {
                            " and attach trace " + trace;
     f.script(direction,{change(original,{{"environment","ローカルMac"}})});
     f.receive("move-with-checksum",direction);
-    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+    check(f.task(original)["pendingDestination"]["environmentId"] == "desktop",
           "the fixture did not create an environment-only move");
 
     f.t3.finish("run-1","Cloud work settled");
@@ -1162,7 +1162,7 @@ void environmentOnlyMoveCancelledBeforeDeliveryKeepsWorkAcrossResume() {
                                "sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8";
     f.script(direction,{change(original,{{"environment","ローカルMac"}})});
     f.receive("cancel-before-move-delivery",direction);
-    check(f.task(original)["pendingEnvironmentId"] == "desktop",
+    check(f.task(original)["pendingDestination"]["environmentId"] == "desktop",
           "the fixture did not create an environment-only move");
     const auto activeRun = f.task(original)["activeRun"]["runId"].get<std::string>();
     f.store->operate(localOwner,TaskTarget::from(f.task(original),0),"cancel");
@@ -1734,6 +1734,7 @@ void rememberCloudProject(Fixture& f) {
     check(opened == SQLITE_OK && sqlite3_exec(db.get(),
           "INSERT INTO bot_t3_projects VALUES('alpha','cloud','cloud-project')",nullptr,nullptr,nullptr) == SQLITE_OK,
           "could not save the previously selected cloud project");
+    f.t3.projectsByEnvironment["cloud"] = {{"cloud-project","Cloud fixture",{}}};
 }
 
 void cloudDestinationWaitsForItsProject() {
@@ -1774,7 +1775,8 @@ void cloudDestinationWaitsForItsProject() {
     f.restart();
     f.reach(desktopFollowing,"running");
     check(f.task(following)["state"] == "queued" && f.t3.sent.size() == 3 &&
-          f.t3.sent.back().environmentId == "desktop" && f.task(moving)["environmentId"] == "desktop",
+          f.t3.sent.back().environmentId == "desktop" && f.task(moving)["environmentId"] == "cloud" &&
+          f.task(moving)["blockedBy"]["id"] == occupied,
           "work entered a Cloud project where another Task was still active");
     f.t3.finish("run-1","Cloud project complete");
     f.reach(occupied,"completed");
@@ -1805,7 +1807,7 @@ void queuedMoveWaitsForTheNewerDestinationOwner() {
     f.script("Transfer this task to cloud",{change(moving,{{"environment","cloud"}})});
     f.receive("move-queued","Transfer this task to cloud");
     f.restart();
-    f.advanceUntil([&] { return f.task(moving).value("environmentReleased",false); },
+    f.advanceUntil([&] { return f.task(moving)["projectId"] == "cloud-project"; },
                    "the queued transfer stayed behind unrelated work in its old queue");
     check(f.task(moving)["blockedBy"]["id"] == remote && f.t3.sent.size() == 2 && f.t3.interrupted.empty(),
           "the transferred Task bypassed the newer active destination owner");
@@ -1825,8 +1827,7 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     T3Connections connections(*f.store);
     connections.connect("desktop",localOwner.id,48123);
     connections.connect("cloud",localOwner.id,48123);
-    f.t3.projectsByEnvironment["cloud"] = {
-        {"cloud-docs","Cloud Docs","docs"},{"cloud-release","Cloud Release","release"}};
+    rememberCloudProject(f);
     const auto owner = f.store->submit(f.routing("Existing cloud work","beta","cloud","cloud-release"));
     const Intake automatic{"alpha","","",""};
     constexpr auto request = "Start work on desktop";
@@ -1839,19 +1840,24 @@ void moveAsksForTheDestinationProjectAfterSettlement() {
     f.script("Move the work to cloud",{change(moving,{{"environment","cloud"}})});
     f.store->receive(localOwner,automatic,"select-cloud-project","Move the work to cloud");
     f.runtime->runConversations();
-    check(f.task(moving)["pendingEnvironmentId"] == "cloud","the unpinned Bot could not move to a connected environment");
+    check(f.task(moving)["pendingDestination"] ==
+          Json{{"environmentId","cloud"},{"projectId","cloud-project"},{"pinned",false}},
+          "the unpinned Bot did not provisionally reserve its remembered project");
     f.t3.finish("run-2","Old Run still settling",false);
     f.tick(3);
     check(f.task(moving).at("environmentId") == "desktop" && f.task(moving).at("projectId") == "project" &&
           !f.task(moving).at("activeRun").is_null() && f.t3.sent.size() == 2,
           "project selection moved work before its original Run settled");
 
+    f.t3.projectsByEnvironment["cloud"] = {
+        {"cloud-docs","Cloud Docs","docs"},{"cloud-release","Cloud Release","release"}};
     f.t3.finish("run-2","Old Run settled");
     f.reach(moving,"waiting");
     const auto waiting = f.task(moving);
     check(waiting.at("environmentId") == "cloud" && waiting.at("projectId") == "" &&
           waiting.at("wait").at("choices") == Json::array({"Cloud Docs","Cloud Release"}) &&
-          f.t3.sent.size() == 2,"the move did not ask about the destination's projects");
+          !waiting.contains("pendingDestination") && f.t3.sent.size() == 2,
+          "the move kept a project that had disappeared or skipped the new choice");
     const auto target = TaskTarget::from(waiting,waiting.at("wait").at("id"));
     f.restart();
     f.store->operate(localOwner,target,"answer",{{"text","Cloud Release"}});

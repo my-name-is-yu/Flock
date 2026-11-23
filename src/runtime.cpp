@@ -221,10 +221,8 @@ SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelle
   state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
 )
 UNION
-SELECT id FROM tasks WHERE state NOT IN ('completed','cancelled') AND (
-  COALESCE(json_extract(data,'$.environmentReleased'),0)=1 OR
-  (state='queued' AND json_extract(data,'$.replanning')=1 AND json_extract(data,'$.pendingEnvironmentId')<>environment_id)
-)
+SELECT id FROM tasks WHERE state='queued' AND json_extract(data,'$.replanning')=1
+  AND json_extract(data,'$.pendingDestination.environmentId')<>environment_id
 UNION
 SELECT tasks.id FROM tasks JOIN peer_exchanges ON tasks.id=recipient_task
 WHERE kind='consult' AND state NOT IN ('completed','cancelled')
@@ -263,90 +261,22 @@ ORDER BY id)SQL");
     }
 
     bool selectProject(Json& task) {
-        const auto environment = field(task,"environmentId");
         const auto bot = field(task,"botId");
-        const auto projectQuestionOpen = [&] {
-            return db.query("SELECT 1 FROM tasks t JOIN waits w ON w.task_id=t.id "
-                            "WHERE t.bot_id=? AND t.environment_id=? AND t.project_id='' AND w.resolution IS NULL "
-                            "AND json_type(w.data,'$.projectChoices')='object' LIMIT 1",{bot,environment}).next();
-        };
+        const auto environment = field(task,"environmentId");
         {
             std::lock_guard lock(db.mutex);
-            if (projectQuestionOpen()) return false;
+            if (db.projectQuestionOpen(bot,environment)) return false;
         }
-        std::vector<T3Project> projects;
-        std::string problem;
-        if (options.requireT3Connection && !db.t3EnvironmentConnected(environment)) {
-            problem = "Connect this T3 environment in Settings, then try again.";
-        } else if (!policy.allows(bot,Action::environment_inspect,environment) ||
-            policy.forbidden(bot,Action::environment_launch,environment)) {
-            problem = "Flock cannot use this T3 environment under the current permissions.";
-        } else {
-            try {
-                projects = t3.projects(environment);
-                const auto scrub = db.redactor(bot);
-                std::erase_if(projects,[&](const T3Project& project) { return scrub.text(project.id) != project.id; });
-                if (projects.empty()) problem = "Add or unarchive a project in this T3 environment, then try again.";
-            } catch (const std::exception&) {
-                problem = "Flock could not list projects. Check the T3 connection and try again.";
-            }
-        }
+        auto catalog = db.readProjectCatalog(t3,bot,environment,options.requireT3Connection);
         return change(task,[&](Json& current) {
-            if (shutdown.stop_requested()) return false;
-            if (!problem.empty()) {
-                db.wait(current,"settings",{{"text",problem}});
-                return true;
-            }
-            std::erase_if(projects,[&](const T3Project& project) {
-                return db.recipientRouteWouldCycle(current.at("id"),environment,project.id);
-            });
-            if (projects.empty()) {
-                db.wait(current,"settings",{{"text",
-                    "Each project in this environment would make project queues wait for one another. Move this task to another environment or retry after related work finishes."}});
-                return true;
-            }
-            const auto remembered = db.rememberedT3Project(bot,environment);
-            const auto saved = std::ranges::find(projects,remembered,&T3Project::id);
-            if (saved != projects.end() || projects.size() == 1) {
-                const auto& project = saved == projects.end() ? projects.front().id : saved->id;
-                current["projectId"] = project;
-                db.rememberT3Project(bot,environment,project);
-                return true;
-            }
-            // Concurrent workflow stages share a Bot's first choice.
-            if (projectQuestionOpen()) return false;
-            const auto scrub = db.redactor(bot);
-            std::map<std::string,std::size_t> titles;
-            std::vector<std::string> names;
-            for (const auto& project : projects) {
-                names.push_back(bounded(scrub.text(project.title),140));
-                ++titles[names.back()];
-            }
-            Json labels = Json::array(), choices = Json::object();
-            for (std::size_t index = 0; index < projects.size(); ++index) {
-                const auto& project = projects[index];
-                auto label = names[index];
-                if (titles.at(label) > 1 && !project.directory.empty())
-                    label += " (" + bounded(scrub.text(project.directory),40) + ")";
-                const auto base = label;
-                for (int suffix = 2; choices.contains(label); ++suffix)
-                    label = base + " #" + std::to_string(suffix);
-                labels.push_back(label);
-                choices[label] = project.id;
-            }
-            db.wait(current,"user_question",{{"text","Which T3 project should this Bot use in this environment?"},
-                {"choices",std::move(labels)},{"projectChoices",std::move(choices)}});
-            return true;
+            return !shutdown.stop_requested() && db.applyProjectCatalog(current,std::move(catalog));
         },&task) && !field(task,"projectId").empty();
     }
 
     void activate(Json task) {
         if (field(task,"projectId").empty() && !selectProject(task)) return;
-        // Project selection changes the queue key. Claim only under that new key.
         change(task,[&](Json& current) {
-            auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL"
-                                 " UNION ALL SELECT 1 FROM peer_exchanges WHERE recipient_task=? AND kind='consult'",
-                                 {current["id"],current["id"]});
+            auto turn = db.query("SELECT 1 FROM project_slots WHERE id=? AND blocker_id IS NULL",{current["id"]});
             if (!turn.next()) return false;
             if (current.contains("workflowId") && current["lastRun"].is_null()) {
                 queueAction(current,actionId(),"delegate","",Json::object(),Json::object(),false);
@@ -375,9 +305,7 @@ ORDER BY id)SQL");
         }
         task.erase("runStop");
         task.erase("replanning");
-        task.erase("pendingEnvironmentId");
-        task.erase("pendingProjectId");
-        task.erase("environmentReleased");
+        task.erase("pendingDestination");
         task.erase("queuedInT3");
         if (hasPending(task)) task["cancelledInstructions"] = task.at("pendingInstructions");
         else task.erase("cancelledInstructions");
@@ -688,36 +616,25 @@ ORDER BY id)SQL");
 
     void finishReplan(const Json& task) {
         change(task,[&](Json& current) {
-            const auto old = field(current,"environmentId");
-            auto target = field(current,"pendingEnvironmentId");
-            if (target.empty()) target = old;
-            const bool changingEnvironment = target != old;
             const auto id = current["id"].get<Id>();
             const auto peer = db.peerExchange(id);
             if (peer && !peer->allowsReplan(id)) return false;
-            const bool released = current.value("environmentReleased",false);
+            const auto oldEnvironment = field(current,"environmentId");
+            const auto destination = PendingDestination::read(current);
+            const bool moving = destination && destination->environmentId != oldEnvironment;
             const auto event = db.currentEvent(current);
             const bool preservePeerAnswer = peer && !event.is_null() && event["consumed"] != true &&
                 event["kind"] == "bot_answer";
-            if (changingEnvironment && !released) {
-                current["environmentReleased"] = true;
-                return true;
-            }
-            if (changingEnvironment || released || current["state"] == "queued") {
-                const auto blocker = db.queueBlocker(id);
-                if (!blocker.is_null()) {
-                    const bool waitingSender = peer && blocker["id"] == peer->sender &&
-                        blocker["state"] == "peer_waiting";
-                    if (!waitingSender) return false;
-                }
-            }
-            if (changingEnvironment) {
-                current["environmentId"] = target;
-                current["projectId"] = field(current,"pendingProjectId");
+            if (moving) {
+                current["environmentId"] = destination->environmentId;
+                current["projectId"] = destination->pinned ? destination->projectId : std::string{};
                 current["newSessionRequired"] = true;
                 current.erase("selectedSession");
-                db.journal(current["id"],"session_destination_changed",{{"from",old},{"to",target},{"revisionId",revision(current)}});
+                db.journal(id,"session_destination_changed",
+                    {{"from",oldEnvironment},{"to",destination->environmentId},{"revisionId",revision(current)}});
             }
+            if (destination && (destination->pinned || destination->projectId.empty()))
+                current.erase("pendingDestination");
             closeQuestion(current,"user_instruction");
             if (!preservePeerAnswer) {
                 consumeEvent(current);
@@ -725,12 +642,10 @@ ORDER BY id)SQL");
                 db.event(current,"replan/" + std::to_string(current["generation"].get<Id>()),
                          report.is_null() ? Json{{"kind","intake"}} : report);
             }
-            const bool needsQueue = field(current,"projectId").empty() ||
+            const bool needsQueue = moving || current["state"] == "queued" || field(current,"projectId").empty() ||
                 (current.contains("workflowId") && current["lastRun"].is_null());
             current["state"] = needsQueue ? "queued" : "deciding";
-            for (const auto* key : {"replanning","replanningDetail","pendingEnvironmentId","pendingProjectId",
-                                    "environmentReleased","runStop","feedback"})
-                current.erase(key);
+            for (const auto* key : {"replanning","replanningDetail","runStop","feedback"}) current.erase(key);
             return true;
         });
     }
@@ -1011,7 +926,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
             applyDelivery(id,action,{Delivery::Kind::Auth,{},
                 "Connect this T3 environment in Flock settings before sending work.",true});
         };
-        std::optional<SessionDispatchLock> dispatch;
+        std::optional<SessionDispatchFileLock> dispatch;
         if (firstSend) {
             if (disconnected()) return connectionUnavailable();
             if (!sessionActionAllowed(task)) return refused(ApprovalGate::denied);
@@ -1088,7 +1003,7 @@ SELECT id,?,stopped_through FROM session_participations WHERE id=? AND stopped_t
                 return applyDelivery(id,action,*stopped);
             }
             if (options.requireT3Connection || sendsToSession || cmd.sessionOrigin)
-                dispatch.emplace(db.path,SessionDispatchLock::Mode::shared);
+                dispatch.emplace(db.path,SessionDispatchFileLock::Mode::shared);
             if (disconnected()) return connectionUnavailable();
             auto policyGate = ApprovalGate::allow;
             if (!change(task,[&](Json& current) {
@@ -1625,19 +1540,6 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         return {{"text",row.string(0)},{"time",row.number(1)}};
     }
 
-    Id openPeerExchange(Json& sender, const Intake& intake, const std::string& kind,
-                        std::string_view note, const std::string& action, bool charge,
-                        Json forwarded) {
-        const auto id = db.submit(intake,0,nullptr,RequestJournal::skip);
-        auto recipient = db.load(id);
-        const PeerExchange exchange{action,kind,"working","",sender["id"],id};
-        auto message = peerMessage(exchange,sender,recipient,"request",note,action);
-        message["chargesBudget"] = charge;
-        if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
-        transitionPeer(exchange,sender,recipient,std::move(message));
-        return id;
-    }
-
     void sendPeer(Json& sender, const Json& event, const TaskDecision& decision, PeerBot peer, const std::string& action) {
         if (db.peerExchange(sender["id"])) throw Conflict("Finish the current Bot exchange first");
         const auto& args = decision.args;
@@ -1653,13 +1555,25 @@ WHERE m.id=? AND m.bot_id=? AND j.kind='conversation_message'
         if (work) {
             if (!sender["activeRun"].is_null() || !field(sender,"actionId").empty())
                 throw Conflict("Let the assigned Run settle before requesting another Bot's work");
+            peer.intake.environmentId = db.defaultT3Environment(peer.intake.botId,peer.intake.environmentId,
+                                                               field(sender,"environmentId"));
+            if (peer.intake.environmentId.empty())
+                throw Conflict("Choose a T3 environment for the destination Bot in its configuration");
+            if (!peer.intake.projectId.empty() &&
+                db.peerWorkRouteWouldCycle(sender.at("id"),peer.intake.environmentId,peer.intake.projectId))
+                throw Conflict("This work request would make two project queues wait for one another");
             if (!admitWork(sender,decision,charge)) return;
             establishCriteria(sender,args);
-            if (db.peerWorkRouteWouldCycle(sender.at("id"),peer.intake.environmentId,peer.intake.projectId))
-                throw Conflict("This work request would make two project queues wait for one another");
         }
         peer.intake.request = note.empty() ? field(forwarded,"text") : note;
-        openPeerExchange(sender,peer.intake,kind,note,action,charge,std::move(forwarded));
+        const auto source = work ? TaskSource::handoff : TaskSource::consultation;
+        const auto id = db.submit(peer.intake,0,nullptr,source);
+        auto recipient = db.load(id);
+        const PeerExchange exchange{action,kind,"working","",sender["id"],id};
+        auto message = peerMessage(exchange,sender,recipient,"request",note,action);
+        message["chargesBudget"] = charge;
+        if (!forwarded.is_null()) message["forwardedMessage"] = std::move(forwarded);
+        transitionPeer(exchange,sender,recipient,std::move(message));
         recordDecision(sender,event,decision,action);
     }
 

@@ -1520,6 +1520,9 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}});
     check(browser.get("/api/settings").at("t3CleanupPending") == false,"retry did not clear T3 cleanup status");
     browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
+    browser.post("/api/settings/t3-connect",{{"source","local"},{"mcpUrl","https://t3.example/mcp"}},400);
+    browser.post("/api/settings/t3-connect",{{"source","saved"},{"mcpUrl","https://t3.example/mcp"}},400);
+    browser.post("/api/settings/t3-connect",{{"source","url"},{"mcpUrl",""}},400);
     browser.post("/api/settings/t3-connect",t3Target,202);
     browser.post("/api/settings/t3-connect",t3Target,409);
     check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "https://t3.example/authorize",

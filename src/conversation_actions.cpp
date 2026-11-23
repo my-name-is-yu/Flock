@@ -5,7 +5,6 @@
 #include <set>
 
 namespace flockv0 {
-using conversation_storage::verifiedEnvironment;
 using conversation_storage::identifier;
 using conversation_storage::ToolError;
 
@@ -237,8 +236,7 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
         else error = "This Session is unavailable through your T3 connection";
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
-    // Keep stop and disconnect from committing between recording the send and sending it.
-    const SessionDispatchLock dispatch(path,SessionDispatchLock::Mode::shared);
+    const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -364,32 +362,6 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
     }
 }
 
-std::set<std::string> Store::Impl::registeredT3Environments(std::string_view bot) {
-    std::set<std::string> result;
-    Policy policy(*this);
-    auto rows = query("SELECT environment_id FROM t3_connected_environments");
-    while (rows.next()) {
-        const auto id = rows.string(0);
-        if (policy.allows(bot,Action::environment_inspect,id) && !policy.forbidden(bot,Action::environment_launch,id))
-            result.insert(id);
-    }
-    return result;
-}
-
-std::string Store::Impl::taskEnvironment(std::string_view bot, const Json& routing, std::string_view name) {
-    const auto configured = field(routing,"environmentId");
-    if (!name.empty()) {
-        const auto explicitEnvironment = verifiedEnvironment(routing,routing,name);
-        if (!explicitEnvironment.empty()) return explicitEnvironment;
-        return configured.empty() && registeredT3Environments(bot).contains(std::string(name)) ? std::string(name) : std::string{};
-    }
-    if (!configured.empty()) return configured;
-    const auto connected = registeredT3Environments(bot);
-    const auto origin = field(routing.value("sessionOrigin",Json::object()),"environmentId");
-    if (connected.contains(origin)) return origin;
-    return connected.size() == 1 ? *connected.begin() : std::string{};
-}
-
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
                                       std::string_view destination, Id messageId, const Json& source,
                                       bool resume, const WorkSession* selectedSession) {
@@ -472,17 +444,20 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
         const auto& environment = change->environment;
         const auto currentEnvironment = field(task,"environmentId");
+        const auto pendingRoute = PendingDestination::read(task);
         const bool destinationChanged = !environment.empty() &&
-            environment != task.value("pendingEnvironmentId",currentEnvironment);
-        std::string project;
+            environment != (pendingRoute ? pendingRoute->environmentId : currentEnvironment);
+        std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
-            if (environment == currentEnvironment) project = field(task,"projectId");
-            else {
-                if (environment == field(routing,"environmentId")) project = field(routing,"projectId");
-                if (project.empty()) project = rememberedT3Project(field(task,"botId"),environment);
+            auto project = environment == currentEnvironment ? field(task,"projectId")
+                : environment == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
+            const bool pinned = !project.empty();
+            if (!pinned) project = rememberedT3Project(field(task,"botId"),environment);
+            if (recipientRouteWouldCycle(task.at("id"),environment,project)) {
+                if (pinned) throw Conflict("This destination would make project queues wait for one another");
+                project.clear();
             }
-            if (recipientRouteWouldCycle(task.at("id"),environment,project))
-                throw Conflict("This destination would make project queues wait for one another");
+            nextRoute = PendingDestination{environment,std::move(project),pinned};
         }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
@@ -499,9 +474,8 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
         }
-        if (destinationChanged) {
-            task["pendingEnvironmentId"] = environment;
-            task["pendingProjectId"] = std::move(project);
+        if (nextRoute) {
+            nextRoute->write(task);
             conflicting = true;
         }
     }

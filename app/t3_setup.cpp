@@ -269,9 +269,9 @@ T3SetupLock::T3SetupLock() {
 
 T3SetupLock::~T3SetupLock() { close(fd_); }
 
-Json configureT3Providers(std::string_view url,
+std::vector<std::string> configureT3Providers(std::string_view url,
     const std::function<void(const InstallT3Provider&)>& connect, const OwnsBearer& owns) {
-    auto providers = Json::array();
+    std::vector<std::string> providers;
     std::optional<ConfigEdit> codex;
     const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
     std::optional<Json> previousClaude;
@@ -281,7 +281,7 @@ Json configureT3Providers(std::string_view url,
         connect([&](std::string_view token) {
             if (installed(setting("FLOCK_CODEX_CLI","codex"))) {
                 codex = editCodex(url,token,owns);
-                providers.push_back("codex");
+                providers.emplace_back("codex");
             }
             const bool hasClaude = installed(claude);
             if (hasClaude) {
@@ -290,7 +290,7 @@ Json configureT3Providers(std::string_view url,
                     return owns ? owns(bearer) : bearer.starts_with("flock-t3-");
                 })) throw Conflict("Remove the existing Claude Code MCP server named flock before connecting");
                 if (previousClaude) requireClaudeStdin(claude);
-                providers.push_back("claude");
+                providers.emplace_back("claude");
             }
             if (codex) {
                 codex->apply();

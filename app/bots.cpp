@@ -337,8 +337,7 @@ std::vector<PeerBot> Bots::peers(std::string_view id) const {
     if (!sender) return {};
     std::vector<PeerBot> result;
     for (const auto& peerId : sender->allowedBots) {
-        if (const auto peer = tryGetConfiguredBot(peerId);
-            peer && !peer->environmentId.empty() && !peer->projectId.empty())
+        if (const auto peer = tryGetConfiguredBot(peerId))
             result.push_back({peer->name,peer->intake(""),peer->role});
     }
     return result;

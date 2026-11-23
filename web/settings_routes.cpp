@@ -25,6 +25,18 @@ void reply(httplib::Response& res, int status, const Json& value) {
     res.status = status;
     res.set_content(value.dump(),"application/json");
 }
+
+std::optional<T3ConnectRequest> parseT3ConnectRequest(const Json& args) {
+    using Source = T3ConnectRequest::Source;
+    if (!args.is_object()) return {};
+    const auto source = args.at("source").get<std::string>();
+    if (source == "local" && args.size() == 1) return T3ConnectRequest{Source::Local,{}};
+    if (args.size() != 2 || (source != "url" && source != "saved")) return {};
+    const bool saved = source == "saved";
+    auto value = args.at(saved ? "environmentId" : "mcpUrl").get<std::string>();
+    if (value.empty() || value.size() > 4096) return {};
+    return T3ConnectRequest{saved ? Source::Saved : Source::Url,std::move(value)};
+}
 }
 
 void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& callbacks) {
@@ -172,20 +184,10 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto actor = person(callbacks,req);
             if (!store.policy().allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
-            const auto args = Json::parse(req.body);
-            using Source = T3ConnectRequest::Source;
-            const auto source = args.at("source").get<std::string>();
-            T3ConnectRequest target{Source::Local,{}};
-            if (source == "url" && args.size() == 2)
-                target = {Source::Url,args.at("mcpUrl").get<std::string>()};
-            else if (source == "saved" && args.size() == 2)
-                target = {Source::Saved,args.at("environmentId").get<std::string>()};
-            else if (source != "local" || args.size() != 1)
-                return reply(res,400,{{"error","invalid_input"}});
-            if (target.source != Source::Local && (target.value.empty() || target.value.size() > 4096))
-                return reply(res,400,{{"error","invalid_input"}});
+            const auto target = parseT3ConnectRequest(Json::parse(req.body));
+            if (!target) return reply(res,400,{{"error","invalid_input"}});
             if (!callbacks.t3Connect) return reply(res,409,{{"error","connect_unavailable"}});
-            if (!callbacks.t3Connect(actor,target)) return reply(res,409,{{"error","connect_pending"}});
+            if (!callbacks.t3Connect(actor,*target)) return reply(res,409,{{"error","connect_pending"}});
             reply(res,202,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }

@@ -13,7 +13,8 @@ target_link_libraries(flock_app_support PUBLIC flock_core PRIVATE CURL::libcurl 
 target_compile_definitions(flock_app_support PRIVATE FLOCK_CHATGPT_BRIDGE="${CMAKE_CURRENT_BINARY_DIR}/chatgpt.mjs")
 target_compile_options(flock_app_support PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(flock main.cpp demo.cpp settings_system.cpp settings_access.cpp settings_connections.cpp)
+add_executable(flock main.cpp demo.cpp settings_system.cpp settings_access.cpp settings_connections.cpp
+                     t3_connection_setup.cpp)
 target_link_libraries(flock PRIVATE flock_app_support CURL::libcurl OpenSSL::Crypto)
 target_compile_options(flock PRIVATE -Wall -Wextra -Wpedantic)
 

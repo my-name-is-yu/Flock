@@ -69,13 +69,13 @@ std::optional<LocalT3Environment> discoverLocalT3() {
         if (response.status != 200) return {};
         const auto descriptor = t3detail::parse(response.body);
         auto id = t3detail::str(descriptor,"environmentId");
-        auto label = t3detail::str(descriptor,"label");
+        const auto label = t3detail::str(descriptor,"label");
         const auto version = t3detail::str(descriptor,"serverVersion");
         const auto recordedVersion = t3detail::str(record,"serverVersion");
         if (id.empty() || id.size() > 512 || std::ranges::any_of(id,[](unsigned char c) { return c <= 32 || c == 127; }) ||
             label.empty() || label.size() > 512 || version.empty() || (!recordedVersion.empty() && recordedVersion != version))
             return {};
-        return LocalT3Environment{std::move(id),std::move(label),origin + "/mcp"};
+        return LocalT3Environment{std::move(id),origin + "/mcp"};
     } catch (const t3detail::Failure&) {
         return {};
     }

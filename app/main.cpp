@@ -5,6 +5,7 @@
 #include "settings_access.hpp"
 #include "settings_connections.hpp"
 #include "settings_system.hpp"
+#include "t3_connection_setup.hpp"
 #include "t3_setup.hpp"
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
@@ -14,7 +15,6 @@
 #include "flock/web.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -138,89 +138,6 @@ int modelCommand(Arguments& args, const std::filesystem::path& home) {
     return 0;
 }
 
-Json connectT3(const std::filesystem::path& home, const T3ConnectRequest& request, unsigned port,
-               const std::function<void(const std::string&)>& authorize,
-               std::stop_token stop = {}, const std::optional<Person>& requester = {}) {
-    const T3SetupLock setup;
-    // Provider registration runs inside the connection transaction. Use its own Store
-    // so the daemon's reads do not wait on the transaction's Store mutex.
-    auto store = openStore(home);
-    SettingsAccess access(store,home,std::getenv("FLOCK_WEB_IDENTITIES_FILE"));
-    const auto resolve = access.identities().resolvePerson;
-    const auto verifyAccess = [&] {
-        if (access.enabled() && !resolve(localOwner.id))
-            throw Conflict("Keep a Web identity for local-owner to connect T3.");
-        if (requester && !access.canManageInstallation(*requester))
-            throw Conflict("The account that started this connection can no longer manage Flock.");
-    };
-    verifyAccess();
-    T3Connections connections(store);
-    const auto previous = connections.settings(localOwner.id);
-    const auto credentialDirectory = home / "credentials" / "t3";
-    std::optional<std::string> environment;
-    std::string url;
-    switch (request.source) {
-    case T3ConnectRequest::Source::Local: {
-        const auto local = discoverLocalT3();
-        if (!local) throw Conflict("Open T3 Code on this machine, or connect using a T3 connection URL.");
-        environment = local->environmentId;
-        url = local->mcpUrl;
-        break;
-    }
-    case T3ConnectRequest::Source::Url:
-        url = request.value;
-        break;
-    case T3ConnectRequest::Source::Saved: {
-        const auto& id = request.value;
-        if (!previous || std::ranges::find(previous->environments,id) == previous->environments.end())
-            throw Conflict("This T3 environment is no longer connected.");
-        const auto saved = savedT3Connection(credentialDirectory,id);
-        if (!saved) throw Conflict("The saved credentials are unavailable. Connect using a T3 connection URL.");
-        environment = id;
-        url = saved->mcpUrl;
-        if (saved->local) {
-            if (const auto local = discoverLocalT3(); local && local->environmentId == id) url = local->mcpUrl;
-        }
-        break;
-    }
-    }
-    const auto savedPort = previous ? previous->port : 0;
-    const auto requestedPort = port;
-    const auto cliPort = [&] {
-        return SettingsSystem(home,std::nullopt,std::nullopt).t3CliPort(requestedPort,savedPort);
-    };
-    if (!requester) port = cliPort();
-    std::string connected;
-    const auto providers = configureT3Providers("http://127.0.0.1:" + std::to_string(port) + "/mcp/flock",
-        [&](const InstallT3Provider& install) {
-            loginT3Environment(credentialDirectory,environment,url,authorize,true,[&](
-                const std::string& verifiedEnvironment, const std::function<void()>& saveCredential) {
-                const auto refreshProviders = t3ProvidersNeedRefresh([&](std::string_view token) {
-                    return connections.ownsBearer(token);
-                });
-                connections.connect(verifiedEnvironment,localOwner.id,port,[&](std::string_view token) {
-                    verifyAccess();
-                    if (!requester && cliPort() != port)
-                        throw Conflict("The Web port changed during T3 setup. Start the connection again.");
-                    if (!token.empty()) install(token);
-                    saveCredential();
-                },refreshProviders);
-                connected = verifiedEnvironment;
-            },stop);
-        });
-    return {{"environmentId",connected},{"port",port},{"portChanged",savedPort != port},{"configuredProviders",providers}};
-}
-
-void disconnectT3(Store& store, const std::optional<std::string>& environment) {
-    const T3SetupLock setup;
-    T3Connections connections(store);
-    const bool cleanup = environment ? connections.disconnect(*environment) : connections.providerCleanupPending();
-    if (cleanup) {
-        removeT3Providers([&](std::string_view token) { return connections.ownsBearer(token); });
-        connections.providerRemoved();
-    }
-}
-
 int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto action = args.pop("T3 command");
     if (action != "connect" && action != "reconnect" && action != "disconnect") throw Conflict("Unknown T3 command");
@@ -248,15 +165,15 @@ int t3Command(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const auto result = connectT3(home,request,port,[](const std::string& authorization) {
         std::cerr << "Open this URL in your browser to authorize Flock's T3 connection.\n" << authorization << '\n';
     });
-    if (result.at("portChanged").get<bool>())
-        std::cerr << "T3 skills use Flock Web port " << result.at("port").get<unsigned>()
+    if (result.portChanged)
+        std::cerr << "T3 skills use Flock Web port " << result.port
                   << ". Restart 'flock run' if it is already running.\n";
     try { syncT3Skills(bots.skillCards()); }
     catch (const std::exception& error) {
         std::cerr << "Could not export T3 skills: " << error.what() << '\n';
     }
-    print({{"environmentId",result.at("environmentId")},{"connected",true},
-           {"port",result.at("port")},{"configuredProviders",result.at("configuredProviders")}});
+    print({{"environmentId",result.environmentId},{"connected",true},
+           {"port",result.port},{"configuredProviders",result.configuredProviders}});
     return 0;
 }
 
@@ -445,56 +362,8 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     callbacks.changeBotChannel = [&](std::string_view bot, const Json& args) {
         return connections.changeBotChannel(bot,args);
     };
-    std::atomic<unsigned> webPort = 0;
-    struct T3Setup {
-        std::mutex mutex;
-        bool running = false;
-        std::string requester, authorizationUrl, error;
-        std::jthread worker;
-    } t3Setup;
-    callbacks.t3Disconnect = [&](const std::optional<std::string>& environment) { disconnectT3(store,environment); };
-    if (!fixed) {
-        callbacks.t3Setup = [&t3Setup](const Person& actor) {
-            std::lock_guard lock(t3Setup.mutex);
-            const bool ownsAttempt = actor.id == t3Setup.requester;
-            return Json{{"running",t3Setup.running},
-                        {"authorizationUrl",ownsAttempt ? t3Setup.authorizationUrl : std::string{}},
-                        {"error",ownsAttempt ? t3Setup.error : std::string{}}};
-        };
-        callbacks.t3Connection = [&](const std::string& environmentId) -> Json {
-            const auto saved = savedT3Connection(home / "credentials" / "t3",environmentId);
-            if (!saved) return nullptr;
-            return {{"label",saved->label},{"expiresAt",saved->expiresAt},
-                    {"expired",saved->expiresAt <= unixTime()},{"local",saved->local}};
-        };
-        callbacks.t3Connect = [&](const Person& actor, const T3ConnectRequest& request) {
-            if (request.source == T3ConnectRequest::Source::Url) validateT3McpUrl(request.value);
-            const auto port = webPort.load();
-            if (!port) return false;
-            std::lock_guard lock(t3Setup.mutex);
-            if (t3Setup.running) return false;
-            t3Setup.worker = std::jthread([&,port,request,requester = actor](std::stop_token stop) {
-                std::string error;
-                try {
-                    connectT3(home,request,port,[&](const std::string& url) {
-                        std::lock_guard lock(t3Setup.mutex);
-                        t3Setup.authorizationUrl = url;
-                    },stop,requester);
-                    syncSkills(true);
-                } catch (const Conflict& failure) { error = failure.what(); }
-                catch (const std::exception&) { error = "Could not complete the T3 connection."; }
-                std::lock_guard lock(t3Setup.mutex);
-                t3Setup.running = false;
-                t3Setup.authorizationUrl.clear();
-                t3Setup.error = std::move(error);
-            });
-            t3Setup.running = true;
-            t3Setup.requester = actor.id;
-            t3Setup.authorizationUrl.clear();
-            t3Setup.error.clear();
-            return true;
-        };
-    }
+    T3WebSetup t3Setup(home,[&] { syncSkills(true); });
+    t3Setup.configure(callbacks,store,!fixed);
     std::unique_ptr<WebServer> server;
     if (web) {
         callbacks.githubWebhookSecret = connections.githubWebhookSecret();
@@ -502,7 +371,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         const auto onBound = [&](unsigned boundPort) {
             rebindT3Port(store,boundPort);
             system.listenerStarted(boundPort);
-            webPort.store(boundPort);
+            t3Setup.listeningOn(boundPort);
         };
         try {
             server = startWeb(store,firstPort,callbacks,onBound);

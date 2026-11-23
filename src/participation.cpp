@@ -63,8 +63,7 @@ bool validId(std::string_view value, std::size_t max = 1024) {
 
 }
 
-SessionDispatchLock::SessionDispatchLock(const std::filesystem::path& database, Mode mode) {
-    // The disconnect CLI opens a separate Store. Lock the same file as the daemon.
+SessionDispatchFileLock::SessionDispatchFileLock(const std::filesystem::path& database, Mode mode) {
     const auto lockPath = std::filesystem::canonical(database).string() + ".session-dispatch.lock";
     fd_ = open(lockPath.c_str(), O_CLOEXEC | O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
     if (fd_ < 0) throw Conflict("Could not open the T3 dispatch lock");
@@ -79,7 +78,7 @@ SessionDispatchLock::SessionDispatchLock(const std::filesystem::path& database, 
     }
 }
 
-SessionDispatchLock::~SessionDispatchLock() { close(fd_); }
+SessionDispatchFileLock::~SessionDispatchFileLock() { close(fd_); }
 
 std::string redactT3Tokens(std::string value) {
     std::size_t at = 0;
@@ -189,7 +188,7 @@ bool T3Connections::ownsBearer(std::string_view token) const {
 
 bool T3Connections::disconnect(std::string_view environment) {
     auto& db = *store_.p_;
-    const SessionDispatchLock dispatch(db.path,SessionDispatchLock::Mode::exclusive);
+    const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::exclusive);
     std::lock_guard lock(db.mutex);
     Transaction tx(db.db);
     auto rows = db.query(R"SQL(
@@ -567,7 +566,7 @@ SessionStopResult SessionParticipation::stop(const T3Connection& connection, std
     auto& db = *store_.p_;
     SessionStop stopped;
     {
-        const SessionDispatchLock dispatch(db.path,SessionDispatchLock::Mode::exclusive);
+        const SessionDispatchFileLock dispatch(db.path,SessionDispatchFileLock::Mode::exclusive);
         std::lock_guard lock(db.mutex);
         Transaction transaction(db.db);
         stopped = db.stopSessionParticipation(person(connection),bot,{"",std::string(thread)},SessionExit::removed);
@@ -792,7 +791,7 @@ bool Store::Impl::leaveSession(const conversation::Message& message, int step, c
                                T3& t3, std::stop_token shutdown) {
     SessionStop stop;
     {
-        const SessionDispatchLock dispatch(path,SessionDispatchLock::Mode::exclusive);
+        const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::exclusive);
         std::lock_guard lock(mutex);
         Transaction transaction(db);
         if (shutdown.stop_requested()) return false;

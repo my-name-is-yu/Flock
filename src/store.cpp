@@ -198,21 +198,14 @@ CREATE TABLE IF NOT EXISTS peer_exchanges(
 CREATE UNIQUE INDEX IF NOT EXISTS peer_sender_open ON peer_exchanges(sender_task) WHERE phase<>'closed';
 CREATE VIEW IF NOT EXISTS project_execution_queue AS
 WITH candidates AS (
-  SELECT task.id,task.state,task.data,
-         CASE WHEN json_extract(task.data,'$.environmentReleased')
-              THEN COALESCE(json_extract(task.data,'$.pendingProjectId'),'')
-              ELSE task.project_id END AS project_id,
-         CASE WHEN json_extract(task.data,'$.environmentReleased')
-              THEN COALESCE(json_extract(task.data,'$.pendingEnvironmentId'),task.environment_id)
-              ELSE task.environment_id END AS environment_id
+  SELECT task.id,task.state,task.data,task.project_id,task.environment_id
   FROM tasks task
-  WHERE task.state NOT IN ('completed','cancelled')
+  WHERE task.project_id<>'' AND task.state NOT IN ('completed','cancelled')
 )
 SELECT task.id,task.environment_id,task.project_id,task.state,
        ROW_NUMBER() OVER (
          PARTITION BY task.environment_id,task.project_id
-         ORDER BY (COALESCE(sender.state,task.state)='queued'
-                   OR COALESCE(json_extract(task.data,'$.environmentReleased'),0)),
+         ORDER BY COALESCE(sender.state,task.state)='queued',
            COALESCE(sender.id,task.id),
            CASE WHEN sender.id IS NOT NULL AND task.state='cancelling' THEN 0
                 WHEN task.state='peer_waiting' THEN 2 ELSE 1 END, task.id
@@ -222,7 +215,7 @@ LEFT JOIN peer_exchanges peer ON peer.recipient_task=task.id
 LEFT JOIN candidates sender ON sender.id=peer.sender_task
   AND sender.environment_id=task.environment_id AND sender.project_id=task.project_id
   AND peer.phase<>'closed'
-WHERE task.project_id<>'' AND COALESCE(peer.kind,'')<>'consult';
+WHERE COALESCE(peer.kind,'')<>'consult';
 CREATE VIEW IF NOT EXISTS project_slots AS
 WITH queue AS (
   SELECT id,FIRST_VALUE(id) OVER (PARTITION BY environment_id,project_id ORDER BY position) AS head_id
@@ -312,16 +305,6 @@ void Store::Impl::save(Json& task) {
          {task["state"],task["generation"],task,task["environmentId"],task["projectId"],task["id"]});
 }
 
-std::string Store::Impl::rememberedT3Project(std::string_view bot, std::string_view environment) const {
-    auto row = query("SELECT project_id FROM bot_t3_projects WHERE bot_id=? AND environment_id=?",{bot,environment});
-    return row.next() ? row.string(0) : std::string{};
-}
-
-void Store::Impl::rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project) {
-    exec("INSERT INTO bot_t3_projects VALUES(?,?,?) ON CONFLICT(bot_id,environment_id) "
-         "DO UPDATE SET project_id=excluded.project_id",{bot,environment,project});
-}
-
 namespace {
 // CROSS JOIN visits the requested IDs first. An empty request set never opens the queue.
 const std::string queueBlockers = R"SQL(
@@ -377,22 +360,18 @@ std::optional<PeerExchange> Store::Impl::peerExchange(Id id) const {
 }
 
 bool Store::Impl::peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const {
-    // A sender cannot move until its exchange closes. Reserve a recipient's pending destination
-    // while retaining the current dependency until the recipient releases that queue.
     return query(R"SQL(
 WITH RECURSIVE source(env,project) AS (
   SELECT environment_id,project_id FROM tasks WHERE id=?1
-), work_routes(source_env,source_project,current_env,current_project,pending_env,pending_project,released) AS (
+), work_routes(source_env,source_project,current_env,current_project,pending_env,pending_project) AS (
   SELECT s.environment_id,s.project_id,r.environment_id,r.project_id,
-         CASE WHEN r.state<>'cancelling' AND json_extract(r.data,'$.replanning')
-              THEN json_extract(r.data,'$.pendingEnvironmentId') END,
-         json_extract(r.data,'$.pendingProjectId'),
-         COALESCE(json_extract(r.data,'$.environmentReleased'),0)
+         CASE WHEN r.state<>'cancelling' THEN json_extract(r.data,'$.pendingDestination.environmentId') END,
+         json_extract(r.data,'$.pendingDestination.projectId')
   FROM peer_exchanges p JOIN tasks s ON s.id=p.sender_task JOIN tasks r ON r.id=p.recipient_task
   WHERE p.kind='work' AND p.phase<>'closed' AND p.sender_task<>?1
 ), dependencies(source_env,source_project,target_env,target_project) AS (
   SELECT source_env,source_project,current_env,current_project FROM work_routes
-  WHERE NOT released AND current_project<>''
+  WHERE current_project<>''
   UNION ALL
   SELECT source_env,source_project,pending_env,pending_project FROM work_routes
   WHERE pending_env IS NOT NULL AND pending_project<>''
@@ -441,7 +420,7 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
         ? Json{{"sessionParticipationId",stop.participation},{"sessionStopId",stop.cutoff}}
         : Json::object());
     if (task["state"] == "queued" && !peer) {
-        for (const auto* key : {"replanning","pendingEnvironmentId","pendingProjectId","environmentReleased","pendingInstructions"})
+        for (const auto* key : {"replanning","pendingDestination","pendingInstructions"})
             task.erase(key);
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
@@ -590,9 +569,10 @@ Id Store::submit(const Intake& item, const Person* requester) {
 }
 
 Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& source,
-                      RequestJournal requestJournal, const Json& trigger) {
+                      TaskSource sourceKind, const Json& trigger) {
+    const bool consultation = sourceKind == TaskSource::consultation;
     if (item.botId.empty() || item.request.find_first_not_of(" \r\n\t") == std::string::npos ||
-        item.request.size() > 16000 || item.environmentId.empty() ||
+        item.request.size() > 16000 || (!consultation && item.environmentId.empty()) ||
         !item.config.is_object())
         throw Conflict("Bot, nonempty request (up to 16,000 bytes), and environment are required");
     const auto scrub = redactor(item.botId);
@@ -610,10 +590,11 @@ Id Store::Impl::submit(const Intake& item, Id sourceMessageId, const Json& sourc
         data["sourceResultRefs"] = Json::array({source});
     }
     if (!trigger.is_null()) data["trigger"] = trigger;
-    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,'queued',0,?)",
-         {item.botId,item.environmentId,item.projectId,data});
+    const auto state = consultation ? "deciding" : "queued";
+    exec("INSERT INTO tasks(bot_id,environment_id,project_id,state,generation,data) VALUES(?,?,?,?,0,?)",
+         {item.botId,item.environmentId,item.projectId,state,data});
     const auto id = last();
-    if (requestJournal == RequestJournal::record) {
+    if (sourceKind == TaskSource::request) {
         Json entry = {{"text",request},{"messageId",sourceMessageId},
                       {"source",sourceMessageId ? "conversation" : trigger.is_null() ? "manual" : "automation"}};
         if (!trigger.is_null()) entry["trigger"] = trigger;

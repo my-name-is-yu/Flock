@@ -309,6 +309,14 @@ void directionalPeerConfiguration() {
         "receiver must use its own route and settings");
     check(bots.peers("verifier").empty(),"peer configuration must be directional and default to empty");
 
+    verifier.erase("environmentId");
+    verifier.erase("projectId");
+    write(temp.path / "verifier" / "config.json",verifier.dump());
+    const auto automatic = bots.peers("release");
+    check(automatic.size() == 1 && automatic[0].intake.botId == "verifier" &&
+          automatic[0].intake.environmentId.empty() && automatic[0].intake.projectId.empty(),
+          "an allowed peer disappeared when using automatic routing");
+
     release["allowedBots"] = Json::array();
     write(temp.path / "release" / "config.json",release.dump());
     check(bots.peers("release").empty(),"resolver must observe peer configuration changes");

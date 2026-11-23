@@ -50,7 +50,7 @@ Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
-enum class RequestJournal { record, skip };
+enum class TaskSource { request, handoff, consultation };
 
 bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
 
@@ -71,6 +71,13 @@ struct PeerExchange {
 };
 
 struct TaskChange { std::string intent, doneWhen, environment; };
+struct PendingDestination {
+    std::string environmentId, projectId;
+    bool pinned;
+    static std::optional<PendingDestination> read(const Json& task);
+    void write(Json& task) const;
+};
+using ProjectCatalog = std::variant<std::vector<T3Project>,std::string>;
 
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
@@ -109,13 +116,13 @@ struct SessionStop {
     Id participation = 0, cutoff = 0;
 };
 
-class SessionDispatchLock {
+class SessionDispatchFileLock {
 public:
     enum class Mode { shared, exclusive };
-    SessionDispatchLock(const std::filesystem::path& database, Mode);
-    ~SessionDispatchLock();
-    SessionDispatchLock(const SessionDispatchLock&) = delete;
-    SessionDispatchLock& operator=(const SessionDispatchLock&) = delete;
+    SessionDispatchFileLock(const std::filesystem::path& database, Mode);
+    ~SessionDispatchFileLock();
+    SessionDispatchFileLock(const SessionDispatchFileLock&) = delete;
+    SessionDispatchFileLock& operator=(const SessionDispatchFileLock&) = delete;
 private:
     int fd_;
 };
@@ -340,10 +347,15 @@ struct Store::Impl {
     void save(Json&);
     std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
     void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
+    bool projectQuestionOpen(std::string_view bot, std::string_view environment) const;
+    ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
+    bool applyProjectCatalog(Json& task, ProjectCatalog catalog);
     std::set<std::string> registeredT3Environments(std::string_view bot);
-    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {});
+    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {},
+                                const Json* movingTask = nullptr);
+    std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
-              RequestJournal requestJournal = RequestJournal::record, const Json& trigger = nullptr);
+              TaskSource sourceKind = TaskSource::request, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
