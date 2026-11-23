@@ -65,7 +65,8 @@ bool Store::Impl::runBotTools(const ToolContext& ctx, int step, const std::vecto
             try {
                 validateBotTool(ctx,calls[i]);
                 for (const auto index : reserved)
-                    if (tool_batch::conflict(calls[i],calls[index])) throw Conflict("Tool calls must be independent");
+                    if (tool_batch::validatedCallsConflict(calls[i],calls[index]))
+                        throw Conflict("Tool calls must be independent");
             } catch (const Conflict& error) {
                 result = toolFailure(scrub.text(error.what()));
                 continue;

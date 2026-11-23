@@ -5,6 +5,8 @@
 
 namespace flockv0::tool_batch {
 namespace {
+constexpr std::string_view conversationBatchReads[]{"flock_session_search","check_environment_readiness"};
+
 bool filenamesMayMatch(const Decision& a, const Decision& b) {
     const auto left = relativeToolPath(field(a.args,"path")).generic_string();
     const auto right = relativeToolPath(field(b.args,"path")).generic_string();
@@ -15,7 +17,7 @@ bool filenamesMayMatch(const Decision& a, const Decision& b) {
 }
 }
 
-bool conflict(const Decision& a, const Decision& b) {
+bool validatedCallsConflict(const Decision& a, const Decision& b) {
     if (a.tool.starts_with("workspace_") && b.tool.starts_with("workspace_")) {
         if (a.tool == "workspace_run_command" || b.tool == "workspace_run_command") return true;
         if (a.args.contains("commandId") && b.args.contains("commandId"))
@@ -36,36 +38,37 @@ CallClass classify(const Decision& call) {
     if (gitOperation(call) == "read")
         return tool == "git_find_repos" || tool == "git_read_result" ? CallClass::parallel_read : CallClass::gated_read;
 
-    // MCP invocations have a per-call policy gate. Discovery and resource reads are ordinary reads.
     constexpr std::string_view gated[]{
         "flock_session_events","read_channel_attachment","read_memory","memory_history","mcp_call_tool"
     };
     if (std::ranges::find(gated,tool) != std::end(gated)) return CallClass::gated_read;
 
     constexpr std::string_view reads[]{
-        "read_result","find_tasks","flock_session_search","read_tool_result","workflow_status","expand_context",
-        "list_secrets","list_connections","check_environment_readiness","list_schedules","workspace_read_file",
+        "read_result","find_tasks","read_tool_result","workflow_status","expand_context",
+        "list_secrets","list_connections","list_schedules","workspace_read_file",
         "workspace_search","workspace_command_status","web_search","web_fetch","mcp_discover","mcp_read_resource",
         "skill_list","skill_read","inspect_attachment"
     };
-    if (std::ranges::find(reads,tool) != std::end(reads)) return CallClass::parallel_read;
+    if (std::ranges::find(reads,tool) != std::end(reads) ||
+        std::ranges::find(conversationBatchReads,tool) != std::end(conversationBatchReads))
+        return CallClass::parallel_read;
 
-    // Routing, mutations, workspace writes and command execution/control require a step of their own.
-    // Unrecognized tools default to the same restriction.
     return CallClass::exclusive;
 }
 
 bool batchable(const Decision& call) {
-    return isBotTool(call.tool) || call.tool == "flock_session_search" || call.tool == "check_environment_readiness";
+    return isBotTool(call.tool) ||
+           std::ranges::find(conversationBatchReads,call.tool) != std::end(conversationBatchReads);
 }
 
-std::vector<std::vector<std::size_t>> planWaves(const std::vector<Decision>& calls) {
+std::vector<std::vector<std::size_t>> planWaves(const std::vector<Decision>& validatedCalls) {
     std::vector<std::vector<std::size_t>> waves;
-    std::vector<std::size_t> waveForCall(calls.size());
-    for (std::size_t i = 0; i < calls.size(); ++i) {
+    std::vector<std::size_t> waveForCall(validatedCalls.size());
+    for (std::size_t i = 0; i < validatedCalls.size(); ++i) {
         auto& wave = waveForCall[i];
         for (std::size_t earlier = 0; earlier < i; ++earlier)
-            if (conflict(calls[i],calls[earlier])) wave = std::max(wave,waveForCall[earlier] + 1);
+            if (validatedCallsConflict(validatedCalls[i],validatedCalls[earlier]))
+                wave = std::max(wave,waveForCall[earlier] + 1);
         if (wave == waves.size()) waves.emplace_back();
         waves[wave].push_back(i);
     }

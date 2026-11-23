@@ -306,8 +306,16 @@ struct Store::Impl {
         std::stop_token shutdown;
         bool sessionEffect, hasWebEvidence;
     };
-    CallOutcome executeConversationCall(const conversation::Message&, int step, std::optional<std::size_t> index,
-                                        const ModelCall&, const ConversationCallContext&);
+    CallOutcome executeConversationCall(const conversation::Message&, int step, const ModelCall&,
+                                        const ConversationCallContext&);
+    CallOutcome executeConversationBotChange(const conversation::Message&, int step, const Decision&,
+                                             std::string_view key, const ConversationCallContext&);
+    CallOutcome executeConversationReply(const conversation::Message&, int step, const Decision&,
+                                          std::string_view key, const std::function<Seconds()>&);
+    CallOutcome executeLocalConversationCall(const conversation::Message&, int step, const Decision&,
+                                             std::string_view key, const ConversationCallContext&);
+    std::optional<Resource> conversationCallResource(const conversation::Message&, const Decision&);
+    void saveConversationCallResult(const conversation::Message&, int step, Json result);
     CallOutcome sendSessionMessage(const conversation::Message&, int step, const Decision&, std::string_view key,
                                    bool hasWebEvidence, T3&, std::stop_token);
     bool inviteSessionBot(const conversation::Message&, int, const Decision&, T3&, const IntakeResolver&,
