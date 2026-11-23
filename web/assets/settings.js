@@ -1,4 +1,4 @@
-import { actionLabel } from '/action-labels.mjs';
+import { actionLabel, actionLabels } from '/action-labels.mjs';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -43,7 +43,9 @@ function reflectMode(mode) {
 }
 function updatePolicyControls() {
   const disabled = savingPolicy || !canManagePolicy;
-  for (const control of document.querySelectorAll('#mode-options input, #rules button')) control.disabled = disabled;
+  for (const input of modeInputs) input.disabled = disabled;
+  for (const control of document.querySelectorAll('#rules button')) control.disabled = disabled;
+  for (const control of $('rule-form').elements) control.disabled = disabled;
 }
 
 // Theme is a per-browser preference shared with the sidebar switch; theme.js applies it.
@@ -88,7 +90,7 @@ async function load() {
     const remove = document.createElement('button');
     remove.textContent = 'Remove';
     remove.className = 'button quiet-danger';
-    remove.onclick = () => void submit('rule', {kind, action, target});
+    remove.onclick = () => void submit('rule', {kind, action, target, add: false});
     item.append(remove);
   }
   $('connections').replaceChildren();
@@ -102,12 +104,71 @@ async function load() {
   } else {
     row('connections', emptyLabel('No connection details available', 'The person who connected T3 and installation administrators can see its details.'));
   }
-  $('policy').hidden = false;
+  $('rule-form').hidden = !canManagePolicy;
+  if (canManagePolicy) populateRuleActions(data.personOnlyActions);
   updatePolicyControls();
 }
 
+// One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
+const sectionNames = { general: 'General', permissions: 'Permissions', bots: 'Bots', connections: 'Connections' };
+function showSection() {
+  const section = Object.hasOwn(sectionNames, location.hash.slice(1)) ? location.hash.slice(1) : 'general';
+  for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== section;
+  for (const link of document.querySelectorAll('[data-section]')) {
+    if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  $('crumb').textContent = sectionNames[section];
+  document.title = `${sectionNames[section]} · Flock settings`;
+}
+addEventListener('hashchange', showSection);
+showSection();
+
+function populateRuleActions(personOnlyActions) {
+  const select = $('rule-action');
+  if (select.options.length) return;
+  for (const [action, label] of Object.entries(actionLabels)) {
+    if (personOnlyActions.includes(action)) continue;
+    const option = document.createElement('option');
+    option.value = action;
+    option.textContent = label;
+    select.append(option);
+  }
+}
+$('rule-form').onsubmit = async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  if (await submit('rule', { ...data, target: data.target.trim(), add: true })) form.reset();
+};
+
+function link(label, href, name) {
+  const anchor = document.createElement('a');
+  anchor.className = 'button';
+  anchor.textContent = label;
+  anchor.setAttribute('aria-label', name);
+  anchor.href = href;
+  return anchor;
+}
+async function loadBots() {
+  const response = await fetch('/api/bots');
+  if (!response.ok) throw new Error();
+  const bots = await response.json();
+  $('bots').replaceChildren();
+  if (!bots.length) row('bots', emptyLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
+  for (const bot of bots) {
+    const item = row('bots', emptyLabel(bot.name, 'Name, look, role and recurring requests'));
+    const actions = document.createElement('span');
+    actions.className = 'row-actions';
+    actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),
+      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`, `Sharing for ${bot.name}`));
+    item.append(actions);
+  }
+}
+loadBots().catch(() => row('bots', emptyLabel('Could not load Bots', 'Reload the page to try again.')));
+
 async function submit(path, data) {
-  if (!canManagePolicy || savingPolicy) return;
+  if (!canManagePolicy || savingPolicy) return false;
   savingPolicy = true;
   updatePolicyControls();
   let saved = false;
@@ -129,6 +190,7 @@ async function submit(path, data) {
     savingPolicy = false;
     updatePolicyControls();
   }
+  return saved;
 }
 
 for (const input of modeInputs) {
@@ -138,4 +200,5 @@ for (const input of modeInputs) {
     await submit('mode', {mode: input.value});
   };
 }
+updatePolicyControls();
 load().catch(() => { $('status').textContent = 'Could not load Flock settings.'; });

@@ -2,6 +2,8 @@
 #include "flock/board_inbox.hpp"
 #include "flock/t3_connection.hpp"
 
+#include <algorithm>
+
 namespace flockv0::web {
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
     if (!callbacks.authenticate) return request.has_header("Authorization") ? Person{} : localOwner;
@@ -10,6 +12,9 @@ Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
 }
 
 namespace {
+constexpr Action personOnlyActions[] = {Action::bot_view,Action::bot_talk,Action::bot_decide,
+    Action::bot_settings,Action::rules_manage};
+
 void reply(httplib::Response& res, int status, const Json& value) {
     res.status = status;
     res.set_content(value.dump(),"application/json");
@@ -21,8 +26,11 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         const auto actor = person(callbacks,req);
         auto policy = store.policy();
         const auto connection = T3Connections(store).settings(actor.id,actor.adminRoot);
+        auto personActionNames = Json::array();
+        for (const auto action : personOnlyActions) personActionNames.push_back(actionName(action));
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
                        {"canManagePolicy",policy.allows(actor,Action::rules_manage,"installation")},
+                       {"personOnlyActions",std::move(personActionNames)},
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
@@ -47,7 +55,12 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                 const auto action = parseAction(args.at("action").get<std::string>());
                 const auto kind = parseRuleKind(args.at("kind").get<std::string>());
                 if (!action || !kind) return reply(res,400,{{"error","invalid_input"}});
-                policy.changeRule(actor,*kind,*action,args.at("target").get<std::string>(),false);
+                const auto target = args.at("target").get<std::string>();
+                const auto add = args.at("add").get<bool>();
+                if (add && (trimSessionQuestionText(target).empty() ||
+                    std::ranges::find(personOnlyActions,*action) != std::end(personOnlyActions)))
+                    return reply(res,400,{{"error","invalid_input"}});
+                policy.changeRule(actor,*kind,*action,target,add);
             }
             reply(res,200,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }

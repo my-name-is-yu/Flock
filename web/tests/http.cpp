@@ -1414,16 +1414,27 @@ void settingsEndpoints(const std::filesystem::path& path) {
           "Settings pages did not serve their own content");
     browser.post("/api/settings/mode",{{"mode","supervised"}});
     const auto rule = settings.at("rules").at(0);
-    const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")}};
+    const Json removal{{"kind",rule.at("kind")},{"action",rule.at("action")},{"target",rule.at("target")},{"add",false}};
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     const auto sharedSettings = browser.get("/api/settings");
     check(sharedSettings.at("mode") == "supervised" && sharedSettings.at("canManagePolicy") == false,
           "Shared member did not get the read-only installation mode");
     browser.post("/api/settings/mode",{{"mode","full"}},403);
     browser.post("/api/settings/rule",removal,403);
+    const Json addition{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",true}};
+    browser.post("/api/settings/rule",addition,403);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/settings/rule",removal);
     check(browser.get("/api/settings").at("rules").empty(),"Root could not remove the rule");
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target",""},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","  "},{"add",true}},400);
+    browser.post("/api/settings/rule",{{"kind","never"},{"action","bot.talk"},{"target","release"},{"add",true}},400);
+    check(browser.get("/api/settings").at("rules").empty(),"an invalid addition changed installation rules");
+    browser.post("/api/settings/rule",addition);
+    const auto added = browser.get("/api/settings").at("rules");
+    check(added.size() == 1 && added.at(0).at("kind") == "allow" && added.at(0).at("action") == "repository.pr" &&
+          added.at(0).at("target") == "github.com/acme/app","Root could not add a rule from Flock settings");
+    browser.post("/api/settings/rule",{{"kind","allow"},{"action","repository.pr"},{"target","github.com/acme/app"},{"add",false}});
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     check(browser.get("/api/view?bot=release").at("composerPerson")=="alice","composer identity did not match viewer");
     browser.get("/api/conversation?bot=release");

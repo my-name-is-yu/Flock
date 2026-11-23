@@ -11,38 +11,71 @@
   <link rel="stylesheet" href="/settings.css">
   <script type="module" src="/settings.js"></script>
 </head>
-<body><main class="settings-page">
-  <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
-  <h1>Flock settings</h1>
-  <p id="status" role="status"></p>
-  <section aria-labelledby="appearance-heading">
-    <h2 id="appearance-heading">Appearance</h2>
-    <div class="settings-group">
-      <div class="settings-row">
-        <span class="row-label"><strong id="theme-label">Theme</strong><small>Follow your system, or keep Flock light or dark on this browser.</small></span>
-        <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
-          <label><input type="radio" name="theme" value="system">System</label>
-          <label><input type="radio" name="theme" value="light">Light</label>
-          <label><input type="radio" name="theme" value="dark">Dark</label>
-        </div>
-      </div>
-    </div>
-  </section>
-  <div id="policy" hidden>
-    <section aria-labelledby="mode-heading">
-      <h2 id="mode-heading">Permissions</h2>
-      <div class="settings-group">
-        <div class="settings-row">
-          <span class="row-label"><strong id="mode-label">Permission mode</strong><small id="mode-description"></small></span>
-          <div id="mode-options" class="segmented" role="radiogroup" aria-labelledby="mode-label" aria-describedby="mode-description">
-            <label><input type="radio" name="mode" value="full">Full</label>
-            <label><input type="radio" name="mode" value="supervised">Supervised</label>
+<body><div class="settings-shell">
+  <nav class="settings-nav" aria-label="Settings sections">
+    <a class="settings-back" href="/"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>Conversations</a>
+    <a href="#general" data-section="general"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>General</a>
+    <a href="#permissions" data-section="permissions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 5 6.5v5c0 4.2 2.9 7.6 7 9 4.1-1.4 7-4.8 7-9v-5z"/><path d="m9 12 2 2 4-4"/></svg>Permissions</a>
+    <a href="#bots" data-section="bots"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="6" width="15" height="12.5" rx="4"/><path d="M12 6V3.5M9.5 12.2v.6M14.5 12.2v.6"/></svg>Bots</a>
+    <a href="#connections" data-section="connections"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 15 15 9"/><path d="M10.5 6.5 12 5a4.2 4.2 0 0 1 6 6l-1.5 1.5M13.5 17.5 12 19a4.2 4.2 0 0 1-6-6l1.5-1.5"/></svg>Connections</a>
+  </nav>
+  <main class="settings-page">
+    <h1 class="settings-crumb"><span>Settings</span><span class="settings-crumb-sep" aria-hidden="true">/</span><span id="crumb">General</span></h1>
+    <p id="status" role="status"></p>
+    <div class="settings-panel" data-panel="general">
+      <section aria-labelledby="appearance-heading">
+        <h2 id="appearance-heading">Appearance</h2>
+        <div class="settings-group">
+          <div class="settings-row">
+            <span class="row-label"><strong id="theme-label">Theme</strong><small>Follow your system, or keep Flock light or dark on this browser.</small></span>
+            <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
+              <label><input type="radio" name="theme" value="system">System</label>
+              <label><input type="radio" name="theme" value="light">Light</label>
+              <label><input type="radio" name="theme" value="dark">Dark</label>
+            </div>
           </div>
         </div>
-      </div>
-    </section>
-    <section aria-labelledby="rules-heading"><h2 id="rules-heading">Rules</h2><div id="rules" class="settings-group"></div></section>
-    <section aria-labelledby="connections-heading"><h2 id="connections-heading">T3 connections</h2><div id="connections" class="settings-group"></div></section>
-  </div>
-</main></body>
+      </section>
+    </div>
+    <div class="settings-panel" data-panel="permissions" hidden>
+      <section aria-labelledby="mode-heading">
+        <h2 id="mode-heading">Permission mode</h2>
+        <div class="settings-group">
+          <div class="settings-row">
+            <span class="row-label"><strong id="mode-label">Mode</strong><small id="mode-description"></small></span>
+            <div id="mode-options" class="segmented" role="radiogroup" aria-labelledby="mode-label" aria-describedby="mode-description">
+              <label><input type="radio" name="mode" value="full">Full</label>
+              <label><input type="radio" name="mode" value="supervised">Supervised</label>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section aria-labelledby="rules-heading">
+        <h2 id="rules-heading">Rules</h2>
+        <div class="settings-group"><div id="rules"></div>
+          <form id="rule-form" class="settings-row rule-form" hidden>
+            <label>Choice <select name="kind" required>
+              <option value="allow">Allow</option><option value="ask">Ask first</option><option value="never">Never</option>
+            </select></label>
+            <label>Action <select name="action" id="rule-action" required></select></label>
+            <label class="rule-target">Target <input name="target" required autocomplete="off" placeholder="github.com/acme/app"></label>
+            <button class="button">Add rule</button>
+          </form>
+        </div>
+      </section>
+    </div>
+    <div class="settings-panel" data-panel="bots" hidden>
+      <section aria-labelledby="bots-heading">
+        <h2 id="bots-heading">Bots</h2>
+        <div id="bots" class="settings-group"></div>
+      </section>
+    </div>
+    <div class="settings-panel" data-panel="connections" hidden>
+      <section aria-labelledby="connections-heading">
+        <h2 id="connections-heading">T3 connections</h2>
+        <div id="connections" class="settings-group"></div>
+      </section>
+    </div>
+  </main>
+</div></body>
 </html>

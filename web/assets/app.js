@@ -450,18 +450,22 @@ function selectLocation() {
   const params = new URLSearchParams(location.search);
   const requested = params.get('bot');
   const bot = bots.find((entry) => entry.id === requested);
+  const wantsSettings = params.get('settings') === '1';
   const peer = params.get('peer');
-  const peerId = bot && peer && peer !== bot.id ? peer : null;
+  const peerId = !wantsSettings && bot && peer && peer !== bot.id ? peer : null;
   const requestedAnchor = params.get('anchor');
   const id = /^\d+$/.test(requestedAnchor ?? '') ? Number(requestedAnchor) : 0;
   const anchor = peerId && Number.isSafeInteger(id) ? id : 0;
   const preferred = saved('flock-selected-bot', null);
   const selectedBot = bot?.id ?? bots.find((entry) => entry.id === preferred)?.id ?? bots[0]?.id ?? null;
-  if (!peerId && view?.dm && view.id === selectedBot) {
-    leavePeerConversation(false);
-    return;
+  if (!peerId && view?.dm && view.id === selectedBot) leavePeerConversation(false);
+  else selectBot(selectedBot, peerId, { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
+  if (wantsSettings) {
+    const url = conversationUrl(selectedBot);
+    url.searchParams.delete('settings');
+    history.replaceState(history.state, '', url);
+    if (bot && view?.id === bot.id) openBotSettings(bot.id);
   }
-  selectBot(selectedBot, peerId, { updateHistory: false, anchor, fromPeerLink: !!anchor && history.state?.peerAnchor === anchor });
 }
 function peerLink(botId, peerId, label, className, anchor = 0) {
   const link = node('a', className, label);

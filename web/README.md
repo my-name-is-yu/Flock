@@ -86,7 +86,7 @@ environment's OAuth endpoint.
 
 **Flock settings** shows the theme for this browser, the installation mode, rules, and the read-only T3
 connection details for the person who connected T3 and installation roots.
-Installation roots can choose **Full** or **Supervised** and remove rules. **Full** is
+Installation roots can choose **Full** or **Supervised**, add rules, and remove rules. **Full** is
 the default and applies only Never rules. In Supervised, Never takes
 precedence over Ask first, then Allow, then the
 [category defaults](../README.md#installation-policy).
@@ -100,9 +100,13 @@ Cards prompted by a person's message stay open, including messages from a
 linked Slack or iMessage sender. The approval is answered in Flock. Changing
 modes closes pending approvals for the prior mode.
 
-`GET /api/settings` returns the mode, rules, and T3 connection details.
-`POST /api/settings/mode` takes `mode` and `POST /api/settings/rule` removes a rule by
-`kind`, `action`, and `target`. Both require an installation root.
+`GET /api/settings` returns the mode, rules, T3 connection details, and action
+names that apply to people only.
+`POST /api/settings/mode` takes `mode`.
+`POST /api/settings/rule` takes `kind`, `action`, `target`, and the Boolean `add`.
+Set `add` to `true` to create a rule for a Bot action with a nonblank target.
+Set `add` to `false` to remove the matching rule. Both POST endpoints require an
+installation root.
 
 ## Bot settings
 
