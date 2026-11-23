@@ -284,7 +284,7 @@ Id Policy::requestSecret(std::string_view bot, const SecretRef& ref, Id sourceMe
     db_.redactor(bot).requirePublic({bot,ref.name});
     auto row = db_.query(R"SQL(
 INSERT INTO protected_inputs(bot,name,file,source_message_id)
- SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE bot=?1 AND name=?2 AND status='fulfilled')
+ SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (SELECT 1 FROM protected_inputs WHERE name=?2 AND status='fulfilled')
  ON CONFLICT(bot,name) WHERE status='pending' DO UPDATE
  SET source_message_id=coalesce(protected_inputs.source_message_id,excluded.source_message_id)
  RETURNING id

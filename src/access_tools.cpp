@@ -60,7 +60,13 @@ Json Store::Impl::accessTool(std::string_view bot, Id sourceMessage, const Json&
         return {{"names",names}};
     }
     if (tool == "request_secret_input") {
-        auto id = access.requestSecret(bot,{argument(args,"name")},sourceMessage);
+        const SecretRef ref{argument(args,"name")};
+        if (!ref.valid()) throw Conflict("Invalid secret reference");
+        if (query("SELECT 1 FROM protected_inputs WHERE name=? AND status='fulfilled'",{ref.name}).next()) {
+            if (!access.allows(bot,Action::secret_use,ref.name)) throw AccessDenied("Protected input unavailable");
+            return {{"status","available"}};
+        }
+        const auto id = access.requestSecret(bot,ref,sourceMessage);
         return {{"requestId",id},{"status","pending"},{"settingsLink","/settings/"+std::string(bot)+"/secrets"}};
     }
     if (tool == "list_connections") {

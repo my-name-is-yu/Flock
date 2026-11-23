@@ -160,6 +160,7 @@ void freshPendingSecretRequests(const std::filesystem::path& path) {
     check(access.administration(owner,"Ernest").at("secretInputs") ==
           Json::array({{{"id",id},{"name",ref.name},{"status","fulfilled"}}}),"duplicate request remained after fulfillment");
     denied([&]{ access.requestSecret("Ernest",ref); });
+    denied([&]{ access.requestSecret("Reviewer",ref); });
 }
 
 void exercise(const std::filesystem::path& dir) {
