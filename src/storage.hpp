@@ -249,7 +249,6 @@ struct Store::Impl {
     Person turnActor(const conversation::Message&);
     conversation::Message loadTurnMessage(Id messageId) const;
     const char* questionAnswerError(const Json& task, const conversation::Message&) const;
-    void resolveOfferedAnswer(const conversation::Message&);
     Json taskState(const Json& task, const conversation::Message&, bool fullContract = false) const;
     Json conversationSteps(const conversation::Message&, int step, std::vector<ModelImage>& images);
     Json turnInput(const conversation::Message&, int step, Seconds now, Json machines, std::vector<ModelImage>& images);
