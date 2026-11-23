@@ -76,7 +76,7 @@ bool sensitiveAfterDecoding(std::string_view source, const SensitiveText& sensit
     constexpr unsigned maxPercentDecodeLayers = 4;
     std::string current(source);
     for (unsigned layer = 0; layer <= maxPercentDecodeLayers; ++layer) {
-        if (sensitive(current)) return true;
+        if (sensitive && sensitive(current)) return true;
         const auto decoded = decode(current);
         if (!decoded) return true;
         if (*decoded == current) return false;
@@ -386,10 +386,10 @@ std::string convert(std::string_view source, Target target, const SensitiveText&
     auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
     if (!document) return escape(source,target);
     std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
-    if (target == Target::html && sensitive) {
-        if (sensitive(render(root.get(),Target::html_text,0)) || hasSensitiveUrl(root.get(),sensitive))
-            return "<p>[redacted]</p>";
-    }
+    // A URL that exceeds the decoding limit requires redaction even without protected text.
+    if (target == Target::html &&
+        ((sensitive && sensitive(render(root.get(),Target::html_text,0))) || hasSensitiveUrl(root.get(),sensitive)))
+        return "<p>[redacted]</p>";
     const auto rendered = render(root.get(),target,0);
     if (rendered.empty() && hasNonWhitespace(source)) return escape(source,target);
     return rendered;

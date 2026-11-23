@@ -117,36 +117,50 @@ struct Runtime::Impl {
         Seconds second;
         bool operator==(const MaintenanceCheck&) const = default;
     };
-    // These scans are due again after a database write or the next clock second.
-    std::optional<MaintenanceCheck> maintenanceAt;
+    std::optional<MaintenanceCheck> approvalsCheckedAt, automationsCheckedAt, workflowsCheckedAt;
 
-    void settleApprovals() {
+    Seconds settleApprovals() {
         std::lock_guard lock(db.mutex);
         Transaction tx(db.db);
-        db.settlePolicyApprovals(options.clock());
+        const auto now = options.clock();
+        db.settlePolicyApprovals(now);
         tx.commit();
+        return now;
     }
 
-    bool fireDueAutomations() {
-        try { db.fireDueAutomations(options.clock()); }
+    std::optional<Seconds> fireDueAutomations() {
+        try {
+            const auto now = options.clock();
+            db.fireDueAutomations(now);
+            return now;
+        }
         catch (const StorageError&) { throw; }
         catch (const std::exception& error) {
             if (!options.automationError) throw;
             options.automationError(error.what());
-            return false;
+            return std::nullopt;
         }
-        return true;
     }
 
-    bool deferContendedWork(std::string_view operation, const auto& work) {
+    void deferContendedWork(std::string_view operation, const auto& work) {
         try { work(); }
         catch (const StorageError& error) {
             if (!error.contended()) throw;
             if (options.storageContention)
                 options.storageContention(std::string(operation) + ": " + error.what());
-            return false;
         }
-        return true;
+    }
+
+    void runMaintenance(std::optional<MaintenanceCheck>& completed, std::string_view operation, const auto& work) {
+        const auto now = options.clock();
+        std::optional<MaintenanceCheck> check;
+        deferContendedWork("database change stamp",[&] { check.emplace(db.changeStamp(),now); });
+        if (check && check == completed) return;
+        deferContendedWork(operation,[&] {
+            // Pair the pre-scan stamp with the time the phase actually used.
+            const std::optional<Seconds> second = work();
+            if (check && second) completed.emplace(check->stamp,*second);
+        });
     }
 
     void runTurn(Id id) {
@@ -2321,12 +2335,9 @@ void Runtime::tick() {
 }
 void Runtime::tickConcurrent() {
     if (p_->shutdown.stop_requested()) return;
-    const auto now = p_->options.clock();
-    std::optional<Impl::MaintenanceCheck> check;
-    p_->deferContendedWork("database change stamp",[&] { check.emplace(p_->db.changeStamp(),now); });
-    const bool checkMaintenance = !check || p_->maintenanceAt != check;
-    const bool approvalsSettled = checkMaintenance &&
-        p_->deferContendedWork("policy approvals",[&] { p_->settleApprovals(); });
+    p_->runMaintenance(p_->approvalsCheckedAt,"policy approvals",[&] {
+        return p_->settleApprovals();
+    });
     const auto collect = [this](auto& workers, std::string_view operation) {
         for (auto it = workers.begin(); it != workers.end();) {
             if (it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -2342,9 +2353,9 @@ void Runtime::tickConcurrent() {
         p_->channelWorker.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         p_->deferContendedWork("channel worker",[&] { p_->channelWorker.get(); });
     p_->deferContendedWork("workspace outcomes",[&] { p_->db.persistWorkspaceResults(); });
-    bool automationsChecked = false;
-    if (checkMaintenance)
-        p_->deferContendedWork("automations",[&] { automationsChecked = p_->fireDueAutomations(); });
+    p_->runMaintenance(p_->automationsCheckedAt,"automations",[&] {
+        return p_->fireDueAutomations();
+    });
     p_->deferContendedWork("Git webhooks",[&] { p_->db.deliverGitWebhooks(); });
     if (!p_->channelWorker.valid() && p_->db.channelDeliveryDue())
         p_->channelWorker = std::async(std::launch::async,[db = &p_->db,stop = p_->shutdown.get_token()] {
@@ -2367,10 +2378,11 @@ void Runtime::tickConcurrent() {
             }
         }
     }
-    if (checkMaintenance) {
-        const bool workflowsAdvanced = p_->deferContendedWork("workflows",[&] { p_->db.advanceWorkflows(p_->options.clock()); });
-        p_->maintenanceAt = approvalsSettled && automationsChecked && workflowsAdvanced ? check : std::nullopt;
-    }
+    p_->runMaintenance(p_->workflowsCheckedAt,"workflows",[&] {
+        const auto now = p_->options.clock();
+        p_->db.advanceWorkflows(now);
+        return now;
+    });
     p_->deferContendedWork("task scheduling",[&] {
         p_->persistTaskInferences();
         for (auto id : p_->nextProjects(Impl::batchLimit - p_->workers.size()))

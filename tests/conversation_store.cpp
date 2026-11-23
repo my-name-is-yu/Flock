@@ -202,30 +202,65 @@ void retryAcrossConnections() {
     check(calls == 2 && restarted.tasks("alpha").size() == 1,"The retry ran an applied message again");
 }
 
-void dueAutomationWakesAfterIdle(bool externalWrite) {
+void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
     Fixture fixture;
     Store store(fixture.database()), writer(fixture.database());
     ScriptedModel model;
     SimulatedT3 t3;
     std::atomic<Seconds> now{100};
-    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
-                    RuntimeOptions{.clock = [&] { return now.load(); }});
     auto reminder = Fixture::bot("beta");
     reminder.request = "Fire a scheduled reminder";
     const auto createReminder = [&](Seconds from) {
         writer.createAutomation(localOwner,reminder,{{"kind","reminder"},{"timezone","Etc/UTC"},
                                   {"fireAt",from + 1},{"request",reminder.request}},from);
     };
+    const auto makeDue = [&] {
+        if (externalWrite) createReminder(now.load() - 1);
+        else ++now;
+    };
+    const auto tickThread = std::this_thread::get_id();
+    int clockReadsUntilDue = 0;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
+                    RuntimeOptions{.clock = [&] {
+                        if (std::this_thread::get_id() == tickThread && clockReadsUntilDue && --clockReadsUntilDue == 0)
+                            makeDue();
+                        return now.load();
+                    }});
     if (!externalWrite) createReminder(now.load());
     runtime.tickConcurrent();
     runtime.tickConcurrent();
     check(store.tasks("beta").empty(),"A reminder ran before it was due");
 
-    // The separate writer can register work due at the Runtime's unchanged clock.
-    if (externalWrite) createReminder(now.load() - 1);
-    else ++now;
+    // Leave the approvals check unchanged and make the reminder due before the automation check.
+    if (duringTick) clockReadsUntilDue = 2;
+    else makeDue();
     runtime.tickConcurrent();
     check(store.tasks("beta").size() == 1,"An idle check missed a newly due reminder");
+}
+
+void failedAutomationDoesNotInvalidateOtherMaintenance() {
+    Fixture fixture;
+    Store store(fixture.database());
+    ScriptedModel model;
+    SimulatedT3 t3;
+    auto locker = fixture.connect();
+    int errors = 0;
+    bool contention = false;
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{
+        .clock = [] { return Seconds{-1}; },
+        .automationError = [&](std::string_view) { ++errors; },
+        .storageContention = [&](std::string_view) {
+            if (!contention) Fixture::sql(locker.get(),"ROLLBACK");
+            contention = true;
+        }
+    });
+    runtime.tickConcurrent();
+
+    // Read-only probes still work, but repeating either completed write transaction would contend.
+    Fixture::sql(locker.get(),"BEGIN IMMEDIATE");
+    runtime.tickConcurrent();
+    if (!contention) Fixture::sql(locker.get(),"ROLLBACK");
+    check(errors == 2 && !contention,"Retrying an automation error repeated completed maintenance");
 }
 
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
@@ -922,8 +957,11 @@ void conversationPagesCombineTaskAndMessageHistory() {
 int main() {
     try {
         retryAcrossConnections();
-        dueAutomationWakesAfterIdle(false);
-        dueAutomationWakesAfterIdle(true);
+        for (bool duringTick : {false,true}) {
+            dueAutomationWakesAfterIdle(false,duringTick);
+            dueAutomationWakesAfterIdle(true,duringTick);
+        }
+        failedAutomationDoesNotInvalidateOtherMaintenance();
         savedDecisionIsAppliedWithoutAnotherModelCall();
         missingToolCannotBeAddedAfterInferenceStarts();
         protectedArgumentKeyCannotReachTaskIntake();
