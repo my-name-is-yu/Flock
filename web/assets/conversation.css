@@ -357,6 +357,13 @@
 .markdown-body li + li { margin-top: .2em; }
 .markdown-body blockquote { margin: .4em 0; padding-inline-start: .75em; border-inline-start: 2px solid var(--line); }
 .markdown-body a { overflow-wrap: anywhere; }
+.msg.user .bubble .markdown-body a,
+.msg.user .bubble .markdown-body a:visited,
+.msg.user .bubble .markdown-body a:hover,
+.msg.user .bubble .markdown-body a:active {
+  color: inherit;
+  text-decoration: underline;
+}
 .markdown-body code { font-family: monospace; font-size: .92em; white-space: pre-wrap; }
 .markdown-body pre { max-width: 100%; margin: .5em 0; overflow-x: auto; overscroll-behavior-x: contain; white-space: pre; }
 .markdown-body pre code { font-size: .9em; white-space: pre; }
