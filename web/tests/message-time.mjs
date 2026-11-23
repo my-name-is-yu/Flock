@@ -9,11 +9,48 @@ import { promisify } from 'node:util';
 function fixtures() {
   const nativeMatchMedia = window.matchMedia.bind(window);
   window.noHoverFixture = Object.assign(new EventTarget(), { matches: true });
-  window.matchMedia = (query) => query === '(hover: none)' ? window.noHoverFixture : nativeMatchMedia(query);
+  window.reducedMotionFixture = Object.assign(new EventTarget(), { matches: false });
+  window.matchMedia = (query) => {
+    if (query === '(hover: none)') return window.noHoverFixture;
+    if (query === '(prefers-reduced-motion: reduce)') return window.reducedMotionFixture;
+    return nativeMatchMedia(query);
+  };
   window.EventSource = undefined;
   const bot = { id: 'release', name: 'Release' };
   const peer = { id: 'triage', name: 'Triage' };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
+  const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
+  const RealDate = Date;
+  const midnight = new RealDate(2026, 10, 21).getTime();
+  let now = new RealDate(2026, 10, 20, 23).getTime();
+  const midnightDelay = midnight - now;
+  window.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  let midnightRefresh;
+  const schedule = window.setTimeout.bind(window);
+  window.setTimeout = (callback, delay, ...args) => {
+    if (delay === midnightDelay) {
+      midnightRefresh = callback;
+      return 0;
+    }
+    return schedule(callback, delay, ...args);
+  };
+  window.rollSessionDate = () => {
+    now = midnight;
+    midnightRefresh?.();
+  };
+  window.returnAfterMidnight = () => {
+    now = new RealDate(2026, 10, 22).getTime();
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  const sessionTasks = [
+    { id: 17, generation: 1, request: 'Completed work', createdAt: time,
+      sessions: [{ environmentId: 'local', threadId: 'thread', state: 'completed', createdAt: sessionCreatedAt }] },
+    { id: 16, generation: 1, request: 'Historical work', createdAt: time,
+      sessions: [{ environmentId: 'local', threadId: 'older', state: 'completed' }] },
+  ];
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'First message' } },
     { id: 2, kind: 'conversation_reply', time: time + 60, data: { text: 'Second message' } },
@@ -37,17 +74,40 @@ function fixtures() {
     dm(12, 1000, 'triage', { text: 'Triage resumes after a break' }),
     dm(13, 12 * 3600, 'triage', { text: 'Triage follows up tomorrow' }),
   ];
+  let activeSessions = [];
+  window.showWorking = (request) => {
+    activeSessions = request ? [{ taskId: 18, threadId: 'working', environmentId: 'local', state: 'running', request }] : [];
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  window.showSuggestion = () => {
+    activeSessions = [];
+    events.push({ id: 5, kind: 'conversation_reply', time: time + 1002, data: {
+      text: 'I can check the logs.', suggestions: ['Check the logs.'],
+    } });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
   window.fetch = async (path) => {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
-    return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [],
+    return Response.json({ bot, events, olderBefore: 0, presence: activeSessions.length ? 'working' : 'idle',
+      activeSessions, sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null });
   };
 }
 
 async function exercise() {
   const check = (value, message) => { if (!value) throw new Error(message); };
+  const sessionRows = () => [...document.querySelectorAll('.session-row')];
+  const sessionLabel = (row) => row?.querySelector('.activity-status span:last-child')?.textContent;
+  const [finished, historical] = sessionRows();
+  check(sessionLabel(finished) === '17:30' && finished.title.includes('17:30') &&
+    sessionLabel(historical) === 'Complete' && !historical.title.includes('Started'),
+    'The sidebar used the request time instead of the Session creation time');
+  window.rollSessionDate();
+  check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
+  window.returnAfterMidnight();
+  check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
   const singleTime = rows.map(row => row.querySelector('time'));
@@ -134,6 +194,49 @@ async function exercise() {
   window.noHoverFixture.dispatchEvent(new Event('change'));
   tap(document.querySelector('#event-1 .event-text'));
   check(!shown().length, 'The tap timestamp remained enabled with hover support');
+
+  const workingLabel = () => document.querySelector('.working-label:not(.leaving)');
+  const leavingLabels = () => document.querySelectorAll('.working-label.leaving');
+  const showWorking = async (text) => {
+    window.showWorking(text);
+    for (let attempt = 0; attempt < 20 && workingLabel()?.textContent !== text; attempt++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    check(workingLabel()?.textContent === text, 'The working status did not update');
+  };
+  await showWorking('Check staging');
+  const workingRow = workingLabel().closest('.msg.working');
+  await showWorking('Check production');
+  check(workingLabel().closest('.msg.working') === workingRow && leavingLabels()[0]?.getAttribute('aria-hidden') === 'true',
+    'Working text lost its stable row or left the old status exposed');
+  await showWorking('Verify the result');
+  check(leavingLabels().length === 1, 'Fast working updates left multiple outgoing labels');
+  leavingLabels()[0].dispatchEvent(new AnimationEvent('animationcancel', { animationName: 'working-label-out' }));
+  check(!leavingLabels().length, 'Cancelling the exit animation left an old status in the row');
+  window.reducedMotionFixture.matches = true;
+  await showWorking('Finish the check');
+  check(!leavingLabels().length && !workingLabel().classList.contains('entering'),
+    'Reduced-motion working statuses still entered or exited with animation');
+
+  const ghost = document.getElementById('composer-ghost');
+  const input = document.getElementById('message');
+  const key = (name, options = {}) => input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: name, code: name, bubbles: true, cancelable: true, ...options,
+  }));
+  window.showSuggestion();
+  for (let attempt = 0; attempt < 20 && ghost.hidden; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 10));
+  check(!ghost.hidden && !input.value, 'A suggested reply did not appear in the empty composer');
+  check(key('Enter', { altKey: true }) && key('Tab', { ctrlKey: true }) && !input.value,
+    'A modified keyboard shortcut accepted the suggested reply');
+  input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+  check(ghost.hidden && key('Enter') && !input.value, 'A suggestion remained active during input composition');
+  input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+  check(!ghost.hidden && !key('Tab') && input.value === 'Check the logs.' && ghost.hidden,
+    'Tab did not accept the exact displayed suggestion');
+  input.value = 'Check tomorrow’s logs.';
+  input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  document.getElementById('cancel-reply').click();
+  check(ghost.hidden && !input.value, 'The suggestion covered a differently worded saved reply draft');
 
   window.noHoverFixture.matches = true;
   window.noHoverFixture.dispatchEvent(new Event('change'));
