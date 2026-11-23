@@ -7,8 +7,6 @@
 #include "flock/t3_connection.hpp"
 #include "flock/identity.hpp"
 
-#include "flock/root_delivery.hpp"
-#include "flock/session_handoff.hpp"
 #include "flock/t3_mcp.hpp"
 #include "flock/web.hpp"
 
@@ -18,7 +16,6 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
-#include <set>
 #include <thread>
 
 namespace flockv0::app {
@@ -238,42 +235,16 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     const IntakeResolver intake = [&](std::string_view botId, std::string_view request) {
         return bots.get(botId).intake(request);
     };
+    options.intake = intake;
     const Runtime::SoulLoader soul = [&](std::string_view botId) { return bots.soul(botId); };
     const auto identityFile = std::getenv("FLOCK_WEB_IDENTITIES_FILE");
     auto identities = identityFile ? loadIdentities(store,identityFile) : ConfiguredIdentities{};
-    if (!identityFile && !store.policy().requiresIdentity()) {
-        identities.resolvePerson = [&store](std::string_view id) -> std::optional<Person> {
-            if (id == localOwner.id && !store.policy().requiresIdentity()) return localOwner;
-            return std::nullopt;
-        };
-    }
-    auto handoffSession = !fixed && identities.resolvePerson
-        ? makeT3ThreadSession(home / "credentials" / "t3") : nullptr;
-    std::shared_ptr<SessionHandoff> handoffs;
-    if (!fixed) {
-        options.resolveSpecialistPerson = [&](std::string_view person) -> std::optional<Person> {
-            return identities.resolvePerson ? identities.resolvePerson(person) : std::nullopt;
-        };
-    }
-    if (handoffSession) {
-        options.observeSpecialistInput = [&](const Person& person, Id channel) -> std::optional<std::string> {
-            if (!handoffs) return {};
-            const auto view = handoffs->view(person,channel);
-            if (!view.coordination) return {};
-            return handoffSession->inputCommit(view.origin.invitation.target);
-        };
-    }
     options.applyBotChange = [&](const BotChange& change) { bots.apply(change); };
     options.reconcileBotCreation = [&](const BotChange& change) { return bots.reconcileCreation(change); };
     Runtime runtime(store,*model,*t3,soul,options);
     bots.syncSchedules(store,options.clock(),[](std::string_view id,std::string_view error) {
         std::cerr << "Flock Bot " << id << ": " << error << '\n';
     });
-    if (handoffSession) {
-        handoffs = std::make_shared<SessionHandoff>(store,*handoffSession,identities.resolvePerson,intake,&runtime,options.peers);
-        handoffs->recover();
-    }
-    std::jthread handoffWorker;
     Json exportedBots;
     auto refreshSkills = [&] {
         try {
@@ -318,7 +289,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (identityFile) callbacks.configuredPerson = identities.resolvePerson;
     const auto bridges = std::getenv("FLOCK_CHANNEL_BRIDGES_FILE");
     if (bridges) configureChannelBridges(store,bridges,callbacks);
-    callbacks.sessionHandoffs = handoffs;
+    callbacks.sessionT3 = t3.get();
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;
@@ -327,44 +298,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     }
     std::signal(SIGINT,requestStop);
     std::signal(SIGTERM,requestStop);
-    if (handoffs) {
-        handoffWorker = std::jthread([&](std::stop_token stop) {
-            Id after = 0;
-            bool pollingFailed = false;
-            std::set<Id> reportedFailures;
-            while (!stop.stop_requested()) {
-                try {
-                    const auto pending = handoffs->pending(after);
-                    pollingFailed = false;
-                    if (pending.empty()) after = 0;
-                    for (const auto& [channel, personId, coordination] : pending) {
-                        if (stop.stop_requested()) return;
-                        after = channel;
-                        try {
-                            const auto actor = identities.resolvePerson(personId);
-                            if (!actor) {
-                                handoffs->discardModelDecision(channel);
-                                if (reportedFailures.insert(channel).second)
-                                    std::cerr << "Session handoff " << channel << " has no configured identity.\n";
-                                continue;
-                            }
-                            if (coordination) handoffs->step(*actor,channel,*model,soul);
-                            else handoffs->consult(*actor,channel,*model,soul);
-                            reportedFailures.erase(channel);
-                        } catch (const std::exception&) {
-                            if (reportedFailures.insert(channel).second)
-                                std::cerr << "Could not advance Session handoff " << channel
-                                          << ". Check its access and Bot settings.\n";
-                        }
-                    }
-                } catch (const std::exception&) {
-                    if (!pollingFailed) std::cerr << "Could not load pending Session handoffs.\n";
-                    pollingFailed = true;
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-            }
-        });
-    }
     if (!web) std::cout << "Flock Runtime is running in headless mode." << std::endl;
 
     auto nextSkillRefresh = std::chrono::steady_clock::now();
@@ -376,7 +309,6 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
         runtime.tickConcurrent();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
-    handoffWorker.request_stop();
     runtime.requestStop();
 }
 

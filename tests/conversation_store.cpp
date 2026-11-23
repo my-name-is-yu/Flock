@@ -105,7 +105,7 @@ struct ScriptedModel : Model {
 
 struct SimulatedT3 : T3 {
     std::map<std::string,Observation> observations;
-    unsigned launches = 0, steers = 0;
+    unsigned launches = 0, sessionSends = 0;
     std::function<void()> beforePreflight;
 
     std::string authGeneration(const std::string&, const Json&) override { return "fixture-auth"; }
@@ -114,8 +114,8 @@ struct SimulatedT3 : T3 {
         return std::nullopt;
     }
     Delivery send(const Command& command) override {
-        if (command.tool == "steer") {
-            ++steers;
+        if (command.tool == "message_session") {
+            ++sessionSends;
             return {Delivery::Kind::Accepted,command.target,{}};
         }
         check(command.tool == "delegate","Unexpected work command in the Store fixture");
@@ -343,22 +343,18 @@ void savedCallsAreCheckedBeforeExecution() {
 
 void sessionNoteIsNotResentAfterARestart(bool webEvidence, bool started) {
     Fixture fixture;
-    Store store(fixture.database()), writer(fixture.database());
+    Store store(fixture.database());
     RuntimeFixture execution(store);
-    const auto id = task(writer,"Benchmark startup");
-    execution.reach(store,id,"running");
     const auto message = receive(store,"note","Use the staging database");
     const auto mid = std::to_string(message);
     const std::string step = webEvidence ? "2" : "1";
-    const Json effect = {{"kind","steer"},{"taskId",id},{"environmentId","env"},{"projectId","project"},
-                         {"config",Json::object()},{"run",store.task(id).at("activeRun")},{"text","Use the staging database"},
-                         {"actionId","flock-turn-" + mid + "-" + step}};
+    const Json effect = {{"kind","message_session"}};
     if (webEvidence)
         fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,result) VALUES(" + mid + ",1,"
                     "'[{\"tool\":\"web_fetch\",\"args\":{\"url\":\"https://example.com/source\"},\"reason\":\"Read a source\"}]',"
                     "'[{\"ok\":true,\"untrustedData\":true}]')");
     fixture.sql("INSERT INTO conversation_steps(message_id,step,decision,effect) VALUES(" + mid + "," + step + ",'" +
-                Json::array({{{"tool","message_session"},{"args",{{"taskId",id},{"generation",0},{"text","x"}}},
+                Json::array({{{"tool","message_session"},{"args",{{"environmentId","env"},{"threadId","thread"},{"text","x"}}},
                               {"reason","Saved"}}}).dump() +
                 "'," + (started ? "'" + effect.dump() + "'" : "NULL") + ")");
     Json seen;
@@ -367,11 +363,11 @@ void sessionNoteIsNotResentAfterARestart(bool webEvidence, bool started) {
         return say("I may have sent that already.");
     };
     execution.runtime.runConversations();
-    check(seen.size() == (webEvidence ? 2 : 1) && execution.t3.steers == 0,
-          "a saved note ran on a connection without Run-targeted steering");
+    check(seen.size() == (webEvidence ? 2 : 1) && execution.t3.sessionSends == 0,
+          "an uncertain or unauthorized Session send was dispatched");
     const auto result = seen.back().at("result");
     check(result.at("ok") == false && (started ? result.value("delivery","") == "unknown" :
-          !result.contains("delivery") && result.at("error").get<std::string>().find("next safe point") != std::string::npos),
+          !result.contains("delivery") && result.at("error").get<std::string>().find("unavailable through your T3 connection") != std::string::npos),
           "a saved note lost the distinction between an uncertain and a refused delivery");
 }
 

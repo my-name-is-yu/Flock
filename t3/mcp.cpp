@@ -50,6 +50,16 @@ size_t receiveHeader(char* data, size_t size, size_t count, void* context) noexc
     return line.size();
 }
 
+// Only a validation diagnostic specific to this property is safe to retry.
+bool rejectsDelegatedFrom(std::string_view message) {
+    return message == "Unknown field: delegatedFrom" ||
+        message == "Unrecognized key: \"delegatedFrom\"" ||
+        message == "Unexpected property: delegatedFrom" ||
+        message == "Unknown argument: delegatedFrom" ||
+        message == "delegatedFrom is not supported" ||
+        message.find("[\"delegatedFrom\"] is unexpected") != message.npos;
+}
+
 Json rpcResponse(const HttpResponse& response, unsigned id) {
     const auto type = response.headers.find("content-type");
     Json message;
@@ -84,7 +94,10 @@ Json rpcResponse(const HttpResponse& response, unsigned id) {
         const auto& error = message["error"];
         if (message.contains("result") || !error.contains("code") || !error["code"].is_number_integer() ||
             !error.contains("message") || !error["message"].is_string()) invalidResponse();
-        throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + str(error, "message"));
+        const auto detail = str(error,"message");
+        const auto reason = error["code"] == -32602 && rejectsDelegatedFrom(detail)
+            ? Failure::Reason::DelegatedFromRejected : Failure::Reason::Other;
+        throw Failure(Failure::Kind::Rpc, "T3 JSON-RPC error " + error["code"].dump() + ": " + detail,reason);
     }
     if (!message.contains("result") || !message["result"].is_object()) invalidResponse();
     return std::move(message["result"]);
@@ -255,10 +268,12 @@ static Failure toolFailure(const Json& payload) {
     const auto& error = payload.contains("error") && payload["error"].is_object() ? payload["error"] : payload;
     const auto code = str(error, "code");
     const auto message = str(error, "message");
+    if ((code == "invalid_request" || code == "invalid_params") && rejectsDelegatedFrom(message))
+        return Failure(Failure::Kind::Tool,"T3 rejected the delegatedFrom launch field",Failure::Reason::DelegatedFromRejected);
     if (code == "capability_denied" || code == "thread_credential_required" ||
         code == "runtime_mode_escalation_denied" || code == "interaction_mode_escalation_denied")
         return Failure(Failure::Kind::Auth, "T3 OAuth approval does not allow this operation or mode");
-    if (code == "thread_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
+    if (code == "thread_not_found" || code == "run_not_found" || code == "item_not_found" || code == "attachment_not_found" ||
         (code == "invalid_request" && message == "The thread was not found."))
         return Failure(Failure::Kind::Tool, "T3 history was not found", Failure::Reason::HistoryNotFound);
     if (code == "project_not_found" || (code == "invalid_request" && message == "The project was not found."))
@@ -284,8 +299,12 @@ Json Client::call(std::string_view tool, Json arguments) {
     if (data.is_null()) {
         const auto content = response.find("content");
         if (content != response.end() && content->is_array() && content->size() == 1 &&
-            str(content->front(), "type") == "text")
-            data = Json::parse(str(content->front(), "text"), nullptr, false);
+            str(content->front(), "type") == "text") {
+            const auto detail = str(content->front(),"text");
+            if (isError && detail.starts_with("MCP error -32602: Input validation error:") && rejectsDelegatedFrom(detail))
+                throw Failure(Failure::Kind::Tool,"T3 rejected the delegatedFrom launch field",Failure::Reason::DelegatedFromRejected);
+            data = Json::parse(detail,nullptr,false);
+        }
     }
     if (isError) throw toolFailure(data);
     if (!data.is_object()) invalidResponse();

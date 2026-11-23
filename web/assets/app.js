@@ -1423,6 +1423,30 @@ function eventCard(event, context, place, report, approval) {
   const data = event.data;
   const bot = context.bot;
   const { side } = place;
+  if (data.sessionWake || data.sessionInvitation) {
+    const session = data.sessionWake ?? data.sessionInvitation;
+    const name = `T3 Session “${session.title || session.threadId}”`;
+    const explanation = {
+      finished: 'Run finished',
+      failed: 'Run did not complete successfully',
+      waiting_for_person: 'Run needs input',
+      unknown: 'Run status is unavailable',
+    }[session.reason] ?? 'Run status is unavailable';
+    const text = data.sessionWake ? `${explanation} in ${name}` : `Invited by ${session.inviterName} to ${name}`;
+    const note = node('article', 'system-note session-event', `${text} · `);
+    note.id = `event-${event.id}`;
+    note.tabIndex = -1;
+    note.append(eventTime(event));
+    if (session.sourceMessageId) {
+      const original = button('Original request', 'text-button', () => {
+        void showConversationMessage(view, session.sourceMessageId, { preferLoaded: true });
+      });
+      original.dataset.timelineAction = 'open-original';
+      note.append(' · ', original);
+    }
+    if (session.note) note.append(node('p', 'session-invitation-note', session.note));
+    return note;
+  }
   if (side === 'system') {
     const stopped = data.request ? `“${data.request.split('\n')[0]}” was stopped` : 'A request was stopped';
     const note = node('article', 'system-note', `${bot?.name ?? 'Bot'} · ${stopped} · `);
@@ -1867,7 +1891,8 @@ function renderTimeline(scroll = 'auto', previousScroll = timelineScrollPosition
   const sentAfterId = context?.pendingSentAfterId;
   const messageAfterId = canAnimate ? liveAfterId : (sentAfterId != null ? sentAfterId : null);
   if (messageAfterId != null) {
-    const addedMessages = events.filter((event) => event.id > messageAfterId && event.kind === 'conversation_message');
+    const addedMessages = events.filter((event) => event.id > messageAfterId &&
+      event.kind === 'conversation_message' && messageSide(event) !== 'system');
     if (addedMessages.length > 0) {
       if (motionAllowed && addedMessages.length <= 2) {
         for (const event of addedMessages) animateSentMessage(event.id);
@@ -1932,7 +1957,7 @@ function conversationRows(data, events, keep, source) {
     bot: source?.bot ?? data?.bot ?? bots.find((item) => item.id === view?.id),
     // Source lookups do not establish the latest message in the live conversation.
     latestWebMessageId: data && !source ? events.findLast((event) =>
-      event.kind === 'conversation_message' && !event.data.channel?.channelKind)?.id : undefined,
+      event.kind === 'conversation_message' && !event.data.channel?.channelKind && messageSide(event) === 'user')?.id : undefined,
     // An earlier page opened from the inbox is for reading; answering happens at the latest messages.
     canDecide: !source && data?.canDecide === true,
     readOnly: !!source,
@@ -2908,7 +2933,7 @@ const conversationFind = mountConversationFind({
   readPage: (context, before, signal) => api(botQuery('conversation', context.id, before), undefined, signal),
   describeAuthor: (context, event) => {
     const side = messageSide(event);
-    return side === 'user' ? 'You' : side === 'external' ? 'Other sender' : context.data.bot.name;
+    return side === 'user' ? 'You' : side === 'external' ? 'Other sender' : side === 'system' ? 'System' : context.data.bot.name;
   },
   openMatch(context, id, signal) {
     return showConversationMessage(context, id, { signal, preferLoaded: true });

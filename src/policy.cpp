@@ -61,7 +61,6 @@ constexpr std::pair<Action,std::string_view> actions[] = {
     {Action::channel_use,"channel.use"},
     {Action::channel_read,"channel.read"},
     {Action::channel_post,"channel.post"},
-    {Action::t3_coordinate,"t3.coordinate"},
     {Action::t3_send,"t3.send"},
     {Action::automation_change,"automation.change"},
     {Action::email_send,"email.send"},

@@ -25,7 +25,6 @@ std::string bounded(std::string_view text, std::size_t bytes);
 std::string actionId();
 
 struct Conflict : std::runtime_error { using std::runtime_error::runtime_error; };
-struct SpecialistAllowanceExhausted : Conflict { using Conflict::Conflict; };
 
 // Initial allowance from an intake's saved config. Each approval adds one attempt.
 Id modelCallLimit(const Json& config);
@@ -41,6 +40,7 @@ Json reconciliationData(const Json& task, Id waitId, Json target, const IntakeRe
 
 struct BotNotes { std::string soul, memory; };
 struct PeerBot { std::string name; Intake intake; std::string role = {}; };
+using PeerResolver = std::function<std::vector<PeerBot>(std::string_view)>;
 
 struct Decision {
     std::string tool;
@@ -105,6 +105,14 @@ struct Observation {
 inline constexpr std::size_t maxSessionPromptBytes = 120000;
 std::string sessionPrompt(const std::string& actionId, const std::string& instruction);
 
+struct SessionTarget {
+    std::string environmentId, threadId;
+    bool operator==(const SessionTarget&) const = default;
+};
+struct SessionOrigin {
+    SessionTarget target;
+    std::string title;
+};
 struct Command {
     std::string actionId, tool, environmentId, projectId, instruction, authGeneration;
     Json config = Json::object(), answers = Json::object();
@@ -114,14 +122,18 @@ struct Command {
     std::string candidateQuestionId;
     std::string ownerBotId;
     std::string launchReceiptThreadId; // From the launch response, even if the Run ID was pending.
+    std::optional<SessionOrigin> sessionOrigin;
 };
 struct Delivery {
     enum class Kind { Accepted, Unknown, Auth, Settings, QuestionGone, NotAccepted } kind = Kind::Unknown;
     RunRef run;
     std::string detail;
     bool definitelyUnsent = false;
+    std::string delivery = {};
+    std::string launchWarning = {};
 };
 enum class InterruptOutcome { Requested, AlreadyTerminal, NoActiveRun };
+enum class QueueCancelOutcome { Cancelled, AlreadyStarted, NotCancellable, Retry };
 struct ReadRequest {
     std::string environmentId, threadId, runId, itemId, cursor, view = "messages";
     std::size_t offset = 0;
@@ -134,10 +146,6 @@ struct Excerpt {
 };
 inline constexpr unsigned sessionPageLimit = 20;
 
-struct SessionTarget {
-    std::string environmentId, threadId;
-    bool operator==(const SessionTarget&) const = default;
-};
 struct SessionPreview {
     std::string text;
     bool truncated = false;
@@ -179,8 +187,10 @@ struct SessionCounts {
 class T3 {
 public:
     virtual ~T3() = default;
-    // A steer must affect only the requested Run, even if another Run takes over.
-    virtual bool supportsRunTargetedSteer() const { return false; }
+    virtual std::string sessionMessageWake(const SessionTarget&, const RunRef&) { return "unknown"; }
+    virtual QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget&, std::string_view) {
+        return QueueCancelOutcome::Retry;
+    }
     virtual std::string authGeneration(const std::string& environmentId, const Json& config) = 0;
     // Local/preflight checks only. Throw ModelError for a settings failure and report auth separately.
     virtual std::optional<Delivery> preflight(const Command&) { return std::nullopt; }
@@ -211,8 +221,7 @@ class GitHost;
 struct GitWebhook;
 class Policy;
 class ParticipationStore;
-class RootDelivery;
-class SessionHandoff;
+class SessionParticipation;
 struct Person;
 struct ConfiguredSchedule;
 struct ScheduleImportError;
@@ -331,36 +340,25 @@ private:
     friend class Runtime;
     friend class Policy;
     friend class T3Connections;
-    friend class RootDelivery;
-    friend class SessionHandoff;
+    friend class SessionParticipation;
 };
 
 struct BotTools;
-struct SpecialistCheck {
-    Id channel, generation;
-    std::string delegationId, peerBotId, purpose, doneWhen, commitSha;
-};
-struct SpecialistDelegation {
-    std::string delegationId;
-    Id senderTaskId, recipientTaskId;
-    bool operator==(const SpecialistDelegation&) const = default;
-};
 struct RuntimeOptions {
     std::function<Seconds()> clock = unixTime;
     // "off", "on_demand", "prefill". Prefill uses the same bounded T3 history reader.
     std::string sessionRead = "off";
     // Resolve the peers this sender can use, with each peer's own execution settings.
-    std::function<std::vector<PeerBot>(std::string_view)> peers = {};
+    PeerResolver peers = {};
     std::function<void(std::string_view)> automationError = {};
     std::shared_ptr<const BotTools> botTools = {};
     std::shared_ptr<GitHost> gitHost = {};
     std::function<void(std::string_view)> storageContention = {};
-    std::function<std::optional<Person>(std::string_view)> resolveSpecialistPerson = {};
-    std::function<std::optional<std::string>(const Person&, Id channel)> observeSpecialistInput = {};
     ApplyBotChange applyBotChange = {};
     // Supply this when applyBotChange can throw after publishing. On exhaustion,
     // confirm publication by request key or release any unpublished reservation.
     ReconcileBotCreation reconcileBotCreation = {};
+    IntakeResolver intake = {};
 };
 class Runtime {
 public:
@@ -369,9 +367,6 @@ public:
     ~Runtime();
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
-    SpecialistDelegation startSpecialist(const Person&, const SpecialistCheck&);
-    Id specialistBudgetRemaining(Id channel) const;
-    void freezeSpecialistWork(const Person&, Id channel, Id generation);
     void runConversations();
     // tick() completes a step for each eligible project. tickConcurrent() schedules
     // eligible projects independently and returns immediately.
@@ -380,8 +375,6 @@ public:
     // Let admitted work settle while stopping further dispatch.
     void requestStop();
 private:
-    friend class SessionHandoff;
-    void freezeSpecialistWorkForRecovery(Id channel, Id generation);
     struct Impl;
     std::unique_ptr<Impl> p_;
 };

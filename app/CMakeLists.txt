@@ -22,15 +22,10 @@ if(BUILD_TESTING)
   target_link_libraries(flock_app_tests PRIVATE flock_app_support)
   add_test(NAME flock_app COMMAND flock_app_tests)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME flock_verify_handoff_model_commit COMMAND "${Python3_EXECUTABLE}"
-    "${PROJECT_SOURCE_DIR}/.agents/skills/verify-handoff-model-commit/model.py")
   add_executable(flock_app_session_settings tests/session_settings.cpp)
   target_link_libraries(flock_app_session_settings PRIVATE flock_app_support flock_t3)
   add_test(NAME flock_app_session_settings COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock_app_session_settings>)
-  add_test(NAME flock_app_headless_handoff COMMAND "${Python3_EXECUTABLE}"
-    "${PROJECT_SOURCE_DIR}/t3/fixture.py" $<TARGET_FILE:flock> headless-handoff)
-  set_tests_properties(flock_app_headless_handoff PROPERTIES TIMEOUT 20)
   add_test(NAME flock_cli_invalid_port
     COMMAND "${CMAKE_COMMAND}" "-DFLOCK=$<TARGET_FILE:flock>" -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_port.cmake")
   find_program(FLOCK_NODE_EXECUTABLE node)

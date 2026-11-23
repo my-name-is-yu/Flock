@@ -52,15 +52,7 @@ PolicyOrigin Store::Impl::taskPolicyOrigin(const Json& task) {
     PolicyOrigin origin{field(task,"botId"),field(task,"channelScope"),{},source,0,id,
                         integer(task,"currentRevision"),integer(task,"generation"),!source};
     if (!source) origin.scope = "task/" + std::to_string(id);
-    if (auto row = query(R"SQL(
-SELECT c.person_id FROM specialist_delegations d JOIN return_channels c ON c.id=d.channel_id
-WHERE d.recipient_task=?1 OR d.sender_task=?1 OR d.id=(
- SELECT w.delegation_id FROM workflow_stages s JOIN workflows w ON w.id=s.workflow_id WHERE s.task_id=?1
-) LIMIT 1
-)SQL",{id}); row.next()) {
-        origin.requester = row.string(0);
-        origin.background = true;
-    } else if (source) {
+    if (source) {
         const auto message = loadTurnMessage(source);
         const auto fromMessage = policyOrigin(message);
         origin.scope = fromMessage.scope;
@@ -128,14 +120,6 @@ WHERE a.status IN ('pending','approved')
         if (stale || expired)
             settled.push_back({rows.number(0),rows.number(1),rows.number(2),stale ? "stale" : "expired"});
     }
-    exec(R"SQL(
-UPDATE policy_approvals SET status='stale'
-WHERE status IN ('pending','approved') AND operation LIKE 'root/%' AND NOT EXISTS (
- SELECT 1 FROM thread_deliveries d JOIN session_controls c ON c.channel_id=d.channel_id
- WHERE d.command_id=substr(policy_approvals.operation,6) AND d.state=0
- AND c.state='active' AND c.generation=d.generation
-)
-)SQL");
     for (const auto& change : settled) {
         exec("UPDATE policy_approvals SET status=? WHERE id=? AND status IN ('pending','approved')",
              {change.status,change.id});

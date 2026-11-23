@@ -65,18 +65,9 @@ struct Mixed : Model {
 
 struct Runs : T3 {
     std::map<std::string,Observation> runs;
-    std::vector<Command> notes;
     std::vector<std::string> interrupted;
-    bool supportsRunTargetedSteer() const override { return true; }
     std::string authGeneration(const std::string&, const Json&) override { return "live-eval"; }
     Delivery send(const Command& command) override {
-        if (command.tool == "steer") {
-            const auto run = runs.find(command.target.runId);
-            if (run == runs.end() || run->second.kind != Observation::Kind::Running)
-                return {Delivery::Kind::NotAccepted,{},"The assigned Run is no longer running",true};
-            notes.push_back(command);
-            return {Delivery::Kind::Accepted,command.target,{}};
-        }
         const auto id = std::to_string(runs.size() + 1);
         runs["run-" + id] = {};
         return {Delivery::Kind::Accepted,{"thread-" + id,"run-" + id,{}},{}};
@@ -96,7 +87,6 @@ using Tasks = std::map<Id,Json>;
 struct Turn {
     Json reply;
     Tasks before, after;
-    std::vector<Command> steers;
     std::size_t interrupts;
 
     Id message() const { return reply.at("replyToMessageId").get<Id>(); }
@@ -153,7 +143,6 @@ struct Scene {
     }
     Turn send(const std::string& text, Id replyTo = 0) {
         auto before = snapshot();
-        const auto steerCount = t3.notes.size();
         const auto interruptCount = t3.interrupted.size();
         const auto receipt = store.receive(localOwner,intake(),"message-" + std::to_string(store.conversation("release",0,200).size()),
                                            text,replyTo);
@@ -163,7 +152,6 @@ struct Scene {
             if (row.at("kind") != "conversation_reply" || data.at("replyToMessageId") != receipt.at("messageId")) continue;
             checkReply(data);
             return {data,std::move(before),snapshot(),
-                    {t3.notes.begin() + static_cast<std::ptrdiff_t>(steerCount),t3.notes.end()},
                     t3.interrupted.size() - interruptCount};
         }
         throw std::runtime_error("The turn did not reply");
@@ -176,11 +164,9 @@ using Action = std::pair<std::string,Id>;
 void checkActions(const Turn& turn, std::initializer_list<Action> expected) {
     std::set<Action> remaining(expected);
     std::set<Id> touched, started;
-    std::size_t steers = 0;
     for (const auto& [tool,id] : expected) {
         touched.insert(id);
         if (tool == "start_task") started.insert(id);
-        if (tool == "message_session") ++steers;
     }
     for (const auto& action : turn.reply.at("actions")) {
         const auto tool = action.at("tool").get<std::string>();
@@ -201,7 +187,7 @@ void checkActions(const Turn& turn, std::initializer_list<Action> expected) {
     for (const auto& [id,task] : turn.after)
         if (!turn.before.contains(id)) created.insert(id);
     check(created == started,"the tasks created by the turn did not match its start actions");
-    check(turn.steers.size() == steers && turn.interrupts == 0,"unexpected T3 steer or interrupt count");
+    check(turn.interrupts == 0,"unexpected T3 interrupt");
 }
 
 std::string lower(std::string text) {
@@ -422,8 +408,6 @@ bool explainsCanary(const std::string& reply) {
     return false;
 }
 
-enum class NoteTiming { Immediate, SafeBoundary };
-
 const std::string databaseDirective =
     R"((?:use|using|(?:switch|move|point|set|change)(?:\s+(?!(?:to|but|then)\b)\w+){0,4}\s+to)"
     R"(|target(?:ing)?|connect(?:ing)?\s+to)"
@@ -444,12 +428,11 @@ bool selectsOtherDatabase(const std::string& text) {
     return false;
 }
 
-void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing) {
-    const bool immediate = timing == NoteTiming::Immediate;
-    checkActions(turn,{{immediate ? "message_session" : "send_to_task",id}});
+void checkStagingNote(const Scene& s, const Turn& turn, Id id) {
+    checkActions(turn,{{"send_to_task",id}});
     const auto& before = turn.before.at(id);
     const auto& after = turn.after.at(id);
-    const auto kind = immediate ? "instruction_steered" : "instruction_accepted";
+    const auto kind = "instruction_accepted";
     const auto notes = turnEvents(s,turn,id,kind);
     check(notes.size() == 1 && notes.front().at("messageId") == turn.message(),
           "expected one new " + std::string(kind) + " event for this message");
@@ -468,22 +451,13 @@ void checkStagingNote(const Scene& s, const Turn& turn, Id id, NoteTiming timing
 
     const auto& effect = turn.reply.at("actions").front().at("effect");
     const auto& run = before.at("activeRun");
-    if (immediate) {
-        const auto& steer = turn.steers.front();
-        check(effect == "delivered" && note.at("run").at("runId") == run.at("runId") &&
-              note.at("run").at("threadId") == run.at("threadId") &&
-              steer.target.runId == run.at("runId").get<std::string>() &&
-              steer.target.threadId == run.at("threadId").get<std::string>() && steer.instruction == instruction && after == before,
-              "the steer did not reach the current run without changing the task");
-    } else {
-        auto pending = before.value("pendingInstructions",Json::array());
-        pending.push_back(note);
-        check(effect == "accepted" && note.at("conflicting") == false &&
-              note.at("revisionId") == before.at("currentRevision") && after.at("pendingInstructions") == pending &&
-              after.at("state") == before.at("state") && after.at("activeRun") == run &&
-              after.at("currentRevision") == before.at("currentRevision") && after.at("revisions") == before.at("revisions") &&
-              !after.value("replanning",false),"the note was not queued for the current revision's next safe boundary");
-    }
+    auto pending = before.value("pendingInstructions",Json::array());
+    pending.push_back(note);
+    check(effect == "accepted" && note.at("conflicting") == false &&
+          note.at("revisionId") == before.at("currentRevision") && after.at("pendingInstructions") == pending &&
+          after.at("state") == before.at("state") && after.at("activeRun") == run &&
+          after.at("currentRevision") == before.at("currentRevision") && after.at("revisions") == before.at("revisions") &&
+          !after.value("replanning",false),"the note was not queued for the current revision's next safe boundary");
 }
 
 std::regex taskDenial(std::string_view action, std::string_view topic) {
@@ -576,15 +550,10 @@ const std::vector<std::pair<std::string,Scenario>> scenarios{
         check(explainsCanary(turn.reply.at("text").get_ref<const std::string&>()),
               "the reply did not explain rollout_canary's 5% one-day rollout followed by full release");
     }},
-    {"a note for running work reaches that task immediately",[](Scene& s) {
-        const auto id = s.task("Benchmark the startup time","benchmark");
-        const auto turn = s.send("Tell the running benchmark session right now to use the staging database from now on. Keep the run going.");
-        checkStagingNote(s,turn,id,NoteTiming::Immediate);
-    }},
     {"a note for running work waits for a safe boundary",[](Scene& s) {
         const auto id = s.task("Benchmark the startup time","benchmark");
         const auto turn = s.send("Leave a note for the benchmark task to use the staging database at its next safe point. Let the current run continue.");
-        checkStagingNote(s,turn,id,NoteTiming::SafeBoundary);
+        checkStagingNote(s,turn,id);
     }},
 };
 
@@ -656,7 +625,6 @@ void selfTest() {
     const auto criteria = [&](std::string_view text, std::string_view instruction = "Update the report criteria") {
         return action("change_task",benchmark,{{"doneWhen",text},{"instruction",instruction}});
     };
-    const auto steer = [&](std::string_view text) { return action("message_session",benchmark,{{"text",text}}); };
     const auto queue = [&](std::string_view text) { return action("send_to_task",benchmark,{{"instruction",text}}); };
     const auto stagingAtSafePoint = queue("Use the staging database at the next safe point");
 
@@ -734,15 +702,7 @@ void selfTest() {
          "did not explain");
     test("explaining",{say("Use rollout_canary for 5% of users for a day, then expand to everyone. Keep it at 5% permanently.")},
          "did not explain");
-    test("a note for running work reaches",{steer("Use the staging database"),done});
-    test("a note for running work reaches",{steer("Use the staging database; do not stop the current run"),done});
-    test("a note for running work reaches",{stagingAtSafePoint,done},"unexpected action");
-    test("a note for running work reaches",
-         {steer("Do not use the staging database"),done},"did not direct");
-    test("a note for running work reaches",
-         {steer("Use the staging database for now. Do not use staging for the benchmark."),done},"did not direct");
     test("a note for running work waits",{stagingAtSafePoint,done});
-    test("a note for running work waits",{steer("Use the staging database"),done},"unexpected action");
     test("a note for running work waits",{queue("Avoid staging database"),done},"did not direct");
     for (auto text : {"Use the staging database, not the production database",
                       "Use the staging database instead of production",
@@ -755,7 +715,6 @@ void selfTest() {
                       "Use **staging** instead of `production`.",
                       "Do not point the benchmark to the dev db. Staging should be used.",
                       "Production must not be used. Run the benchmark using staging."}) {
-        test("a note for running work reaches",{steer(text),done});
         test("a note for running work waits",{queue(text),done});
     }
     for (auto text : {"Use the production database",
@@ -774,7 +733,6 @@ void selfTest() {
                       "Use staging for now. Don’t use staging for the final run.",
                       "Use staging for now. Staging should not be used going forward.",
                       "Use staging for now. Run on the existing database instead of staging."}) {
-        test("a note for running work reaches",{steer(text),done},"did not direct");
         test("a note for running work waits",{queue(text),done},"did not direct");
     }
 
@@ -785,9 +743,9 @@ void selfTest() {
     run("old intent and instruction cannot satisfy the new turn",[&](Scene& s) {
         const auto id = s.task(stagingBenchmark,"benchmark");
         const auto prior = s.send("Use the staging database");
-        checkStagingNote(s,prior,id,NoteTiming::SafeBoundary);
+        checkStagingNote(s,prior,id);
         const auto turn = s.send("Use staging for the next batch too");
-        checkStagingNote(s,turn,id,NoteTiming::SafeBoundary);
+        checkStagingNote(s,turn,id);
     },{queuedNote("Use the staging database"),done,queuedNote("Continue measuring"),done},"did not direct");
 
     for (const auto* field : {"state","currentRevision","pendingInstructions"}) {
