@@ -219,11 +219,22 @@ void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
         else ++now;
     };
     const auto tickThread = std::this_thread::get_id();
-    int clockReadsUntilDue = 0;
+    enum class DueReminder { Unarmed, AfterApprovalClockRead, OnNextClockRead };
+    auto dueReminder = DueReminder::Unarmed;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },
                     RuntimeOptions{.clock = [&] {
-                        if (std::this_thread::get_id() == tickThread && clockReadsUntilDue && --clockReadsUntilDue == 0)
-                            makeDue();
+                        if (std::this_thread::get_id() == tickThread) {
+                            switch (dueReminder) {
+                            case DueReminder::Unarmed: break;
+                            case DueReminder::AfterApprovalClockRead:
+                                dueReminder = DueReminder::OnNextClockRead;
+                                break;
+                            case DueReminder::OnNextClockRead:
+                                dueReminder = DueReminder::Unarmed;
+                                makeDue();
+                                break;
+                            }
+                        }
                         return now.load();
                     }});
     if (!externalWrite) createReminder(now.load());
@@ -231,7 +242,7 @@ void dueAutomationWakesAfterIdle(bool externalWrite, bool duringTick) {
     runtime.tickConcurrent();
     check(store.tasks("beta").empty(),"A reminder ran before it was due");
 
-    if (duringTick) clockReadsUntilDue = 2;
+    if (duringTick) dueReminder = DueReminder::AfterApprovalClockRead;
     else makeDue();
     runtime.tickConcurrent();
     check(store.tasks("beta").size() == 1,"An idle check missed a newly due reminder");
@@ -242,23 +253,24 @@ void failedAutomationDoesNotInvalidateOtherMaintenance() {
     Store store(fixture.database());
     ScriptedModel model;
     SimulatedT3 t3;
-    auto locker = fixture.connect();
+    auto maintenanceWriteLock = fixture.connect();
+    const auto releaseWriteLock = [&] { Fixture::sql(maintenanceWriteLock.get(),"ROLLBACK"); };
     int errors = 0;
-    bool contention = false;
+    bool unexpectedMaintenanceWrite = false;
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{
         .clock = [] { return Seconds{-1}; },
         .automationError = [&](std::string_view) { ++errors; },
         .storageContention = [&](std::string_view) {
-            if (!contention) Fixture::sql(locker.get(),"ROLLBACK");
-            contention = true;
+            if (!unexpectedMaintenanceWrite) releaseWriteLock();
+            unexpectedMaintenanceWrite = true;
         }
     });
     runtime.tickConcurrent();
 
-    Fixture::sql(locker.get(),"BEGIN IMMEDIATE");
+    Fixture::sql(maintenanceWriteLock.get(),"BEGIN IMMEDIATE");
     runtime.tickConcurrent();
-    if (!contention) Fixture::sql(locker.get(),"ROLLBACK");
-    check(errors == 2 && !contention,"Retrying an automation error repeated completed maintenance");
+    if (!unexpectedMaintenanceWrite) releaseWriteLock();
+    check(errors == 2 && !unexpectedMaintenanceWrite,"Retrying an automation error repeated completed maintenance");
 }
 
 void savedDecisionIsAppliedWithoutAnotherModelCall() {
