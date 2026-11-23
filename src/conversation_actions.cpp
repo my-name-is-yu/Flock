@@ -5,7 +5,6 @@
 #include <set>
 
 namespace flockv0 {
-using conversation_storage::verifiedEnvironment;
 using conversation_storage::identifier;
 using conversation_storage::ToolError;
 
@@ -241,9 +240,7 @@ Store::Impl::CallOutcome Store::Impl::sendSessionMessage(
         if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
         else error = "This Session is unavailable through your T3 connection";
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
-    // A stop takes the exclusive lock. Hold this through the wire call so a stop cannot
-    // commit between recording a dispatch and starting it.
-    std::shared_lock dispatch(sessionDispatchMutex);
+    const SessionDispatchFileLock dispatch(path,SessionDispatchFileLock::Mode::shared);
     {
         std::lock_guard lock(mutex);
         Transaction transaction(db);
@@ -370,13 +367,12 @@ SELECT ?,?,scope_key,origin,sender_id,person_id FROM channel_messages WHERE mess
 }
 
 Id Store::Impl::startConversationTask(const Json& routing, std::string_view bot, std::string_view request,
-                                      std::string_view environment, Id messageId, const Json& source,
+                                      std::string_view destination, Id messageId, const Json& source,
                                       bool resume, const WorkSession* selectedSession) {
-    const auto destination = selectedSession ? selectedSession->environmentId
-        : environment.empty() ? field(routing,"environmentId") : verifiedEnvironment(routing,routing,environment);
-    const auto project = selectedSession ? selectedSession->projectId : field(routing,"projectId");
+    const auto project = selectedSession ? selectedSession->projectId
+        : destination == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
     if (selectedSession) redactor(bot).requirePublic(selectedSession->threadId);
-    const auto id = submit({std::string(bot),std::string(request),destination,project,routing.at("config")},
+    const auto id = submit({std::string(bot),std::string(request),std::string(destination),project,routing.at("config")},
                            messageId,source);
     auto task = load(id);
     if (routing.contains("sessionOrigin")) task["sessionOrigin"] = routing.at("sessionOrigin");
@@ -450,15 +446,22 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
         const auto oldDone = effectiveDoneWhen(task);
         const auto intent = change->intent.empty() ? oldIntent : change->intent;
         const auto done = change->doneWhen.empty() ? oldDone : change->doneWhen;
-        const auto environment = verifiedEnvironment(task,routing,change->environment);
+        const auto& environment = change->environment;
+        const auto currentEnvironment = field(task,"environmentId");
+        const auto pendingRoute = PendingDestination::read(task);
         const bool destinationChanged = !environment.empty() &&
-            environment != task.value("pendingEnvironmentId",field(task,"environmentId"));
+            environment != (pendingRoute ? pendingRoute->environmentId : currentEnvironment);
+        std::optional<PendingDestination> nextRoute;
         if (destinationChanged) {
-            const auto id = task.at("id").get<Id>();
-            const auto peer = peerExchange(id);
-            if (peer && peer->recipient == id && peer->kind == "work" &&
-                peerWorkRouteWouldCycle(peer->sender,environment,field(task,"projectId")))
-                throw Conflict("This destination would make project queues wait for one another");
+            auto project = environment == currentEnvironment ? field(task,"projectId")
+                : environment == field(routing,"environmentId") ? field(routing,"projectId") : std::string{};
+            const bool pinned = !project.empty();
+            if (!pinned) project = rememberedT3Project(field(task,"botId"),environment);
+            if (recipientRouteWouldCycle(task.at("id"),environment,project)) {
+                if (pinned) throw Conflict("This destination would make project queues wait for one another");
+                project.clear();
+            }
+            nextRoute = PendingDestination{environment,std::move(project),pinned};
         }
         const bool criteriaChanged = oldDone != done;
         const bool intentChanged = oldIntent != intent;
@@ -475,8 +478,8 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
             if (intentChanged) task["sourceMessageCoversFullRequest"] = false;
             conflicting = true;
         }
-        if (destinationChanged) {
-            task["pendingEnvironmentId"] = environment;
+        if (nextRoute) {
+            nextRoute->write(task);
             conflicting = true;
         }
     }
@@ -532,6 +535,7 @@ void Store::Impl::withdrawTaskQuestion(Json& task, Id waitId) {
     if (task.at("state") != "waiting" || field(wait,"reason") != "user_question" ||
         wait.at("id") != waitId || !waitIsActionable(task))
         throw Conflict("The question is no longer open");
+    if (wait.contains("projectChoices")) throw Conflict("Choose a T3 project before this task can start");
     auto updated = currentEvent(task);
     for (const auto* metadata : {"id","failures","retryAt","evidence","consumed"}) updated.erase(metadata);
     updated["withdrawnUserQuestion"] = field(wait,"text");

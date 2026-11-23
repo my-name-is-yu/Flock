@@ -136,7 +136,8 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .row-actions { display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
 .row-actions .button { text-decoration: none; }
 #rules:empty { display: none; }
-:is(#rules, #connections):not(:empty) + .rule-form:not([hidden]) { border-block-start: 1px solid var(--hairline); }
+#rules:not(:empty) + .rule-form:not([hidden]),
+#connections:not(:empty) + .t3-connect-options:not([hidden]) { border-block-start: 1px solid var(--hairline); }
 #connections:empty { display: none; }
 #connections > .settings-row + .settings-row { border-block-start: 1px solid var(--hairline); }
 .settings-group form.rule-form { align-items: end; justify-content: flex-start; border-radius: 0; background: transparent; padding: .8rem 1rem; }
@@ -203,8 +204,10 @@ main.settings-page { width: 100%; max-width: 46rem; margin: 0 auto; padding: var
 .settings-row .button.primary { background: var(--accent-fill); color: var(--on-accent); }
 .settings-row .button.primary:hover:not(:disabled) { background: var(--accent-fill-hover); }
 .settings-row a.button.primary { background: var(--accent-fill); color: var(--on-accent); }
-.settings-group :is(#rule-form, #t3-form) { border-radius: 0; }
-.settings-group #t3-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.settings-group .t3-connect-options { align-items: start; flex-direction: column; }
+.t3-connect-options details { width: 100%; }
+.t3-connect-options summary { cursor: pointer; width: fit-content; }
+.settings-group #t3-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: .5rem 0 0; }
 .settings-group #t3-form button { align-self: end; }
 .settings-row a.button { text-decoration: none; }
 

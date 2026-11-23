@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
         auto signIn = [&](const std::string& environment) {
             return loginT3(home, environment, endpoint, [&](const std::string& authorization) {
                 fixture({{"authorization", authorization}});
-            });
+            }).operate;
         };
         for (const auto& [stage, code] : std::map<std::string, std::string>{
                  {"discovery", "invalid_resource"}, {"registration", "invalid_client_metadata"}, {"token", "invalid_grant"}}) {
@@ -244,16 +244,22 @@ int main(int argc, char** argv) {
             check(ownerOnly(entry.path()), "stored credentials are owner-only");
         const auto discoveredHome = home / "discovered";
         fixture({{"claimedEnvironment", "env-discovered"}});
-        check(loginT3Environment(discoveredHome,std::nullopt,endpoint,[&](const std::string& authorization) {
+        const auto login = loginT3(discoveredHome,std::nullopt,endpoint,[&](const std::string& authorization) {
             fixture({{"authorization", authorization}});
         },true,[](const std::string& environment, const std::function<void()>& save) {
             check(environment == "env-discovered", "connection uses the authenticated environment identity");
             save();
-        }), "URL-only login reports Operate approval");
+        });
+        check(login.operate && login.environmentId == "env-discovered",
+              "URL-only login returns the authenticated environment and Operate approval");
         check(!makeT3Mcp(discoveredHome)->authGeneration("env-discovered",Json::object()).empty(),
               "URL-only login saves credentials under the discovered environment ID");
         fixture({{"claimedEnvironment", "env-1"}});
         auto adapter = makeT3Mcp(home);
+        const auto projects = adapter->projects("env-1");
+        check(projects.size() == 2 && projects[0].id == "project" && projects[0].title == "Release Pipeline" &&
+              projects[0].directory == "release" && projects[1].id == "docs" && projects[1].directory == "docs",
+              "Project discovery did not page through live projects or exclude archived projects");
         Command launch;
         launch.actionId = "flock-action-0123";
         launch.tool = "delegate";

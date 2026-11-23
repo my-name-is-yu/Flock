@@ -9,7 +9,6 @@
 #include <map>
 #include <mutex>
 #include <set>
-#include <shared_mutex>
 #include <sqlite3.h>
 #include <utility>
 #include <variant>
@@ -51,7 +50,7 @@ Json runJson(const RunRef&);
 RunRef runRef(const Json&);
 Json gitJournal(const GitContext&, std::string_view tool, const GitRepository&, Json result);
 
-enum class RequestJournal { record, skip };
+enum class TaskSource { request, handoff, consultation };
 
 bool modelArgumentsContainProtected(const SecretRedactor&, std::string_view tool, const Json& args);
 
@@ -72,6 +71,13 @@ struct PeerExchange {
 };
 
 struct TaskChange { std::string intent, doneWhen, environment; };
+struct PendingDestination {
+    std::string environmentId, projectId;
+    bool pinned;
+    static std::optional<PendingDestination> read(const Json& task);
+    void write(Json& task) const;
+};
+using ProjectCatalog = std::variant<std::vector<T3Project>,std::string>;
 
 struct ConversationModelFailure {
     std::optional<Seconds> retryFrom;
@@ -109,6 +115,18 @@ enum class SessionExit { removed, left };
 struct SessionStop {
     Id participation = 0, cutoff = 0;
 };
+
+class SessionDispatchFileLock {
+public:
+    enum class Mode { shared, exclusive };
+    SessionDispatchFileLock(const std::filesystem::path& database, Mode);
+    ~SessionDispatchFileLock();
+    SessionDispatchFileLock(const SessionDispatchFileLock&) = delete;
+    SessionDispatchFileLock& operator=(const SessionDispatchFileLock&) = delete;
+private:
+    int fd_;
+};
+
 enum class ApprovalGate { allow, waiting, denied, expired, stale };
 std::string_view approvalError(ApprovalGate);
 
@@ -126,7 +144,6 @@ struct Store::Impl {
     bool liveInteractiveRoles = false;
     std::string artifactOrigin, webOrigin;
     std::mutex deliveryMutex;
-    std::shared_mutex sessionDispatchMutex;
     std::mutex sessionQueueCancellationMutex;
     std::function<Seconds()> policyClock = unixTime;
     void openSchema();
@@ -177,6 +194,7 @@ struct Store::Impl {
     SessionStop stopSessionParticipation(const Person&, std::string_view bot, const SessionTarget&, SessionExit, Id message = 0);
     SessionStopResult settleSessionQueueCancellations(T3&, std::stop_token, SessionStop stop = {});
     bool connectedSessionAccess(const conversation::Message&, const SessionTarget&);
+    bool t3EnvironmentConnected(std::string_view environment);
     void initializeMemorySchema();
     void initializeAutomationSchema();
     BotNotes loadNotes(std::string_view bot, const Runtime::SoulLoader&, Seconds now);
@@ -349,14 +367,24 @@ struct Store::Impl {
     Id addRevision(Json&, std::string_view intent, std::string_view doneWhen, Id sourceMessageId = 0);
     bool conversationPending(std::string_view bot) const;
     void save(Json&);
+    std::string rememberedT3Project(std::string_view bot, std::string_view environment) const;
+    void rememberT3Project(std::string_view bot, std::string_view environment, std::string_view project);
+    bool projectQuestionOpen(std::string_view bot, std::string_view environment) const;
+    ProjectCatalog readProjectCatalog(T3&, std::string_view bot, std::string_view environment, bool requireConnection);
+    bool applyProjectCatalog(Json& task, ProjectCatalog catalog);
+    std::set<std::string> registeredT3Environments(std::string_view bot);
+    std::string taskEnvironment(std::string_view bot, const Json& routing, std::string_view name = {},
+                                const Json* movingTask = nullptr);
+    std::string defaultT3Environment(std::string_view bot, std::string_view configured, std::string_view preferred);
     Id submit(const Intake&, Id sourceMessageId = 0, const Json& source = nullptr,
-              RequestJournal requestJournal = RequestJournal::record, const Json& trigger = nullptr);
+              TaskSource sourceKind = TaskSource::request, const Json& trigger = nullptr);
     void operate(const Person&, const TaskTarget&, std::string_view, const Json&,
                  Id sourceMessage = 0, std::optional<InboxKind> = {});
     bool waitIsActionable(const Json& task) const;
     Id waitAnchor(Id task, Id wait) const;
     std::optional<PeerExchange> peerExchange(Id) const;
     bool peerWorkRouteWouldCycle(Id sender, std::string_view environment, std::string_view project) const;
+    bool recipientRouteWouldCycle(Id task, std::string_view environment, std::string_view project) const;
     bool replanReady(const Json& task) const;
     void peerMessage(const PeerExchange&, const Json&);
     void requestCancellation(Json&, SessionStop stop = {});

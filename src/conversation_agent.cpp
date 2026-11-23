@@ -10,7 +10,6 @@ using conversation_storage::identifier;
 using conversation_storage::text;
 using conversation_storage::ToolError;
 using conversation_storage::messageSize;
-using conversation_storage::verifiedEnvironment;
 
 namespace {
 using conversation::Message;
@@ -359,12 +358,16 @@ WHERE j.id=? AND j.id<? AND (j.conversation_bot_id=? OR t.bot_id=?)
     }
 
     Json environments = Json::array();
-    if (const auto initial = field(message.routing,"environmentId"); !initial.empty())
+    const auto initial = taskEnvironment(message.bot,message.routing);
+    if (!initial.empty())
         environments.push_back({{"name",initial},{"environmentId",initial},{"default",true}});
+    if (field(message.routing,"environmentId").empty())
+        for (const auto& environment : registeredT3Environments(message.bot))
+            if (environment != initial) environments.push_back({{"name",environment},{"environmentId",environment}});
     const auto& config = message.routing.at("config");
     if (const auto aliases = config.find("conversationEnvironments"); aliases != config.end() && aliases->is_object()) {
         for (auto alias = aliases->begin(); alias != aliases->end(); ++alias) {
-            const auto id = verifiedEnvironment(message.routing,message.routing,alias.key());
+            const auto id = taskEnvironment(message.bot,message.routing,alias.key());
             if (!id.empty()) environments.push_back({{"name",alias.key()},{"environmentId",id}});
         }
     }
@@ -460,14 +463,15 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
             throw ToolError("The selected T3 Session is unavailable. Search for it again and check its connection.");
         if (selectedSession && (!environment.empty() || resume))
             throw ToolError("A selected T3 Session fixes the destination. Omit environment and resume.");
-        if (!selectedSession && (field(routing,"environmentId").empty() || field(routing,"projectId").empty()))
-            throw ToolError("This Bot needs an execution environment and project before it can start work");
-        if (!environment.empty() && verifiedEnvironment(routing,routing,environment).empty())
-            throw ToolError("Unknown environment " + environment + "; use one of task.environments");
+        const auto destination = selectedSession ? selectedSession->environmentId : taskEnvironment(bot,routing,environment);
+        if (destination.empty())
+            throw ToolError(environment.empty()
+                ? "Choose a connected T3 environment to start work. Use task.environments or connect T3 in Settings."
+                : "Unknown environment " + environment + "; use one of task.environments");
         const auto result = source(nullptr);
         if (resume && (result.is_null() || result.at("taskState") != "cancelled"))
             throw ToolError("resume requires sourceResultMessageId from a cancelled task");
-        const auto id = startConversationTask(routing,bot,request,environment,message.id,
+        const auto id = startConversationTask(routing,bot,request,destination,message.id,
                                               result.is_null() ? Json(nullptr) : sourceRef(result),resume,selectedSession);
         if (!doneWhen.empty()) {
             auto task = load(id);
@@ -495,8 +499,12 @@ Json Store::Impl::applyTurnTool(const Message& message, int step, const Decision
                                 text(args,"environment",256,false)};
             if (change->intent.empty() && change->doneWhen.empty() && change->environment.empty())
                 throw ToolError("change_task needs intent, doneWhen, or environment; use send_to_task for other instructions");
-            if (!change->environment.empty() && verifiedEnvironment(task,routing,change->environment).empty())
-                throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+            if (!change->environment.empty()) {
+                auto destination = taskEnvironment(bot,routing,change->environment,&task);
+                if (destination.empty())
+                    throw ToolError("Unknown environment " + change->environment + "; use one of task.environments");
+                change->environment = std::move(destination);
+            }
         }
         const bool conflicting = acceptInstruction(task,message.id,step,
             instruction,result.is_null() ? Json(nullptr) : sourceRef(result),routing,change ? &*change : nullptr);

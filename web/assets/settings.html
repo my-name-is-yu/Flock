@@ -77,10 +77,16 @@
         <div class="connection-provider">
           <h3>T3 Code</h3>
           <div class="settings-group"><div id="connections"></div>
-            <form id="t3-form" class="settings-row rule-form" hidden>
-              <label class="rule-target">T3 connection URL <input name="mcpUrl" type="url" required autocomplete="off" spellcheck="false" placeholder="Paste the URL from T3 Code"></label>
-              <button class="button primary">Connect</button>
-            </form>
+            <div id="t3-connect-options" class="settings-row t3-connect-options" hidden>
+              <button id="t3-connect-local" type="button" class="button primary">Connect local T3</button>
+              <details id="t3-connect-by-url">
+                <summary>Use a connection URL</summary>
+                <form id="t3-form" class="rule-form">
+                  <label class="rule-target">T3 connection URL <input name="mcpUrl" type="url" required autocomplete="off" spellcheck="false" placeholder="Paste Copy MCP URL from T3 Code"></label>
+                  <button class="button">Connect</button>
+                </form>
+              </details>
+            </div>
           </div>
         </div>
       </section>

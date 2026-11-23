@@ -1386,10 +1386,11 @@ void settingsEndpoints(const std::filesystem::path& path) {
     Store store(path);
     store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/org/private",true);
     auto cb = callbacks();
-    const Json t3Target{{"environmentId","env-1"},{"mcpUrl","https://t3.example/mcp"}};
+    const Json t3Target{{"source","url"},{"mcpUrl","https://t3.example/mcp"}};
     std::atomic<bool> t3Started = false;
-    cb.t3Connect = [&](const Person& actor, const std::string& env, const std::string& url) {
-        check(actor.id == "owner" && env == "env-1" && url == "https://t3.example/mcp",
+    cb.t3Connect = [&](const Person& actor, const T3ConnectRequest& target) {
+        check(actor.id == "owner" && target.source == T3ConnectRequest::Source::Url &&
+              target.value == "https://t3.example/mcp",
               "T3 connection callback received the wrong requester or target");
         return !t3Started.exchange(true);
     };
@@ -1519,6 +1520,9 @@ void settingsEndpoints(const std::filesystem::path& path) {
     browser.post("/api/settings/t3-disconnect",{{"environmentId",nullptr}});
     check(browser.get("/api/settings").at("t3CleanupPending") == false,"retry did not clear T3 cleanup status");
     browser.post("/api/settings/t3-connect",{{"environmentId","env-1"},{"mcpUrl",false}},400);
+    browser.post("/api/settings/t3-connect",{{"source","local"},{"mcpUrl","https://t3.example/mcp"}},400);
+    browser.post("/api/settings/t3-connect",{{"source","saved"},{"mcpUrl","https://t3.example/mcp"}},400);
+    browser.post("/api/settings/t3-connect",{{"source","url"},{"mcpUrl",""}},400);
     browser.post("/api/settings/t3-connect",t3Target,202);
     browser.post("/api/settings/t3-connect",t3Target,409);
     check(browser.get("/api/settings").at("t3Setup").at("authorizationUrl") == "https://t3.example/authorize",

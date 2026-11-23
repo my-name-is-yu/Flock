@@ -191,6 +191,10 @@ struct SessionCounts {
     Id messages = 0, runs = 0;
 };
 
+struct T3Project {
+    std::string id, title, directory;
+};
+
 class T3 {
 public:
     virtual ~T3() = default;
@@ -213,6 +217,7 @@ public:
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
+    virtual std::vector<T3Project> projects(std::string_view) { return {}; }
     virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
         std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
@@ -367,6 +372,7 @@ struct RuntimeOptions {
     // confirm publication by request key or release any unpublished reservation.
     ReconcileBotCreation reconcileBotCreation = {};
     IntakeResolver intake = {};
+    bool requireT3Connection = false;
 };
 class Runtime {
 public:
