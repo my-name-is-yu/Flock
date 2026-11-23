@@ -331,16 +331,27 @@ void verifyAfterRestart(bool advance) {
     require(status["stages"][1]["verified"]==!advance && status["verdicts"].size()==1 &&
         status["verdicts"][0]["artifactVersion"]==shaA && status["verdicts"][0]["verdict"]=="pass" &&
         status["status"]==(advance ? "needs_verification" : "completed"),"incorrect versioned verification");
+    require(status["stages"][1].value("currentVerdict",std::string{})==(advance ? "" : "pass"),
+            "the stage showed a verdict for an outdated artifact or lost the current verdict");
     if (advance) {
         f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","verify"},{"instruction","Check the revised artifact"}});
         f.ticks(2);
         require(f.t3.commands.back().instruction.find(shaB)!=std::string::npos,"new verification was given an obsolete pin");
+        require(!f.status()["stages"][1].contains("currentVerdict"),"a running verification showed the earlier verdict");
         f.t3.finish("run-4",{{"artifactVersion",shaB},{"verdict","pass"}});
         f.ticks(1);
         status = f.status();
         require(status["status"]=="completed" && status["stages"][1]["verified"]==true &&
+            status["stages"][1]["currentVerdict"]=="pass" &&
             status["verdicts"].size()==2 && status["verdicts"][0]["artifactVersion"]==shaA &&
             status["verdicts"][1]["artifactVersion"]==shaB,"new verification overwrote old evidence");
+        f.call("instruct_workflow_stage",{{"workflowId",id},{"stageId","verify"},{"instruction","Check again"}});
+        f.ticks(2);
+        f.t3.finish("run-5",{{"artifactVersion",shaB}});
+        f.ticks(1);
+        status = f.status();
+        require(status["stages"][1]["status"]=="failed" && !status["stages"][1].contains("currentVerdict") &&
+                status["verdicts"].size()==2,"an invalid report exposed a prior verdict for the same artifact");
     }
 }
 

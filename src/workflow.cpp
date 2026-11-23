@@ -141,10 +141,11 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
     auto rows = query(R"SQL(SELECT s.spec,s.status,s.task_id,s.input,s.output,s.deadline,t.data,t.state,s.alerted,
           s.confirmed_state,s.confirmed_at,s.unreachable,old.stage_id IS NOT NULL,
           (SELECT json_group_array(d.parent_id) FROM workflow_dependencies d WHERE d.workflow_id=s.workflow_id AND d.stage_id=s.stage_id),
-          pending.phase='started' AND json_extract(t.data,'$.activeRun') IS NULL
+          pending.phase='started' AND json_extract(t.data,'$.activeRun') IS NULL,v.verdict
         FROM workflow_stages s LEFT JOIN tasks t ON t.id=s.task_id
         LEFT JOIN outbox pending ON pending.id=json_extract(t.data,'$.actionId')
         LEFT JOIN outdated_workflow_stages old USING(workflow_id,stage_id)
+        LEFT JOIN workflow_verdicts v ON v.report_id=s.result_id
         WHERE s.workflow_id=? ORDER BY s.rowid)SQL",{id});
     while (rows.next()) {
         const auto spec = rows.json(0);
@@ -173,6 +174,8 @@ Json Store::Impl::workflowStatus(Id id, std::string_view bot, Seconds now) const
             {"lastConfirmedState",rows.string(9)},{"lastConfirmedAt",rows.number(10)},
             {"inputArtifactVersion",rows.string(3)},{"outputArtifactVersion",rows.string(4)}};
         if (spec.at("role")=="verify") stage["verified"] = status=="completed" && !outdated;
+        const auto verdict = rows.string(15);
+        if (!verdict.empty() && !outdated && (status=="completed" || status=="failed")) stage["currentVerdict"] = verdict;
         result["stages"].push_back(stage);
     }
     auto evidence = query(R"SQL(SELECT e.stage_id,j.task_id,e.version,e.verdict,j.id,j.data FROM (
