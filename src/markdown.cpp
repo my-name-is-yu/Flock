@@ -12,7 +12,7 @@
 
 namespace flockv0::markdown {
 namespace {
-enum class Target { html, slack, plain };
+enum class Target { html, slack, slack_plain, plain };
 
 std::string value(const char* source) {
     return source ? source : "";
@@ -161,8 +161,9 @@ std::string fallbackLink(cmark_node* node, Target target, unsigned depth) {
                                : escape(destination,target);
         return label + " (" + href + ")";
     }
-    if (target == Target::slack) {
-        const auto link = safe ? "<" + escape(destination,target) + ">" : escape(destination,target);
+    if (target == Target::slack || target == Target::slack_plain) {
+        const auto link = target == Target::slack && safe ? "<" + escape(destination,target) + ">"
+                                                          : escape(destination,target);
         return label + " (" + link + ")";
     }
     return label + "（" + destination + "）";
@@ -178,6 +179,7 @@ std::string link(cmark_node* node, Target target, unsigned depth) {
         if (label.find('|') != label.npos || label.find('\n') != label.npos) return fallbackLink(node,target,depth);
         return "<" + escape(destination,target) + "|" + label + ">";
     }
+    if (target == Target::slack_plain) return label + " (" + escape(destination,target) + ")";
     return label + "（" + destination + "）";
 }
 
@@ -191,8 +193,9 @@ std::string image(cmark_node* node, Target target, unsigned depth) {
                               : escape(destination,target);
         return alt + " (" + url + ")";
     }
-    if (target == Target::slack) {
-        const auto url = safe ? "<" + escape(destination,target) + ">" : escape(destination,target);
+    if (target == Target::slack || target == Target::slack_plain) {
+        const auto url = target == Target::slack && safe ? "<" + escape(destination,target) + ">"
+                                                         : escape(destination,target);
         return alt + " (" + url + ")";
     }
     return alt + "（" + destination + "）";
@@ -204,13 +207,12 @@ std::string code(std::string_view content, Target target, bool fenced) {
         return "<code>" + escape(content,target) + "</code>";
     }
     if (target == Target::plain) return std::string(content);
+    if (target == Target::slack_plain) return escape(content,target);
     if (fenced) {
-        if (content.find("```") != content.npos) return escape(content,target);
         std::string result = "```\n" + escape(content,target);
         if (!content.ends_with('\n')) result += '\n';
         return result + "```";
     }
-    if (content.find('`') != content.npos) return escape(content,target);
     return "`" + escape(content,target) + "`";
 }
 
@@ -280,6 +282,19 @@ std::string render(cmark_node* node, Target target, unsigned depth) {
     }
 }
 
+bool slackMrkdwnRepresentable(cmark_node* node) {
+    const auto type = cmark_node_get_type(node);
+    const auto literal = value(cmark_node_get_literal(node));
+    if (type == CMARK_NODE_CODE) return literal.find('`') == std::string::npos;
+    if (type == CMARK_NODE_CODE_BLOCK) return literal.find("```") == std::string::npos;
+    if ((type == CMARK_NODE_TEXT || type == CMARK_NODE_HTML_INLINE || type == CMARK_NODE_HTML_BLOCK) &&
+        literal.find_first_of("*_~`") != std::string::npos)
+        return false;
+    for (auto* child = cmark_node_first_child(node); child; child = cmark_node_next(child))
+        if (!slackMrkdwnRepresentable(child)) return false;
+    return true;
+}
+
 std::string convert(std::string_view source, Target target) {
     static constexpr char empty[] = "";
     const auto* bytes = source.empty() ? empty : source.data();
@@ -291,6 +306,15 @@ std::string convert(std::string_view source, Target target) {
 }
 
 std::string toHtml(std::string_view source) { return convert(source,Target::html); }
-std::string toSlack(std::string_view source) { return convert(source,Target::slack); }
+SlackReply toSlack(std::string_view source) {
+    static constexpr char empty[] = "";
+    const auto* bytes = source.empty() ? empty : source.data();
+    auto* document = cmark_parse_document(bytes,source.size(),CMARK_OPT_DEFAULT);
+    if (!document) return {escape(source,Target::slack_plain),false};
+    std::unique_ptr<cmark_node,decltype(&cmark_node_free)> root(document,cmark_node_free);
+    const bool mrkdwn = slackMrkdwnRepresentable(root.get());
+    const auto target = mrkdwn ? Target::slack : Target::slack_plain;
+    return {render(root.get(),target,0),mrkdwn};
+}
 std::string toPlain(std::string_view source) { return convert(source,Target::plain); }
 }

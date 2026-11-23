@@ -663,9 +663,10 @@ WHERE d.state IN ('pending','unknown') AND next_attempt<=? ORDER BY d.rowid LIMI
                 if (operation == "reply" && deliveryPayload.contains("text") && deliveryPayload["text"].is_string()) {
                     const auto source = deliveryPayload["text"].get<std::string>();
                     if (origin.kind == ChannelKind::slack) {
-                        deliveryPayload["text"] = markdown::toSlack(source);
+                        const auto slackReply = markdown::toSlack(source);
+                        deliveryPayload["text"] = slackReply.text;
                         deliveryPayload["deliveryMetadata"] = {
-                            {"mrkdwn",true},{"parse","none"},{"link_names",false},{"disableAutoMentions",true}
+                            {"mrkdwn",slackReply.mrkdwn},{"parse","none"},{"link_names",false},{"disableAutoMentions",true}
                         };
                     } else if (origin.kind == ChannelKind::imessage) {
                         deliveryPayload["text"] = markdown::toPlain(source);

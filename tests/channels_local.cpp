@@ -418,6 +418,29 @@ void markdownDelivery(const std::filesystem::path& database) {
     }
 }
 
+void markdownFallbackDelivery(const std::filesystem::path& database) {
+    const std::string source =
+        "Before **bold** and ``literal ` ** _ <tag> >`` after [search](https://example.com/search?q=a&lang=en)";
+    const std::string expected =
+        "Before bold and literal ` ** _ &lt;tag&gt; &gt; after search (https://example.com/search?q=a&amp;lang=en)";
+    Script model;
+    model.decideNext = [&](const ModelInput&) { return reply(source); };
+    SessionAdapter t3;
+    auto transport = std::make_shared<RecordedTransport>();
+    transport->loseNextSlackReply = false;
+    Store store(database);
+    connect(store,transport);
+    shareBot(store,"release");
+    store.policy().setMode(root,"full");
+    store.receiveChannel(ChannelKind::slack,"fixture-auth",event("slack-code-fallback","slack-code-fallback","hello"),intake);
+    Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
+    runtime.runConversations();
+    check(transport->effects.size() == 1 && transport->effects[0].at("payload").at("text") == expected &&
+          transport->effects[0].at("payload").at("deliveryMetadata") == Json({{"mrkdwn",false},{"parse","none"},
+              {"link_names",false},{"disableAutoMentions",true}}),
+          "Slack delivery did not send escaped fallback text with mrkdwn disabled");
+}
+
 void taskUpdates(const std::filesystem::path& database) {
     Store store(database);
     SessionAdapter t3;
@@ -869,6 +892,7 @@ int main() {
         std::ofstream(path) << "fixture text";
         channels(temp.path / "channels.db");
         markdownDelivery(temp.path / "markdown-delivery.db");
+        markdownFallbackDelivery(temp.path / "markdown-fallback.db");
         taskUpdates(temp.path / "task-updates.db");
         workflowContextIsWebScoped(temp.path / "workflow-context-scope.db");
         sessionEvidence(temp.path / "session-evidence.db");

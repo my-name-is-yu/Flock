@@ -32,13 +32,19 @@ destinations. Other operations and payload fields, including suggestions,
 attachments, and approval state, are unchanged.
 
 The local bridge receives the derived `payload.text` and `origin` on `/deliver`.
-For Slack replies, `payload.deliveryMetadata` is
-`{"mrkdwn":true,"parse":"none","link_names":false,"disableAutoMentions":true}`.
+For Slack replies, `payload.deliveryMetadata.mrkdwn` matches the renderer's
+result. The worker also sets `parse` to `none`, `link_names` to false, and
+`disableAutoMentions` to true.
 The provider sender must honor these settings, must not enable automatic
 mentions or link-name expansion, and must send the supplied text rather than
 reparse canonical Markdown. Text-like Markdown content is escaped before it
-reaches Slack. The provider sender is external to this repository; an adapter
-that ignores this contract can re-enable provider-specific notifications.
+reaches Slack. `mrkdwn` is false when inline code contains a backtick, a code
+block contains triple backticks, or literal text or raw HTML contains `*`, `_`,
+`~`, or a backtick. In that case the entire reply uses escaped plain text with
+links expanded. This removes Markdown formatting throughout the reply to
+preserve literal content without changing code delimiters or inserting characters.
+The provider sender is external to this repository; an adapter that ignores
+this contract can re-enable provider-specific notifications.
 
 Queued and resumed shared Web messages use the sender's current identity and
 Bot access. If a person has multiple credentials, their queued messages have
