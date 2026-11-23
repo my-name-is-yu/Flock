@@ -534,6 +534,15 @@ void accessAndActions() {
     cross["headRepo"] = "fork/private";
     check(invoke(store,runtime,script,"cross-repo","git_open_pr",cross).at("ok") == false &&
           host->createCalls == 0,"blocked fork was used");
+    const auto fork = GitRepository{hostName,"fork/public"}.resource();
+    cross["headRepo"] = "fork/public";
+    store.policy().changeRule(localOwner,RuleKind::ask,Action::repository_read,fork,true);
+    store.policy().changeRule(localOwner,RuleKind::allow,Action::repository_pr,repoTarget,true);
+    store.policy().setMode(localOwner,"supervised");
+    check(invoke(store,runtime,script,"cross-repo-head-ask","git_open_pr",cross).at("error") ==
+          "Head repository read access denied" && host->createCalls == 0,
+          "A base PR Allow bypassed the fork's Ask-first read rule");
+    store.policy().setMode(localOwner,"full");
     for (const auto& [tool,args] : commands) {
         const auto name = "allowed-" + std::to_string(++counter);
         const auto result = invoke(store,runtime,script,name,tool,argsFor(args,repoName));

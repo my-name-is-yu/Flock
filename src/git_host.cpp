@@ -363,7 +363,9 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
     }
     if (decision.tool == "git_open_pr") {
         const auto head = args.contains("headRepo") ? GitRepository::parse(hostId,field(args,"headRepo")) : repo;
-        if (head != repo && !permits(head,"read")) throw Conflict("Head repository read access denied");
+        if (head != repo && (!permits(head,"read") ||
+                            !policy.allows(bot,Action::repository_read,head.resource())))
+            throw Conflict("Head repository read access denied");
         auto result = openGitPr(host,context,{{repo,head,branch(args,"baseRef"),branch(args,"headRef")},{},
                                      field(args,"title"),field(args,"body"),args.value("draft",false)},
                                 invocation,args.value("newIntent",false));

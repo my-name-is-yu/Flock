@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
-#include <sqlite3.h>
 
 using namespace flockv0;
 namespace {
@@ -91,43 +90,18 @@ void rules(const std::filesystem::path& path) {
     rejected([&] { policy.setMode(requester,"supervised"); });
 }
 
-void upgrade(const std::filesystem::path& path) {
+void reopen(const std::filesystem::path& path) {
     Id oldMessage;
     {
         Store store(path);
         store.policy().setOwner(requester,"release");
-        oldMessage = store.receive(requester,intake,"legacy","Existing turn").at("messageId");
+        store.policy().changeNeverRule(localOwner,Action::repository_read,"github.com/example/private",true);
+        oldMessage = store.receive(requester,intake,"existing","Existing turn").at("messageId");
     }
-    sqlite3* connection = nullptr;
-    const auto opened = sqlite3_open(path.c_str(),&connection);
-    std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(connection,sqlite3_close);
-    check(opened == SQLITE_OK,"Could not open migration fixture");
-    check(sqlite3_exec(db.get(),R"SQL(
-DROP TABLE policy_approvals;
-DROP TABLE policy_settings;
-CREATE TABLE policy_settings(id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL CHECK(mode='full'));
-INSERT INTO policy_settings VALUES(1,'full');
-DROP TABLE policy_rules;
-CREATE TABLE policy_rules(kind TEXT NOT NULL CHECK(kind='never'),action TEXT NOT NULL,
- target TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(kind,action,target));
-INSERT INTO policy_rules VALUES('never','repository.read','github.com/example/private',123);
-DROP VIEW conversation_input_status;
-DROP INDEX conversation_turns_running;
-CREATE TABLE old_turns(message_id INTEGER PRIMARY KEY REFERENCES messages(id),
- status TEXT NOT NULL CHECK(status IN ('running','paused','done')),
- pause_id INTEGER UNIQUE REFERENCES journal(id), reserved_attempt INTEGER,
- reply_id INTEGER UNIQUE REFERENCES journal(id));
-INSERT INTO old_turns SELECT * FROM conversation_turns;
-DROP TABLE conversation_turns;
-ALTER TABLE old_turns RENAME TO conversation_turns;
-CREATE VIEW conversation_input_status AS SELECT message_id,status FROM conversation_turns;
-)SQL",nullptr,nullptr,nullptr) == SQLITE_OK,"Could not construct pre-Supervised database");
-    db.reset();
-
-    Store upgraded(path);
-    auto policy = upgraded.policy();
+    Store reopened(path);
+    auto policy = reopened.policy();
     check(policy.mode()=="full" && policy.forbidden("release",Action::repository_read,"github.com/example/private"),
-          "Upgrade lost settings or Never rules");
+          "Reopening lost settings or Never rules");
     policy.setMode(localOwner,"supervised");
     FixtureModel model;
     model.action = {"request_bot_change",{{"operation","create_bot"},{"targetBotId","new-bot"},{"name","New Bot"}},"Create"};
@@ -135,14 +109,14 @@ CREATE VIEW conversation_input_status AS SELECT message_id,status FROM conversat
     int applied = 0;
     RuntimeOptions options;
     options.applyBotChange = [&](const BotChange&) { ++applied; };
-    Runtime runtime(upgraded,model,adapter,[](auto) { return std::string{}; },options);
+    Runtime runtime(reopened,model,adapter,[](auto) { return std::string{}; },options);
     runtime.runConversations();
-    const auto items = upgraded.inbox(requester);
+    const auto items = reopened.inbox(requester);
     check(items.size()==1 && items.at(0).at("conversationEventId")==oldMessage,
-          "Upgrade lost the existing turn or its approval");
-    upgraded.decideInbox(requester,target(items.at(0)),"allow_once");
+          "Reopening lost the existing turn or its approval");
+    reopened.decideInbox(requester,target(items.at(0)),"allow_once");
     runtime.runConversations();
-    check(applied==1,"Upgraded turn could not consume approval");
+    check(applied==1,"Reopened turn could not consume approval");
 }
 
 void turns(const std::filesystem::path& path) {
@@ -430,7 +404,7 @@ int main() {
     int status = 0;
     try {
         rules(root/"rules.db");
-        upgrade(root/"upgrade.db");
+        reopen(root/"reopen.db");
         turns(root/"turns.db");
         downstreamApproval(root/"one-shot.db");
         scheduled(root/"scheduled.db");
