@@ -108,9 +108,41 @@ void linksAndRawHtml() {
     check(markdown::toPlain(rawHtml) == rawHtml,"plain rendering changed raw literal text");
 
     const auto remoteImage = markdown::toHtml("![diagram](https://images.example/diagram.png)");
-    check(remoteImage.find("<img") == std::string::npos && remoteImage.find("diagram") != std::string::npos &&
-          remoteImage.find("https://images.example/diagram.png") != std::string::npos,
+    check(remoteImage == "<p>diagram (<a href=\"https://images.example/diagram.png\">https://images.example/diagram.png</a>)</p>",
           "remote image was loaded or its fallback destination was hidden");
+    const auto remoteSlack = markdown::toSlack("![diagram](https://images.example/diagram.png)");
+    check(remoteSlack.mrkdwn && remoteSlack.text == "diagram (<https://images.example/diagram.png>)" &&
+          markdown::toPlain("![diagram](https://images.example/diagram.png)") ==
+              "diagram（https://images.example/diagram.png）",
+          "standalone image fallback changed");
+}
+
+void linkedImages() {
+    const std::string linked = "[![diagram](https://images.example/diagram.png?q=a&lang=en)](https://example.com/outer)";
+    const auto html = markdown::toHtml(linked);
+    const auto slack = markdown::toSlack(linked);
+    const auto outerAnchor = html.find("<a href=");
+    check(html == "<p><a href=\"https://example.com/outer\">diagram (https://images.example/diagram.png?q=a&amp;lang=en)</a></p>" &&
+          outerAnchor != std::string::npos && html.find("<a href=",outerAnchor + 1) == std::string::npos,
+          "linked image produced nested HTML anchors");
+    check(slack.mrkdwn && slack.text == "<https://example.com/outer|diagram (https://images.example/diagram.png?q=a&amp;lang=en)>",
+          "linked image produced nested Slack links");
+    check(markdown::toPlain(linked) ==
+              "diagram（https://images.example/diagram.png?q=a&lang=en）（https://example.com/outer）",
+          "linked image plain text lost a destination");
+
+    const std::string unsafeImage = "[![**bold _alt_**](javascript:alert%281%29)](https://example.com/outer)";
+    const auto unsafeHtml = markdown::toHtml(unsafeImage);
+    const auto unsafeSlack = markdown::toSlack(unsafeImage);
+    check(unsafeHtml == "<p><a href=\"https://example.com/outer\"><strong>bold <em>alt</em></strong> (javascript:alert%281%29)</a></p>" &&
+          unsafeHtml.find("href=\"javascript:") == std::string::npos,
+          "unsafe linked-image destination became an HTML link or formatted alt was lost");
+    check(unsafeSlack.mrkdwn &&
+          unsafeSlack.text == "<https://example.com/outer|*bold _alt_* (javascript:alert%281%29)>" &&
+          unsafeSlack.text.find("<javascript:") == std::string::npos,
+          "unsafe linked-image destination became a Slack link or formatted alt was lost");
+    check(markdown::toPlain(unsafeImage) == "bold alt（javascript:alert%281%29）（https://example.com/outer）",
+          "unsafe linked-image plain text lost its destinations");
 }
 
 void nestedAndStable() {
@@ -151,6 +183,7 @@ int main() {
         slackTextFallback();
         codeAndNewlines();
         linksAndRawHtml();
+        linkedImages();
         nestedAndStable();
         std::cout << "Markdown rendering behavior passed\n";
     } catch (const std::exception& error) {

@@ -183,19 +183,26 @@ std::string link(cmark_node* node, Target target, unsigned depth) {
     return label + "（" + destination + "）";
 }
 
+bool insideLink(cmark_node* node) {
+    for (auto* parent = cmark_node_parent(node); parent; parent = cmark_node_parent(parent))
+        if (cmark_node_get_type(parent) == CMARK_NODE_LINK) return true;
+    return false;
+}
+
 std::string image(cmark_node* node, Target target, unsigned depth) {
     const auto alt = inlineChildren(node,target,depth);
     const auto destination = value(cmark_node_get_url(node));
     if (destination.empty()) return alt;
     const auto safe = safeUrl(destination);
+    const auto linked = insideLink(node);
     if (target == Target::html) {
-        const auto url = safe ? "<a href=\"" + escape(destination,target,true) + "\">" + escape(destination,target) + "</a>"
-                              : escape(destination,target);
+        const auto url = safe && !linked ? "<a href=\"" + escape(destination,target,true) + "\">" + escape(destination,target) + "</a>"
+                                         : escape(destination,target);
         return alt + " (" + url + ")";
     }
     if (target == Target::slack || target == Target::slack_plain) {
-        const auto url = target == Target::slack && safe ? "<" + escape(destination,target) + ">"
-                                                         : escape(destination,target);
+        const auto url = target == Target::slack && safe && !linked ? "<" + escape(destination,target) + ">"
+                                                                    : escape(destination,target);
         return alt + " (" + url + ")";
     }
     return alt + "（" + destination + "）";
