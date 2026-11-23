@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "flock/session_read.hpp"
 #include "flock/session_settings.hpp"
 
 #include <algorithm>
@@ -576,13 +577,21 @@ Delivery reconcileWork(Client& client, const Command& command) {
     return result(Outcome::Accepted, {}, match);
 }
 
-struct Report { std::string text, itemId; bool truncated = false; };
+struct Report {
+    std::string text, itemId, sessionCreatedAt;
+    bool truncated = false;
+};
 Report readReport(Client& client, const RunRef& run, std::string_view view, std::string_view type) {
     Scan scan;
+    Report report;
     Position before = maxHistoryPosition;
     for (;;) {
         scan.step();
         const auto page = readThread(client,run.threadId,view,PageSize,ExcerptChars,{{"beforePosition",before}});
+        if (before == maxHistoryPosition) {
+            auto createdAt = str(page.at("thread"),"createdAt");
+            if (session_read::utcTimestamp(createdAt)) report.sessionCreatedAt = std::move(createdAt);
+        }
         const auto& items = array(page, "items");
         for (auto it = items.rbegin(); it != items.rend(); ++it) {
             if (!fromRun(*it, run) || str(*it, "type") != type || str(*it, "text").empty()) continue;
@@ -597,10 +606,13 @@ Report readReport(Client& client, const RunRef& run, std::string_view view, std:
                 text = itemText(item, text.next);
                 output += text.text;
             }
-            return {bounded(output, 8192), id, text.more || output.size() > 8192};
+            report.text = bounded(output, 8192);
+            report.itemId = id;
+            report.truncated = text.more || output.size() > 8192;
+            return report;
         }
         const auto next = cursor(page, "earlierPosition");
-        if (!next) return {};
+        if (!next) return report;
         if (*next >= before || items.empty() || *next != position(member(items.front(), "position"))) invalidResponse();
         before = *next;
     }
@@ -662,6 +674,7 @@ RunEvidence readTerminalEvidence(Client& client, const RunRef& source, std::stri
     evidence.report = bounded(report.text, 8192);
     evidence.truncated = report.truncated || evidence.report.size() < report.text.size();
     evidence.itemId = std::move(report.itemId);
+    evidence.sessionCreatedAt = std::move(report.sessionCreatedAt);
     return evidence;
 }
 
@@ -969,6 +982,7 @@ public:
                 observed.detail = std::move(evidence.detail);
                 observed.truncated = evidence.truncated;
                 observed.resultRunId = source.runId;
+                observed.sessionCreatedAt = std::move(evidence.sessionCreatedAt);
                 return observed;
             }
             if (!finished && !active(status)) invalidResponse();

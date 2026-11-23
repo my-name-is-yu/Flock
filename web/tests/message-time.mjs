@@ -14,6 +14,38 @@ function fixtures() {
   const bot = { id: 'release', name: 'Release' };
   const peer = { id: 'triage', name: 'Triage' };
   const time = new Date(2026, 10, 20, 13).getTime() / 1000;
+  const sessionCreatedAt = new Date(2026, 10, 20, 17, 30).toISOString();
+  const RealDate = Date;
+  const midnight = new RealDate(2026, 10, 21).getTime();
+  let now = new RealDate(2026, 10, 20, 23).getTime();
+  const midnightDelay = midnight - now;
+  window.Date = class extends RealDate {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  };
+  let midnightRefresh;
+  const schedule = window.setTimeout.bind(window);
+  window.setTimeout = (callback, delay, ...args) => {
+    if (delay === midnightDelay) {
+      midnightRefresh = callback;
+      return 0;
+    }
+    return schedule(callback, delay, ...args);
+  };
+  window.rollSessionDate = () => {
+    now = midnight;
+    midnightRefresh?.();
+  };
+  window.returnAfterMidnight = () => {
+    now = new RealDate(2026, 10, 22).getTime();
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  const sessionTasks = [
+    { id: 17, generation: 1, request: 'Completed work', createdAt: time,
+      sessions: [{ environmentId: 'local', threadId: 'thread', state: 'completed', createdAt: sessionCreatedAt }] },
+    { id: 16, generation: 1, request: 'Historical work', createdAt: time,
+      sessions: [{ environmentId: 'local', threadId: 'older', state: 'completed' }] },
+  ];
   const events = [
     { id: 1, kind: 'conversation_message', time, data: { text: 'First message' } },
     { id: 2, kind: 'conversation_reply', time: time + 60, data: { text: 'Second message' } },
@@ -41,13 +73,23 @@ function fixtures() {
     if (path === '/api/bots') return Response.json([bot, peer]);
     if (path.startsWith('/api/peer-conversation?')) return Response.json(path.includes('before=')
       ? { messages: [older], hasOlder: false } : { messages: peerEvents, hasOlder: true });
-    return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [],
+    return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks, sessionsBefore: 0, sessionCursor: 0, waits: [],
       canDecide: true, composerPerson: null });
   };
 }
 
 async function exercise() {
   const check = (value, message) => { if (!value) throw new Error(message); };
+  const sessionRows = () => [...document.querySelectorAll('.session-row')];
+  const sessionLabel = (row) => row?.querySelector('.activity-status span:last-child')?.textContent;
+  const [finished, historical] = sessionRows();
+  check(sessionLabel(finished) === '17:30' && finished.title.includes('17:30') &&
+    sessionLabel(historical) === 'Complete' && !historical.title.includes('Started'),
+    'The sidebar used the request time instead of the Session creation time');
+  window.rollSessionDate();
+  check(sessionLabel(sessionRows()[0]) === 'Yesterday', 'An open tab did not refresh Session time at local midnight');
+  window.returnAfterMidnight();
+  check(sessionLabel(sessionRows()[0]) === 'Nov 20', 'Returning to the tab did not refresh the relative Session time');
   const rows = [...document.querySelectorAll('.event-message')];
   const [first, second, report] = rows.map(row => row.querySelector('.event-text'));
   const singleTime = rows.map(row => row.querySelector('time'));

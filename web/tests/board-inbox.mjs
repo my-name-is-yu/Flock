@@ -40,10 +40,14 @@ async function exercise(mountBoardInbox) {
   const nextDocs = { ...docs, itemId: 7, waitId: 7, targetGeneration: 5,
     prompt: 'Which examples, and how many?', choices: ['Quickstart', { options: ['1', '2'] }] };
 
+  const approval = { ...question, itemKind: 'policy_approval', itemId: 10, status: 'pending',
+    action: 'repository.pr', target: 'team/guide' };
   const calls = [];
   const sources = [];
+  const outcomes = [];
   let questions = [question, docs, secret, review];
   let finishDocs;
+  let rejectApproval;
   let readInbox;
   let retries = 0;
   const choices = () => item.querySelector('.question-choice-form');
@@ -54,6 +58,7 @@ async function exercise(mountBoardInbox) {
     async api(path, data) {
       calls.push([path, data]);
       if (path === 'inbox/decide') {
+        if (data.itemId === approval.itemId) await new Promise((_, reject) => { rejectApproval = reject; });
         if (data.waitId === docs.waitId) {
           await new Promise((resolve) => { finishDocs = resolve; });
           questions = questions.filter((entry) => entry !== docs);
@@ -83,7 +88,7 @@ async function exercise(mountBoardInbox) {
       return source;
     },
     onChange() {},
-    onAccepted() {},
+    onAccepted(entry, result) { outcomes.push({ entry, result }); },
     onRefreshError() { retries++; },
     canCompose: () => true,
     focusComposer: () => editor.focus(),
@@ -245,6 +250,25 @@ async function exercise(mountBoardInbox) {
     check(board.count('release') === 0 && layer.hidden && trigger.hidden && retries === 0,
       `HTTP ${status} did not clear the Inbox and close its pending panel`);
   }
+
+  questions = [approval];
+  board.setContext('release', 'approver');
+  await board.refresh();
+  const inline = board.inlinePolicyCard(approval);
+  conversation.append(inline);
+  const allowOnce = inline.querySelector('button[value=allow_once]');
+  const beforeApproval = outcomes.length;
+  allowOnce.click();
+  rejectApproval(new Error('request_changed'));
+  await settled();
+  check(outcomes.length === beforeApproval + 1 && outcomes.at(-1).result.error,
+    'The original viewer did not receive their inline approval error');
+  allowOnce.click();
+  board.setContext('release', 'next-viewer');
+  await board.refresh();
+  rejectApproval(new Error('request_changed'));
+  await settled();
+  check(outcomes.length === beforeApproval + 1, 'A previous viewer’s inline approval error reached the new viewer');
 }
 
 function liveFixture() {
@@ -253,9 +277,12 @@ function liveFixture() {
     taskId: 1, targetRevision: 1, targetGeneration: 1, requestTitle: 'Draft notes', prompt: 'Which branch?' };
   const approval = { ...decision, itemKind: 'policy_approval', itemId: 2, taskId: 2, waitId: 2,
     action: 'repository.pr', target: 'team/guide', requestTitle: 'repository.pr · team/guide',
-    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true };
+    prompt: JSON.stringify(['git_update_pr', {prNumber: 42, state: 'closed'}]), canDecide: true, status: 'pending' };
   const wait = {id: 2, reason: 'policy_approval', text: approval.requestTitle};
-  const fixture = window.inboxFixture = { reads: 0, approvalReady: false, updated: false, failed: false };
+  const stopWait = { id: 9, reason: 'model_failure', text: 'The last attempt failed.' };
+  const stopTask = { id: 3, currentRevision: 5, generation: 7, request: 'Check the release', wait: stopWait };
+  const fixture = window.inboxFixture = { reads: 0, approvalReady: false, updated: false, failed: false,
+    showStop: false, canDecide: true, stopRequests: [] };
   window.EventSource = class extends EventTarget {
     constructor(path) {
       super();
@@ -264,14 +291,25 @@ function liveFixture() {
     }
     close() { this.closed = true; }
   };
-  window.fetch = async (path) => {
+  window.fetch = async (path, init) => {
     const headers = { 'X-Flock-Viewer': '"viewer"' };
+    if (path === '/api/operations') {
+      fixture.stopRequests.push(JSON.parse(init.body));
+      return new Promise(resolve => { fixture.finishStop = (status, body) => resolve(Response.json(body, { status })); });
+    }
     if (path === '/api/bots') return Response.json([bot], { headers });
-    if (path.startsWith('/api/view?')) return Response.json({
-      bot, events: [{id: 4, taskId: 2, time: 1, kind: 'waiting', data: wait}],
-      olderBefore: 0, presence: 'idle', sessionTasks: [], waits: [{id: 2, wait}], historyCursor: 0,
-      sessionCursor: 0, canDecide: true, composerPerson: 'viewer',
-    }, { headers });
+    if (path.startsWith('/api/view?')) {
+      const events = [{id: 4, taskId: 2, time: 1, kind: 'waiting', data: wait}];
+      if (fixture.updated) events.push({id: 5, taskId: 2, time: 2, kind: 'wait_closed',
+        data: { waitId: 2, resolution: 'allow_once' }});
+      const waits = fixture.updated ? [] : [{id: 2, wait}];
+      if (fixture.showStop) {
+        waits.push(stopTask);
+        events.push({ id: 6, taskId: stopTask.id, time: 3, kind: 'waiting', data: stopWait });
+      }
+      return Response.json({ bot, events, olderBefore: 0, presence: 'idle', sessionTasks: [],
+        waits, historyCursor: 0, sessionCursor: 0, canDecide: fixture.canDecide, composerPerson: 'viewer' }, { headers });
+    }
     if (path === '/api/inbox') {
       fixture.reads++;
       if (fixture.updated && !fixture.failed) {
@@ -303,19 +341,63 @@ async function exerciseLiveRetry() {
   fixture.approvalReady = true;
   stream.dispatchEvent(new Event('ready'));
   await waitFor(() => fixture.reads > reads, 'The ready stream did not catch up');
-  const review = () => [...document.querySelectorAll('#event-4 button')]
-    .find(button => button.textContent === 'Review approval…');
-  await waitFor(review, 'A late Inbox response did not attach the approval to its wait');
-  review().click();
+  const approvalCard = () => document.querySelector('#event-4.policy-inline-card');
+  await waitFor(approvalCard, 'A late Inbox response did not replace the first waiting event with its approval');
+  if (document.querySelectorAll('.policy-inline-card').length !== 1 || !approvalCard().textContent.includes('Pull request: 42') ||
+      ![...approvalCard().querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
+    throw new Error('The approval card duplicated the request or displayed the wrong action');
+  const review = [...document.querySelectorAll('#wait-list .wait-row')].find(row => row.textContent.includes('Approval needed'));
+  if (!review) throw new Error('The approval disappeared from Needs you');
+  review.click();
   if (panel.hidden || !panel.textContent.includes('Pull request: 42') || !panel.textContent.includes('State: closed') ||
       ![...panel.querySelectorAll('button')].some(button => button.textContent === 'Allow once'))
     throw new Error('The wait did not open the exact approval with its requested change');
   fixture.updated = true;
-  stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true}' }));
+  stream.dispatchEvent(new MessageEvent('change', { data: '{"list":true,"bot":"release"}' }));
   await waitFor(() => fixture.failed, 'The live invalidation did not fetch the Inbox');
   if (trigger.hidden || panel.hidden) throw new Error('A transient Inbox failure cleared the pending decision');
   await waitFor(() => trigger.hidden && panel.hidden, 'The Inbox stayed stale with a healthy stream after HTTP 503');
+  const resolution = document.querySelector('#event-4 .msg-resolution');
+  if (approvalCard() || !resolution?.textContent.includes('Allowed once'))
+    throw new Error('Resolving the approval did not restore its waiting event and decision');
   if (stream.closed || fixture.stream !== stream) throw new Error('The Inbox recovered by reconnecting its event stream');
+
+  const refreshView = () => stream.dispatchEvent(new MessageEvent('change', { data: '{"bot":"release"}' }));
+  const stop = () => document.querySelector('#detail .wait-cancel');
+  const confirmStop = () => document.querySelector('#detail .wait-stop-confirm .danger');
+  const openStop = () => document.querySelector('#event-6 .question-actions button');
+  fixture.showStop = true;
+  refreshView();
+  await waitFor(openStop, 'The cancellable wait did not arrive');
+  openStop().click();
+  stop().click();
+  const keep = document.querySelector('#detail .wait-stop-confirm .quiet');
+  if (document.activeElement !== keep || fixture.stopRequests.length)
+    throw new Error('Opening the stop confirmation changed the request or lost focus');
+  keep.click();
+  if (document.activeElement !== stop() || confirmStop()) throw new Error('Dismissing the confirmation did not restore the wait actions');
+  stop().click();
+  const detail = document.getElementById('detail');
+  if (detail.dispatchEvent(new Event('cancel', { cancelable: true })) || !detail.open ||
+      confirmStop() || document.activeElement !== stop())
+    throw new Error('Escape closed the request detail or submitted the stop');
+  stop().click();
+  fixture.canDecide = false;
+  refreshView();
+  await waitFor(() => !confirmStop() && !stop(), 'Permission loss did not clear the stop confirmation');
+  if (fixture.stopRequests.length) throw new Error('Permission loss submitted a stop');
+  fixture.canDecide = true;
+  refreshView();
+  await waitFor(stop, 'The stop action did not return after permission was restored');
+  stop().click();
+  confirmStop().click();
+  confirmStop().click();
+  const [target] = fixture.stopRequests;
+  if (fixture.stopRequests.length !== 1 || target.botId !== 'release' || target.operation !== 'cancel' ||
+      target.taskId !== 3 || target.waitId !== 9 || target.targetRevision !== 5 || target.targetGeneration !== 7)
+    throw new Error('The stop was submitted twice or lost its exact target');
+  fixture.finishStop(409, { error: 'request_changed' });
+  await waitFor(() => confirmStop() && !confirmStop().disabled, 'A failed stop left the confirmation disabled');
 }
 
 const assets = new URL('../assets/', import.meta.url);
