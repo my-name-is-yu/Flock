@@ -18,6 +18,7 @@ WITH candidates AS (
   WHERE json_type(task.data,'$.runTargets') IS NULL AND task.project_id<>''
     AND task.state NOT IN ('completed','cancelled')
   UNION ALL
+  -- An active verification Run reserves its own project. Its pending sibling keeps its queue position.
   SELECT task.id,CASE WHEN outbox.phase IN ('started','accepted') THEN task.state ELSE 'queued' END,
          json_extract(route.value,'$.projectId'),json_extract(route.value,'$.environmentId'),outbox.id
   FROM tasks task

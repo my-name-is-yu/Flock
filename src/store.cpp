@@ -402,8 +402,6 @@ void Store::Impl::requestCancellation(Json& task, SessionStop stop) {
     if (task["state"] == "queued" && !peer) {
         for (const auto* key : {"replanning","pendingDestination","pendingInstructions"})
             task.erase(key);
-        if (auto checks = task.find("runResults"); checks != task.end())
-            for (auto& check : *checks) check["status"] = "cancelled";
         task["state"] = "cancelled";
         journal(id,"cancelled",Json::object());
     } else task["state"] = "cancelling";

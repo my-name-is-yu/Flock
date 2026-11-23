@@ -217,8 +217,10 @@ struct Runtime::Impl {
     std::vector<Work> eligible() {
         std::lock_guard lock(db.mutex);
         auto rows = db.query(R"SQL(
-WITH runnable AS (
-  SELECT id FROM project_slots WHERE blocker_id IS NULL
+WITH slots AS MATERIALIZED (
+  SELECT id,action_id,blocker_id FROM project_route_slots
+), runnable AS (
+  SELECT id FROM slots WHERE action_id IS NULL AND blocker_id IS NULL
   UNION
   SELECT id FROM tasks WHERE project_id='' AND state NOT IN ('completed','cancelled') AND (
     state IN ('queued','cancelling') OR COALESCE(json_extract(data,'$.replanning'),0)=1
@@ -240,7 +242,7 @@ WHERE json_type(task.data,'$.runResults') IS NULL AND NOT EXISTS (
   SELECT 1 FROM policy_approvals approval WHERE approval.task=task.id AND turn=0 AND status='pending'
 )
 UNION ALL
-SELECT slot.id,slot.action_id FROM project_route_slots slot JOIN tasks task ON task.id=slot.id
+SELECT slot.id,slot.action_id FROM slots slot JOIN tasks task ON task.id=slot.id
 WHERE slot.action_id IS NOT NULL AND (task.state='cancelling' OR (
   slot.blocker_id IS NULL AND NOT EXISTS (
     SELECT 1 FROM policy_approvals WHERE operation=?1 || slot.action_id AND status='pending'
