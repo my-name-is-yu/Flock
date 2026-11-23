@@ -1,5 +1,6 @@
 #include "views.hpp"
 #include "flock/markdown.hpp"
+#include "flock/policy.hpp"
 
 #include <charconv>
 #include <iterator>
@@ -345,7 +346,8 @@ Json botList(Store& store, const Json& bots) {
 }
 
 Json conversation(Store& store, std::string_view bot, Id before, std::string_view viewer) {
-    const auto events = store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer);
+    const auto events = store.policy().redactSecrets(bot,
+        store.conversation(bot,before,conversationSize + 1,Store::ConversationEvents::all,viewer));
     const bool more = events.size() > conversationSize;
     Json result = {{"events",Json::array()},{"olderBefore",0}};
     auto& page = result["events"];
@@ -358,7 +360,9 @@ Json conversation(Store& store, std::string_view bot, Id before, std::string_vie
 Json peerConversation(Store& store, std::string_view bot, std::string_view peer, Id before, Id anchor,
                       std::string_view viewer) {
     const auto olderSize = anchor ? conversationSize / 2 : conversationSize;
-    const auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1,0,viewer);
+    auto events = store.peerConversation(bot,peer,anchor ? anchor : before,olderSize + 1,0,viewer);
+    events = store.policy().redactSecrets(bot,events);
+    events = store.policy().redactSecrets(peer,events);
     const bool more = events.size() > olderSize;
     Json result = {{"messages",Json::array()},{"hasOlder",more}};
     auto& page = result["messages"];
@@ -366,7 +370,10 @@ Json peerConversation(Store& store, std::string_view bot, std::string_view peer,
         page.push_back(eventView(*event));
     if (anchor) {
         result["anchorId"] = anchor;
-        for (const auto& event : store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor,viewer))
+        auto newer = store.peerConversation(bot,peer,0,conversationSize - olderSize,anchor,viewer);
+        newer = store.policy().redactSecrets(bot,newer);
+        newer = store.policy().redactSecrets(peer,newer);
+        for (const auto& event : newer)
             page.push_back(eventView(event));
     }
     return result;

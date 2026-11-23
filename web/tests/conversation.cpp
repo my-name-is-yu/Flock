@@ -572,7 +572,9 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     constexpr auto request = "出荷前に確認してください。\n\n署名付きビルドの確認手順を教えてください。";
     constexpr auto greeting = "こんにちは。";
     constexpr auto greetingReply = "こんにちは。出荷の準備についてお手伝いします。";
-    constexpr auto review = "前のバージョンから更新し、署名が有効であることを確認してください。";
+    const std::string peerAmpSecret = "Synthetic&ErnestCredential-221";
+    const std::string peerMarkdownSecret = "**Synthetic&ReviewerCredential-221**";
+    const std::string review = "前のバージョンから更新し、署名が有効であることを確認してください。 " + peerMarkdownSecret;
     constexpr auto response = "Reviewer に確認しました。前のバージョンから更新し、署名が有効であることを確認してください。";
     Json original;
     struct ForwardingModel final : Model {
@@ -618,8 +620,10 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto web = callbacks();
     web.bots = [] { return Json::array({{{"id","ernest"},{"name","Ernest"}},{{"id","reviewer"},{"name","Reviewer"}}}); };
     web.peers = peers;
+    const Person author{"fixture-message-author",true};
+    Id ampRequest = 0;
+    Id markdownRequest = 0;
     if (authenticated) {
-        const Person author{"fixture-message-author",true};
         const auto identities = path.string() + ".identities";
         writeWebIdentities(identities,Json::array({
             {{"authorization","Bearer fixture-author"},{"person",author.id},{"adminRoot",true}},
@@ -628,6 +632,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
         configureWebIdentities(store,identities,web);
         for (const auto* bot : {"ernest","reviewer"})
             store.policy().setMember(author,bot,"fixture-shared-reader",true);
+        ampRequest = store.policy().requestSecret("ernest",{"peer-ernest-renderer"});
+        markdownRequest = store.policy().requestSecret("reviewer",{"peer-reviewer-renderer"});
     }
     Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },RuntimeOptions{.peers=peers});
     const auto server = startWeb(store,0,web);
@@ -655,6 +661,21 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
           "the user's request bypassed Ernest's decision and contacted Reviewer");
 
     tick(runtime,8);
+    std::string expectedNote(note);
+    std::string expectedReview(review);
+    if (authenticated) {
+        auto policy = store.policy();
+        policy.submitSecret(author,"ernest",ampRequest,peerAmpSecret);
+        policy.submitSecret(author,"reviewer",markdownRequest,peerMarkdownSecret);
+        if (const auto found = expectedNote.find(peerAmpSecret); found != expectedNote.npos)
+            expectedNote.replace(found,peerAmpSecret.size(),"[redacted]");
+        if (const auto found = expectedReview.find(peerMarkdownSecret); found != expectedReview.npos)
+            expectedReview.replace(found,peerMarkdownSecret.size(),"[redacted]");
+        const auto stored = store.peerConversation("ernest","reviewer",0,20,0);
+        check(stored.size() == 2 && stored.front().at("data").at("text") == note &&
+              stored.back().at("data").at("text") == review,
+              "peer response redaction must preserve canonical journal text");
+    }
     const auto ernest = browser.get("/api/view?bot=ernest");
     const auto& events = ernest.at("events");
     check(ernest.at("bot").at("id") == "ernest" && hasEvent(events,"conversation_message",request) &&
@@ -668,8 +689,8 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     auto expectedQuote = original;
     if (authenticated) expectedQuote["fromViewer"] = true;
     check(forwarded.at("fromBotId") == "ernest" && forwarded.at("toBotId") == "reviewer" &&
-          forwarded.value("text",std::string{}) == note && forwarded.at("forwardedMessage") == expectedQuote &&
-          answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == review &&
+          forwarded.value("text",std::string{}) == expectedNote && forwarded.at("forwardedMessage") == expectedQuote &&
+          answered.at("fromBotId") == "reviewer" && answered.at("toBotId") == "ernest" && answered.at("text") == expectedReview &&
           !answered.contains("forwardedMessage") && t3.launches == 0,
           "the exchange did not preserve the forward, its Bot authors, or the reply");
     check(std::ranges::none_of(messages,[](const Json& row) {
@@ -678,6 +699,11 @@ void botMediatedConversation(const std::filesystem::path& path, std::string_view
     if (authenticated) {
         const auto anchored = std::string(dm) + "&anchor=" + std::to_string(messages.front().at("id").get<Id>());
         check(browser.get(anchored).at("messages") == messages,"the author lost attribution in anchored history");
+        const auto splitAnchor = std::string(dm) + "&anchor=" + std::to_string(messages.back().at("id").get<Id>());
+        const auto splitMessages = browser.get(splitAnchor).at("messages");
+        check(splitMessages.size() == 2 && splitMessages.front().at("data").at("text") == expectedNote &&
+              splitMessages.back().at("data").at("text") == expectedReview,
+              "older and anchor-newer peer pages must redact both participants' secrets");
         browser.client.set_default_headers({{"Authorization","Bearer fixture-reader"}});
         auto shared = messages;
         shared.front()["data"]["forwardedMessage"] = original;
@@ -857,32 +883,66 @@ void secretCollisionKeepsBotRoutes(const std::filesystem::path& path) {
     auto policy = store.policy();
     policy.setMember(owner,"staging-triage","alice",true);
     const auto request = policy.requestSecret("release",{"fixture-token"});
+    const auto ampRequest = policy.requestSecret("release",{"renderer-amp"});
+    const auto markdownRequest = policy.requestSecret("release",{"renderer-markdown"});
     const auto send = [&](std::string_view bot, std::string_view clientId, std::string_view text) {
         return store.receive(owner,{std::string(bot),"unused","local-env","fixture"},clientId,text)
             .at("messageId").get<Id>();
     };
+    const std::string ampSecret = "Synthetic&Credential-221";
+    const std::string markdownSecret = "**Markdown&Credential-221**";
+    const std::string ampText = "Amp handoff " + ampSecret + " end";
+    const std::string markdownText = "Markdown handoff " + markdownSecret + " end";
     const auto oldMessage = send("staging-triage","old","Original handoff for staging");
     const auto otherBotMessage = send("release","other","Unrelated handoff");
+    const auto historyAmpMessage = send("staging-triage","history-amp",ampText);
+    const auto historyMarkdownMessage = send("staging-triage","history-markdown",markdownText);
     for (int i = 0; i < 40; ++i) send("staging-triage","filler-" + std::to_string(i),"Later update");
+    const auto viewAmpMessage = send("staging-triage","view-amp",ampText);
+    const auto viewMarkdownMessage = send("staging-triage","view-markdown",markdownText);
     auto server = startWeb(store,0,cb);
     Browser browser(*server);
     browser.client.set_default_headers({{"Authorization","Bearer fixture-owner"}});
     browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",request},{"value","staging"}});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",ampRequest},{"value",ampSecret}});
+    browser.post("/api/bot-settings/secret",{{"botId","release"},{"requestId",markdownRequest},{"value",markdownSecret}});
     const auto saved = browser.post("/api/bots/profile",{{"botId","staging-triage"},{"name","Triage"}});
     check(saved.at("id")=="staging-triage","profile route changed the Bot ID");
 
     browser.client.set_default_headers({{"Authorization","Bearer fixture-alice"}});
     const auto bots = browser.get("/api/bots");
     check(bots.size()==1 && bots.at(0).at("id")=="staging-triage","secret redaction hid or renamed an authorized Bot");
-    const auto view = browser.get("/api/view?bot=staging-triage").at("bot");
+    const auto viewResponse = browser.get("/api/view?bot=staging-triage");
+    const auto view = viewResponse.at("bot");
     check(view.at("id")=="staging-triage" && view.at("soul")=="Check [redacted]",
           "Bot view must preserve its ID and redact display text");
+    const auto verifyRenderedMessage = [&](const Json& events, Id id, std::string_view expectedText) {
+        const auto event = std::ranges::find_if(events,[&](const Json& row) {
+            return row.at("id").get<Id>() == id;
+        });
+        check(event != events.end(),"rendered conversation message was missing from its response page");
+        const auto& data = event->at("data");
+        const auto html = data.at("textHtml").get<std::string>();
+        check(data.at("text") == expectedText && html == "<p>" + std::string(expectedText) + "</p>" &&
+              html.find(ampSecret) == std::string::npos && html.find(markdownSecret) == std::string::npos &&
+              html.find("&amp;") == std::string::npos,
+              "conversation response must redact source and rendered HTML before Markdown parsing");
+    };
+    verifyRenderedMessage(viewResponse.at("events"),viewAmpMessage,"Amp handoff [redacted] end");
+    verifyRenderedMessage(viewResponse.at("events"),viewMarkdownMessage,"Markdown handoff [redacted] end");
+    const auto storedAmp = store.conversation("staging-triage",viewAmpMessage + 1,1);
+    const auto storedMarkdown = store.conversation("staging-triage",viewMarkdownMessage + 1,1);
+    check(storedAmp.size() == 1 && storedAmp.front().at("data").at("text") == ampText &&
+          storedMarkdown.size() == 1 && storedMarkdown.front().at("data").at("text") == markdownText,
+          "response redaction must preserve canonical journal text");
     const std::string history = "/api/conversation?bot=staging-triage";
     const auto latest = browser.get(history);
     const auto older = browser.get(history + "&before=" + latest.at("olderBefore").dump());
     const auto exact = browser.get(history + "&before=" + std::to_string(oldMessage + 1));
     check(latest.at("events").front().at("id") > oldMessage && older.at("events").front().at("id") == oldMessage,
           "An older match must be reachable through the same Bot conversation projection");
+    verifyRenderedMessage(older.at("events"),historyAmpMessage,"Amp handoff [redacted] end");
+    verifyRenderedMessage(older.at("events"),historyMarkdownMessage,"Markdown handoff [redacted] end");
     check(exact.at("events").size() == 1 && exact.at("events").back().at("id") == oldMessage &&
           exact.at("events").back().at("data").at("text") == "Original handoff for [redacted]",
           "The older conversation projection must redact its text and omit other Bots' messages");
@@ -1192,7 +1252,8 @@ int main(int argc,char** argv) {
         imageAttachmentCountInConversation(directory.path / "image-attachment-count.sqlite");
         suggestionsAndEnvironmentsInView(directory.path / "suggestions.sqlite");
         conversationEntry(directory.path / "conversation.sqlite");
-        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite","確認手順の妥当性を確認してください。",true);
+        botMediatedConversation(directory.path / "bot-mediated-with-note.sqlite",
+            "確認手順の妥当性を確認してください。 Synthetic&ErnestCredential-221",true);
         botMediatedConversation(directory.path / "bot-mediated-without-note.sqlite",{});
         secretCollisionKeepsBotRoutes(directory.path / "secret-collision.db");
         approveModelCallBeforeTask(directory.path / "model-budget.sqlite");
