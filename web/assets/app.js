@@ -91,6 +91,11 @@ const waitLabels = {
   auth: ['T3 sign-in needed', 'This work is paused because the T3 sign-in expired. Sign in to T3 again, then reconcile.'],
   settings: ['T3 settings', 'This work is paused because of the T3 connection or execution settings. Fix them, then reconcile.'],
 };
+// Name what the person will do in the dialog; the ellipsis says it opens a step before anything happens.
+const pendingActionLabels = {
+  budget: 'Approve one more run…', model_budget: 'Approve another model call…', model_failure: 'Try again…',
+  deadline: 'Extend deadline…', t3_input: 'Open in T3…', unknown_delivery: 'Resolve…', auth: 'Resolve…', settings: 'Resolve…',
+};
 const closedLabels = {
   answer: 'Answered', run_finished: 'Session ended', cancel: 'Stop requested',
   session_question: 'The session updated the question', withdrawn: 'Question withdrawn', request_changed: 'Request changed',
@@ -1423,7 +1428,8 @@ function eventCard(event, context, place, report) {
     if (context.canDecide && pendingWait?.wait.reason === 'user_question') extras.push(questionActions(view, pendingWait));
     else if (pendingWait) {
       const open = node('div', 'event-actions question-actions');
-      open.append(button('View pending request', 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
+      const label = pendingActionLabels[pendingWait.wait.reason] ?? 'Review…';
+      open.append(button(label, 'button', () => openDetail({ kind: 'wait', taskId: pendingWait.id, waitId: data.id })));
       extras.push(open);
     } else if (!context.readOnly || context.closed.has(data.id)) {
       const resolution = node('p', 'msg-resolution');
