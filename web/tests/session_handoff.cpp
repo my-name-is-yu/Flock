@@ -1,5 +1,6 @@
 #include "http_fixture.hpp"
 
+#include <atomic>
 #include <fstream>
 #include <iostream>
 
@@ -100,9 +101,14 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     ConsultationModel model;
     auto cb = callbacks();
     installIdentities(directory/"identities.json",db,cb);
-    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson);
-    const auto handoffs = cb.sessionHandoffs;
     const auto intake = cb.intake;
+    std::atomic_bool configured{true};
+    cb.intake = [intake,&configured](std::string_view bot, std::string_view request) {
+        if (bot == "broken" || !configured) throw Conflict(privateValue);
+        return intake(bot,request);
+    };
+    cb.sessionHandoffs = std::make_shared<SessionHandoff>(db,session,cb.configuredPerson,cb.intake);
+    const auto handoffs = cb.sessionHandoffs;
 
     const Person alice{"alice",true};
     const auto grant = [&](const Scope& scope) {
@@ -112,6 +118,7 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     grant(Scope::consultReply(otherTarget.environmentId,otherTarget.threadId));
     grant(Scope::sessionCoordinate(target.environmentId,target.threadId));
     grant(Scope::sessionRead(target.environmentId,target.threadId));
+    db.access().resourceGrant(alice,"broken",Scope::consultReply(target.environmentId,target.threadId),GrantChange::grant);
 
     auto server = startWeb(db,0,std::move(cb));
     Browser browser(*server);
@@ -123,6 +130,9 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     auto unknownBot = pairingInput(target);
     unknownBot["botId"] = "unconfigured-bot";
     browser.post(pairingRoute,unknownBot,403);
+    auto profileOnlyBot = pairingInput(target);
+    profileOnlyBot["botId"] = "broken";
+    browser.post(pairingRoute,profileOnlyBot,403);
     auto oldTarget = pairingInput(target);
     oldTarget.at("target")["runId"] = "human-run";
     browser.post(pairingRoute,oldTarget,400);
@@ -162,12 +172,20 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     check(mcp.call(wrong,{{"Authorization",aliceCredential}}).at("result").at("isError") == true,
           "a Web credential replaced the pairing code");
 
+    configured = false;
+    check(mcp.call(args).at("result").value("isError",false),
+          "MCP created a channel after the paired Bot configuration became invalid");
+    check(handoffs->recent(alice).empty(),"Rejected intake left an active channel");
+    configured = true;
     const auto ack = mcp.call(args).at("result");
     const auto paired = ack.at("structuredContent");
     check(!paired.at("requestId").get<std::string>().empty() && ack.dump().find(code) == std::string::npos &&
           ack.dump().find(target.threadId) == std::string::npos && session.sends.empty() && model.calls == 0,
           "MCP intake ran the Bot synchronously or disclosed pairing material");
-    check(mcp.call(args).at("result").at("structuredContent") == paired,"identical MCP retry created new work");
+    configured = false;
+    check(mcp.call(args).at("result").at("structuredContent") == paired,
+          "An identical retry lost its saved acknowledgement when the Bot configuration changed");
+    configured = true;
     wrong = args;
     wrong["text"] = "Change the original request";
     check(mcp.call(wrong).at("result").at("isError") == true,"same request accepted a different payload");
@@ -192,8 +210,8 @@ void sessionHandoffs(const std::filesystem::path& directory) {
     browser.client.set_default_headers({{"Authorization",aliceCredential}});
 
     const Runtime::SoulLoader soul = [](std::string_view) { return "Check releases carefully"; };
-    handoffs->consult(alice,channel,model,intake,soul);
-    handoffs->consult(alice,otherChannel,model,intake,soul);
+    handoffs->consult(alice,channel,model,soul);
+    handoffs->consult(alice,otherChannel,model,soul);
     view = browser.get(path);
     const auto& delivery = view.at("deliveries").at(0);
     check(session.sends.size() == 2 && session.sends[0].first == target && session.sends[1].first == otherTarget &&

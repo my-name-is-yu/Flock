@@ -274,7 +274,7 @@ bool Store::Impl::acceptInstruction(Json& task, Id messageId, int step, std::str
     }
     if (conflicting) {
         task["replanning"] = true;
-        exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{task.value("eventId",Id{0})});
+        releaseModelCall(takeReservedTaskCall(task.value("eventId",Id{0})));
         if (task.at("state") == "waiting" && waitIsActionable(task)) {
             auto data = task.at("wait");
             if (!data.is_object()) throw DecisionUnavailable{};

@@ -121,6 +121,12 @@ FROM return_channels c JOIN session_controls s ON s.channel_id=c.id WHERE c.id=?
     return CoordinationActivation{std::move(result),{std::move(*scope)}};
 }
 
+Intake SessionHandoff::resolveBot(std::string_view bot) const {
+    auto routing = intake_(bot,"");
+    if (routing.botId != bot) throw Conflict("Session Bot is unavailable");
+    return routing;
+}
+
 PairingTicket SessionHandoff::pair(const Person& person, const ThreadTarget& target, std::string_view bot,
                                    std::optional<CoordinationRequest> coordination) {
     if (!validId(target.environmentId) || !validId(target.projectId) || !validId(target.threadId) ||
@@ -140,6 +146,7 @@ PairingTicket SessionHandoff::pair(const Person& person, const ThreadTarget& tar
         std::lock_guard lock(db.mutex);
         check();
     }
+    resolveBot(bot);
     const auto origin = session_.read(target,std::nullopt);
     if (!origin || origin->target != target || origin->authGeneration.empty())
         throw Conflict("The configured T3 connection cannot verify this Thread");
@@ -194,6 +201,7 @@ WHERE code_digest=? AND expires_at>?
         tx.commit();
         return reply;
     }
+    resolveBot(bot);
     if (db.query("SELECT 1 FROM runs WHERE environment_id=? AND thread_id=?",
                  {target.environmentId,target.threadId}).next())
         throw Conflict("A Flock-owned Thread cannot be paired");

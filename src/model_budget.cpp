@@ -97,9 +97,24 @@ Id Store::Impl::takeReservedConversationCall(Id message) {
     return id;
 }
 
-void Store::Impl::releaseModelCall(std::string_view budget, Id attempt) {
-    exec("DELETE FROM model_attempts WHERE id=? AND budget_id=?",{attempt,budget});
-    if (sqlite3_changes(db)) exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
+Id Store::Impl::takeReservedTaskCall(Id event) {
+    auto reserved = query("SELECT reserved_attempt FROM events WHERE id=? AND reserved_attempt IS NOT NULL",{event});
+    if (!reserved.next()) return 0;
+    const auto id = reserved.number(0);
+    exec("UPDATE events SET reserved_attempt=NULL WHERE id=?",{event});
+    return id;
+}
+
+void Store::Impl::releaseModelCall(Id attempt) {
+    if (!attempt) return;
+    std::string budget;
+    {
+        auto removed = query("DELETE FROM model_attempts WHERE id=? RETURNING budget_id",{attempt});
+        if (!removed.next()) return;
+        budget = removed.string(0);
+        removed.next();
+    }
+    exec("UPDATE model_budgets SET attempts=attempts-1 WHERE id=?",{budget});
 }
 
 Id Store::Impl::reserveExtraModelCall(std::string_view budget, std::string_view purpose,

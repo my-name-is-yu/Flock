@@ -232,7 +232,8 @@ struct Store::Impl {
     std::string ensureModelBudget(std::string key, const Json& config);
     Id reserveModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     Id takeReservedConversationCall(Id messageId);
-    void releaseModelCall(std::string_view budget, Id attempt);
+    Id takeReservedTaskCall(Id event);
+    void releaseModelCall(Id attempt);
     Id reserveExtraModelCall(std::string_view budget, std::string_view purpose, Id messageId, Id taskId, Id eventId);
     SecretRedactor modelCallRedactor(std::string_view bot, std::string_view tool, const Json& args,
                                      bool gitNotification) const;

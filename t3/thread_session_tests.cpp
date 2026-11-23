@@ -1,5 +1,5 @@
 #include "internal.hpp"
-#include "flock/root_delivery.hpp"
+#include "flock/session_handoff.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -11,6 +11,15 @@ namespace {
 void check(bool passed, std::string_view reason) {
     if (!passed) throw std::logic_error(std::string(reason));
 }
+
+class ReplyBot final : public Model {
+public:
+    ModelTurn decide(const ModelInput&) override {
+        ++calls;
+        return {{{"reply",{{"text","Fixture reply"}},""}}};
+    }
+    int calls = 0;
+};
 }
 
 int main(int argc, char** argv) {
@@ -33,21 +42,23 @@ int main(int argc, char** argv) {
               "newest page excludes inherited and unfinalized messages and holds the cursor");
         fixture({{"finalized",true}});
         const auto later = session->read(target,page->cursor);
-        check(later && later->cursor == 6 && later->events.size() == 2 && later->events.back().messageId == "sent-id" &&
+        check(later && !later->hasMore && later->cursor == 6 && later->events.size() == 2 &&
+              later->events.back().messageId == "sent-id" &&
               later->events.back().creationSource == "mcp" && later->events.back().createdBy == "agent",
               "forward page includes finalized progress and correlated MCP delivery");
 
         fixture({{"stockHistory","late-human"}});
         const auto firstPage = session->read(target,0);
         const auto fullHistory = session->dispatchHistory(target,0);
-        check(firstPage && firstPage->cursor == 20 && fullHistory && fullHistory->cursor == 26 &&
+        check(firstPage && firstPage->hasMore && firstPage->cursor == 20 && fullHistory && fullHistory->cursor == 26 &&
               std::ranges::any_of(fullHistory->events,[](const auto& event) {
                   return event.position == 26 && event.kind == "user_message" && event.createdBy == "user";
               }),"dispatch history did not paginate beyond the finalized observation page");
         fixture({{"stockHistory","streaming-late-human"}});
         const auto streamingPage = session->read(target,0);
         const auto streamingHistory = session->dispatchHistory(target,0);
-        check(streamingPage && streamingPage->cursor == 0 && streamingPage->events.empty() && streamingHistory &&
+        check(streamingPage && streamingPage->hasMore && streamingPage->cursor == 0 &&
+              streamingPage->events.empty() && streamingHistory &&
               streamingHistory->events.size() == 2 && streamingHistory->events.back().createdBy == "user",
               "dispatch history stopped at an unfinished assistant message");
         fixture({{"stockIncomplete",true}});
@@ -129,7 +140,57 @@ int main(int argc, char** argv) {
               stock.at("stockLaunches").at("project:pinned-worker").at("replays")==1 &&
               stock.at("stockPromptSends").at("pinned-worker:pinned-worker:start").at("replays")==0,
               "same-key provision recovery created another thread, resent the first prompt, or sent to invalid work");
-        std::cout << "Stock Thread delivery, history provenance, and pinned specialist verified\n";
+
+        fixture({{"stockRootRecovery",true},{"stockDropSendReply",true}});
+        const auto database = directory.parent_path() / "root-recovery.sqlite3";
+        const Person owner{"owner",true};
+        const auto people = [&](std::string_view person) -> std::optional<Person> {
+            return person == owner.id ? std::optional(owner) : std::nullopt;
+        };
+        const auto intake = [&](std::string_view bot, std::string_view) {
+            return Intake{std::string(bot),"",target.environmentId,target.projectId};
+        };
+        const auto soul = [](std::string_view) { return std::string{}; };
+        ReplyBot bot;
+        Id channel;
+        {
+            Store store(database);
+            store.access().resourceGrant(owner,"planner",Scope::consultReply(target.environmentId,target.threadId),
+                                         GrantChange::grant);
+            SessionHandoff handoff(store,*session,people,intake);
+            const auto pair = handoff.pair(owner,target,"planner",{});
+            channel = handoff.intake(pair.code,"failed-root-run","Check the fixture.").channel;
+            handoff.consult(owner,channel,bot,soul);
+            check(handoff.view(owner,channel).deliveries.front().state == RootDeliveryState::Unknown,
+                  "a dropped send response was reported as confirmed");
+        }
+        fixture({{"stockDropSendReply",false},{"stockRootWait","wrong-run"}});
+        auto reconnected = makeT3ThreadSession(directory);
+        Store reopened(database);
+        SessionHandoff recovered(reopened,*reconnected,people,intake);
+        recovered.recover();
+        recovered.consult(owner,channel,bot,soul);
+        check(recovered.view(owner,channel).deliveries.front().observedRunId == "next-run",
+              "history did not identify the run after the lost reply");
+        for (const auto wait : {"wrong-thread","wrong-run","timed-out","cancelled"}) {
+            fixture({{"stockRootWait",wait}});
+            recovered.consult(owner,channel,bot,soul);
+            const auto pending = recovered.view(owner,channel);
+            check(pending.state == "active" && pending.deliveries.front().state == RootDeliveryState::Unknown,
+                  "unproven failure settled the delivery");
+        }
+        fixture({{"stockRootWait","failed"},{"stockRootExtraHistory",true}});
+        recovered.consult(owner,channel,bot,soul);
+        check(recovered.view(owner,channel).deliveries.front().state == RootDeliveryState::Unknown,
+              "run failure settled delivery before checking all available messages");
+        recovered.consult(owner,channel,bot,soul);
+        const auto settled = recovered.view(owner,channel);
+        check(settled.state == "failed" && settled.deliveries.front().state == RootDeliveryState::Failed,
+              "confirmed root run failure without an assistant message left delivery unresolved");
+        const auto recoveredEffects = Json::parse(http(origin+"/fixture/effects","GET").body);
+        check(bot.calls == 1 && recoveredEffects.at("t3_thread_send").size() == 4,
+              "failure reconciliation repeated the model or root send");
+        std::cout << "Stock Thread delivery, lost reply recovery, and pinned specialist verified\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
