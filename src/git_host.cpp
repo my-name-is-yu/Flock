@@ -232,7 +232,7 @@ void Store::Impl::projectTaskGitReads(GitHost& host, const Json& task, Json& eve
         try {
             if (source.tool == "git_find_repos") {
                 if (!std::ranges::all_of(result.at("repos"),[&](const Json& repo) {
-                    return repositoryAccess(access,host,context,{std::string(host.name()),repo.get<std::string>()},"read");
+                    return repositoryAccess(access,host,context,{std::string(host.name()),repo.get<std::string>()},"read",&source);
                 })) continue;
             } else {
                 const auto repo = GitRepository::parse(host.name(),field(source.args,"repo"));
@@ -303,7 +303,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
         return repositoryAccess(access,host,context,repository,required);
     };
     if (decision.tool == "git_find_repos") {
-        const auto [candidates,more] = host.repositories(context,lower(field(args,"query")));
+        const auto page = args.value("page",Id{1});
+        const auto [candidates,more] = host.repositories(context,lower(field(args,"query")),page);
         Json repos = Json::array();
         bool truncated = more;
         for (const auto& candidate : candidates) {
@@ -314,7 +315,8 @@ Json Store::Impl::gitTool(GitHost& host, std::string_view bot, Id taskId, const 
             }
             repos.push_back(candidate.repo);
         }
-        const auto result = sharedRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated}},
+        const auto result = sharedRedactor().record({{"ok",true},{"host",hostId},{"repos",repos},{"truncated",truncated},
+                                                     {"nextPage",more && page < std::numeric_limits<Id>::max() ? Json(page+1) : Json(nullptr)}},
                                                     SecretRedactor::Fields::external);
         if (generation) return saveTaskGitRead(taskId,invocation,decision.tool,readTarget(decision,hostId),result);
         return result;
