@@ -1134,7 +1134,6 @@ void retryHistoryInvalidation(const std::filesystem::path& path) {
             check(change == Json{{"list",true},{"bot","release"}},"missing initial view scopes");
             projectionUnavailable = true;
 
-            // Isolate the persisted effect of steering an old message from any other Runtime writes.
             sqlite3* raw = nullptr;
             const auto opened = sqlite3_open_v2(path.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
             const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> db(raw,sqlite3_close);
