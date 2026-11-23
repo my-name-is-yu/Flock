@@ -8,13 +8,13 @@
 <section id="local-connections" hidden><h2>Local machine connections</h2><div id="machines"></div></section>
 <div id="administration" hidden>
 <section id="environment"><h2>Environment</h2>
-<p>Set environmentId and projectId in the Bot’s config.json. Sign in with the T3 connection for that environment and grant the Bot its environment launch operation below.</p></section>
+<p><span>This Bot works in the T3 environment and project set in its config.json. Sign in to that environment’s T3 connection, then allow <strong>Start Sessions</strong> for it under Resource access.</span></p></section>
 <section id="secrets" hidden><h2>Protected input</h2><div id="inputs"></div></section>
 <section id="access-requests" hidden><h2>Access requests</h2><div id="requests"></div></section>
 <section id="bot-changes" hidden><h2>Bot changes</h2><div id="changes"></div></section>
-<section><h2>Resource grants</h2><div id="grants"></div>
-<form id="resource"><label>Resource kind <select name="resourceKind"></select></label><label>Resource ID <input required name="resourceId"><small id="resource-hint"></small></label><label>Operation <select name="operation"></select></label><button class="button">Grant</button></form></section>
+<section><h2>Resource access</h2><div id="grants"></div>
+<form id="resource"><label>Resource <select name="resourceKind"></select></label><label>ID <input required name="resourceId" spellcheck="false"><small id="resource-hint"></small></label><label>Allow <select name="operation"></select></label><button class="button">Allow</button></form></section>
 <section><h2>People</h2><div id="people"></div>
-<form id="person"><label>Person ID <input required name="person"></label><label>Role <select name="role"><option>view</option><option>decide</option><option>admin</option></select></label><button class="button">Grant</button></form></section>
+<form id="person"><label>Person ID <input required name="person"></label><label>Role <select name="role"><option value="view">Can view</option><option value="decide">Can respond</option><option value="admin">Administrator</option></select></label><button class="button">Add person</button></form></section>
 </div>
 </main></body></html>

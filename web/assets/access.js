@@ -6,16 +6,38 @@ fetch('/api/bots').then(r => r.ok ? r.json() : []).then(bots => {
   $('back-label').textContent = bots.find(bot => bot.id === botId)?.name || botId;
 }).catch(() => { $('back-label').textContent = botId; });
 const resource = $('resource').elements;
+// The API speaks in resource kinds and operation ids; people read what the Bot will be allowed to do.
+const kindLabels = {
+  attachment: 'Attachment', bot_admin: 'Bot administration', consult: 'Session consultation',
+  environment: 'T3 environment', mcp_server: 'MCP server', repository: 'Repository', secret: 'Secret',
+  service: 'Service', session: 'T3 Session', shared_memory: 'Shared memory', skill: 'Skill', web: 'Web',
+  work: 'Specialist work', workspace: 'Workspace',
+};
+const operationLabels = {
+  inspect: 'View', create_bot: 'Create Bots', rename_bot: 'Rename Bots', 'reply-once': 'Reply once',
+  configure: 'Change settings', launch: 'Start Sessions', discover: 'List tools', invoke: 'Call tools',
+  read_resource: 'Read resources', read: 'Read', write: 'Write', pr: 'Open pull requests',
+  review: 'Review pull requests', issues: 'Manage issues', use: 'Use', manage: 'Manage', coordinate: 'Coordinate',
+  list: 'List', search: 'Search', fetch: 'Open pages', delegate: 'Hand off to specialists', exec: 'Run commands',
+};
+const roleLabels = { view: 'Can view', decide: 'Can respond', admin: 'Administrator' };
+const idPlaceholders = {
+  environment: 'T3 environment ID', repository: 'owner/repository', session: '["environment","thread"]',
+  consult: '["environment","thread"]', work: '["environment","thread"]', web: 'public',
+};
+const kindLabel = (kind) => kindLabels[kind] ?? kind;
+const operationLabel = (operation) => operationLabels[operation] ?? operation;
 function configureResourceForm(operations) {
   const kinds = Object.keys(operations);
-  resource.resourceKind.replaceChildren(...kinds.map(kind => new Option(kind)));
+  resource.resourceKind.replaceChildren(...kinds.map(kind => new Option(kindLabel(kind), kind)));
   const selectOperations = () => {
     const kind = resource.resourceKind.value;
     const available = operations[kind];
     $('resource-hint').textContent = ['session', 'consult', 'work'].includes(kind)
-      ? `Use the compact [environmentId,threadId] JSON array, for example ["local","thread-id"]. Operations: ${available.join(', ')}.`
+      ? 'Enter the environment and Thread IDs as a JSON array.'
       : '';
-    resource.operation.replaceChildren(...available.map(op => new Option(op)));
+    resource.resourceId.placeholder = idPlaceholders[kind] ?? '';
+    resource.operation.replaceChildren(...available.map(op => new Option(operationLabel(op), op)));
   };
   resource.resourceKind.onchange = selectOperations;
   selectOperations();
@@ -44,9 +66,19 @@ for (const path of ['person','resource']) {
     void submit(path, {action:'grant', ...Object.fromEntries(new FormData(event.target))});
   };
 }
-function row(id, text) {
+function row(id, text, detail) {
   const item = document.createElement('p');
-  item.textContent = text;
+  const label = document.createElement('span');
+  label.className = 'row-label';
+  const title = document.createElement('strong');
+  title.textContent = text;
+  label.append(title);
+  if (detail) {
+    const sub = document.createElement('small');
+    sub.textContent = detail;
+    label.append(sub);
+  }
+  item.append(label);
   $(id).append(item);
   return item;
 }
@@ -77,10 +109,10 @@ async function load() {
       void submit('secret',{requestId:request.id,value});
     });
   }
-  const scope = r => [r.resourceKind,r.resourceId,r.operation].join(' / ');
+  const scope = r => [operationLabel(r.operation), `${kindLabel(r.resourceKind)} · ${r.resourceId}`];
   for (const [list, endpoint, entries] of [['requests','decision',data.requests],['changes','bot-change',data.botChanges]]) {
     for (const r of entries.filter(x => x.status === 'pending' || (endpoint === 'bot-change' && x.status === 'approved'))) {
-      const item = row(list,r.resourceKind ? scope(r) : [r.operation,r.target,r.name].join(' / '));
+      const item = r.resourceKind ? row(list,...scope(r)) : row(list,r.name || r.target,[r.operation,r.target].filter(Boolean).join(' · '));
       if (r.status === 'approved') {
         button(item,'Apply approved change',() => submit(endpoint,{requestId:r.id,approve:true}));
         continue;
@@ -89,8 +121,8 @@ async function load() {
     }
   }
   for (const [section, list] of [['secrets','inputs'],['access-requests','requests'],['bot-changes','changes']]) $(section).hidden = !$(list).childElementCount;
-  for (const r of data.grants) button(row('grants',scope(r)),'Revoke',() => submit('resource',{resourceKind:r.resourceKind,resourceId:r.resourceId,operation:r.operation,action:'revoke'}));
-  for (const p of data.people) button(row('people',p.person+' / '+p.role),'Revoke',() => submit('person',{...p,action:'revoke'}));
+  for (const r of data.grants) button(row('grants',...scope(r)),'Revoke',() => submit('resource',{resourceKind:r.resourceKind,resourceId:r.resourceId,operation:r.operation,action:'revoke'}));
+  for (const p of data.people) button(row('people',p.person,roleLabels[p.role] ?? p.role),'Revoke',() => submit('person',{...p,action:'revoke'}));
 }
 async function loadMachines() {
   const response = await fetch('/api/channels/local-connections');
