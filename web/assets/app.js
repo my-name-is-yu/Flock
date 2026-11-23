@@ -685,6 +685,20 @@ function skeletonRows(count, className = 'skeleton-row') {
   });
 }
 
+let emptyBotRow;
+function newBotRow() {
+  if (emptyBotRow) return emptyBotRow;
+  emptyBotRow = node('div', 'bot-row new-bot-row');
+  const select = button(null, 'bot-select', () => openNewBot(emptyBotRow.querySelector('button')));
+  const mark = node('span', 'new-bot-mark');
+  mark.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  const text = node('span', 'bot-text');
+  text.append(node('span', 'bot-name', 'New bot'), node('span', 'bot-preview', 'No Bots yet'));
+  select.append(mark, text);
+  emptyBotRow.append(select);
+  return emptyBotRow;
+}
+
 function draftRow(draft) {
   const row = node('div', 'bot-row draft');
   row.setAttribute('aria-hidden', 'true');
@@ -762,7 +776,7 @@ function renderBots() {
   const rows = unpinned.map(rowFor);
   if (botDraft?.mode === 'create') rows.unshift(draftRow(botDraft));
   if (!listLoaded) rows.push(...skeletonRows(4, 'skeleton-bot'));
-  else if (!bots.length && !botDraft) rows.push(node('p', 'activity-empty', 'No Bots configured'));
+  else if (!bots.length && !botDraft) rows.push(newBotRow());
   placeRows(list, rows);
   pinned.forEach((bot, index) => sidebarEntries.get(bot.id).update(bot, index));
   unpinned.forEach((bot) => sidebarEntries.get(bot.id).update(bot, -1));
@@ -825,7 +839,8 @@ function renderHeader() {
   const identity = elements['profile-identity'];
   identity.hidden = !bot || !!dm;
   elements['profile-toolbar'].hidden = !bot;
-  elements['profile-placeholder'].hidden = !!bot || !!dm;
+  // The first-run empty state carries its own heading; a bare "Conversation" title would only repeat it.
+  elements['profile-placeholder'].hidden = !!bot || !!dm || (listLoaded && !bots.length);
   elements['bot-activity'].hidden = !bot || !!dm;
   elements['peer-picker'].hidden = !view?.data || !!dm || !botPeers(bot.id).length;
   elements['peer-back'].hidden = !dm;
@@ -1925,10 +1940,16 @@ function conversationRows(data, events, keep, source) {
     const loaded = !view && listLoaded;
     rows.push(keep('empty', [loaded, !bots.length], () => {
       const empty = node('div', 'empty-state');
-      empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
       if (loaded && !bots.length) {
-        empty.append(node('p', null, 'Create a Bot to get started.'));
-        empty.append(button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+        empty.classList.add('first-run');
+        const flock = node('div', 'first-run-flock');
+        flock.setAttribute('aria-hidden', 'true');
+        for (const example of ['chat', 'sprout', 'controller']) flock.append(avatar({ id: example, avatar: { example } }));
+        empty.append(flock, node('h2', null, 'Create your first Bot'),
+          node('p', null, 'A Bot takes your requests, runs the work in T3 Sessions and reports back here.'),
+          button('New bot', 'dialog-button primary', () => openNewBot(elements['new-bot-button'])));
+      } else {
+        empty.append(node('h2', null, loaded ? 'No Bots' : 'Loading…'));
       }
       return empty;
     }));
