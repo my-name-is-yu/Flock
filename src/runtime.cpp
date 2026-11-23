@@ -2690,7 +2690,7 @@ SELECT data FROM journal WHERE task_id=? AND kind='read_bot_evidence'
         try {
             auto turn = db.callModel(field(task,"botId"),model,
                 {summary,event,history,bot,tools,field(task,"feedback"),evidence,task["config"],
-                 needsDoneWhen(task),summary.contains("forwardableUserMessage")},0);
+                 needsDoneWhen(task),summary.contains("forwardableUserMessage")});
             inference.usage = std::move(turn.usage);
             if (turn.calls.size() == 1) inference.outcome = std::move(turn.calls.front());
             else inference.outcome = ModelError("Return one task action",false);

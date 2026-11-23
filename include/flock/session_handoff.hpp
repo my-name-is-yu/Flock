@@ -3,11 +3,20 @@
 #include "flock/root_delivery.hpp"
 #include "flock/t3_connection.hpp"
 
+#include <exception>
+#include <map>
+#include <mutex>
+
 namespace flockv0 {
 
 struct HandoffAck {
     Id channel;
     std::string requestId;
+};
+struct PendingHandoff {
+    Id channel;
+    std::string personId;
+    bool coordination;
 };
 struct SessionHandoffView {
     Id channel;
@@ -51,9 +60,25 @@ public:
     std::vector<SessionHandoffView> recent(const Person&) const;
     void consult(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
     SessionHandoffView step(const Person&, Id channel, Model&, const Runtime::SoulLoader&);
-    std::vector<std::pair<Id,std::string>> pending(Id after) const;
+    std::vector<PendingHandoff> pending(Id after) const;
+    void discardModelDecision(Id channel);
 
 private:
+    struct ModelCommit {
+        Id attempt, generation;
+        std::string personId;
+        bool coordination;
+        Json usage;
+        std::function<void()> save;
+        std::function<std::optional<bool>(bool retry)> checkEvidence;
+        std::exception_ptr failure;
+        bool deferredForHistory = false;
+    };
+    bool commitModelDecision(const Person*, Id channel, bool coordination, bool retry = true);
+    template <typename Prepare>
+    void checkpointModelDecision(const Person&, Id channel, Id generation, Id attempt, bool coordination,
+                                 std::string_view bot, Model&, const ModelInput&, Prepare);
+
     HandoffAck openChannel(const T3Connection&, const ThreadProof&, std::string_view bot,
                            std::string_view requestId, std::string_view text, std::string_view payloadDigest,
                            const std::optional<CoordinationRequest>&);
@@ -65,6 +90,8 @@ private:
     IntakeResolver intake_;
     Runtime* runtime_;
     Peers peers_;
+    mutable std::mutex modelMutex_;
+    std::map<Id,ModelCommit> modelCommits_;
 };
 
 }

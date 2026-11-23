@@ -162,7 +162,7 @@ ModelCall Store::Impl::checkModelCall(std::string_view bot, Decision call, const
     return {std::move(call),std::move(rejection)};
 }
 
-CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input, Id attemptId) {
+CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, const ModelInput& input) {
     Json revision;
     const bool conversation = input.event.contains("turn") && input.event.value("kind","") == "conversation_turn";
     const auto scrub = redactor(bot,conversation ? &revision : nullptr);
@@ -183,20 +183,11 @@ CheckedModelTurn Store::Impl::callModel(std::string_view bot, Model& model, cons
             checked.calls.push_back(checkModelCall(bot,std::move(call),input.tools,input.event.contains("gitEvent")));
         checked.usage = scrub.payload(turn.usage);
     } catch (const ModelError& error) {
-        auto usage = scrub.payload(error.usage);
-        if (attemptId && !usage.empty()) {
-            std::lock_guard lock(mutex);
-            exec("UPDATE model_attempts SET usage=? WHERE id=?",{usage,attemptId});
-        }
-        throw ModelError(scrub.text(error.what()),error.transient,std::move(usage));
+        throw ModelError(scrub.text(error.what()),error.transient,scrub.payload(error.usage));
     } catch (const StorageError&) {
         throw;
     } catch (const std::exception& error) {
         throw ModelError(scrub.text(error.what()),false);
-    }
-    if (attemptId && !checked.usage.empty()) {
-        std::lock_guard lock(mutex);
-        exec("UPDATE model_attempts SET usage=? WHERE id=?",{checked.usage,attemptId});
     }
     return checked;
 }
