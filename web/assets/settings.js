@@ -142,10 +142,11 @@ $('rule-form').onsubmit = async (event) => {
   if (await submit('rule', { ...data, target: data.target.trim(), add: true })) form.reset();
 };
 
-function link(label, href) {
+function link(label, href, name) {
   const anchor = document.createElement('a');
   anchor.className = 'button';
   anchor.textContent = label;
+  anchor.setAttribute('aria-label', name);
   anchor.href = href;
   return anchor;
 }
@@ -159,8 +160,8 @@ async function loadBots() {
     const item = row('bots', emptyLabel(bot.name, 'Name, look, role and recurring requests'));
     const actions = document.createElement('span');
     actions.className = 'row-actions';
-    actions.append(link('Edit', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`),
-      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`));
+    actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),
+      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`, `Sharing for ${bot.name}`));
     item.append(actions);
   }
 }
