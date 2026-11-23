@@ -1,10 +1,10 @@
 import { hasQuestionChoices, questionChoiceForm, updateQuestionChoiceForm } from './question-choices.js';
 
 const labels = {
-  user_question: 'Question', extra_run: 'Extra run', deadline: 'Deadline extension',
-  model_budget: 'Extra model call', conversation_model_budget: 'Extra conversation model call',
+  user_question: 'Question', extra_run: 'One more run', deadline: 'Deadline extension',
+  model_budget: 'Another model call', conversation_model_budget: 'Another model call',
   unknown_delivery: 'Unconfirmed message to T3',
-  protected_input: 'Protected input', pr_review: 'Pull request review',
+  protected_input: 'Secret value', pr_review: 'Pull request review',
   pr_reconciliation: 'Unconfirmed pull request',
   answer: 'Answered', approve: 'Approved', deny: 'Denied', supply: 'Supplied',
   extend: 'Extended', reconcile: 'Checked again', request_changes: 'Changes requested',
@@ -18,7 +18,7 @@ const actions = {
   model_budget: [['approve', 'Approve one call']],
   conversation_model_budget: [['approve', 'Approve one call']],
   unknown_delivery: [['reconcile', 'Check T3 again']],
-  protected_input: [['supply', 'Save protected value']],
+  protected_input: [['supply', 'Save secret']],
   pr_reconciliation: [['reject_pr', 'Reject']],
   policy_approval: [['allow_once', 'Allow once'], ['always_allow', 'Always allow'], ['deny', 'Deny']],
   pr_review: [['request_changes', 'Request changes'], ['approve', 'Approve review']],
@@ -209,7 +209,7 @@ function decisionCard(item, submit, source, question, saving) {
     inputs.value.type = 'password';
     inputs.value.autocomplete = 'off';
     inputs.value.required = true;
-    form.append(labeled('Protected value', inputs.value));
+    form.append(labeled('Secret value', inputs.value));
   }
   for (const pr of item.candidates || []) {
     const btn = element('button', `Link #${pr.prNumber}`);

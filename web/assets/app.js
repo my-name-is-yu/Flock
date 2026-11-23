@@ -969,15 +969,15 @@ function workflowInspectors(data, open) {
   return sections;
 }
 const decisionKindLabels = {
-  user_question: 'Question from the Bot',
-  pr_review: 'Pull request review',
-  pr_reconciliation: 'Unconfirmed pull request',
-  extra_run: 'Extra run',
-  deadline: 'Deadline extension',
-  model_budget: 'Extra model call',
-  conversation_model_budget: 'Extra model call',
-  unknown_delivery: 'Delivery confirmation',
-  protected_input: 'Protected input',
+  user_question: 'Question for you',
+  pr_review: 'Review requested',
+  pr_reconciliation: 'Confirm the pull request',
+  extra_run: 'Approve one more run',
+  deadline: 'Deadline reached',
+  model_budget: 'Approve another model call',
+  conversation_model_budget: 'Approve another model call',
+  unknown_delivery: 'Message to T3 unconfirmed',
+  protected_input: 'Secret needed',
   policy_approval: 'Approval',
 };
 let activityBotId = null;
