@@ -222,13 +222,41 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     std::unique_ptr<Model> model;
     std::unique_ptr<T3> t3;
     std::function<Json()> modelStatus;
+    std::function<void(bool)> modelLogin;
     if (fixed) {
         model = makeDemoModel();
         t3 = makeDemoT3();
         modelStatus = [] { return Json{{"connected",true},{"demo",true}}; };
     } else {
         auto chatgpt = std::make_unique<ChatGPTModel>(home / "credentials" / "chatgpt");
-        modelStatus = [model = chatgpt.get()] { return model->status(); };
+        // Sign-in from Flock settings runs on its own model handle, so a pending browser approval
+        // never blocks shutdown; status reports it until it settles.
+        struct SignIn { std::mutex mutex; bool running = false; std::string error; };
+        auto signIn = std::make_shared<SignIn>();
+        modelStatus = [model = chatgpt.get(),signIn] {
+            {
+                std::lock_guard lock(signIn->mutex);
+                if (signIn->running) return Json{{"signingIn",true}};
+            }
+            auto status = model->status();
+            std::lock_guard lock(signIn->mutex);
+            if (!signIn->error.empty()) status["signInError"] = signIn->error;
+            return status;
+        };
+        modelLogin = [signIn,directory = home / "credentials" / "chatgpt"](bool reconsent) {
+            std::lock_guard lock(signIn->mutex);
+            if (signIn->running) return;
+            signIn->running = true;
+            signIn->error.clear();
+            std::thread([signIn,directory,reconsent] {
+                std::string error;
+                try { ChatGPTModel(directory).login(false,reconsent); }
+                catch (const std::exception& failure) { error = failure.what(); }
+                std::lock_guard lock(signIn->mutex);
+                signIn->running = false;
+                signIn->error = error;
+            }).detach();
+        };
         model = std::move(chatgpt);
         t3 = makeT3Mcp(home / "credentials" / "t3");
     }
@@ -295,6 +323,7 @@ void daemon(Arguments& args, const std::filesystem::path& home, Bots& bots) {
     if (bridges) configureChannelBridges(store,bridges,callbacks);
     callbacks.sessionT3 = t3.get();
     callbacks.modelStatus = modelStatus;
+    callbacks.modelLogin = modelLogin;
     std::unique_ptr<WebServer> server;
     if (web) {
         if (const auto* secret = std::getenv("FLOCK_GITHUB_WEBHOOK_SECRET")) callbacks.githubWebhookSecret = secret;

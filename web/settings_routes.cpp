@@ -28,7 +28,9 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             try {
                 const auto status = callbacks.modelStatus();
                 model = {{"connected",status.value("connected",false)},{"account",status.value("account","")},
-                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)}};
+                         {"planUsage",status.value("planUsage",false)},{"demo",status.value("demo",false)},
+                         {"signingIn",status.value("signingIn",false)},{"signInError",status.value("signInError","")},
+                         {"canSignIn",bool(callbacks.modelLogin)}};
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
         reply(res,200,{{"mode",policy.mode()},{"rules",policy.redactSecrets({},policy.rules())},
@@ -44,6 +46,17 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             view["canManageMembers"] = view.at("canManage").get<bool>() && bool(callbacks.authenticate);
             reply(res,200,view);
         } catch (const Conflict&) { reply(res,403,{{"error","access_denied"}}); }
+    });
+    server.Post("/api/settings/model-login",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 1024) return reply(res,413,{{"error","payload_too_large"}});
+        try {
+            const auto args = Json::parse(req.body);
+            if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
+            if (!callbacks.modelLogin) return reply(res,409,{{"error","sign_in_unavailable"}});
+            callbacks.modelLogin(args.at("reconsent").get<bool>());
+            reply(res,202,{{"ok",true}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
     });
     server.Post(R"(/api/settings/(mode|rule))",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 4096) return reply(res,413,{{"error","payload_too_large"}});

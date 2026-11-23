@@ -26,6 +26,8 @@ struct WebCallbacks {
     std::function<std::optional<Person>(std::string_view)> configuredPerson = {};
     // Optional model connection status for Flock settings: connected, account, planUsage, demo.
     std::function<Json()> modelStatus = {};
+    // Optional: starts ChatGPT sign-in in the background (opens the browser on this machine).
+    std::function<void(bool reconsent)> modelLogin = {};
 };
 void configureChannelBridges(Store&, const std::filesystem::path&, WebCallbacks&);
 void configureWebIdentities(Store&, const std::filesystem::path&, WebCallbacks&);
