@@ -602,12 +602,15 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     FixedT3 t3;
     Runtime runtime(store,model,t3,[](auto) { return std::string{}; });
     const Person requester{"requester",false};
+    const Person administrator{"administrator",true};
     auto web = callbacks();
     web.authenticate = [&](std::string_view credential) {
+        if (credential == "Bearer administrator") return administrator;
         return credential == "Bearer requester" ? requester : Person{};
     };
     web.resolveIdentity = [&](std::string_view person) -> std::optional<bool> {
         if (person == requester.id) return requester.adminRoot;
+        if (person == administrator.id) return administrator.adminRoot;
         return std::nullopt;
     };
     auto policy = store.policy();
@@ -627,16 +630,27 @@ void conversationRequestApproval(const std::filesystem::path& path) {
     const auto& task = tasks.at(0);
     check(task.at("environmentId") == "local-env" && task.at("projectId") == "release" && !task.contains("trigger"),
           "the HTTP client changed routing or schedule");
-    const auto approvals = store.inbox(requester);
+    const auto approvals = browser.get("/api/inbox").at("items");
     check(approvals.size() == 1 && approvals.at(0).at("taskId") == task.at("id") &&
-          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true,
-          "the message sender could not approve the Task they requested");
+          approvals.at(0).at("itemKind") == "policy_approval" && approvals.at(0).at("canDecide") == true &&
+          approvals.at(0).at("canSaveRule") == false,
+          "the message sender could not approve once without access to Flock-wide rules");
+    browser.client.set_default_headers({{"Authorization","Bearer administrator"}});
+    const auto adminApprovals = browser.get("/api/inbox").at("items");
+    check(adminApprovals.size() == 1 && adminApprovals.at(0).at("itemId") == approvals.at(0).at("itemId") &&
+          adminApprovals.at(0).at("canSaveRule") == true,"the administrator could not save a rule from this approval");
+    browser.client.set_default_headers({{"Authorization","Bearer requester"}});
     check(t3.launches.empty(),"the Task launched before approval");
     const auto& item = approvals.at(0);
-    browser.post("/api/inbox/decide",{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
+    Json decision{{"botId",item.at("botId")},{"itemKind",item.at("itemKind")},
         {"itemId",item.at("itemId")},{"waitId",item.at("waitId")},{"taskId",item.at("taskId")},
         {"targetRevision",item.at("targetRevision")},{"targetGeneration",item.at("targetGeneration")},
-        {"decision","allow_once"}});
+        {"decision","always_allow"}};
+    browser.post("/api/inbox/decide",decision,403);
+    check(browser.get("/api/inbox").at("items") == approvals && policy.rules().empty(),
+          "a denied Flock-wide rule changed the request or policy");
+    decision["decision"] = "allow_once";
+    browser.post("/api/inbox/decide",decision);
     tick(runtime,4);
     check(t3.launches["release"] == 1,"the Task could not launch with approval");
 }

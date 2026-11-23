@@ -11,7 +11,8 @@ public:
     explicit ChatGPTModel(std::filesystem::path directory);
     ModelTurn decide(const ModelInput&) override;
     Json login(bool printUrl, bool reconsent);
-    Json loginWeb(bool reconsent, std::stop_token);
+    Json loginWeb(bool reconsent, std::stop_token, bool switchAccount = false);
+    Json signOut();
     Json status();
     Json webStatus();
     Json models();

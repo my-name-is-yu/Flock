@@ -17,7 +17,8 @@ private:
 
 using InstallT3Provider = std::function<void(std::string_view)>;
 Json configureT3Providers(std::string_view url,
-    const std::function<void(const InstallT3Provider&)>& connect);
+    const std::function<void(const InstallT3Provider&)>& connect,
+    const std::function<bool(std::string_view)>& owns = {});
 bool t3ProvidersNeedRefresh(const std::function<bool(std::string_view)>& owns);
 void removeT3Providers(const std::function<bool(std::string_view)>& owns);
 void syncT3Skills(const Json& bots);

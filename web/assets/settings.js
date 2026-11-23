@@ -1,4 +1,7 @@
 import { actionLabel, actionLabels } from '/action-labels.mjs';
+import {
+  actionButton, confirmSetting, emptyLabel, loadInstallation, postSettings, row, showInstallationUnavailable, statusBadge,
+} from '/installation-settings.js';
 
 const $ = (id) => document.getElementById(id);
 const modeInputs = [...document.querySelectorAll('input[name="mode"]')];
@@ -7,34 +10,9 @@ let canManagePolicy = false;
 let savingPolicy = false;
 const ruleLabels = {never: 'Never', ask: 'Ask first', allow: 'Allow'};
 
-function emptyLabel(title, ...detail) {
-  const label = document.createElement('span');
-  label.className = 'row-label';
-  const heading = document.createElement('strong');
-  heading.textContent = title;
-  const sub = document.createElement('small');
-  sub.append(...detail);
-  label.append(heading, sub);
-  return label;
-}
-
-function command(text) {
-  const code = document.createElement('code');
-  code.textContent = text;
-  return code;
-}
-
-function row(list, content) {
-  const item = document.createElement('div');
-  item.className = 'settings-row';
-  item.append(content);
-  $(list).append(item);
-  return item;
-}
-
 const modeDescriptions = {
-  full: 'Bots use the access they’re given without asking. Never rules still apply.',
-  supervised: 'By default, Bots ask before actions with outside effects, such as opening pull requests, posting to channels or starting Sessions.',
+  full: 'Bots with access can open pull requests and post to other channels without asking. Never rules still apply.',
+  supervised: 'By default, Bots ask before opening pull requests or posting outside the originating conversation.',
 };
 function describeMode(mode) { $('mode-description').textContent = modeDescriptions[mode] ?? ''; }
 function reflectMode(mode) {
@@ -78,7 +56,7 @@ async function load() {
   reflectMode(mode);
   $('rules').replaceChildren();
   if (!rules.length) row('rules', canManagePolicy
-    ? emptyLabel('No rules yet', 'Choosing Always allow on a request adds one here, or add one below.')
+    ? emptyLabel('No rules yet', 'Choose Allow for this Flock on an approval card or add a rule below.')
     : emptyLabel('No rules yet', 'An installation administrator can add rules.'));
   for (const {kind, action, target} of rules) {
     const label = document.createElement('span');
@@ -103,15 +81,17 @@ async function load() {
 }
 
 // One section shows at a time, chosen by the URL hash, like a settings window's sidebar.
-const sectionNames = { general: 'General', permissions: 'Permissions', bots: 'Bots', connections: 'Connections' };
+const sectionNames = { appearance: 'Appearance', permissions: 'Permissions', connections: 'Connections', access: 'Access', system: 'System' };
 function showSection() {
-  const section = Object.hasOwn(sectionNames, location.hash.slice(1)) ? location.hash.slice(1) : 'general';
+  const hash = location.hash.slice(1);
+  const section = Object.hasOwn(sectionNames, hash) ? hash : 'appearance';
   for (const panel of document.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== section;
   for (const link of document.querySelectorAll('[data-section]')) {
     if (link.dataset.section === section) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
   $('crumb').textContent = sectionNames[section];
+  $('settings-scope').textContent = section === 'appearance' ? 'Applies to this browser' : 'Applies to this Flock';
   document.title = `${sectionNames[section]} · Flock settings`;
 }
 addEventListener('hashchange', showSection);
@@ -143,36 +123,10 @@ function link(label, href, name) {
   anchor.href = href;
   return anchor;
 }
-async function loadBots() {
-  const response = await fetch('/api/bots');
-  if (!response.ok) throw new Error();
-  const bots = await response.json();
-  $('bots').replaceChildren();
-  if (!bots.length) row('bots', emptyLabel('No Bots yet', 'Create one from the + button in the conversation list.'));
-  for (const bot of bots) {
-    const item = row('bots', emptyLabel(bot.name, bot.about || 'No role written yet. Choose Settings to describe what it does.'));
-    const actions = document.createElement('span');
-    actions.className = 'row-actions';
-    actions.append(link('Settings', `/?${new URLSearchParams({ bot: bot.id, settings: '1' })}`, `Settings for ${bot.name}`),
-      link('Sharing', `/settings/${encodeURIComponent(bot.id)}`, `Sharing for ${bot.name}`));
-    item.append(actions);
-  }
-}
-loadBots().catch(() => row('bots', emptyLabel('Could not load Bots', 'Reload the page to try again.')));
-
 let modelPoll = 0;
 let modelRequest = 0;
 let watchingSignIn = false;
-
-function actionButton(item, label, onclick, primary = false) {
-  const control = document.createElement('button');
-  control.type = 'button';
-  control.className = primary ? 'button primary' : 'button';
-  control.textContent = label;
-  control.onclick = onclick;
-  item.append(control);
-  return control;
-}
+let signingOut = false;
 
 function pollModel() {
   clearTimeout(modelPoll);
@@ -192,16 +146,13 @@ async function refreshModel() {
   }
 }
 
-async function signIn(reconsent, control) {
-  if (watchingSignIn) return;
+async function signIn(reconsent, control, switchAccount = false) {
+  if (watchingSignIn || signingOut) return;
   watchingSignIn = true;
   ++modelRequest;
   control.disabled = true;
   try {
-    const response = await fetch('/api/settings/model-login', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
-      body: JSON.stringify({ reconsent }),
-    });
+    const response = await postSettings('model-login', {reconsent, switchAccount});
     if (!response.ok && (response.status !== 409 || (await response.json()).error !== 'sign_in_pending')) throw new Error();
   } catch {
     watchingSignIn = false;
@@ -214,6 +165,31 @@ async function signIn(reconsent, control) {
   await refreshModel();
 }
 
+async function signOut() {
+  if (watchingSignIn || signingOut) return;
+  ++modelRequest;
+  signingOut = true;
+  try {
+    const response = await postSettings('model-logout', {});
+    if (!response.ok) throw new Error('Could not sign out of ChatGPT. Try again.');
+    const {revocationConfirmed} = await response.json();
+    await refreshModel();
+    $('status').textContent = revocationConfirmed ? 'Signed out of ChatGPT.'
+      : 'Signed out on this Flock. ChatGPT did not confirm revoking the previous session.';
+  } finally {
+    signingOut = false;
+  }
+}
+
+function modelAccountActions(item, model) {
+  const actions = document.createElement('span');
+  actions.className = 'row-actions';
+  if (model.canSwitch) actionButton(actions, 'Switch account', (event) => void signIn(false, event.currentTarget, true));
+  if (model.canSignOut) actionButton(actions, 'Sign out', () => confirmSetting('Sign out of ChatGPT?',
+    'Bots on this Flock will need a connected account to use ChatGPT.', 'Sign out', signOut));
+  item.append(actions);
+}
+
 function renderModel(model) {
   clearTimeout(modelPoll);
   $('model-section').hidden = !model;
@@ -222,7 +198,7 @@ function renderModel(model) {
   watchingSignIn = !!pending;
   if (!model) return;
   if (model.demo) {
-    row('model', emptyLabel('Demo model', 'This Flock runs with ', command('--fixed'), ', so Bots use a local demo instead of ChatGPT.'));
+    row('model', emptyLabel('Demo model', 'Bots use a local demo model on this Flock.'));
     return;
   }
   if (pending) {
@@ -234,14 +210,16 @@ function renderModel(model) {
   if (model.unavailable) {
     row('model', emptyLabel('ChatGPT', 'Flock couldn’t check the connection right now.'));
   } else if (model.connected && !model.needsSignIn) {
-    row('model', emptyLabel('ChatGPT', model.account ? `Saved account ${model.account}` : 'Account registered'));
+    const item = row('model', emptyLabel('Signed in', model.account || 'A ChatGPT account is linked to this Flock.'));
+    modelAccountActions(item, model);
     if (!model.planUsage) {
-      const item = row('model', emptyLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
-      if (model.canSignIn) actionButton(item, 'Allow plan usage', (event) => void signIn(true, event.currentTarget), true);
+      const usage = row('model', emptyLabel('Plan usage unavailable', 'Allow plan usage so your Bots can use your ChatGPT plan.'));
+      if (model.canSignIn) actionButton(usage, 'Allow plan usage', (event) => void signIn(true, event.currentTarget), true);
     }
   } else {
     const item = row('model', emptyLabel('ChatGPT sign-in needed', 'Sign in so your Bots can use your ChatGPT plan.'));
     if (model.canSignIn) actionButton(item, 'Sign in with ChatGPT', (event) => void signIn(false, event.currentTarget), true);
+    if (model.connected && (model.canSwitch || model.canSignOut)) modelAccountActions(item, model);
   }
 }
 
@@ -279,13 +257,15 @@ function renderConnections({t3, t3Setup, canManagePolicy: editable, canDisconnec
   $('connections').replaceChildren();
   if (t3) {
     for (const environment of t3.environments) {
-      const item = row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots'));
-      if (canDisconnectT3) disconnectButton(item, 'Disconnect', environment);
+      const item = row('connections', emptyLabel(environment, 'Sessions in this environment can ask your Bots.'));
+      const actions = document.createElement('div');
+      actions.className = 'connection-actions';
+      actions.append(statusBadge('Authorized', 'checked'));
+      if (canDisconnectT3) disconnectButton(actions, 'Disconnect', environment);
+      item.append(actions);
     }
-    row('connections', emptyLabel('Coding agents', 'Flock is configured to use port ', command(String(t3.port)),
-      ' for local Codex and Claude Code connections.'));
   } else if (editable && t3Setup) {
-    row('connections', emptyLabel('Not connected', 'Connect a T3 environment so its Sessions can ask your Bots.'));
+    row('connections', emptyLabel('Not connected', 'In T3 Code, open Settings → Environments and choose Copy MCP URL.'));
   } else if (editable) {
     row('connections', emptyLabel('Not connected', 'T3 setup is unavailable in this Flock instance.'));
   } else {
@@ -333,10 +313,7 @@ async function disconnectT3(environment) {
   updateConnectionButtons();
   let saved = false;
   try {
-    const response = await fetch('/api/settings/t3-disconnect', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
-      body: JSON.stringify({environmentId: environment}),
-    });
+    const response = await postSettings('t3-disconnect', {environmentId: environment});
     saved = response.ok;
   } catch {}
   const refreshed = await refreshConnections();
@@ -352,22 +329,19 @@ $('t3-form').onsubmit = async (event) => {
   event.preventDefault();
   if (!canManagePolicy || startingT3 || watchingT3 || disconnectingT3) return;
   const form = event.currentTarget;
-  const {environmentId, mcpUrl} = Object.fromEntries(new FormData(form));
+  const {mcpUrl} = Object.fromEntries(new FormData(form));
   startingT3 = true;
   ++connectionsRequest;
   updateConnectionButtons();
   try {
-    const response = await fetch('/api/settings/t3-connect', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
-      body: JSON.stringify({environmentId: environmentId.trim(), mcpUrl: mcpUrl.trim()}),
-    });
+    const response = await postSettings('t3-connect', {mcpUrl: mcpUrl.trim()});
     if (response.ok) form.reset();
     else if (response.status !== 409 || (await response.json()).error !== 'connect_pending') throw new Error();
     watchingT3 = true;
     $('status').textContent = '';
     await refreshConnections();
   } catch {
-    $('status').textContent = 'Could not start the T3 connection. Check the environment ID and MCP URL.';
+    $('status').textContent = 'Could not start the T3 connection. Check the connection URL.';
   } finally {
     startingT3 = false;
     updateConnectionButtons();
@@ -380,10 +354,7 @@ async function submit(path, data) {
   updatePolicyControls();
   let saved = false;
   try {
-    const response = await fetch('/api/settings/' + path, {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Flock-Action': '1'},
-      body: JSON.stringify(data)
-    });
+    const response = await postSettings(path, data);
     saved = response.ok;
   } catch {}
   if (saved && path === 'mode') currentMode = data.mode;
@@ -408,4 +379,7 @@ for (const input of modeInputs) {
   };
 }
 updatePolicyControls();
-load().catch(() => { $('status').textContent = 'Could not load Flock settings.'; });
+load().then(() => {
+  if (canManagePolicy) return loadInstallation();
+  showInstallationUnavailable();
+}).catch(() => { $('status').textContent = 'Could not load Flock settings.'; });

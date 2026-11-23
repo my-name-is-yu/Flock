@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { closeSync, openSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -121,10 +122,111 @@ function checkTransport(executable) {
   }
 }
 
+function simulateAccountLifecycle(mode) {
+  const localFetch = globalThis.fetch;
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const clientId = "fixture-new-registration";
+  let nonce;
+  globalThis.fetch = async (url, options) => {
+    switch (String(url)) {
+      case `${issuer}/.well-known/openid-configuration`:
+        return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+          jwks_uri: `${issuer}/jwks`, revocation_endpoint: `${issuer}/revoke` });
+      case `${issuer}/jwks`:
+        return Response.json({ keys: [{ ...publicKey.export({ format: "jwk" }), kid: "test-signing-key" }] });
+      case `${issuer}/token`: {
+        assert.equal(options.body.get("client_id"), clientId);
+        const iat = Math.floor(Date.now() / 1000);
+        const content = `${encode({ alg: "RS256", kid: "test-signing-key" })}.${encode({ iss: issuer, aud: clientId,
+          sub: "fixture-new-subject", email: "second@example.com", nonce, iat, exp: iat + 600 })}`;
+        return Response.json({ id_token: `${content}.${sign("RSA-SHA256", Buffer.from(content), privateKey).toString("base64url")}`,
+          access_token: "new-access", refresh_token: "new-refresh", token_type: "bearer", expires_in: 900,
+          scope: "openid chatgpt.tokens.use.direct" });
+      }
+      case `${issuer}/revoke`:
+        assert.equal(options.body.get("token"), "pending-refresh");
+        assert.equal(options.body.get("token_type_hint"), "refresh_token");
+        assert.equal(options.body.get("client_id"), "fixture-old-registration");
+        return new Response(null, { status: mode === "revocation-unavailable" ? 503 : 200 });
+      default:
+        assert.fail("Unexpected ChatGPT account lifecycle request");
+    }
+  };
+  childProcess.spawn = (_command, [url]) => {
+    const opened = new EventEmitter();
+    const authorization = new URL(url);
+    assert.equal(authorization.searchParams.get("client_id"), "dynamic_agent_client");
+    assert.equal(authorization.searchParams.get("ext_agent_host_id"), "urn:uuid:fixture-stable-host");
+    assert.equal(authorization.searchParams.get("agent_name_hint"), "Flock");
+    nonce = authorization.searchParams.get("nonce");
+    const callback = new URL(authorization.searchParams.get("redirect_uri"));
+    callback.searchParams.set("state", authorization.searchParams.get("state"));
+    if (mode === "switch-declined") callback.searchParams.set("error", "access_denied");
+    else {
+      callback.searchParams.set("code", "fixture-authorization-code");
+      callback.searchParams.set("client_id", clientId);
+    }
+    void localFetch(callback, { redirect: "manual" }).then(response => {
+      assert.equal(response.status, 303);
+      opened.emit("exit", 0);
+    });
+    return opened;
+  };
+  syncBuiltinESMExports();
+}
+
+function checkAccountLifecycle(executable) {
+  const root = mkdtempSync(join(tmpdir(), "flock-account-lifecycle-"));
+  const lock = openSync(join(root, "lock"), "wx", 0o600);
+  const profile = join(root, "profile.json");
+  const original = { hostId: "urn:uuid:fixture-stable-host", clientId: "fixture-old-registration", subject: "fixture-old-subject",
+    email: "first@example.com", idToken: "original-id", accessToken: "original-access", refreshToken: "original-refresh",
+    pending: { refreshToken: "pending-refresh" }, granted: ["chatgpt.tokens.use.direct"] };
+  const writeOriginal = () => writeFileSync(profile, JSON.stringify(original), { mode: 0o600 });
+  const read = () => JSON.parse(readFileSync(profile, "utf8"));
+  const invoke = (operation, mode, input = {}) => {
+    const response = childProcess.spawnSync(process.execPath, ["--import", scriptPath,
+      join(dirname(executable), "chatgpt.mjs"), operation, root, "3"], {
+      input: JSON.stringify(input), encoding: "utf8", stdio: ["pipe", "pipe", "pipe", lock], timeout: 10_000,
+      env: { ...process.env, FLOCK_TEST_ACCOUNT_LIFECYCLE: mode },
+    });
+    if (response.error) throw response.error;
+    assert.equal(response.status, 0, response.stderr);
+    return JSON.parse(response.stdout);
+  };
+  try {
+    writeOriginal();
+    const switching = { browserRequired: true, switchAccount: true };
+    assert.match(invoke("login", "switch-declined", switching).error, /declined/);
+    assert.deepEqual(read(), original, "a failed switch keeps the active registration and tokens");
+    const switched = invoke("login", "switch-approved", switching).result;
+    assert.equal(switched.account, "second@example.com");
+    assert.equal(switched.planUsage, true);
+    assert.equal(read().clientId, "fixture-new-registration");
+    assert.equal(read().hostId, original.hostId);
+    for (const [mode, revocationConfirmed] of [["revocation-approved", true], ["revocation-unavailable", false]]) {
+      writeOriginal();
+      assert.deepEqual(invoke("sign_out", mode).result, { revocationConfirmed });
+      assert.deepEqual(read(), { hostId: original.hostId, clientId: original.clientId, subject: original.subject,
+        email: original.email, signedOut: true, revocationConfirmed });
+      const status = invoke("web_status", mode).result;
+      assert.equal(status.connected, false);
+      assert.equal(status.planUsage, false);
+    }
+  } finally {
+    closeSync(lock);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 if (realpathSync(process.argv[1]) === scriptPath) {
   if (Number(process.versions.node.split(".")[0]) < 22) process.exit(77);
   checkLogin(process.argv[2]);
   checkTransport(process.argv[2]);
+  checkAccountLifecycle(process.argv[2]);
+} else if (process.env.FLOCK_TEST_ACCOUNT_LIFECYCLE) {
+  simulateAccountLifecycle(process.env.FLOCK_TEST_ACCOUNT_LIFECYCLE);
 } else if (process.env.FLOCK_TEST_TRANSPORT_MODE) {
   globalThis.fetch = async () => transportResponse(process.env.FLOCK_TEST_TRANSPORT_MODE);
 } else {

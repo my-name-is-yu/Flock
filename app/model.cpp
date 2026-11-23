@@ -609,9 +609,10 @@ Json ChatGPTModel::call(std::string_view operation, const Json& input, std::stop
 Json ChatGPTModel::login(bool printUrl, bool reconsent) {
     return call("login",{{"printUrl",printUrl},{"reconsent",reconsent}});
 }
-Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop) {
-    return call("login",{{"reconsent",reconsent},{"browserRequired",true}},stop);
+Json ChatGPTModel::loginWeb(bool reconsent, std::stop_token stop, bool switchAccount) {
+    return call("login",{{"reconsent",reconsent},{"browserRequired",true},{"switchAccount",switchAccount}},stop);
 }
+Json ChatGPTModel::signOut() { return call("sign_out"); }
 Json ChatGPTModel::status() { return call("status"); }
 Json ChatGPTModel::webStatus() { return call("web_status"); }
 Json ChatGPTModel::models() { return call("models"); }

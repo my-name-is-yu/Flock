@@ -136,7 +136,11 @@ void Store::setWebOrigin(std::string origin) {
 }
 
 bool Store::Impl::permitsLocalMachineOwner(std::string_view owner, std::string_view bot) const {
-    const Person person{std::string(owner),std::ranges::find(rootPeople,owner) != rootPeople.end()};
+    const auto root = resolveWebIdentity
+        ? resolveWebIdentity(owner)
+        : std::optional{std::ranges::find(rootPeople,owner) != rootPeople.end()};
+    if (!root) return false;
+    const Person person{std::string(owner),*root};
     return Policy(const_cast<Impl&>(*this)).allows(person,Action::bot_decide,bot);
 }
 

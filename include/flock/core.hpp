@@ -322,7 +322,7 @@ public:
     std::optional<ChannelResource> artifact(std::string_view id) const;
     std::optional<ChannelResource> attachment(const Person&, Id id) const;
     void setRootPeople(std::vector<std::string> ids);
-    void setWebIdentityResolver(WebIdentityResolver);
+    void setWebIdentityResolver(WebIdentityResolver, bool liveInteractiveRoles = false);
     void setWebOrigin(std::string origin);
     void connectLocalMachine(std::string id, std::shared_ptr<LocalMachine>);
     Json localConnections(const Person&) const;
@@ -343,6 +343,7 @@ private:
     friend class Policy;
     friend class T3Connections;
     friend class SessionParticipation;
+    friend class SettingsAccess;
 };
 
 struct BotTools;

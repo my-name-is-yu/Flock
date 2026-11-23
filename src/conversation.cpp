@@ -18,9 +18,10 @@ Json receiptRow(const Statement& row, std::string_view text, Id replyTo) {
 }
 }
 
-void Store::setWebIdentityResolver(WebIdentityResolver resolver) {
+void Store::setWebIdentityResolver(WebIdentityResolver resolver, bool liveInteractiveRoles) {
     std::lock_guard lock(p_->mutex);
     p_->resolveWebIdentity = std::move(resolver);
+    p_->liveInteractiveRoles = liveInteractiveRoles;
 }
 
 void Store::Impl::initializeConversationSchema() {

@@ -183,5 +183,16 @@ void channelEndpoints(const std::filesystem::path& database) {
     reviewBrowser.post("/api/channels/local-connections/disconnect",{{"id",id}});
     Browser::checked(sessionBridge.Post(endpoint,bridgeIdentity,request.dump(),"application/json"),403);
     check(reviewBrowser.get("/api/channels/local-connections")[0]["status"] == "disconnected","Local decision endpoints");
+    event["externalMessageId"] = "queued-before-revocation";
+    Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),201);
+    const auto sentBeforeRevocation = transport->replies.size();
+    store.setWebIdentityResolver([&](std::string_view person) -> std::optional<bool> {
+        if (person == owner.id) return true;
+        return std::nullopt;
+    });
+    runtime.runConversations();
+    check(transport->replies.size() == sentBeforeRevocation,"Revoked sender's queued channel reply was delivered");
+    event["externalMessageId"] = "new-after-revocation";
+    Browser::checked(sessionBridge.Post(slack,credential,event.dump(),"application/json"),403);
 }
 }

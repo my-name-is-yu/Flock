@@ -5,9 +5,15 @@
 #include <algorithm>
 
 namespace flockv0::web {
+bool hasWebIdentities(const WebCallbacks& callbacks) {
+    return callbacks.identityRequired ? callbacks.identityRequired() : bool(callbacks.authenticate);
+}
+
 Person person(const WebCallbacks& callbacks, const httplib::Request& request) {
     if (!callbacks.authenticate) return request.has_header("Authorization") ? Person{} : localOwner;
-    if (request.get_header_value_count("Authorization") != 1) return {};
+    const auto credentials = request.get_header_value_count("Authorization");
+    if (!credentials && callbacks.identityRequired) return callbacks.authenticate({});
+    if (credentials != 1) return {};
     return callbacks.authenticate(request.get_header_value("Authorization"));
 }
 
@@ -35,6 +41,8 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                          {"needsSignIn",status.value("needsSignIn",false)},{"unavailable",status.value("unavailable",false)},
                          {"signingIn",status.value("signingIn",false)},{"signInError",status.value("signInError","")},
                          {"canSignIn",bool(callbacks.modelLogin)}};
+                if (callbacks.modelSwitch) model["canSwitch"] = true;
+                if (callbacks.modelLogout) model["canSignOut"] = true;
             } catch (const std::exception&) { model = {{"unavailable",true}}; }
         }
         const auto t3Setup = canManage && callbacks.t3Setup ? callbacks.t3Setup(actor) : Json(nullptr);
@@ -51,12 +59,70 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
                        {"t3",connection ? Json{{"port",connection->port},{"environments",connection->environments}}
                                         : Json(nullptr)}});
     });
+    server.Get("/api/settings/installation",[&](const httplib::Request& req, httplib::Response& res) {
+        const auto actor = person(callbacks,req);
+        if (!store.policy().allows(actor,Action::rules_manage,"installation"))
+            return reply(res,403,{{"error","access_denied"}});
+        if (!callbacks.installationSettings) return reply(res,404,{{"error","settings_unavailable"}});
+        reply(res,200,callbacks.installationSettings(actor));
+    });
+    server.Post(R"(/api/settings/installation/(access|system|github|channels|tools))",[&](
+        const httplib::Request& req, httplib::Response& res) {
+        const auto actor = person(callbacks,req);
+        if (!store.policy().allows(actor,Action::rules_manage,"installation"))
+            return reply(res,403,{{"error","access_denied"}});
+        if (!callbacks.changeInstallationSettings) return reply(res,404,{{"error","settings_unavailable"}});
+        if (req.body.size() > 32 * 1024) return reply(res,413,{{"error","payload_too_large"}});
+        const auto args = Json::parse(req.body,nullptr,false);
+        if (!args.is_object()) return reply(res,400,{{"error","invalid_input"}});
+        try {
+            auto result = callbacks.changeInstallationSettings(actor,req.matches[1].str(),args);
+            result["ok"] = true;
+            reply(res,200,result);
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const Conflict& failure) { reply(res,409,{{"error","settings_not_saved"},{"message",failure.what()}}); }
+    });
+    const auto botChannelAccess = [&store,&callbacks](const Person& actor, std::string_view bot) {
+        auto policy = store.policy();
+        if (!validBotId(bot) || !policy.allows(actor,Action::rules_manage,"installation") ||
+            !policy.allows(actor,Action::bot_settings,bot)) return false;
+        return std::ranges::any_of(callbacks.bots(),[&](const Json& card) {
+            return card.value("id",std::string{}) == bot;
+        });
+    };
+    server.Get("/api/bot-settings/channels",[&,botChannelAccess](const httplib::Request& req, httplib::Response& res) {
+        if (!callbacks.botChannels) return reply(res,404,{{"error","settings_unavailable"}});
+        if (req.get_param_value_count("bot") != 1) return reply(res,400,{{"error","invalid_bot"}});
+        const auto bot = req.get_param_value("bot");
+        if (!botChannelAccess(person(callbacks,req),bot)) return reply(res,403,{{"error","access_denied"}});
+        reply(res,200,{{"bridges",callbacks.botChannels(bot)}});
+    });
+    server.Post("/api/bot-settings/channels",[&,botChannelAccess](const httplib::Request& req, httplib::Response& res) {
+        if (!callbacks.changeBotChannel) return reply(res,404,{{"error","settings_unavailable"}});
+        if (req.body.size() > 8192) return reply(res,413,{{"error","payload_too_large"}});
+        const auto args = Json::parse(req.body,nullptr,false);
+        try {
+            const auto bot = args.at("botId").get<std::string>();
+            const auto actor = person(callbacks,req);
+            if (!botChannelAccess(actor,bot)) return reply(res,403,{{"error","access_denied"}});
+            if (args.at("action") == "setSender") {
+                const auto member = args.at("sender").at("personId").get<std::string>();
+                const auto target = callbacks.configuredPerson ? callbacks.configuredPerson(member) : std::nullopt;
+                if (!target || !store.policy().allows(Person{target->id,false},Action::bot_talk,bot))
+                    return reply(res,400,{{"error","invalid_sender"},{"message","Choose a person who can talk to this Bot."}});
+            }
+            reply(res,200,{{"bridges",callbacks.changeBotChannel(bot,args)}});
+        } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
+        catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
+        catch (const Conflict& failure) { reply(res,409,{{"error","settings_not_saved"},{"message",failure.what()}}); }
+    });
     server.Get("/api/bot-settings",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.get_param_value_count("bot") != 1 || req.get_param_value("bot").empty())
             return reply(res,400,{{"error","invalid_bot"}});
         try {
             auto view = store.policy().botSettings(person(callbacks,req),req.get_param_value("bot"));
-            view["canManageMembers"] = view.at("canManage").get<bool>() && bool(callbacks.authenticate);
+            view["canManageMembers"] = view.at("canManage").get<bool>() && hasWebIdentities(callbacks);
             reply(res,200,view);
         } catch (const Conflict&) { reply(res,403,{{"error","access_denied"}}); }
     });
@@ -65,14 +131,32 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
         try {
             const auto args = Json::parse(req.body);
             if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation")) throw DecisionDenied{};
-            if (!args.is_object() || args.size() != 1) return reply(res,400,{{"error","invalid_input"}});
+            if (!args.is_object() || args.size() != (args.contains("switchAccount") ? 2 : 1))
+                return reply(res,400,{{"error","invalid_input"}});
             const auto reconsent = args.at("reconsent").get<bool>();
-            if (!callbacks.modelLogin) return reply(res,409,{{"error","sign_in_unavailable"}});
-            if (!callbacks.modelLogin(reconsent)) return reply(res,409,{{"error","sign_in_pending"}});
+            const auto switchAccount = args.value("switchAccount",false);
+            if (switchAccount && reconsent) return reply(res,400,{{"error","invalid_input"}});
+            if (switchAccount ? !callbacks.modelSwitch : !callbacks.modelLogin)
+                return reply(res,409,{{"error","sign_in_unavailable"}});
+            if (!(switchAccount ? callbacks.modelSwitch() : callbacks.modelLogin(reconsent)))
+                return reply(res,409,{{"error","sign_in_pending"}});
             reply(res,202,{{"ok",true}});
         } catch (const Json::exception&) { reply(res,400,{{"error","invalid_input"}}); }
         catch (const DecisionDenied&) { reply(res,403,{{"error","access_denied"}}); }
         catch (const std::exception&) { reply(res,503,{{"error","sign_in_unavailable"}}); }
+    });
+    server.Post("/api/settings/model-logout",[&](const httplib::Request& req, httplib::Response& res) {
+        if (req.body.size() > 1024) return reply(res,413,{{"error","payload_too_large"}});
+        const auto args = Json::parse(req.body,nullptr,false);
+        if (!args.is_object() || !args.empty()) return reply(res,400,{{"error","invalid_input"}});
+        if (!store.policy().allows(person(callbacks,req),Action::rules_manage,"installation"))
+            return reply(res,403,{{"error","access_denied"}});
+        if (!callbacks.modelLogout) return reply(res,409,{{"error","sign_out_unavailable"}});
+        try {
+            const auto revoked = callbacks.modelLogout();
+            if (!revoked) return reply(res,409,{{"error","sign_in_pending"}});
+            reply(res,200,{{"ok",true},{"revocationConfirmed",*revoked}});
+        } catch (const std::exception&) { reply(res,503,{{"error","sign_out_unavailable"}}); }
     });
     server.Post("/api/settings/t3-connect",[&](const httplib::Request& req, httplib::Response& res) {
         if (req.body.size() > 8192) return reply(res,413,{{"error","payload_too_large"}});
@@ -80,10 +164,12 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             const auto actor = person(callbacks,req);
             if (!store.policy().allows(actor,Action::rules_manage,"installation")) throw DecisionDenied{};
             const auto args = Json::parse(req.body);
-            if (!args.is_object() || args.size() != 2) return reply(res,400,{{"error","invalid_input"}});
-            const auto environment = args.at("environmentId").get<std::string>();
+            if (!args.is_object() || args.size() != (args.contains("environmentId") ? 2 : 1))
+                return reply(res,400,{{"error","invalid_input"}});
+            const auto environment = args.value("environmentId",std::string{});
             const auto url = args.at("mcpUrl").get<std::string>();
-            if (environment.empty() || url.empty()) return reply(res,400,{{"error","invalid_input"}});
+            if ((args.contains("environmentId") && environment.empty()) || url.empty())
+                return reply(res,400,{{"error","invalid_input"}});
             if (!callbacks.t3Connect) return reply(res,409,{{"error","connect_unavailable"}});
             if (!callbacks.t3Connect(actor,environment,url)) return reply(res,409,{{"error","connect_pending"}});
             reply(res,202,{{"ok",true}});
@@ -144,7 +230,7 @@ void settingsRoutes(httplib::Server& server, Store& store, const WebCallbacks& c
             if (!args.is_object() || args.size()!=3) return reply(res,400,{{"error","invalid_input"}});
             auto policy = store.policy();
             if (req.matches[1] == "members") {
-                if (!callbacks.authenticate) return reply(res,409,{{"error","configure_web_identities_first"}});
+                if (!hasWebIdentities(callbacks)) return reply(res,409,{{"error","configure_web_identities_first"}});
                 const auto member = args.at("person").get<std::string>();
                 const auto add = args.at("add").get<bool>();
                 if (add && callbacks.configuredPerson && !callbacks.configuredPerson(member))
