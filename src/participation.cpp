@@ -435,7 +435,7 @@ ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
             const auto key = "session-invite:" + std::to_string(message.id) + ":" + std::to_string(step);
             const SessionOrigin origin{target,title};
             const Json invitation{{"environmentId",target.environmentId},{"threadId",target.threadId},
-                                  {"inviterBotId",message.bot},{"inviterName",inviterName},
+                                  {"title",title},{"inviterBotId",message.bot},{"inviterName",inviterName},
                                   {"note",safeNote},{"depth",sender.depth}};
             const auto invited = enqueueConversation(sender.actor,routing,conversation::PrincipalSource::session,
                                                       key,description,0,&origin,invitation);
@@ -489,29 +489,17 @@ Id Store::Impl::stopSessionParticipation(const Person& actor, std::string_view b
     Policy policy(*this);
     if (!policy.allows(actor,Action::bot_decide,bot)) throw Conflict("Bot access is required");
     auto row = query(R"SQL(
-SELECT e.environment_id FROM t3_connected_environments e JOIN t3_connector c ON c.person_id=?
-WHERE (?='' OR e.environment_id=?) AND (
- EXISTS(SELECT 1 FROM session_participations p
-        WHERE p.bot_id=? AND p.environment_id=e.environment_id AND p.thread_id=? AND p.person_id=c.person_id)
- OR EXISTS(SELECT 1 FROM session_message_waits w JOIN messages m ON m.id=w.message_id
-           WHERE w.bot=? AND w.environment=e.environment_id AND w.thread=? AND m.person_id=c.person_id)
-)
-)SQL",{actor.id,target.environmentId,target.environmentId,bot,target.threadId,bot,target.threadId});
+SELECT p.id,p.environment_id FROM session_participations p
+JOIN t3_connector c ON c.person_id=p.person_id
+JOIN t3_connected_environments e ON e.environment_id=p.environment_id
+WHERE p.person_id=? AND p.bot_id=? AND p.thread_id=? AND (?='' OR p.environment_id=?)
+)SQL",{actor.id,bot,target.threadId,target.environmentId,target.environmentId});
     if (!row.next()) throw Conflict("This Session participation is unavailable");
-    const auto environment = row.string(0);
+    const auto id = row.number(0);
+    const auto environment = row.string(1);
     if (row.next()) throw Conflict("This threadId matched more than one connected T3 environment");
     if (!policy.allows(bot,Action::environment_inspect,environment))
         throw Conflict("This Session is unavailable through your T3 connection");
-
-    // Legacy Entry B sends could have waits without a participation row.
-    exec(R"SQL(
-INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
-VALUES(?,?,?,?,'active')
-)SQL",{bot,environment,target.threadId,actor.id});
-    auto participant = query("SELECT id FROM session_participations WHERE bot_id=? AND environment_id=? AND thread_id=? AND person_id=?",
-                             {bot,environment,target.threadId,actor.id});
-    if (!participant.next()) throw Conflict("This Session participation is unavailable");
-    const auto id = participant.number(0);
 
     // A send may have returned a receipt before its transaction hit SQLite contention.
     // Include that Run in the same stop transaction even if the conversation step is retried later.

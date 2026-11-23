@@ -14,7 +14,7 @@
 namespace flockv0 {
 namespace {
 constexpr Id applicationId = 0x464c4f43; // FLOC
-constexpr Id schemaVersion = 4;
+constexpr Id schemaVersion = 5;
 constexpr std::chrono::milliseconds storageBusyTimeout{4000};
 
 [[noreturn]] void sqlError(sqlite3* db) { throw StorageError(db); }
@@ -141,13 +141,6 @@ void Store::Impl::openSchema() {
             exec(("PRAGMA user_version=" + std::to_string(schemaVersion)).c_str());
         }
         initialize.commit();
-    }
-    // Add the Session stop tables to states written before durable queue cancellation.
-    if (!query("SELECT 1 FROM sqlite_schema WHERE name='session_queue_cancellations' AND type='table'").next()) {
-        Transaction update(db);
-        initializeConversationSchema();
-        initializeParticipationSchema();
-        update.commit();
     }
     exec("PRAGMA journal_mode=WAL");
     // Open the WAL now so a read-only peer can use a freshly initialized database.

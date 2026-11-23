@@ -1,7 +1,7 @@
 const groupGapSeconds = 15 * 60;
 
 export function messageSide(event) {
-  if (event.kind === 'cancelled') return 'system';
+  if (event.kind === 'cancelled' || event.data.sessionWake || event.data.sessionInvitation) return 'system';
   if (event.kind === 'bot_message') return 'peer';
   if (event.kind === 'conversation_message' && event.data.channel?.channelKind)
     return event.data.channel.fromViewer === true ? 'user' : 'external';

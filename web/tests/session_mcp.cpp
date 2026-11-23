@@ -173,6 +173,81 @@ void stopDuringSendDispatch() {
           "A send or wake passed the committed stop");
 }
 
+void webSendParticipation() {
+    struct SessionT3 : FixedT3 {
+        unsigned sends = 0;
+        std::vector<std::string> cancelled;
+
+        std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target, bool, SessionReadDeadline) override {
+            if (target != SessionTarget{"env-1","thread"}) return {};
+            return SessionMetadata{.title="Staging follow-up",.projectId="origin-project"};
+        }
+        Delivery send(const Command&) override {
+            ++sends;
+            return {Delivery::Kind::Accepted,{"thread","web-send-run",{}},{},false,"queued"};
+        }
+        QueueCancelOutcome cancelQueuedSessionMessage(const SessionTarget& target, std::string_view run) override {
+            check(target == SessionTarget{"env-1","thread"},"Cancelled the wrong Session");
+            cancelled.emplace_back(run);
+            return QueueCancelOutcome::Cancelled;
+        }
+    } t3;
+    struct WebSendModel : Model {
+        Json send, invite;
+
+        ModelTurn decide(const ModelInput& input) override {
+            const auto& steps = input.event.at("turn");
+            const Json target{{"environmentId","env-1"},{"threadId","thread"}};
+            if (!input.event.contains("sessionInvitation")) {
+                check(!input.event.contains("sessionOrigin"),"The Web send already had a Session origin");
+                if (steps.empty()) {
+                    auto args = target;
+                    args["text"] = "Staging is ready.";
+                    return {{{"message_session",args,"Send an update"}}};
+                }
+                send = steps.front().at("result");
+                if (steps.size() == 1 && send.value("ok",false)) {
+                    auto args = target;
+                    args.update(Json{{"botId","triage"},{"note","Review the staging checks."}});
+                    return {{{"invite_bot",args,"Invite Triage"}}};
+                }
+                if (steps.size() == 2) invite = steps.back().at("result");
+            }
+            return {{{"reply",{{"text","Done."}},"Finish the turn"}}};
+        }
+    } model;
+    TestDirectory dir;
+    Store store(dir.path/"flock.sqlite3");
+    const auto token = T3Connections(store).connect("env-1",alice.id,4173);
+    auto cb = callbacks();
+    cb.sessionT3 = &t3;
+    cb.authenticate = [](std::string_view authorization) { return authorization == aliceCredential ? alice : Person{}; };
+    cb.resolveIdentity = [](std::string_view id) -> std::optional<bool> { return id == alice.id ? std::optional{true} : std::nullopt; };
+    const auto server = startWeb(store,0,cb);
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization",aliceCredential}});
+    Runtime runtime(store,model,t3,[](std::string_view) { return std::string{}; },{.intake=cb.intake});
+    const auto send = [&](std::string_view id) {
+        browser.post("/api/messages",{{"botId","release"},{"clientMessageId",id},{"text","Send a staging update."}},201);
+        runtime.runConversations();
+    };
+    send("first-web-send");
+    check(t3.sends == 1 && model.send.value("ok",false),"The Web send failed: " + model.send.dump());
+    check(model.invite.value("ok",false),"The Web Bot's invitation failed: " + model.invite.dump());
+    const auto timeline = browser.get("/api/view?bot=triage").at("events");
+    const auto invitation = [](const Json& row) { return row.at("data").contains("sessionInvitation"); };
+    check(std::ranges::count_if(timeline,invitation) == 1 &&
+          std::ranges::find_if(timeline,invitation)->at("id") == model.invite.at("messageId"),
+          "The invitee did not receive exactly one invitation: " + timeline.dump());
+
+    const auto stopped = Mcp(*server,token).call("flock_stop",{{"bot","release"},{"threadId","thread"}});
+    check(stopped.at("structuredContent").at("cancelled") == 1 &&
+          t3.cancelled == std::vector<std::string>{"web-send-run"},"Stop did not cancel the Web Bot's queued Run");
+    send("web-send-after-stop");
+    check(t3.sends == 1 && model.send == Json{{"ok",false},{"error","This Bot's participation in the Session has stopped"}},
+          "A Web send reopened the stopped participation");
+}
+
 void sessionInvitations() {
     struct InviteT3 : FixedT3 {
         std::vector<Command> sends;
@@ -321,6 +396,16 @@ void sessionInvitations() {
     runtime->runConversations();
     runtime->runConversations();
     check(model.wakes == 1 && model.invitations == 3 && t3.sends.size() == 1,"The invitee's own send did not wake it once");
+    Browser browser(*server);
+    browser.client.set_default_headers({{"Authorization",aliceCredential}});
+    const auto timeline = browser.get("/api/view?bot=triage").at("events");
+    const auto wake = std::ranges::find_if(timeline,[](const Json& row) { return row.at("data").contains("sessionWake"); });
+    check(wake != timeline.end() && wake->at("data").at("sessionWake") == Json{{"threadId","thread"},
+          {"title","Staging follow-up"},{"reason","finished"},{"sourceMessageId",first.at("messageId")}},
+          "The Web timeline lost the wake's Session, reason, or original request");
+    check(std::ranges::any_of(timeline,[&](const Json& row) {
+        return row.at("kind") == "conversation_reply" && row.at("data").at("replyToMessageId") == wake->at("id");
+    }),"The wake's normal Bot reply was missing from the Web timeline");
 
     const auto reject = [&](const char* request, const char* recipient, std::string_view error) {
         model.target = recipient;
@@ -570,15 +655,9 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     outstanding["bot-run-2"] = "running";
     configure({{"stopRuns",outstanding}});
 
-    // Reopen saved send receipts from a database created before the stop outbox existed.
+    // Reopen with the queued Runs still outstanding.
     runtime.reset();
     server.reset();
-    db.reset();
-    sqlite3* raw = nullptr;
-    const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
-    const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> oldState(raw,sqlite3_close);
-    check(opened == SQLITE_OK && sqlite3_exec(oldState.get(),"DROP TABLE session_queue_cancellations",
-                                             nullptr,nullptr,nullptr) == SQLITE_OK,"Could not prepare the pre-stop schema");
     db = std::make_unique<Store>(database);
     server = startWeb(*db,0,cb);
     runtime = std::make_unique<Runtime>(*db,model,*t3,soul,options);
@@ -587,8 +666,13 @@ void sessionStops(std::string_view fixtureUrl, const std::filesystem::path& cred
     const auto markWake = "UPDATE messages SET routing=json_set(routing,'$.sessionWake',json_object("
         "'environmentId','env-1','threadId','thread','reason','finished')) WHERE id=" +
         std::to_string(queuedWake.at("messageId").get<Id>());
-    check(sqlite3_exec(oldState.get(),markWake.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
-          "Could not prepare the queued wake");
+    {
+        sqlite3* raw = nullptr;
+        const auto opened = sqlite3_open_v2(database.c_str(),&raw,SQLITE_OPEN_READWRITE,nullptr);
+        const std::unique_ptr<sqlite3,decltype(&sqlite3_close)> sql(raw,sqlite3_close);
+        check(opened == SQLITE_OK && sqlite3_exec(sql.get(),markWake.c_str(),nullptr,nullptr,nullptr) == SQLITE_OK,
+              "Could not prepare the queued wake");
+    }
     const auto result = stop("release");
     check(result.at("structuredContent") == Json{{"stopped",true},{"cancelled",1},{"alreadyStarted",1},
                                                 {"notCancellable",0},{"pending",1}} &&
@@ -639,6 +723,8 @@ int main(int argc, char** argv) {
         stopDuringSendPreflight();
         scenario = "stop during send dispatch";
         stopDuringSendDispatch();
+        scenario = "Web send participation";
+        webSendParticipation();
         scenario = "Session invitations";
         sessionInvitations();
         return 0;

@@ -23,6 +23,11 @@ assert.equal(messagePlacement(lastNight, midnight, null).timeBreak, false);
 assert.equal(messagePlacement(second, first, null).groupStart, true);
 
 const shortlyAfter = localTime(10, 1);
+for (const type of ['sessionWake', 'sessionInvitation']) {
+  const event = message(shortlyAfter, 'conversation_message', 0, { [type]: {}, channel: { fromViewer: true, channelKind: 'slack' } });
+  assert.equal(messagePlacement(first, event, later).side, 'system');
+  assert.equal(messagePlacement(null, first, event).groupEnd, true);
+}
 for (const boundary of [message(shortlyAfter, 'conversation_reply'), message(shortlyAfter, 'cancelled'),
   message(shortlyAfter, 'bot_message'), message(shortlyAfter, 'request', 4)]) {
   assert.equal(messagePlacement(null, first, boundary).groupEnd, true);

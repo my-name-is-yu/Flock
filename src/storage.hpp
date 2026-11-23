@@ -282,7 +282,7 @@ struct Store::Impl {
     std::vector<std::pair<std::string,Id>> pendingConversations(unsigned limit, Seconds now) const;
     void deferConversation(Id, Seconds now);
     std::map<Id,ConversationModelCheckpoint> conversationCheckpoints;
-    struct SessionSendReceipt { std::string bot; SessionTarget target; Delivery delivery; };
+    struct SessionSendReceipt { std::string bot; SessionTarget target; std::string title; Delivery delivery; };
     std::map<Id,SessionSendReceipt> sessionSendReceipts;
     void recordSessionSendRun(Id, const SessionSendReceipt&);
     void runTurn(Id messageId, Model&, T3&, const Runtime::SoulLoader&, const std::function<Seconds()>&,

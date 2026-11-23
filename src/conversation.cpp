@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS conversation_steps(
   PRIMARY KEY(message_id,step));
 CREATE TABLE IF NOT EXISTS session_message_waits(
   message_id INTEGER NOT NULL REFERENCES messages(id),
-  bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL,
+  bot TEXT NOT NULL, environment TEXT NOT NULL, thread TEXT NOT NULL, run TEXT NOT NULL, title TEXT NOT NULL,
   notified INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(message_id,environment,thread,run));
 CREATE TABLE IF NOT EXISTS task_revisions(

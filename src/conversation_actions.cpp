@@ -161,10 +161,10 @@ bool acceptedSessionSend(const SessionTarget& target, const Delivery& receipt) {
 }
 
 void Store::Impl::recordSessionSendRun(Id message, const SessionSendReceipt& receipt) {
-    const auto& [bot,target,delivery] = receipt;
+    const auto& [bot,target,title,delivery] = receipt;
     if (!acceptedSessionSend(target,delivery)) return;
-    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,notified) VALUES(?,?,?,?,?,?)",
-         {message,bot,target.environmentId,target.threadId,delivery.run.runId,
+    exec("INSERT OR IGNORE INTO session_message_waits(message_id,bot,environment,thread,run,title,notified) VALUES(?,?,?,?,?,?,?)",
+         {message,bot,target.environmentId,target.threadId,delivery.run.runId,title,
           sessionParticipationStopped(bot,target) ? 1 : 0});
 }
 
@@ -231,10 +231,11 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
             return true;
         }
     }
+    std::string title;
     try {
         command.authGeneration = t3.authGeneration(target.environmentId,command.config);
-        if (!t3.sessionMetadata(target,false))
-            error = "This Session is unavailable through your T3 connection";
+        if (const auto metadata = t3.sessionMetadata(target,false)) title = metadata->title;
+        else error = "This Session is unavailable through your T3 connection";
     } catch (const std::exception&) { error = "Could not verify access to this T3 Session"; }
     // A stop takes the exclusive lock. Hold this through the wire call so a stop cannot
     // commit between recording a dispatch and starting it.
@@ -265,12 +266,11 @@ bool Store::Impl::sendSessionMessage(const conversation::Message& message, int s
         exec("UPDATE conversation_steps SET effect=? WHERE message_id=? AND step=? "
              "AND result IS NULL AND effect IS NULL",{Json{{"kind","message_session"}},id,step});
         if (!sqlite3_changes(db)) return false;
-        // A send from the Bot screen can be the Bot's first participation in this Session.
+        title = bounded(redactT3Tokens(redactor(message.bot).text(title)),512);
         exec(R"SQL(
-INSERT OR IGNORE INTO session_participations(bot_id,environment_id,thread_id,person_id,state)
-SELECT ?,e.environment_id,?,c.person_id,'active' FROM t3_connector c CROSS JOIN t3_connected_environments e
-WHERE e.environment_id=?
-)SQL",{message.bot,target.threadId,target.environmentId});
+INSERT INTO session_participations(bot_id,environment_id,thread_id,person_id,state) VALUES(?,?,?,?,'active')
+ON CONFLICT(bot_id,environment_id,thread_id) DO NOTHING
+)SQL",{message.bot,target.environmentId,target.threadId,message.admittedActor.id});
         transaction.commit();
     }
 
@@ -285,7 +285,7 @@ WHERE e.environment_id=?
     std::lock_guard lock(mutex);
     // If SQLite is busy, retry the receipt write without repeating the T3 send.
     const auto checkpoint = sessionSendReceipts.insert_or_assign(
-        id,SessionSendReceipt{message.bot,target,std::move(receipt)}).first;
+        id,SessionSendReceipt{message.bot,target,std::move(title),std::move(receipt)}).first;
     Transaction transaction(db);
     recordSessionSendRun(id,checkpoint->second);
     saveReceipt(checkpoint->second.delivery);
@@ -295,13 +295,14 @@ WHERE e.environment_id=?
 }
 
 void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
-    struct Wait { Id key, message; std::string bot; SessionTarget target; std::string run; };
+    struct Wait { Id key, message; std::string bot; SessionTarget target; std::string run, title; };
     std::vector<Wait> waits;
     {
         std::lock_guard lock(mutex);
-        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run FROM session_message_waits WHERE notified=0 ORDER BY rowid");
+        auto rows = query("SELECT rowid,message_id,bot,environment,thread,run,title "
+                          "FROM session_message_waits WHERE notified=0 ORDER BY rowid");
         while (rows.next())
-            waits.push_back({rows.number(0),rows.number(1),rows.string(2),{rows.string(3),rows.string(4)},rows.string(5)});
+            waits.push_back({rows.number(0),rows.number(1),rows.string(2),{rows.string(3),rows.string(4)},rows.string(5),rows.string(6)});
     }
     for (const auto& wait : waits) {
         if (shutdown.stop_requested()) return;
@@ -337,7 +338,7 @@ void Store::Impl::wakeSessionMessages(T3& t3, std::stop_token shutdown) {
         auto routing = source.routing;
         routing.erase("sessionInvitation");
         routing["sessionWake"] = {{"environmentId",wait.target.environmentId},{"threadId",wait.target.threadId},
-                                  {"reason",reason},{"sourceMessageId",wait.message}};
+                                  {"title",wait.title},{"reason",reason},{"sourceMessageId",wait.message}};
         exec("INSERT INTO journal(time,kind,data,conversation_bot_id) VALUES(?,'conversation_message',?,?)",
              {unixTime(),Json{{"sessionWake",routing.at("sessionWake")}},wait.bot});
         const auto id = last();
