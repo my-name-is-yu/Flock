@@ -310,7 +310,8 @@ bool t3ProvidersNeedRefresh(const OwnsBearer& owns) {
 void removeT3Providers(const OwnsBearer& owns) {
     const auto codex = editCodex({},{},owns);
     const auto claude = setting("FLOCK_CLAUDE_CLI","claude");
-    const bool removeRegistration = ownsClaudeServer(readClaudeServer(),owns);
+    // Without Claude Code there is no registration to remove, and its leftover file must not block Codex cleanup.
+    const bool removeRegistration = installed(claude) && ownsClaudeServer(readClaudeServer(),owns);
     codex.apply();
     try { if (removeRegistration) removeClaude(claude); }
     catch (...) {

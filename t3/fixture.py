@@ -799,6 +799,14 @@ path.write_bytes(config.replace(old, marker + json.dumps(servers).encode(), 1))
             subprocess.run(working_command + ["t3", "disconnect", "env-1"], env=env, check=True,
                            timeout=5, stdout=subprocess.DEVNULL)
             assert (codex_config.read_bytes(), claude_config.read_bytes()) == configs
+
+            # A leftover Claude Code config must not strand the Codex registration once Claude Code is gone.
+            env["FLOCK_CLAUDE_CLI"] = str(directory / "not-installed")
+            claude_config.write_text("{ not json")
+            subprocess.run(second + ["t3", "disconnect", "env-1"], env=env, check=True,
+                           timeout=5, stdout=subprocess.DEVNULL)
+            assert codex_config.read_text() == original and claude_config.read_text() == "{ not json"
+            env["FLOCK_CLAUDE_CLI"] = str(claude)
         finally:
             daemon.terminate()
             daemon.wait(timeout=8)
