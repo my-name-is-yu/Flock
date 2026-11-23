@@ -28,6 +28,8 @@ struct Backend : T3 {
     std::function<void()> onRead;
     std::string secret;
     bool denyAttachment = false;
+    bool pagedCatalog = false;
+    std::vector<Id> catalogOffsets;
 
     std::string authGeneration(const std::string&,const Json&) override { return "connected"; }
     Delivery send(const Command& command) override {
@@ -44,10 +46,17 @@ struct Backend : T3 {
         return (target.environmentId == env || target.environmentId == otherEnv) && !denied[target.threadId] &&
             (target.threadId == staging || target.threadId == second || target.threadId == "foreign-thread");
     }
-    std::pair<std::vector<std::string>,bool> projectSessions(
-        std::string_view environment, std::string_view, SessionReadDeadline) override {
-        if (environment == otherEnv) return {{staging},false};
-        return {{staging,second,"internal-shared-but-denied"},false};
+    std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view environment, std::string_view, Id offset, SessionReadDeadline) override {
+        if (pagedCatalog) {
+            if (environment == otherEnv) return {};
+            catalogOffsets.push_back(offset);
+            if (offset == 0) return {{staging},1000};
+            if (offset == 1000) return {{second},std::nullopt};
+            return {};
+        }
+        if (environment == otherEnv) return {{staging},std::nullopt};
+        return {{staging,second,"internal-shared-but-denied"},std::nullopt};
     }
     std::optional<SessionMetadata> sessionMetadata(const SessionTarget& target,bool includeMessages,
                                                   SessionReadDeadline) override {
@@ -345,6 +354,19 @@ void acceptance() {
     check(f.call(search,filters) == empty,"revoked or unauthorized Sessions returned to search");
 }
 
+void catalogResumesAfterPartialDiscovery() {
+    Fixture f;
+    f.t3.pagedCatalog = true;
+    const auto first = f.call("flock_session_search",Json::object());
+    check(first.at("sessions").size() == 1 && first.at("truncated") == true &&
+          first.at("nextCursor").is_string(),"Partial catalog lost its results or continuation");
+    f.restart();
+    const auto secondPage = f.call("flock_session_search",{{"cursor",first.at("nextCursor")}});
+    check(secondPage.at("sessions").size() == 1 && secondPage.at("nextCursor").is_null() &&
+          secondPage.at("sessions").front().at("title") == "Staging investigation 2" &&
+          f.t3.catalogOffsets == std::vector<Id>{0,1000},"Catalog restarted at offset zero");
+}
+
 void approvedCallSurvivesReadPreflightContention() {
     Fixture f;
     f.model.next = {"flock_session_search",{{"query","regression"}},"Find the report"};
@@ -436,6 +458,7 @@ void redactionAndResumedHistory() {
 int main() {
     try {
         acceptance();
+        catalogResumesAfterPartialDiscovery();
         redactionAndResumedHistory();
         approvedCallSurvivesReadPreflightContention();
     } catch (const std::exception& error) {

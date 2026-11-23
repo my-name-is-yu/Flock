@@ -194,8 +194,8 @@ public:
     }
     virtual InterruptOutcome interrupt(const std::string& environmentId, const Json& config, const RunRef&) = 0;
     virtual Excerpt read(const ReadRequest&) { throw std::runtime_error("Session reading is unavailable"); }
-    virtual std::pair<std::vector<std::string>,bool> projectSessions(
-        std::string_view, std::string_view, SessionReadDeadline) { return {}; }
+    virtual std::pair<std::vector<std::string>,std::optional<Id>> projectSessions(
+        std::string_view, std::string_view, Id, SessionReadDeadline) { return {}; }
     virtual std::optional<SessionMetadata> sessionMetadata(const SessionTarget&, bool, SessionReadDeadline = {}) { return {}; }
     virtual std::optional<SessionEventPage> sessionEvents(const SessionTarget&, const SessionEventFilter&) { return {}; }
     virtual std::optional<SessionEvent> sessionEvent(const SessionTarget&, std::string_view) { return {}; }
